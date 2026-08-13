@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import json
 import os
 import stat
 from contextlib import contextmanager
@@ -110,14 +112,37 @@ def nofollow_flag() -> int:
     return flag
 
 
-def _parsed_path(raw: str) -> Path:
+def validate_request_path_lexical(raw: str) -> str:
+    """Return the one lexical acceptance rule every filesystem request must pass.
+
+    These three refusals read only the request string: no descriptor, no authorization, no
+    filesystem access and no name service.  That is what makes them safe on the web thread, which
+    applies them before it accepts an operation, so a request the worker would refuse can never be
+    accepted as a 202 receipt.  This is the only implementation of the rule; the jobd worker
+    reaches it through ``parsed_request_path``.
+
+    Expansion is deliberately NOT part of it.  ``os.path.expanduser`` on a ``~user/...`` path is an
+    NSS/passwd lookup, which blocks on a networked passwd source and would stall every request
+    sharing the web process -- exactly the work the operation queue exists to move off this thread.
+    """
+
     if not isinstance(raw, str) or not raw:
         raise FilesystemError("path is required", message_key="fs.error.pathRequired")
     if "\x00" in raw or "\n" in raw or "\r" in raw:
         raise FilesystemError("path contains illegal characters", message_key="fs.error.pathIllegal")
     if not raw.startswith("/") and not raw.startswith("~"):
         raise FilesystemError("path must be absolute", message_key="fs.error.pathAbsolute")
-    return Path(os.path.expanduser(raw))
+    return raw
+
+
+def parsed_request_path(raw: str) -> Path:
+    """Apply the lexical acceptance rule, then expand the user -- worker side only.
+
+    ``expanduser`` may block on a name-service lookup, so every caller of this function must
+    already be off the web thread.  Web-thread acceptance calls ``validate_request_path_lexical``.
+    """
+
+    return Path(os.path.expanduser(validate_request_path_lexical(raw)))
 
 
 def _canonical_root(path: Path) -> Path:
@@ -174,6 +199,151 @@ def _configured_fs_roots_for_value(generation: int, raw: str, default_roots: tup
         if root not in roots:
             roots.append(root)
     return tuple(roots)
+
+
+# One filesystem access policy, captured by the server that ACCEPTS a request and enforced by
+# whatever process finally executes it.
+#
+# `jobd` and `watchd` are shared per-user daemons: the first server to need one launches it, and
+# every other server on every other port then reuses that same process.  A filesystem job
+# descriptor used to carry only `op`, `path` and `args`, so the worker authorized the path against
+# `YOLOMUX_FS_ROOTS` in its OWN environment -- the environment of whichever server launched it
+# first.  A server configured with narrow roots therefore borrowed a broader launcher's authority:
+# its own direct read answered `403 fs.error.outsideRoots`, and the identical descriptor executed
+# in the shared daemon returned the file's contents.  That is a confused deputy, and the reverse
+# (a broad server denied by a narrow launcher) is the same defect with the sign flipped.
+#
+# The fix is to make the policy part of the descriptor: capture it at HTTP accept time, carry it
+# with the job (so it is also part of every product/coalescing identity), and bind it at execution.
+# A descriptor whose policy is absent, malformed, or from a different policy version is REFUSED --
+# it must never fall back to the executing process's environment, because that fallback is the
+# vulnerability itself.
+#
+# Bump FS_ACCESS_POLICY_VERSION whenever the meaning of a serialized policy changes, so a daemon
+# running older or newer code refuses a descriptor it cannot interpret rather than guessing.
+FS_ACCESS_POLICY_VERSION = 1
+FS_ACCESS_POLICY_FIELD = "access_policy"
+
+
+@dataclass(frozen=True)
+class FilesystemAccessPolicy:
+    """One accepting server's immutable canonical filesystem roots plus its policy version."""
+
+    version: int
+    roots: tuple[str, ...]
+
+    @property
+    def root_paths(self) -> tuple[Path, ...]:
+        """The captured roots as paths; they are already canonical, so never re-resolve them."""
+        return tuple(Path(root) for root in self.roots)
+
+    def digest(self) -> str:
+        return _access_policy_digest(int(self.version), self.roots)
+
+    def descriptor(self) -> dict[str, Any]:
+        """The serialized form carried on a job descriptor and hashed into its product identity."""
+        return {"version": int(self.version), "roots": list(self.roots), "digest": self.digest()}
+
+
+_ACTIVE_ACCESS_POLICY: contextvars.ContextVar[FilesystemAccessPolicy | None] = contextvars.ContextVar(
+    "filesystem_access_policy",
+    default=None,
+)
+
+
+def access_policy_refused(reason: str) -> FilesystemError:
+    """Return the one typed refusal for a descriptor that carries no usable access policy."""
+    return FilesystemError(
+        f"filesystem access policy is unusable: {reason}",
+        status=403,
+        message_key="fs.error.operationFailed",
+        diagnostic=f"filesystem access policy refused: {reason}",
+    )
+
+
+@lru_cache(maxsize=64)
+def _access_policy_digest(version: int, roots: tuple[str, ...]) -> str:
+    return hashlib.sha256(json.dumps(
+        {"version": version, "roots": list(roots)},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def capture_access_policy() -> FilesystemAccessPolicy:
+    """Capture this process's configured roots as one immutable value, at HTTP accept time.
+
+    Canonicalizing roots costs real syscalls, and this now runs on the request thread, so the
+    captured value is cached on the same generation/configuration key the roots themselves use.
+    """
+    return _captured_access_policy(_PATH_POLICY_GENERATION, os.environ.get(FS_ROOTS_ENV, ""))
+
+
+@lru_cache(maxsize=32)
+def _captured_access_policy(generation: int, raw: str) -> FilesystemAccessPolicy:
+    del raw  # part of the cache key; the roots below read the same configuration value
+    del generation
+    return FilesystemAccessPolicy(
+        version=FS_ACCESS_POLICY_VERSION,
+        roots=tuple(str(root) for root in _configured_fs_roots()),
+    )
+
+
+def access_policy_descriptor() -> dict[str, Any]:
+    """The accepting server's policy, ready to serialize onto a job descriptor."""
+    return capture_access_policy().descriptor()
+
+
+def access_policy_from_descriptor(value: Any) -> FilesystemAccessPolicy:
+    """Parse a descriptor's carried policy, or refuse; never fall back to this process's roots."""
+    if value is None:
+        raise access_policy_refused("policy_missing")
+    if not isinstance(value, dict):
+        raise access_policy_refused("policy_malformed")
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise access_policy_refused("policy_version_invalid")
+    if version != FS_ACCESS_POLICY_VERSION:
+        raise access_policy_refused(f"policy_version_mismatch:{version}")
+    raw_roots = value.get("roots")
+    if not isinstance(raw_roots, list) or any(
+        not isinstance(root, str) or not root.startswith(os.sep) for root in raw_roots
+    ):
+        raise access_policy_refused("policy_roots_invalid")
+    policy = FilesystemAccessPolicy(version=version, roots=tuple(raw_roots))
+    if value.get("digest") != policy.digest():
+        raise access_policy_refused("policy_digest_mismatch")
+    return policy
+
+
+@contextmanager
+def enforce_access_policy(policy: FilesystemAccessPolicy) -> Iterator[None]:
+    """Bind one accepting server's policy for the duration of an execution, without mutating env."""
+    if not isinstance(policy, FilesystemAccessPolicy):
+        raise access_policy_refused("policy_unbound")
+    token = _ACTIVE_ACCESS_POLICY.set(policy)
+    try:
+        yield
+    finally:
+        _ACTIVE_ACCESS_POLICY.reset(token)
+
+
+def active_access_policy() -> FilesystemAccessPolicy:
+    """The bound accepting-server policy, or this process's own when nothing is bound.
+
+    In-process callers (the web process answering its own request, watchd building its own product)
+    have no descriptor and no other server's authority to borrow, so their policy is their own
+    environment.  Descriptor-carried execution never reaches this fallback: the jobd task entry
+    points refuse a descriptor without a parsable policy before any path is touched.
+    """
+    bound = _ACTIVE_ACCESS_POLICY.get()
+    return bound if bound is not None else capture_access_policy()
+
+
+def authorized_fs_roots() -> tuple[Path, ...]:
+    """The one root set every authorization decision reads."""
+    return active_access_policy().root_paths
 
 
 def _secret_exact_paths() -> tuple[Path, ...]:
@@ -265,6 +435,7 @@ def invalidate_path_policy_caches() -> None:
     global _PATH_POLICY_GENERATION
     _PATH_POLICY_GENERATION += 1
     _configured_fs_roots_for_value.cache_clear()
+    _captured_access_policy.cache_clear()
     _secret_exact_paths_for_values.cache_clear()
     _secret_directories_for_home.cache_clear()
     _compiled_secret_policy_for_values.cache_clear()
@@ -343,7 +514,7 @@ def _path_is_secret(path: Path, *, resolved: Path | None = None, resolve: bool =
 
 def _ensure_path_allowed(path: Path, *, resolved: Path | None = None) -> None:
     resolved = resolved if resolved is not None else _normalized_scope_path(path)
-    roots = _configured_fs_roots()
+    roots = authorized_fs_roots()
     resolved_text = str(resolved)
     if not roots or not any(_normalized_absolute_text_is_within(resolved_text, str(root)) for root in roots):
         roots_text = ", ".join(str(root) for root in roots) or "(none)"
@@ -452,7 +623,7 @@ def safe_path(
 ) -> Iterator[SafePathHandle]:
     """Resolve once, authorize that value, then consume only its no-follow descriptor."""
 
-    requested = _parsed_path(raw_path)
+    requested = parsed_request_path(raw_path)
     if observe_name:
         name_observed(operation, requested)
     resolved = resolved_path if resolved_path is not None else _normalized_scope_path(requested)
@@ -530,7 +701,7 @@ def safe_parent(
 ) -> Iterator[SafeParentHandle]:
     """Pin the authorized lexical parent before a create, rename, or delete."""
 
-    requested = _parsed_path(raw_path)
+    requested = parsed_request_path(raw_path)
     observed_paths = (requested, *additional_requested)
     for observed_path in observed_paths:
         name_observed(operation, observed_path)
@@ -664,7 +835,7 @@ def _ensure_not_configured_root(path: Path, action: str, *, resolved: Path | Non
             message_key="fs.error.rootMutation",
             message_params={"action": action},
         )
-    for root in _configured_fs_roots():
+    for root in authorized_fs_roots():
         if resolved == root:
             raise FilesystemError(
                 f"refusing to {action} configured filesystem root: {path}",

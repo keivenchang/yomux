@@ -22,6 +22,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "background_owner_changed",
     "background_refresh_done",
     "background_refresh_requested",
+    "backend_health_changed",
     "pricing_catalog_changed",
     "chat_messages_changed",
     "chat_typing_changed",
@@ -30,7 +31,9 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "event_log_changed",
     "files_changed",
     "fs_changed",
+    "operation_terminal",
     "roots_changed",
+    "search_progress",
     "session_files_ready",
     "settings_changed",
     "stats_sample",
@@ -59,6 +62,10 @@ CLIENT_EVENT_CHANNELS: frozenset[str] = frozenset({
 
 CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "activity_summary_ready": frozenset({"activity"}),
+    # M9 of DOIT.p0.daemon-monitor. Backend health is a topbar-indicator signal, so it rides the
+    # `core` channel every page subscribes to; putting it on `status` would tie it to the System
+    # panel and reproduce the defect that health is only computed while diagnostics are open.
+    "backend_health_changed": frozenset({"core"}),
     "attention_acks_changed": frozenset({"status", "attention"}),
     "auto_approve_changed": frozenset({"status", "attention"}),
     "background_owner_changed": frozenset({"core"}),
@@ -71,7 +78,13 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "event_log_changed": frozenset({"events"}),
     "files_changed": frozenset({"files"}),
     "fs_changed": frozenset({"files"}),
+    "operation_terminal": frozenset({"core", "files"}),
     "roots_changed": frozenset({"files"}),
+    # Streaming Quick Open (step 5): the signal-only per-root progress nudge. It rides `core` -- the
+    # channel every page subscribes to -- so any process holding an open palette hears it, and it is
+    # retained (below) so a page connecting between two publications still learns the latest revision.
+    # The payload is redacted upstream to {scope_id, generation, revision, coverage}; no path/query.
+    "search_progress": frozenset({"core"}),
     "session_files_ready": frozenset({"files"}),
     "settings_changed": frozenset({"core"}),
     # One compact durable owner sample for a visible YO!stats graph.  This
@@ -89,6 +102,15 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
 }
 
 CLIENT_EVENT_SNAPSHOT_CLIENT_LIMIT = 32
+
+# Event types whose LATEST event per resource is retained and replayed to a subscriber the moment
+# it connects. Every other type is a nudge to refetch, so a reconnecting page repairs itself by
+# asking; backend health has no endpoint the browser is allowed to poll on a timer, so the newest
+# revision has to be replayed here or a page that connects between two transitions would show
+# nothing at all until the next one.
+CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({"backend_health_changed", "search_progress"})
+# One retained event per resource, and the retained types own a fixed, tiny resource set.
+CLIENT_EVENT_RETAINED_LIMIT = 8
 
 
 def normalize_client_event_client_id(client_id: Any) -> str:
@@ -127,6 +149,16 @@ def client_event_resource(event_type: str, payload: dict[str, Any] | None = None
             scope_digest = hashlib.sha256(scope.encode("utf-8", errors="replace")).hexdigest()[:16]
             return f"background:{role}:{scope_digest}"
         return f"background:{role}"
+    if safe_type == "search_progress":
+        # Per-root ordering + latest-per-resource retention keyed by the OPAQUE scope digest the
+        # producer already redacted to. Never the filesystem path: this resource name is part of the
+        # globally fanned-out, persisted SSE envelope, so a path here would leak across clients.
+        scope_id = str(data.get("scope_id") or "")
+        return f"search_progress:{scope_id}" if scope_id else safe_type
+    if safe_type == "operation_terminal":
+        operation = data.get("operation")
+        operation_id = str(operation.get("id") if isinstance(operation, dict) else "")
+        return f"operation_terminal:{operation_id}" if operation_id else safe_type
     if safe_type in {"event_log_changed", "session_files_ready", "context_items_ready", "yoagent_conversation_changed", "yoagent_jobs_changed", "yoagent_stream_delta"}:
         request = data.get("request")
         session = str(data.get("session") or (request.get("session") if isinstance(request, dict) else "") or "")
@@ -165,6 +197,9 @@ class ClientEventBroker:
         self.next_event_id = 1
         self.epoch = uuid.uuid4().hex
         self.resource_revisions: dict[str, int] = {}
+        # resource -> the newest event published for it, for the retained types only.
+        self.retained_events: dict[str, dict[str, Any]] = {}
+        self.replayed_events = 0
         self.subscribers: dict[int, ClientEventSubscriberRecord] = {}
         self.published_events = 0
         self.published_bytes = 0
@@ -190,12 +225,32 @@ class ClientEventBroker:
         with self.lock:
             subscriber_id = self.next_subscriber_id
             self.next_subscriber_id += 1
-            self.subscribers[subscriber_id] = ClientEventSubscriberRecord(
+            subscriber = ClientEventSubscriberRecord(
                 queue=subscriber_queue,
                 channels=channel_set,
                 client_id=normalize_client_event_client_id(client_id),
             )
+            self.subscribers[subscriber_id] = subscriber
+            self.replay_retained(subscriber)
         return subscriber_id, subscriber_queue
+
+    def replay_retained(self, subscriber: ClientEventSubscriberRecord) -> int:
+        """Deliver the newest retained event for each resource this subscriber demanded.
+
+        Caller holds ``self.lock``. The replayed copy is marked ``replay`` so a consumer can tell
+        a reconnect repair from a live transition; everything else, including the resource
+        revision, is the original event, because a replay must not mint a revision the producer
+        never published.
+        """
+
+        replayed = 0
+        for resource, event in sorted(self.retained_events.items()):
+            if subscriber.channels.isdisjoint(client_event_resource_channels(resource)):
+                continue
+            self.enqueue(subscriber, {**event, "replay": True})
+            replayed += 1
+            self.replayed_events += 1
+        return replayed
 
     def unsubscribe(self, subscriber_id: int) -> None:
         with self.lock:
@@ -214,9 +269,14 @@ class ClientEventBroker:
                 "payload": dict(payload or {}),
                 "epoch": self.epoch,
                 "resource": resource,
+                "base_resource_revision": resource_revision - 1,
                 "resource_revision": resource_revision,
             }
             self.next_event_id += 1
+            if safe_type in CLIENT_EVENT_RETAINED_TYPES and (
+                resource in self.retained_events or len(self.retained_events) < CLIENT_EVENT_RETAINED_LIMIT
+            ):
+                self.retained_events[resource] = event
             event_channels = client_event_type_channels(safe_type)
             subscribers = list(self.subscribers.values())
             # There is no wire payload without an SSE consumer. Avoid serializing a discarded
@@ -302,6 +362,8 @@ class ClientEventBroker:
                 "filtered_bytes": self.filtered_bytes,
                 "coalesced_events": self.coalesced_events,
                 "dropped_events": self.dropped_events,
+                "replayed_events": self.replayed_events,
+                "retained_resources": sorted(self.retained_events),
                 "heartbeat_events": self.heartbeat_events,
                 "last_heartbeat_at": self.last_heartbeat_at,
                 "published_by_type": self.counter_snapshot(self.published_by_type),
@@ -366,6 +428,12 @@ class ClientEventBroker:
         if pending is not None:
             # Keep the queued object in place so its queue position is stable, but replace its
             # contents atomically under the broker lock with the newest readable revision.
+            pending_payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+            event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if pending_payload.get("patch") is True or event_payload.get("patch") is True:
+                # A keyed patch is based on the resource revision immediately before it. Replacing
+                # a queued patch skips that base, so the browser must repair from the HTTP snapshot.
+                subscriber.pending_repair_resources.add(resource)
             pending.clear()
             pending.update(event)
             return "coalesced"

@@ -48,6 +48,15 @@ function sourceFunction(name, nextName) {
   return source.slice(start, end);
 }
 
+// A bounded region between two literal needles, for the constants a sliced function depends on.
+function slice(text, startNeedle, endNeedle) {
+  const start = text.indexOf(startNeedle);
+  assert.notEqual(start, -1, `${startNeedle} exists`);
+  const end = text.indexOf(endNeedle, start);
+  assert.notEqual(end, -1, `${endNeedle} follows ${startNeedle}`);
+  return text.slice(start, end);
+}
+
 const clientCapabilityGuardSource = bootstrapSource.slice(
   bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()'),
   bootstrapSource.indexOf('\nconst shareToken =', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
@@ -106,8 +115,10 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
     Set,
     result: null,
     jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
+    jsDebugClientLogEpoch: 'client-epoch',
     jsDebugLogsState: {
-      clearedAt: 0,
+      serverEpoch: 'server-epoch',
+      clearedCursors: {server: null, client: null},
       levels: new Set(['warning', 'error']),
       payload: [
         {id: 7, timestamp: 100, level: 'error', source: 'watchd', category: 'transport', message: tokenized('timeout'), request_id: tokenized('r-watchd'), route: tokenized('/api/fs/watch-diff'), event_type: tokenized('watch-update'), delivery_outcome: tokenized('timeout'), unsafe: secret},
@@ -276,21 +287,178 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   assert.match(serviceSource, /if \(key === 'web'\) continue;/);
 });
 
-test('CPU promotes the newest sampled owner instead of covering it with a duplicate fallback', () => {
+test('CPU keeps the exact serving port as the only solid series and shows a gap, never promoting a peer', () => {
+  // W5 truthfulness: the exact serving `port:N` is ALWAYS the one solid series even
+  // with zero samples (it renders as an honest gap), a peer is NEVER promoted to
+  // "current", and there is NO aggregate fallback. The old code promoted the newest
+  // sampled owner to solid; these assertions are red against that behavior.
   const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const helpers = sourceFunction('debugGraphProcessCpuBucketValue', 'debugGraphHostMetricBucketItem');
   const context = {
-    result: null,
+    result: null, Number,
     location: {port: '9001', protocol: 'https:'},
     jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
-    debugGraphProcessCpuBucketValue: () => 0,
-    debugGraphProcessCpuBucketHasData: () => true,
   };
-  vm.runInNewContext(`${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([{servers: new Map([['port:9000', {cpuCount: 1, label: 'port:9000'}]])}]);`, context);
+  const bucket = "{servers: new Map([['port:9000', {cpuCount: 1, cpuTotalPercent: 40, label: 'port:9000'}]])}";
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([${bucket}]);`, context);
+  const solid = context.result.filter(series => series.linePattern === 'solid');
+  assert.equal(solid.length, 1);
+  assert.equal(solid[0].key, 'cpu:port:9001');
+  assert.equal(solid[0].color, 'green');
+  assert.equal(solid[0].labelParams.process, 'yolomux.py (web)');
+  // The serving port had no sample in this bucket, so it is an honest gap, not a value.
+  vm.runInNewContext(`${helpers}\nresult = debugGraphProcessCpuBucketHasData(${bucket}, 'port:9001');`, context);
+  assert.equal(context.result, false);
+  // The one sampled peer stays dotted and port-labelled, never promoted to current.
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([${bucket}]);`, context);
+  const dotted = context.result.filter(series => series.linePattern === 'dot');
+  assert.equal(dotted.length, 1);
+  assert.equal(dotted[0].key, 'cpu:port:9000');
+  assert.equal(dotted[0].labelParams.process, 'yolomux.py (web) :9000');
+  assert.equal(dotted[0].color, 'red');
+});
+
+test('CPU serving-port series stands alone on the default port with no aggregate fallback', () => {
+  // W5: on the default port (empty location.port) with zero sampled servers, the
+  // serving port is still the one solid series and there is NO aggregate `cpu`
+  // fallback series. The old code returned a single aggregate `{key:'cpu'}` here.
+  const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const helpers = sourceFunction('debugGraphProcessCpuBucketValue', 'debugGraphHostMetricBucketItem');
+  const context = {
+    result: null, Number,
+    location: {port: '', protocol: 'http:'},
+    jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
+  };
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([{servers: new Map()}]);`, context);
   assert.equal(context.result.length, 1);
-  assert.equal(context.result[0].key, 'cpu:port:9000');
-  assert.equal(context.result[0].labelParams.process, 'yolomux.py (web)');
-  assert.equal(context.result[0].color, 'green');
+  assert.equal(context.result[0].key, 'cpu:port:80');
   assert.equal(context.result[0].linePattern, 'solid');
+  assert.equal(context.result.some(series => series.key === 'cpu'), false);
+});
+
+test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall time, and survives an epoch reset', () => {
+  // W5: Clear uses validated (epoch, sequence) cursors, never wall time. A same-tick
+  // record above the cursor stays; a clock rollback cannot resurface a hidden record;
+  // a server epoch reset makes the old cursor stop matching so post-reset records show.
+  const logsSource = source.slice(
+    source.indexOf('function debugClientLogRecord('),
+    source.indexOf('\nfunction debugVisibleLogRecords('),
+  );
+  const context = {
+    result: null, Number, Object, String, Set, Array, Date,
+    jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
+    jsDebugClientLogEpoch: 'client-1',
+    shareRedactDiagnosticValue: value => value,
+    diagnosticPacificWallTime: () => '',
+    debugClientLogLevel: event => event.level || 'info',
+    debugEventDetailText: event => String(event.message || ''),
+    debugEventStatusText: () => '',
+    debugPhaseTimingText: () => '',
+    jsDebugEvents: [
+      {id: 5, ts: '1970-01-01T00:00:05.000Z', level: 'error', message: 'c5'},
+      {id: 6, ts: '1970-01-01T00:00:06.000Z', level: 'error', message: 'c6'},
+    ],
+    jsDebugLogsState: {
+      serverEpoch: 'e1', serverSequence: 3, clearedCursors: {server: null, client: null},
+      payload: [
+        {id: 1, timestamp: 100, level: 'error', message: 's1'},
+        {id: 2, timestamp: 100, level: 'error', message: 's2'},
+        {id: 3, timestamp: 90, level: 'error', message: 's3'},
+      ],
+    },
+  };
+  const run = 'result = debugMergedLogRecords().map(record => record.id);';
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:5', 'client:6', 'server:1', 'server:2', 'server:3']);
+  // Clear at server seq 2 / client seq 5. Same-tick s2 (ts 100) is hidden while s3
+  // (higher seq but EARLIER ts 90 — a clock rollback) stays: sequence, not wall time.
+  context.jsDebugLogsState.clearedCursors = {server: {epoch: 'e1', sequence: 2}, client: {epoch: 'client-1', sequence: 5}};
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:6', 'server:3']);
+  // Server ring reset (new epoch) — the old cursor no longer matches, so every
+  // server record shows again even though its id is at/below the cleared sequence.
+  context.jsDebugLogsState.serverEpoch = 'e2';
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:6', 'server:1', 'server:2', 'server:3']);
+});
+
+test('Logs poll validation rejects malformed, missing-epoch, and inconsistent envelopes but accepts duplicate ids', () => {
+  const validatorSource = sourceFunction('jsDebugValidateServerLogEnvelope', 'debugVisibleLogRecords');
+  const run = envelope => {
+    const context = {result: null, Number, Array, JSON, payload: envelope};
+    vm.runInNewContext(`${validatorSource}\nresult = jsDebugValidateServerLogEnvelope(payload);`, context);
+    return context.result;
+  };
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 1}, {id: 2}]}).ok, true);
+  assert.match(run({ok: false, epoch: 'e', sequence: 0, logs: []}).reason, /malformed/);
+  assert.match(run({ok: true, epoch: '', sequence: 1, logs: []}).reason, /epoch/);
+  // Duplicate or nonmonotonic ids are accepted and stored raw; render-time dedup owns them.
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 1}, {id: 1}]}).ok, true);
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 2}, {id: 1}]}).ok, true);
+  assert.match(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 3}]}).reason, /exceeds/);
+});
+
+test('an API observation finalizes its enriched bytes exactly once and ignores late arrivals', () => {
+  // W5: reserve immediately, finalize once after bounded byte/timing enrichment
+  // (Content-Length or a response clone). A second, later measurement for an
+  // already-finalized observation cannot rewrite its immutable content.
+  const finalizeSource = sourceFunction('jsDebugCurrentObservationEventSnapshot', 'queueJsDebugCurrentObservation');
+  const bytesSource = sourceFunction('finalizeJsDebugCurrentObservationBytes', 'recordJsDebugDisconnectedSpan');
+  const context = {
+    result: null, Number, String, Object,
+    reloadClientJourneyId: 'j', jsDebugCodeRevision: () => 'rev', jsDebugBrowserFamily: () => 'chromium',
+    jsDebugCurrentObservationState: {epoch: 'ep', queue: []},
+  };
+  const live = {type: 'api', id: 7, ts: '1970-01-01T00:00:01.000Z', requestBytes: 100};
+  context.jsDebugCurrentObservationState.queue.push({
+    key: 'ep:7', epoch: 'ep', event: {...live}, liveEvent: live, releaseBlocking: false, finalized: false,
+  });
+  const program = `
+    ${finalizeSource}
+    ${bytesSource}
+    live.responseBytes = 345;
+    finalizeJsDebugCurrentObservationBytes(live);
+    const entry = jsDebugCurrentObservationState.queue[0];
+    const afterFirst = {bytes: entry.event.responseBytes, finalized: entry.finalized, live: entry.liveEvent};
+    live.responseBytes = 999;
+    finalizeJsDebugCurrentObservationBytes(live);
+    result = {afterFirst, afterSecond: entry.event.responseBytes};
+  `;
+  context.live = live;
+  vm.runInNewContext(program, context);
+  assert.equal(context.result.afterFirst.bytes, 345);
+  assert.equal(context.result.afterFirst.finalized, true);
+  assert.equal(context.result.afterFirst.live, null);
+  assert.equal(context.result.afterSecond, 345);
+});
+
+test('a reserved failure and a restored observation finalize without a live event', () => {
+  // W5: a failure reserves identity immediately and finalizes its already-complete
+  // content unchanged; a restored (pre-finalized) entry is never re-snapshotted.
+  const finalizeSource = sourceFunction('finalizeJsDebugCurrentObservation', 'queueJsDebugCurrentObservation');
+  const snapshotSource = sourceFunction('jsDebugCurrentObservationEventSnapshot', 'finalizeJsDebugCurrentObservation');
+  const context = {
+    result: null, Object, String,
+    reloadClientJourneyId: 'j', jsDebugCodeRevision: () => 'rev', jsDebugBrowserFamily: () => 'chromium',
+  };
+  const program = `
+    ${snapshotSource}
+    ${finalizeSource}
+    const failure = {key: 'ep:1', event: {type: 'error', message: 'boom'}, liveEvent: {type: 'error', message: 'boom', id: 1}, finalized: false};
+    finalizeJsDebugCurrentObservation(failure);
+    const restored = {key: 'ep:2', event: {type: 'error', message: 'kept', responseBytes: 12}, liveEvent: null, finalized: true};
+    finalizeJsDebugCurrentObservation(restored);
+    result = {
+      failureFinalized: failure.finalized, failureLive: failure.liveEvent, failureMessage: failure.event.message,
+      restoredMessage: restored.event.message, restoredBytes: restored.event.responseBytes,
+    };
+  `;
+  vm.runInNewContext(program, context);
+  assert.equal(context.result.failureFinalized, true);
+  assert.equal(context.result.failureLive, null);
+  assert.equal(context.result.failureMessage, 'boom');
+  assert.equal(context.result.restoredMessage, 'kept');
+  assert.equal(context.result.restoredBytes, 12);
 });
 
 test('chart popup uses the full localized chart titles', () => {
@@ -382,6 +550,14 @@ test('Agent-window live detail joins current sessions, diagnoses stale sessions,
   vm.runInNewContext(`${detailSource}\nautoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});\nautoApproveStates.set('two', {agent_window_snapshot_revision: 6, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
   assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="stale"/);
   assert.match(context.result, /one → claude → claude → working/);
+  // W4: ONE compact summary carries the stale count; the per-session stale specifics move under
+  // the Live breakdown details rather than being repeated as header prose.
+  assert.match(context.result, /2 agent windows across 2 sessions \(1 stale\)/);
+  const staleSummaryIndex = context.result.indexOf('(1 stale)');
+  const breakdownIndex = context.result.indexOf('Live breakdown');
+  const stalePerSessionIndex = context.result.indexOf('two status is stale (rev 6 vs 7)');
+  assert.ok(stalePerSessionIndex > breakdownIndex, 'per-session stale text lives under Live breakdown');
+  assert.ok(breakdownIndex > staleSummaryIndex, 'compact summary precedes the breakdown');
   assert.match(context.result, /two status is stale \(rev 6 vs 7\)/);
   assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
   context.autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
@@ -444,22 +620,27 @@ test('one shared spike-compression descriptor preserves token behavior and makes
   assert.match(source, /data-js-debug-chart-axis-break/);
 });
 
-test('a live service transport failure keeps its typed reason and operator-specific label', () => {
-  const start = source.indexOf('function debugSystemServiceState(');
-  const end = source.indexOf('\nconst DEBUG_SYSTEM_SERVICE_FRESH_MS', start);
-  assert.notEqual(start, -1, 'service-state owner exists');
-  assert.notEqual(end, -1, 'service-state owner has a bounded source region');
-  const functionText = source.slice(start, end);
-  const context = {Number, String, result: null, t: key => key};
-  vm.runInNewContext(`${functionText}\nresult = debugSystemServiceState({pid: 42, healthy: false, transport_reason: 'rpc_refused', last_failure: 'status transport refused'});`, context);
-  assert.equal(context.result.reason, 'rpc_refused');
-  assert.match(context.result.label, /transport/i);
-  assert.doesNotMatch(context.result.label, /not running/i);
-  assert.equal(context.result.tone, 'bad');
-});
+// The transport-failure classification used to be re-derived here, in JavaScript, from
+// `pid`/`healthy`/`transport_reason` -- a second copy of the rule
+// `yolomux_lib/app.py:system_status_service` owns. That classifier is retired. The behaviour it
+// pinned now has two owners' worth of coverage on the surviving path:
+//   * the backend rule and its published row -- tests/test_gate_contract.py
+//     `test_m3_live_daemon_transport_failure_is_not_reported_as_process_down`;
+//   * the rendered roster row -- tests/system_health_panel.test.js
+//     `a running daemon whose transport failed is an issue with its typed reason, not "down"`.
+
+// The sampler block renders an unpublished field as the panel's ONE unmeasured spelling -- an em
+// dash carrying its reason. That spelling has a single owner, so these tests run the REAL
+// `debugSystemScalar` and the REAL reason table rather than stubbing them: a stub here would let
+// the sampler drift back to "not available" or to a `|| 0` zero while the test stayed green.
+const SAMPLER_ABSENCE_SOURCE = [
+  slice(source, 'const DEBUG_SYSTEM_HEALTH_REASON_TEXT', '\nconst DEBUG_SYSTEM_STATE_TONES'),
+  sourceFunction('debugSystemHealthReasonText', 'debugSystemScalar'),
+  sourceFunction('debugSystemScalar', 'debugSystemHealthReasonListText'),
+].join('\n');
 
 test('the System sampler renders stalled usage as an explicit bounded warning', () => {
-  const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
   const context = {result: null};
   vm.runInNewContext(`
     function esc(value) { return String(value); }
@@ -467,9 +648,10 @@ test('the System sampler renders stalled usage as an explicit bounded warning', 
     function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
     function debugSystemRowsHtml() { return '<dl></dl>'; }
     function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
-    function debugSystemCardHtml(_title, body) { return body; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
     ${functionText}
-    result = debugSystemStatsSamplerCardHtml([{service: 'statsd', usage: {
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
       quarantined_conflict_count: 2,
       health: {state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 125},
     }}], 1000);
@@ -477,12 +659,15 @@ test('the System sampler renders stalled usage as an explicit bounded warning', 
   assert.match(context.result, /data-js-debug-usage-health="warning"/);
   assert.match(context.result, /role="alert"/);
   assert.match(context.result, /transcripts are advancing but usage atoms are stale/);
-  assert.match(context.result, /Quarantined conflicts 2/);
+  assert.match(context.result, /Quarantined conflicts <span>2<\/span>/);
+  assert.match(context.result, /Last accepted <span>125000ms<\/span>/);
   assert.doesNotMatch(context.result, /payload|quantity|token values/);
+  // A published count carries no reason, because there is nothing to explain.
+  assert.doesNotMatch(context.result, /data-value-reason/);
 });
 
-test('the System sampler reuses the same warning block for sustained collector failure loops', () => {
-  const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
+test('an unpublished usage figure is an em dash with its reason, never "not available"', () => {
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
   const context = {result: null};
   vm.runInNewContext(`
     function esc(value) { return String(value); }
@@ -490,9 +675,35 @@ test('the System sampler reuses the same warning block for sustained collector f
     function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
     function debugSystemRowsHtml() { return '<dl></dl>'; }
     function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
-    function debugSystemCardHtml(_title, body) { return body; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
     ${functionText}
-    result = debugSystemStatsSamplerCardHtml([{service: 'statsd', usage: {
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
+      health: {state: 'idle', reason: 'no usage health evidence'},
+    }}], 1000);
+  `, context);
+  // NEGATIVE CONTROL: the stubbed `debugSystemNumber` returns 'N/A' for an absent value -- exactly
+  // the shape of the old defect, where an unpublished count printed a word instead of the panel's
+  // em dash. The absence must never reach that formatter.
+  assert.doesNotMatch(context.result, /N\/A/, 'an absent count must not reach the number formatter');
+  assert.doesNotMatch(context.result, /not available/);
+  assert.match(context.result, /Quarantined conflicts <span title="the usage store has not published a quarantined-conflict count" data-value-reason="[^"]+">—<\/span>/);
+  assert.match(context.result, /Last accepted <span title="no usage atom has been accepted since this process started" data-value-reason="[^"]+">—<\/span>/);
+});
+
+test('the System sampler reuses the same warning block for sustained collector failure loops', () => {
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
+  const context = {result: null};
+  vm.runInNewContext(`
+    function esc(value) { return String(value); }
+    function debugSystemNumber(value) { return Number.isFinite(Number(value)) ? String(value) : 'N/A'; }
+    function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
+    function debugSystemRowsHtml() { return '<dl></dl>'; }
+    function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
+    ${functionText}
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
       quarantined_conflict_count: 0,
       health: {
         state: 'warning',
@@ -524,7 +735,11 @@ test('System renders bounded recurring-work diagnostics without client identity 
   assert.match(context.result, /4 \/ 4 \/ 0 \/ 0/);
   assert.match(context.result, /10 ago/);
   assert.doesNotMatch(context.result, /client_id|payload|request/);
-  assert.match(source, /debugSystemCardHtml\('Recurring work', debugSystemRecurringWorkHtml\(recurringWork\), \{wide: true\}\)/);
+  // Recurring work is a logical diagnostic, not a daemon: it lives in the collapsed Advanced
+  // diagnostics section and never above the service roster.
+  assert.match(source, /debugSystemCardHtml\('Recurring work', debugSystemRecurringWorkHtml\(Array\.isArray\(refresh\.recurring_work\) \? refresh\.recurring_work : \[\]\), \{wide: true\}\)/);
+  const advanced = sourceFunction('debugSystemAdvancedHtml', 'debugSystemRegionHtml');
+  assert.match(advanced, /Recurring work/, 'recurring work belongs to Advanced diagnostics');
 });
 
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {
@@ -580,18 +795,19 @@ test('client failures use the existing bounded observation uploader without debu
 
 test('browser observation uploader emits a periodic heartbeat when the page is otherwise idle', () => {
   assert.match(source, /const jsDebugCurrentObservationHeartbeatMs = 10_000/);
-  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval/);
+  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval[\s\S]*currentObservationLifecycleScope\(\)\.ownTimer\('liveness'/);
   assert.match(source, /installJsDebugCurrentObservationLiveness\(\);/);
   const functionText = source.slice(
     source.indexOf('function installJsDebugCurrentObservationLiveness()'),
     source.indexOf('\nfunction jsDebugBrowserFamily()'),
   );
   const runFixture = unscopedHostRequests => {
-    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}};
+    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}, currentObservationLifecycleScope: () => ({ownTimer() {}})};
     vm.runInNewContext(`
       const jsDebugCurrentObservationHeartbeatMs = 10000;
       function recordJsDebugClientHealthObservation(...args) { calls.push(args); }
       function setInterval(callback, delay) { timers.push({callback, delay}); return 91; }
+      function clearInterval() {}
       ${clientCapabilityFixtureSource(unscopedHostRequests)}
       ${functionText}
     `, context);
@@ -606,6 +822,14 @@ test('browser observation uploader emits a periodic heartbeat when the page is o
   assert.equal(context.timers[0].delay, 10000);
   context.timers[0].callback();
   assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'the periodic timer emits another heartbeat without other traffic');
+});
+
+test('observation, pricing, and graph resources share lifecycle scopes with pagehide disposal and bfcache resume', () => {
+  assert.match(source, /function disposeJsDebugCurrentObservationLifecycle\(reason = 'disposed'\)/);
+  assert.match(source, /function disposeDebugPricingRefreshLifecycle\(reason = 'disposed'\)/);
+  assert.match(source, /function stopDebugGraphLiveTicker\(\)[\s\S]*debugGraphLifecycleScope\(\)\.release\('live-ticker'/);
+  assert.match(source, /window\.addEventListener\('pagehide'[\s\S]*stopDebugGraphLiveTicker\(\)[\s\S]*disposeDebugPricingRefreshLifecycle\('pagehide'\)[\s\S]*disposeJsDebugCurrentObservationLifecycle\('pagehide'\)/);
+  assert.match(source, /window\.addEventListener\('pageshow'[\s\S]*event\?\.persisted[\s\S]*installJsDebugCurrentObservationLiveness\(\)[\s\S]*scheduleJsDebugCurrentObservationFlush\(\)[\s\S]*syncDebugGraphLiveTicker\(\)/);
 });
 
 test('client failure observations are signed, source-bounded, and omit arbitrary event fields', () => {
@@ -732,7 +956,7 @@ test('typed YO!stats warnings use the same durable browser-observation path', ()
 testAsync('browser observation writer fences acknowledge, retry authentication, and discard only rejected batches', async () => {
   const uploaderSource = source.slice(
     source.indexOf('function jsDebugCurrentObservationEventSnapshot('),
-    source.indexOf('\nfunction recordApiDebugResponseBytesForGraph('),
+    source.indexOf('\nfunction finalizeJsDebugCurrentObservationBytes('),
   );
   const endpointStart = coreSource.indexOf('function jsDebugEndpointText(');
   const endpointSource = coreSource.slice(endpointStart, coreSource.indexOf('\nfunction jsDebugRoundedMs(', endpointStart));
@@ -808,6 +1032,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       const jsDebugCurrentObservationBatchDelayMs = 10000;
       const jsDebugCurrentObservationRetryMaxMs = 300000;
       const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, epoch: ${JSON.stringify(epoch)}, highWaterDepth: 0, drops: 0, retries: 0, instrumentationCostMs: 0, receipts: new Map()};
+      function currentObservationLifecycleScope() { return {ownTimer() {}, release() { return false; }}; }
       ${endpointSource}
       ${byteLengthSource}
       ${failureClassifierSource}
@@ -1794,7 +2019,7 @@ test('same-range resolution replacement is not mislabeled as older history', () 
   );
   const context = {
     result: null,
-    jsDebugGraphRangeSeconds: 7200,
+    debugRuntimeState: {graphRangeSeconds: 7200},
     jsDebugHistoryReadiness: {generation: 1, requestedRangeSeconds: 7200, loadedStartSeconds: 1000},
     performanceNow: () => 10,
     setJsDebugHistoryReadiness: (_phase, updates) => updates,
@@ -1803,7 +2028,7 @@ test('same-range resolution replacement is not mislabeled as older history', () 
   vm.runInNewContext(`${functionText}\nresult = beginJsDebugHistoryReadiness(970, {requestedEndSeconds: 8170, requestedResolutionSeconds: 300});`, context);
   assert.equal(context.result.reason, 'initial');
 
-  context.jsDebugGraphRangeSeconds = 57600;
+  context.debugRuntimeState.graphRangeSeconds = 57600;
   vm.runInNewContext(`result = beginJsDebugHistoryReadiness(0, {requestedEndSeconds: 58600, requestedResolutionSeconds: 300});`, context);
   assert.equal(context.result.reason, 'older');
 });
@@ -1997,8 +2222,7 @@ test('resolution completion accepts later matching generations only after matchi
   const context = {result: null};
   vm.runInNewContext(`
     let jsDebugGraphPendingResolutionChange = null;
-    let jsDebugGraphResolutionOverrideSeconds = 300;
-    let jsDebugGraphRangeSeconds = 7200;
+    const debugRuntimeState = {graphResolutionOverrideSeconds: 300, graphRangeSeconds: 7200};
     let jsDebugGraphExactResolutionEnabled = true;
     const jsDebugHistoryReadiness = {overlayVisible: true};
     const diagnostics = [];
@@ -2137,8 +2361,7 @@ test('hidden panels start the document-visible client and paint only when opened
     const debugModeEnabled = true;
     const debugPaneItemId = 'debug';
     const yocostItemId = 'cost';
-    const jsDebugGraphRangeSeconds = 7200;
-    const jsDebugGraphResolutionOverrideSeconds = 300;
+    const debugRuntimeState = {graphRangeSeconds: 7200, graphResolutionOverrideSeconds: 300};
     function normalizedJsDebugGraphRange(value) { return value; }
     function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
     function itemIsActivePaneTab() { return panelVisible; }
@@ -2193,14 +2416,13 @@ test('hidden boot loads saved exact selection before constructing the one curren
     const debugModeEnabled = true;
     const debugPaneItemId = 'debug';
     const yocostItemId = 'cost';
-    let jsDebugGraphRangeSeconds = 900;
-    let jsDebugGraphResolutionOverrideSeconds = 0;
+    const debugRuntimeState = {graphRangeSeconds: 900, graphResolutionOverrideSeconds: 0};
     let loaded = false;
     let constructed = null;
     function loadJsDebugStatsUiPreferences() {
       loaded = true;
-      jsDebugGraphRangeSeconds = 3600;
-      jsDebugGraphResolutionOverrideSeconds = 60;
+      debugRuntimeState.graphRangeSeconds = 3600;
+      debugRuntimeState.graphResolutionOverrideSeconds = 60;
     }
     function normalizedJsDebugGraphRange(value) { return value; }
     function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
@@ -2386,7 +2608,7 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     let nowMs = 0;
     let jsDebugGraphLiveTimer = 0;
     let jsDebugCostAgeNextRefreshAtMs = 0;
-    let jsDebugGraphRangeSeconds = 300;
+    const debugRuntimeState = {graphRangeSeconds: 300};
     const jsDebugGraphSlideMaxRangeSeconds = 3600;
     let queryCount = 0;
     const timers = [];
@@ -2401,6 +2623,7 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     function debugCostAgeRefreshDelayMs() { return 3000; }
     function setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; }
     function clearTimeout() {}
+    function debugGraphLifecycleScope() { return {ownTimer() {}, release() { return false; }, relinquish() { return true; }}; }
     const Date = {now: () => nowMs};
     ${tickerSource}
     syncDebugGraphLiveTicker();
@@ -2550,8 +2773,10 @@ test('API SSE log preserves reader position through updates and forced rebuilds'
   assert.equal(context.result.threshold, 1200);
   assert.equal(context.result.explicit, 1200);
   const renderText = sourceFunction('renderDebugPanels', 'refreshDebugPanelsFromEvents');
-  assert.ok(renderText.indexOf('debugLogScrollAnchor(') < renderText.indexOf('body.innerHTML ='));
-  assert.ok(renderText.indexOf('body.innerHTML =') < renderText.indexOf('restoreDebugLogScrollAnchor('));
+  assert.match(renderText, /reconcilePanelBody\(\{[\s\S]*capture: root => debugLogScrollAnchor\([\s\S]*restore: \(root, value\) => restoreDebugLogScrollAnchor\(/);
+  const reconcileText = slice(coreSource, 'function reconcilePanelBody(', '\nfunction elementScrollAnchor(');
+  assert.ok(reconcileText.indexOf('anchor.capture(body)') < reconcileText.indexOf('body.innerHTML = html'));
+  assert.ok(reconcileText.indexOf('body.innerHTML = html') < reconcileText.indexOf('anchor.restore?.(body, value)'));
   const refreshText = sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl');
   assert.doesNotMatch(refreshText, /document\.activeElement === log/);
   assert.doesNotMatch(refreshText, /options\.force === true \? log\.scrollHeight/);
@@ -2722,6 +2947,25 @@ test('the YO!stats Daemons subtab keeps the system key and every locale carries 
     assert.doesNotMatch(label, /^Services$/, `${name} debug.tab.services no longer the old "Services" label`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(built, 'en.json'), 'utf8'))['debug.tab.services'], 'Daemons');
+});
+
+test('debug subviews share one complete lifecycle descriptor registry', () => {
+  const registry = source.slice(
+    source.indexOf('const DEBUG_SUBVIEWS = Object.freeze(['),
+    source.indexOf('\nfunction debugSubview(id)'),
+  );
+  for (const id of ['logs', 'system', 'events', 'graph', 'cost']) {
+    assert.equal((registry.match(new RegExp(`id: '${id}'`, 'g')) || []).length, 1, `${id} has one descriptor`);
+  }
+  const factory = sourceFunction('debugSubviewDescriptor', 'debugPanelHtml');
+  for (const hook of ['render', 'bind', 'activate', 'deactivate', 'relocalize']) {
+    assert.match(factory, new RegExp(`${hook} = debugSubviewNoop`), `${hook} has an explicit no-op default`);
+  }
+  assert.match(sourceFunction('debugPanelHtml', 'relocalizeDebugPanelChrome'), /debugSubview\(id\)\.html\(\)/);
+  assert.match(sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl'), /view\.render\(panel, options\)/);
+  assert.match(source.slice(source.indexOf('function bindDebugPanel(')), /view\.bind\(panel\)/);
+  assert.match(sourceFunction('setDebugSubTab', 'requestJsDebugHistoryForCurrentDomain'), /syncDebugSubviewActivation\(\{pollNow: true\}\)/);
+  assert.match(sourceFunction('relocalizeDebugPanelChrome', 'yoCostPanelHtml'), /view\.relocalize\(panel\)/);
 });
 
 test('the YO!cost report shows one always-visible column legend sharing the description owner', () => {

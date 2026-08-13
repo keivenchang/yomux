@@ -29,7 +29,8 @@ class FakeClient:
         self.releases.append(lease_id)
         return {"ok": True}
 
-    def register_collector_context(self, *, pid, port, owner_generation):
+    def register_collector_context(self, *, pid, port, owner_generation, control_socket):
+        self.registered_control_socket = control_socket
         return {"ok": True, "pid": pid, "port": port, "owner_generation": owner_generation}
 
     def append(self, **groups):
@@ -106,10 +107,10 @@ def test_runtime_registers_owner_identity_before_starting_collectors():
     events = []
 
     class ContextClient(FakeClient):
-        def register_collector_context(self, *, pid, port, owner_generation):
-            events.append(("context", pid, port, owner_generation))
+        def register_collector_context(self, *, pid, port, owner_generation, control_socket):
+            events.append(("context", pid, port, owner_generation, control_socket))
             return super().register_collector_context(
-                pid=pid, port=port, owner_generation=owner_generation,
+                pid=pid, port=port, owner_generation=owner_generation, control_socket=control_socket,
             )
 
     client = ContextClient()
@@ -123,14 +124,18 @@ def test_runtime_registers_owner_identity_before_starting_collectors():
         complete_collectors(collect),
         owner_generation=lambda: 7,
         token_cadence_seconds=lambda: 60,
-        collector_context=lambda: {"pid": 1234, "port": 7443, "owner_generation": 7},
+        collector_context=lambda: {"pid": 1234, "port": 7443, "owner_generation": 7, "control_socket": "/tmp/web.sock"},
     )
 
     assert current.start() is True
     assert wait_until(lambda: any(event[0] == "collect" for event in events))
     current.stop()
 
-    assert events[0] == ("context", 1234, 7443, 7)
+    # The ordering contract is unchanged: identity is registered before any collector runs. The
+    # registration now also carries WHERE to reach this web process, because statsd cannot push
+    # the process's own CPU sample without it -- so the address belongs to the same handshake
+    # this test has always guarded, not to a later one.
+    assert events[0] == ("context", 1234, 7443, 7, "/tmp/web.sock")
 
 
 def test_runtime_leases_before_append_and_releases_after_workers_stop():

@@ -6,9 +6,7 @@ and the test-auth bypass are preserved; and that a blocked attempt never runs PB
 from __future__ import annotations
 
 import base64
-import threading
 from http import HTTPStatus
-from http.client import HTTPConnection
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
@@ -22,7 +20,8 @@ from yolomux_lib.login_escalation import EdgeBlockController
 from yolomux_lib.login_rate_limit import BucketPolicy
 from yolomux_lib.login_rate_limit import LoginRatePolicy
 from yolomux_lib.login_rate_limit import LoginRateLimiter
-from yolomux_lib.server import TmuxWebtermHTTPServer
+from tests.helpers.fixture_http_server import FixtureHttpServer
+from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 
 pytestmark = pytest.mark.socket
 
@@ -36,16 +35,6 @@ def active_auth_yaml() -> str:
     password: "{VALID_PASSWORD}"
     role: "admin"
 """
-
-
-def request(port, method, path, body=None, headers=None):
-    conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request(method, path, body=body, headers=headers or {})
-    response = conn.getresponse()
-    data = response.read()
-    result = response.status, dict(response.getheaders()), data
-    conn.close()
-    return result
 
 
 def auth_header(username, password):
@@ -78,16 +67,12 @@ def start_server(monkeypatch, tmp_path, *, policy=None, extra_app=None):
     if extra_app:
         for key, value in extra_app.items():
             setattr(app, key, value)
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=None)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread, limiter
+    runtime = FixtureHttpServer.start(app, label="login-throttle fixture HTTP server")
+    return runtime.server, runtime.thread, limiter
 
 
 def stop_server(server, thread):
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
+    FixtureHttpServer(server, thread, "login-throttle fixture HTTP server").close()
 
 
 def post_login(port, username, password):
@@ -175,9 +160,8 @@ def test_setup_mode_is_preserved_and_never_throttles(monkeypatch, tmp_path):
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     limiter = LoginRateLimiter(tmp_path / "login-throttle.sqlite3", policy=loose_network_policy())
     app = SimpleNamespace(sessions=[], dangerously_yolo=False, login_rate_limiter=limiter)
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=None)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    runtime = FixtureHttpServer.start(app, label="login-throttle setup-mode fixture HTTP server")
+    server, thread = runtime.server, runtime.thread
     port = server.server_address[1]
     try:
         for _ in range(10):

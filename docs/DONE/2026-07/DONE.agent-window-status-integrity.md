@@ -1,0 +1,4 @@
+# 2026-07-19 Agent-window status integrity
+
+- Completed `DOIT.agent-window-status-integrity.md`. Agent state is now keyed by the physical `session|window|pane_target|kind` identity across statusd, Tabber, stats, YO!agent, and token attribution, while the separately labeled session rollup uses explicit priority. A temporary empty tmux discovery can no longer erase a valid same-revision statusd roster, stale/dead panes are not counted as transition, and named sub-window labels never borrow a sibling's green state.
+- Verification: a new private real-tmux/statusd lifecycle regression drives mock Claude through working, idle/cooldown expiry, session removal, and a recreated app request; it compares statusd, Tabber, and chart identities/revisions. Focused backend tests passed (427), and Tabber/current-stats UI suites passed (45 and 27).

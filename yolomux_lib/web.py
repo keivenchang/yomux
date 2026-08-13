@@ -6,8 +6,10 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from .filesystem import BATCH_TRIGGER_COUNT_LIMIT
+from .filesystem import MAX_BATCH_REQUESTS
 from .filesystem.io_ops import read_json_file
-from .common import AUTH_CONFIG_DISPLAY_PATH
+from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
 from .common import path_mtime_or_zero
@@ -42,6 +44,8 @@ from .workdir import agent_command
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
 from .approval.yolo_rules import rules_status
+from .statusd_protocol import activity_summary_bootstrap
+from .statusd_protocol import normalized_activity_summary_bootstrap
 
 
 STATIC_CONTENT_TYPES = {
@@ -55,6 +59,12 @@ STATIC_CONTENT_TYPES = {
     "xterm.css": "text/css; charset=utf-8",
     "xterm.js": "application/javascript; charset=utf-8",
     "xterm-addon-unicode11.js": "application/javascript; charset=utf-8",
+    "vendor/xterm.css": "text/css; charset=utf-8",
+    "vendor/xterm.js": "application/javascript; charset=utf-8",
+    "vendor/xterm-addon-unicode11.js": "application/javascript; charset=utf-8",
+    "vendor/highlight-github-dark.min.css": "text/css; charset=utf-8",
+    "vendor/highlight.min.js": "application/javascript; charset=utf-8",
+    "vendor/marked.min.js": "application/javascript; charset=utf-8",
     "yolomux.css": "text/css; charset=utf-8",
     "yolomux.js": "application/javascript; charset=utf-8",
     "vendor/dockview.css": "text/css; charset=utf-8",
@@ -117,6 +127,26 @@ def html_lang_dir_attrs(locale: str) -> str:
     code = normalize_locale(locale)
     direction = locale_direction(code)
     return f'lang="{html.escape(code, quote=True)}" dir="{direction}"'
+
+
+def html_preview_document(source: str, path: str, locale: str) -> str:
+    """Build the sandboxed preview shell in the worker-owned byte product."""
+    escaped_source = html.escape(source, quote=True)
+    title = html.escape(Path(path).name or server_string(locale, "preview.htmlTitle"))
+    return f"""<!doctype html>
+<html {html_lang_dir_attrs(locale)}>
+<head>
+  <meta charset="utf-8">
+  <title>{title}</title>
+  <style>
+    html, body, iframe {{ width: 100%; height: 100%; margin: 0; border: 0; background: #fff; }}
+    iframe {{ display: block; }}
+  </style>
+</head>
+<body>
+  <iframe title="{title}" sandbox="allow-scripts allow-forms allow-popups" srcdoc="{escaped_source}"></iframe>
+</body>
+</html>"""
 
 
 def server_string(locale: str, key: str, **params: str) -> str:
@@ -223,6 +253,27 @@ def bootstrap_settings_payload(settings_data: dict) -> dict:
     return payload
 
 
+def filesystem_batch_limits_payload() -> dict[str, int]:
+    """The `filesystemBatchLimits` boot-payload block, from the one constant that enforces it.
+
+    Every page the browser boots gets its /api/fs/batch bounds from here, and so must every test
+    page that runs the real bundle: the bundle falls back to one request per item when the payload
+    states no bound, so a hand-written fixture bootstrap that omits this block does not merely skip
+    a key, it silently runs the whole Finder in an unbatched mode no real page ever uses.
+    """
+    return {
+        "maxRequests": MAX_BATCH_REQUESTS,
+        "triggerCountLimit": BATCH_TRIGGER_COUNT_LIMIT,
+    }
+
+
+# Declared inline in every page head so the browser never probes the authenticated
+# /favicon.ico. Pre-auth pages need it most: there the probe returns 401.
+INLINE_FAVICON_LINK = (
+    "<link rel=\"icon\" data-yolomux-favicon href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2399d441'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-family='Arial,sans-serif' font-size='46' font-weight='900' fill='%23111827'%3EY%3C/text%3E%3C/svg%3E\" type=\"image/svg+xml\">"
+)
+
+
 def html_page(
     sessions: list[str],
     access_role: str = "admin",
@@ -262,6 +313,14 @@ def html_page(
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
+        # The two bounds /api/fs/batch refuses above, stated by the server that will refuse.
+        # `maxRequests` is the size the browser must split its posts at: the same constant this
+        # server's own watch-batch producer chunks at (`submit_filesystem_watch_batches`), and the
+        # one a Finder mass re-list of a deleted worktree used to exceed in a single body and get a
+        # 400 invalid_request for.  `triggerCountLimit` is the ceiling coalesced per-item trigger
+        # counts are rejected above.  Both ship here so `filesystem.MAX_BATCH_REQUESTS` stays the
+        # one copy instead of the bundle carrying a remembered literal that can drift from it.
+        "filesystemBatchLimits": filesystem_batch_limits_payload(),
         "serverHostname": SERVER_HOSTNAME,
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
@@ -273,6 +332,7 @@ def html_page(
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),
         "settingsPayload": bootstrap_settings_payload(settings_data),
+        "activitySummary": normalized_activity_summary_bootstrap(activity_summary_bootstrap()),
         # This fence ships atomically with the cache-busted client bundle. An already-loaded older
         # bundle keeps its old fence and is rejected before it can write into a newer stats store.
         "statsWriterFence": {
@@ -306,15 +366,16 @@ def html_page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(server_string(locale, "app.documentTitle"))}</title>
-<link rel="stylesheet" href="{static_asset_url("xterm.css")}" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
+{INLINE_FAVICON_LINK}
+<link rel="stylesheet" href="{static_asset_url("vendor/xterm.css")}">
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("vendor/dockview.css")}">
 <link rel="stylesheet" href="{static_asset_url("yolomux.css")}">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
-<script src="{static_asset_url("xterm.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
-<script src="{static_asset_url("xterm-addon-unicode11.js")}" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11/lib/addon-unicode11.js';"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
+<link rel="stylesheet" href="{static_asset_url("vendor/highlight-github-dark.min.css")}">
+<script src="{static_asset_url("vendor/xterm.js")}"></script>
+<script src="{static_asset_url("vendor/xterm-addon-unicode11.js")}"></script>
+<script src="{static_asset_url("vendor/marked.min.js")}" defer></script>
+<script src="{static_asset_url("vendor/highlight.min.js")}" defer></script>
 </head>
 <body>
 <div id="appRoot" class="app-root">
@@ -499,6 +560,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(server_string(locale, "login.documentTitle"))}</title>
+{INLINE_FAVICON_LINK}
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("login.css")}">
 </head>
@@ -557,7 +619,7 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
     preference = normalize_locale(current_locale, default=SYSTEM_LOCALE_PREFERENCE, allow_system=True)
     locale = resolve_locale_preference(preference, accept_language)
     locale_picker = locale_field_html(preference, "setup-locale", locale)
-    auth_path = html.escape(AUTH_CONFIG_DISPLAY_PATH)
+    auth_path = html.escape(str(AUTH_CONFIG_PATH))
     login = html.escape(login_username())
     agent_notice_html = agent_login_notice_html("setup-login-notice", locale)
     set_up = html.escape(server_string(locale, "setup.setUp"))
@@ -579,6 +641,7 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(server_string(locale, "setup.documentTitle"))}</title>
+{INLINE_FAVICON_LINK}
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
 <link rel="stylesheet" href="{static_asset_url("setup-auth.css")}">
 </head>

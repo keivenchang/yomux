@@ -42,13 +42,5 @@ def test_two_client_measurement_records_idle_change_failure_reload_and_navigatio
         assert client["request_counts"].get("/api/fs/batch", 0) <= 1
 
 
-def test_two_client_full_sse_keyframe_converges_without_watch_diff(monkeypatch, tmp_path):
-    report = tool.run_measurement(monkeypatch, tmp_path, idle_seconds=0.1, event_timeout=10.0, force_full_filesystem_event=True)
-
-    assert report["file_change_delivery"] == "full-sse"
-    phase = report["phases"]["file_change"]
-    for client in ("client-a", "client-b"):
-        assert phase["finder_state"][client]["watch_token"]
-        assert phase["clients"][client]["request_counts"].get("/api/fs/watch-diff", 0) == 0
-        assert phase["clients"][client]["request_counts"].get("/api/fs/batch", 0) == 0
-    assert phase["server"]["summary"] == []
+# The two-client full-SSE keyframe test was retired with W8: the orphan full-SSE payload path was
+# removed, so accepted `/api/fs/watch-diff` is the sole full/diff owner and there is no force-full path.

@@ -189,7 +189,7 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     for number in range(jobd.JOBD_MAX_QUEUE):
         queued = service._queue_record("text_facts", {"text": str(number)}, "freshness", number, f"queue-{number}")
@@ -202,7 +202,11 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
     assert running.status == "timed_out"
     assert waiting.status == "queued"
     assert crashed.status == "failed"
-    assert service.common_status()["last_failure"] == "worker crashed"
+    # A crashed WORKER is historical job failure, not a current daemon failure. Publishing it
+    # as `last_failure` pinned a healthy jobd to degraded in the health observer, permanently.
+    _st = service.common_status()
+    assert _st["last_job_failure"] == "worker crashed"
+    assert not _st.get("last_failure"), _st.get("last_failure")
     assert service._submit({"task": "text_facts", "payload": {"text": "overflow"}}) == {"ok": False, "error": "queue full"}
     missing_response = client.submit("text_facts", {"text": "queued"})
     assert missing_response["ok"] is False

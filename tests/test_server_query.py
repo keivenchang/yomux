@@ -7,6 +7,7 @@ import os
 import socket
 from http import HTTPStatus
 from pathlib import Path
+from types import MethodType
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -20,6 +21,7 @@ from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib import web
 from yolomux_lib.filesystem import FilesystemError
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yolomux_lib import server_logs
 from yolomux_lib.workspace import settings as settings_module
 from yolomux_lib.tmux import process_group_ownership
 from yolomux_lib.common import ACTIVITY_MAX_HOURS
@@ -261,7 +263,7 @@ def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monk
     assert first == {"session": ["one", "two"]}
     assert calls == ["session=one&session=two"]
     source = inspect.getsource(http_routes)
-    assert source.count("request_query(request, parsed)") == 35
+    assert source.count("request_query(request, parsed)") == 36
     assert source.count("parse_qs(parsed.query)") == 1
 
 
@@ -517,6 +519,98 @@ def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
     assert kwargs["details"]["request_parse_to_route_ms"] == pytest.approx(0.0)
     assert kwargs["details"]["accept_to_route_ms"] == pytest.approx(10.0)
     assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
+
+
+def test_route_to_representation_ready_is_stamped_at_the_pre_write_boundary(monkeypatch):
+    # W9: the shared response writer must stamp route_to_representation_ready_ms once the final wire
+    # bytes exist but BEFORE any header/body byte is written. The number is route entry (dispatch
+    # start) -> representation ready, so it must exclude the body write and the whole-request total.
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/system-status"
+    handler.headers = {}  # no Accept-Encoding: keep the body identity-encoded, one compression tick
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler._api_request_id = "r-fixture"
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = 100.0
+    handler._http_request_line_read_at = None
+    handler._http_request_parse_completed_at = None
+    handler._http_request_dispatch_started_at = 100.0
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)),
+    ))
+    handler.send_response = lambda *args, **kwargs: None
+    handler.send_header = lambda *args, **kwargs: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+
+    # dispatch=100.0; compression_started=100.005; representation_ready=100.012 (=> 12ms boundary);
+    # write_started=100.020; write end=100.050 (write_ms=30); record response_started=100.060.
+    clock = iter([100.005, 100.012, 100.020, 100.050, 100.060])
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: next(clock))
+
+    body = b'{"ok":true}'
+    Handler._write_product_representation(
+        handler,
+        body,
+        status=HTTPStatus.OK,
+        content_type="application/json; charset=utf-8",
+        disposition="inline",
+        filename="",
+    )
+
+    assert len(records) == 1
+    _args, kwargs = records[0]
+    details = kwargs["details"]
+    assert details["route_to_representation_ready_ms"] == pytest.approx(12.0)
+    # The boundary number excludes the body write (30ms) and is not the whole-request compute (60ms).
+    assert details["write_ms"] == pytest.approx(30.0)
+    assert kwargs["compute_ms"] == pytest.approx(60.0)
+    assert details["route_to_representation_ready_ms"] < details["write_ms"]
+    assert details["route_to_representation_ready_ms"] < kwargs["compute_ms"]
+
+
+def test_route_to_representation_ready_is_absent_without_a_dispatch_timer(monkeypatch):
+    # A response written on a path that never set the dispatch timer must not fabricate a zero; the
+    # boundary field is simply absent so no reader can cite an unmeasured latency as measured.
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/system-status"
+    handler.headers = {}
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler._api_request_id = "r-fixture"
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = None
+    handler._http_request_line_read_at = None
+    handler._http_request_parse_completed_at = None
+    handler._http_request_dispatch_started_at = None
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)),
+    ))
+    handler.send_response = lambda *args, **kwargs: None
+    handler.send_header = lambda *args, **kwargs: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: 100.0)
+
+    Handler._write_product_representation(
+        handler,
+        b'{"ok":true}',
+        status=HTTPStatus.OK,
+        content_type="application/json; charset=utf-8",
+        disposition="inline",
+        filename="",
+    )
+
+    assert len(records) == 1
+    _args, kwargs = records[0]
+    assert "route_to_representation_ready_ms" not in kwargs["details"]
 
 
 class FakeShareConnection:
@@ -1121,6 +1215,7 @@ def route_handler(path, app=None, readonly=False):
     handler.share_token = lambda: ""
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_json_bytes = lambda value, status=HTTPStatus.OK: writes.append(("json_bytes", status, value))
+    handler.write_product_bytes = lambda data, product, promise=None: writes.append(("product", HTTPStatus.OK, data))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
     handler.write_app_result = lambda result: handler.write_json(result[0], status=result[1])
@@ -1299,11 +1394,13 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
 
-    app = SimpleNamespace(system_status_payload=lambda: {"ok": True, "server": {"pid": 123}})
+    # The route reads a published snapshot and writes its bytes; it never calls a payload builder.
+    system_status_body = b'{"ok":true,"server":{"pid":123}}'
+    app = SimpleNamespace(system_status_snapshot_response=lambda advanced=False: (system_status_body, {"length": len(system_status_body)}))
     handler, calls, writes = route_handler("/api/system-status", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "server": {"pid": 123}})]
+    assert writes == [("product", HTTPStatus.OK, system_status_body)]
 
     app = SimpleNamespace(background_owner_claim_payload=lambda: ({"ok": True, "claimed": True, "was_owner": False}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/background/claim", app)
@@ -1541,14 +1638,14 @@ def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
 
 
 def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
-    app_start_body = inspect.getsource(app_module.TmuxWebtermApp.start_client_event_watcher)
-    app_event_body = inspect.getsource(app_module.TmuxWebtermApp.handle_tmux_signal_event)
+    app_start_body = inspect.getsource(app_module.WatchBridge.start_client_event_watcher)
+    app_event_body = inspect.getsource(app_module.WatchBridge.handle_tmux_signal_event)
     stream_body = inspect.getsource(server_module.Handler.stream_client_events)
     server_init_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.__init__)
     server_close_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.server_close)
 
-    assert "self.start_tmux_signal_event_watcher()" in app_start_body
-    assert "self.tmux_signal_cache.clear()" in app_event_body
+    assert "app.start_tmux_signal_event_watcher()" in app_start_body
+    assert "app.tmux_signal_cache.clear()" in app_event_body
     assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
     assert "record.tmux_signal_refresh_at" in app_event_body
     assert "record.wake_event.set()" in app_event_body
@@ -2248,6 +2345,7 @@ def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
             {"id": "mkdir", "type": "mkdir", "path": "/repo/new"},
             {"id": "unindex", "type": "unindex", "path": "/repo"},
         ],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     responses = result["responses"]
@@ -2272,7 +2370,10 @@ def test_filesystem_batch_product_returns_typed_permission_failure_without_raisi
         raise PermissionError(13, "permission denied", "/restricted/item")
 
     monkeypatch.setattr(server_module.filesystem.io_ops, "path_info", denied_path_info)
-    result = server_module.filesystem.filesystem_batch_result({"requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}]})
+    result = server_module.filesystem.filesystem_batch_result({
+        "requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
+    })
 
     assert result["responses"] == [{
         "id": "denied",
@@ -2351,6 +2452,7 @@ def test_filesystem_batch_product_preserves_bounded_coalesced_trigger_counts(mon
     )
     result = server_module.filesystem.filesystem_batch_result({
         "requests": [{"id": "root", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 2, "watch-diff-fallback": 3}}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     assert result["responses"][0]["ok"] is True
@@ -2368,6 +2470,7 @@ def test_filesystem_batch_product_rejects_arbitrary_trigger_without_recording_it
         "client_scope": trigger_canary,
         "password": "do-not-log-this-body-8e2f6a4d",
         "requests": [{"id": "root", "type": "list", "path": path_canary, "trigger": trigger_canary}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     assert result["responses"] == [{
@@ -2390,16 +2493,35 @@ def test_filesystem_batch_product_rejects_arbitrary_trigger_without_recording_it
 
 
 def test_handle_fs_batch_rejects_invalid_shape():
-    handler, writes = batch_handler({"requests": "nope"})
+    """The handler owns no batch rule of its own; it renders the app's one typed rejection.
 
-    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+    The rejection is canonical, so it carries the causal frame the API response parent requires.
+    Without that frame the parent rejects its own 400 and route dispatch emits an internal 500.
+    """
 
-    assert writes[0][0] == HTTPStatus.BAD_REQUEST
-    assert writes[0][1]["user_message"] == {
+    webapp = app_module.TmuxWebtermApp([])
+    handler, writes = batch_handler({"requests": "nope"}, app=webapp)
+
+    try:
+        Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    status, payload = writes[0]
+    assert status == HTTPStatus.BAD_REQUEST
+    assert payload["state"] == "failed"
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == {
         "key": "request.error.list",
         "params": {"field": "requests"},
         "fallback": "requests must be a list",
     }
+    assert payload["error"]["stack"] == [{
+        "component": "server.http",
+        "operation": "POST /api/fs/batch",
+        "code": "invalid_request",
+    }]
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
@@ -3926,6 +4048,112 @@ def test_share_terminal_reader_uses_owned_fd_duplicate_before_reading():
     assert "if self.stop_event.is_set():" in body
     assert "os.read(reader_fd" in body
     assert "os.close(reader_fd)" in body
+
+
+def _api_response_capturing_handler(method: str = "GET", path: str = "/api/fs/list"):
+    """Return one Handler whose real ``write_api_response`` writes through a capture."""
+
+    route = http_routes.Route(
+        method,
+        path,
+        "readonly",
+        lambda *_args: None,
+        protocol=http_routes.RESPONSE_JSON,
+    )
+    handler = Handler.__new__(Handler)
+    handler._route_response = route
+    handler._route_response_written = False
+    handler._api_request_id = ""
+    handler.headers = {}
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        observe_http_commit=lambda *_args: None,
+        observe_http_receipt=lambda *_args: None,
+    ))
+    writes = []
+
+    def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):
+        del json_encode_ms, product_metadata
+        writes.append((json.loads(data), HTTPStatus(int(status))))
+
+    handler._write_json_representation = MethodType(capture, handler)
+    return handler, writes
+
+
+def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: str) -> dict:
+    """Build the terminal failure the operation ledger replays for a filesystem operation."""
+
+    return {
+        "state": "failed",
+        "request": {"id": "r-fixture-terminal"},
+        "error": {
+            "code": code,
+            "message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
+            "origin": "local_services.jobd",
+            "retryable": False,
+            "details": {
+                "status": int(status),
+                "path": "/tmp/yo-deleted-worktree",
+                "operation_id": "op-fixture",
+                "diagnostic": "path not found",
+            },
+            "stack": [
+                {"component": "server.http", "operation": "GET /api/fs/list", "code": "dependency_failed"},
+                {"component": "local_services.jobd", "operation": "jobd.result", "code": code},
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message_key", "expected_level"),
+    (
+        (HTTPStatus.NOT_FOUND, "path_not_found", "common.pathNotFound", "info"),
+        (HTTPStatus.FORBIDDEN, "permission_denied", "fs.error.operationFailed", "info"),
+        (HTTPStatus.INTERNAL_SERVER_ERROR, "dependency_failed", "common.requestFailed", "error"),
+        (HTTPStatus.BAD_REQUEST, "invalid_request", "common.requestFailed", "error"),
+    ),
+)
+def test_write_api_response_records_expected_outcomes_and_faults_at_one_severity_rule(
+    status,
+    code,
+    message_key,
+    expected_level,
+):
+    """The synchronous writer must reach the same verdict as the asynchronous recorder.
+
+    A terminal filesystem failure is replayed to the browser here, so if this writer kept its own
+    hardcoded ``level="error"`` the same 404 would be an operator error on one path and an ordinary
+    outcome on the other -- one rule in two places, which is the defect being removed.
+    """
+
+    handler, writes = _api_response_capturing_handler()
+    envelope = _terminal_filesystem_envelope(status, code, message_key)
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+
+    handler.write_json(envelope, status=status)
+
+    payload, written_status = writes[0]
+    assert written_status == status and payload["error"]["code"] == code, payload
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+    assert [entry["source"] for entry in rows] == ["api-response"], rows
+    assert rows[0]["level"] == expected_level, rows
+    assert rows[0]["category"] == "api", rows
+    assert json.loads(rows[0]["message"])["code"] == code, rows
+
+
+def test_write_api_response_keeps_a_malformed_outcome_record_an_error():
+    """An outcome code inside a record missing its causal stack is still a fault."""
+
+    handler, _writes = _api_response_capturing_handler()
+    envelope = _terminal_filesystem_envelope(HTTPStatus.NOT_FOUND, "path_not_found", "common.pathNotFound")
+    envelope["error"]["details"] = {}
+    envelope["error"]["stack"] = [{"component": "server.http", "operation": "GET /api/fs/list", "code": ""}]
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+
+    with pytest.raises(ValueError, match="invalid HTTP status or error shape"):
+        handler.write_json(envelope, status=HTTPStatus.NOT_FOUND)
+
+    assert [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before] == []
 
 
 def test_bridge_shared_tmux_cleans_registration_when_add_viewer_fails():

@@ -76,6 +76,7 @@ from .tmux.tmux_utils import tmux_session_client_rows
 from .tmux.tmux_utils import tmux_session_target
 from .tmux.process_group_ownership import record_owned_process_group
 from .tmux.process_group_ownership import signal_recorded_process_group
+from .observability.failure_severity import failure_record_level
 from .observability.transcripts import codex_event_text
 from .observability.transcripts import strip_terminal_query_responses
 from .observability.transcripts import transcript_items_from_raw_line
@@ -968,7 +969,1324 @@ class ShareTerminalUpstream:
             terminate_process_group(process)
 
 
+class _HandlerAdapter:
+    """Composition seam that keeps request state owned by the HTTP handler."""
+
+    def __init__(self, handler: Any) -> None:
+        object.__setattr__(self, "_handler", handler)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handler, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._handler, name, value)
+
+
+class FilesystemHttpAdapter(_HandlerAdapter):
+    """Composed owner for FilesystemHttpAdapter."""
+
+    def handle_fs_list(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "/") or "/")
+        self.submit_filesystem_operation("GET /api/fs/list", "list", raw_path)
+
+    def handle_fs_search(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
+        query = str(query_one(qs, "query", "") or "")
+        limit = str(query_one(qs, "limit", "400") or "400")
+        recursive = query_bool(qs, "recursive")
+        # Streaming Quick Open (step 4): an opaque delta cursor turns this same route into a bounded,
+        # committed-journal delta read. It rides the existing filesystem-operation descriptor so the
+        # authenticated read path, safe-root containment, and exclusion policy are identical to a
+        # snapshot read. Absent/empty -> a first snapshot read that returns the baseline cursor.
+        cursor = str(query_one(qs, "cursor", "") or "")
+        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor})
+
+    def handle_fs_index_status(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
+        self.submit_filesystem_operation("GET /api/fs/index-status", "index_status", raw_root)
+
+    def handle_fs_read(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path)
+
+    def handle_fs_info(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path)
+
+    def handle_fs_diff(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        from_ref = query_one(qs, "from", None)
+        to_ref = query_one(qs, "to", None)
+        self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
+
+    def handle_blame(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        ref = query_one(qs, "ref", None)
+        self.submit_filesystem_operation("GET /api/blame", "blame", raw_path, {"ref": ref})
+
+    def submit_filesystem_operation(
+        self,
+        route: str,
+        operation: str,
+        raw_path: str,
+        args: dict[str, Any] | None = None,
+        *,
+        reload_yolo_rules: bool = False,
+    ) -> None:
+        """Accept one serializable filesystem descriptor without invoking it in the web thread."""
+        share_token = self.share_token()
+        if share_token:
+            scope = f"share:{share_token}"
+        else:
+            identity = self.auth_identity()
+            scope = f"user:{identity.role}:{identity.username}"
+        response = self.server.app.filesystem_operation_http_payload(
+            route=route,
+            operation=operation,
+            path=raw_path,
+            args=args,
+            reload_yolo_rules=reload_yolo_rules,
+            scope=scope,
+        )
+        if response.product is not None:
+            self.write_product_bytes(response.body, response.product)
+            return
+        self.write_json(response.payload, status=response.status)
+
+    def handle_fs_raw(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        download = query_bool(qs, "download")
+        self.submit_filesystem_relay(
+            "GET /api/fs/raw",
+            "raw",
+            raw_path,
+            {"download": download, "max_bytes": self.file_transfer_max_bytes()},
+        )
+
+    def handle_fs_zip(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.submit_filesystem_relay(
+            "GET /api/fs/zip",
+            "zip",
+            raw_path,
+            {"filename": fs_zip_attachment_filename(raw_path), "max_bytes": self.file_transfer_max_bytes()},
+        )
+
+    def handle_fs_count(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        self.submit_filesystem_operation("GET /api/fs/count", "count", raw_path)
+
+    def handle_fs_html_preview(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        if not raw_path.lower().endswith((".html", ".htm")):
+            self.write_json(
+                error_payload(
+                    "path must be an HTML file",
+                    message_key="fs.error.htmlFileRequired",
+                    message_params={"path": raw_path},
+                    path=raw_path,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        self.submit_filesystem_relay("GET /api/fs/html-preview", "html_preview", raw_path, {"locale": locale})
+
+    def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
+        """Forward browser-owned filesystem bytes through the shared product writer."""
+        response = self.server.app.filesystem_operation_relay(
+            route=route,
+            operation=operation,
+            path=raw_path,
+            args=args,
+        )
+        if response.product is not None:
+            self.write_product_bytes(response.body, response.product)
+            return
+        self.write_json(response.payload, status=response.status)
+
+    def read_request_body(
+        self,
+        max_length: int,
+        *,
+        allow_empty: bool = False,
+        allow_missing: bool = False,
+        missing_message: str = "missing Content-Length",
+        invalid_message: str = "invalid Content-Length",
+        empty_message: str = "invalid Content-Length",
+        too_large_message: str = "content too large",
+        missing_status: HTTPStatus = HTTPStatus.LENGTH_REQUIRED,
+        invalid_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        empty_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        too_large_status: HTTPStatus = HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        close_on_too_large: bool = True,
+    ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
+        length_text = self.headers.get("Content-Length", "")
+        if not length_text and allow_missing:
+            return b"", None, HTTPStatus.OK
+        try:
+            length = int(length_text)
+        except (TypeError, ValueError):
+            missing = not length_text
+            status = missing_status if missing else invalid_status
+            return None, error_payload(
+                missing_message if missing else invalid_message,
+                message_key="request.error.contentLengthRequired" if missing else "request.error.contentLengthInvalid",
+                status=status,
+            ), status
+        if length < 0 or (length == 0 and not allow_empty):
+            return None, error_payload(
+                empty_message,
+                message_key="request.error.contentLengthInvalid",
+                status=empty_status,
+            ), empty_status
+        if length > max_length:
+            if close_on_too_large:
+                self.close_connection = True
+            return None, error_payload(
+                too_large_message,
+                message_key="request.error.contentTooLarge",
+                message_params={"max": max_length},
+                status=too_large_status,
+            ), too_large_status
+        return self.rfile.read(length), None, HTTPStatus.OK
+
+    def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
+        body, error, status = Handler.read_request_body(
+            self,
+            max_length,
+            allow_empty=allow_empty,
+            allow_missing=allow_missing,
+            missing_message="missing or invalid Content-Length",
+            invalid_message="missing or invalid Content-Length",
+            empty_message="content too large",
+            missing_status=HTTPStatus.LENGTH_REQUIRED,
+            invalid_status=HTTPStatus.LENGTH_REQUIRED,
+            empty_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            too_large_message="content too large",
+        )
+        if error is not None:
+            self.write_json(error, status=status)
+            return None
+        if body == b"" and (allow_empty or allow_missing):
+            return {}
+        try:
+            text = (body or b"").decode("utf-8")
+        except UnicodeDecodeError as exc:
+            self.write_json(
+                error_payload(
+                    "request body must be utf-8 JSON",
+                    message_key="request.error.jsonUtf8",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            self.write_json(
+                error_payload(
+                    "invalid JSON",
+                    message_key="request.error.invalidJson",
+                    diagnostic=exc,
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        if not isinstance(payload, dict):
+            self.write_json(
+                error_payload(
+                    "request body must be a JSON object",
+                    message_key="request.error.jsonObject",
+                    status=HTTPStatus.BAD_REQUEST,
+                ),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        return payload
+
+    def handle_fs_write(self, parsed: Any) -> None:
+        payload = self.read_json_body(filesystem.MAX_WRITE_BYTES + 4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        content = payload.get("content", "")
+        expected_mtime = payload.get("expected_mtime")
+        if expected_mtime is not None:
+            try:
+                expected_mtime = int(expected_mtime)
+            except (TypeError, ValueError):
+                self.write_json(
+                    error_payload(
+                        "expected_mtime must be an integer",
+                        message_key="request.error.integer",
+                        message_params={"field": "expected_mtime"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+        try:
+            rules_file_path = yolo_rules.is_rules_file_path(raw_path)
+        except OSError as exc:
+            self.write_json(
+                error_payload(
+                    "YOLO rules path is unavailable",
+                    message_key="yolo.error.invalidRules",
+                    diagnostic=exc,
+                    path=raw_path,
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                ),
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        if rules_file_path:
+            try:
+                yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
+            except (ValueError, yaml.YAMLError) as exc:
+                self.write_json(
+                    error_payload(
+                        "YOLO rules are invalid",
+                        message_key="yolo.error.invalidRules",
+                        diagnostic=exc,
+                        path=raw_path,
+                        status=HTTPStatus.BAD_REQUEST,
+                    ),
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            self.submit_filesystem_operation(
+                "POST /api/fs/write",
+                "write",
+                raw_path,
+                {"content": content, "expected_mtime": expected_mtime},
+                reload_yolo_rules=True,
+            )
+            return
+        self.submit_filesystem_operation(
+            "POST /api/fs/write",
+            "write",
+            raw_path,
+            {"content": content, "expected_mtime": expected_mtime},
+        )
+
+    def handle_fs_delete(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        self.submit_filesystem_operation("POST /api/fs/delete", "delete", raw_path)
+
+    def handle_fs_unindex(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", payload.get("root", ""))
+        self.submit_filesystem_operation("POST /api/fs/unindex", "unindex", raw_path)
+
+    def handle_fs_rename(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        new_name = payload.get("new_name", "")
+        self.submit_filesystem_operation("POST /api/fs/rename", "rename", raw_path, {"new_name": new_name})
+
+    def handle_fs_mkdir(self, parsed: Any) -> None:
+        payload = self.read_json_body(4096)
+        if payload is None:
+            return
+        raw_path = payload.get("path", "")
+        self.submit_filesystem_operation("POST /api/fs/mkdir", "mkdir", raw_path)
+
+    def handle_fs_batch(self, parsed: Any) -> None:
+        del parsed
+        started = time.perf_counter()
+        payload = self.read_json_body(64 * 1024)
+        body_read_ms = (time.perf_counter() - started) * 1000
+        if payload is None:
+            return
+        # filesystem.validated_batch_requests is the one owner of what a batch may contain, and
+        # the app owns the one typed rejection built from it.  Re-checking the same two rules here
+        # is how the handler and the app payload used to disagree about the failure shape.
+        try:
+            summary = filesystem.filesystem_batch_request_summary(payload)
+        except ValueError as error:
+            self.write_json(
+                self.server.app.fs_batch_invalid_request_result(payload, error),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        operation_started = time.perf_counter()
+        response, status = self.server.app.fs_batch_http_payload(
+            payload,
+            shared_sessions=self.share_sessions(),
+        )
+        operation_ms = max(0.0, (time.perf_counter() - operation_started) * 1000)
+        self._http_response_compute_ms = max(0.0, (time.perf_counter() - started) * 1000)
+        self._http_response_performance_details = {
+            "fs_batch": True,
+            "fs_batch_offloaded": True,
+            "fs_batch_size": summary["batch_size"],
+            "fs_batch_body_read_ms": round(body_read_ms, 3),
+            "fs_batch_operation_ms": round(operation_ms, 3),
+            "fs_batch_list_ms": 0.0,
+            "fs_batch_info_ms": 0.0,
+            "fs_batch_operations": json.dumps(summary["operations"], sort_keys=True),
+            "fs_batch_path_hashes": json.dumps(summary["path_fingerprints"]),
+            "fs_batch_triggers": json.dumps(summary["triggers"], sort_keys=True),
+            "fs_batch_client_revision": summary["client_revision"],
+            "fs_batch_client_scope": summary["client_scope"],
+        }
+        self.write_json(response, status=status)
+
+    def file_transfer_max_bytes(self) -> int:
+        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        getter = getattr(self.server.app, "upload_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        return UPLOAD_MAX_BYTES
+
+    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        upload_max_bytes = self.file_transfer_max_bytes()
+        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
+        if error is not None:
+            return {**error, "session": session}, status
+        try:
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
+        except ValueError as exc:
+            return error_payload(
+                "invalid upload data",
+                message_key="upload.error.invalidMultipart",
+                diagnostic=exc,
+                session=session,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
+        auth_username = self.auth_identity().username
+        if editor_path or base_dir:
+            return self.server.app.upload_editor_files(
+                files,
+                editor_path=editor_path,
+                base_dir=base_dir,
+                auth_username=auth_username,
+                session=session or "editor",
+            )
+        return self.server.app.upload_files(session, files, auth_username=auth_username)
+
+class ShareHttpAdapter(_HandlerAdapter):
+    """Composed owner for ShareHttpAdapter."""
+
+    def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not record:
+            return None
+        mode = str(record.get("mode") or "ro")
+        if not self.request_is_https():
+            mode = "ro"
+        max_viewers = int(record.get("max_viewers") or 0)
+        viewers = int(record.get("viewers") or 0)
+        sessions = self.share_record_sessions_for_handler(record)
+        session = sessions[0] if sessions else str(record.get("session") or "")
+        host_dims = {
+            current: {
+                "rows": self.server.host_pty_dimensions_for_session(current)[0],
+                "cols": self.server.host_pty_dimensions_for_session(current)[1],
+            }
+            for current in sessions
+        }
+        rows, cols = self.server.host_pty_dimensions_for_session(session)
+        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+        return {
+            "view": True,
+            "id": str(record.get("short_id") or ""),
+            "session": session,
+            "sessions": sessions,
+            "mode": mode,
+            "readOnly": mode != "rw",
+            "scheme": "https" if self.request_is_https() else "http",
+            "expiresAt": float(record.get("expires_at") or 0.0),
+            "createdBy": str(record.get("created_by") or ""),
+            "maxViewers": max_viewers,
+            "viewers": viewers,
+            "debugProfile": bool(record.get("debug_profile")),
+            "hostDims": {"rows": rows, "cols": cols},
+            "hostDimsBySession": host_dims,
+            "layout": str(record.get("layout") or ""),
+            "tabs": str(record.get("tabs") or ""),
+            "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
+            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
+            "appearance": ui_state.get("appearance") if isinstance(ui_state.get("appearance"), dict) else {},
+            "uiState": ui_state,
+            "tokenInFragment": True,
+        }
+
+    def share_record_at_viewer_cap(self, record: dict[str, Any]) -> bool:
+        max_viewers = int(record.get("max_viewers") or 0)
+        viewers = int(record.get("viewers") or 0)
+        return max_viewers > 0 and viewers >= max_viewers
+
+    def share_record_sessions_for_handler(self, record: dict[str, Any]) -> list[str]:
+        session_reader = getattr(self.server.app, "share_record_sessions", None)
+        if callable(session_reader):
+            raw_sessions = session_reader(record)
+        elif isinstance(record.get("sessions"), list):
+            raw_sessions = record.get("sessions")
+        else:
+            raw_sessions = [record.get("session")]
+        result: list[str] = []
+        for raw_session in raw_sessions or []:
+            session = str(raw_session or "").strip()
+            if session and session not in result:
+                result.append(session)
+        return result
+
+    def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        verifier = getattr(self.server.app, "verify_share_token", None)
+        record = verifier(str(token or "")) if callable(verifier) else None
+        if not isinstance(record, dict):
+            return None
+        if str(record.get("mode") or "ro") != "rw" or not self.request_is_https():
+            return None
+        return normalize_share_input_intent_payload(payload, self.share_record_sessions_for_handler(record))
+
+    def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
+        intent = str(payload.get("intent") or "")
+        if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
+            upstream_getter = getattr(self.server, "share_terminal_upstream", None)
+            if not callable(upstream_getter):
+                return False
+            upstream = upstream_getter(str(token or ""), str(payload.get("session") or ""))
+            data = json.dumps({"type": "input", "data": str(payload.get("data") or "")}).encode("utf-8")
+            return bool(upstream.write_input(data))
+        if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
+            scroller = getattr(self.server.app, "tmux_scroll", None)
+            if not callable(scroller):
+                return False
+            scroller(str(payload.get("session") or ""), str(payload.get("direction") or ""), int(payload.get("lines") or 0))
+            return True
+        return False
+
+    def handle_share_shell(self, parsed: Any) -> bool:
+        short_id = parsed.path.removeprefix("/share/").strip("/")
+        if not short_id or "/" in short_id:
+            return False
+        finder = getattr(self.server.app, "share_record_for_short_id", None)
+        record = finder(short_id) if callable(finder) else None
+        if not record:
+            return False
+        if self.share_record_at_viewer_cap(record):
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
+            return True
+        sessions = self.share_record_sessions_for_handler(record)
+        if not sessions:
+            return False
+        self.write_html(html_page(
+            sessions,
+            "readonly",
+            dev=getattr(self.server, 'dev', False),
+            dangerously_yolo=self.server.app.dangerously_yolo,
+            share=self.share_bootstrap_payload(record),
+            accept_language=self.headers.get("Accept-Language", ""),
+            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
+        ))
+        return True
+
+    def share_scoped_activity_result(self, result: tuple[dict[str, Any], HTTPStatus]) -> tuple[dict[str, Any], HTTPStatus]:
+        allowed = set(self.share_sessions())
+        if not allowed:
+            return result
+        payload, status = result
+        activity = payload.get("activity") if isinstance(payload, dict) else None
+        if not isinstance(activity, dict):
+            return result
+        scoped = dict(payload)
+        scoped["activity"] = {
+            key: value
+            for key, value in activity.items()
+            if str(key).split(":", 1)[0] in allowed
+        }
+        return scoped, status
+
+    def share_scoped_session_metadata_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        allowed = set(self.share_sessions())
+        if not allowed or not isinstance(payload, dict):
+            return payload
+        scoped = dict(payload)
+        sessions = payload.get("sessions")
+        if isinstance(sessions, dict):
+            scoped["sessions"] = {session: info for session, info in sessions.items() if session in allowed}
+        order = payload.get("session_order")
+        if isinstance(order, list):
+            scoped["session_order"] = [session for session in order if session in allowed]
+        return scoped
+
+    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.share_scoped_session_metadata_payload(payload)
+
+    def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        session = str(payload.get("session") or "").strip()
+        sessions = payload.get("sessions", None)
+        ttl_seconds = payload.get("ttl_seconds", payload.get("ttl", None))
+        layout = str(payload.get("layout") or "")
+        tabs = str(payload.get("tabs") or "")
+        finder = payload.get("finder", None)
+        ui_state = payload.get("ui_state", payload.get("uiState", None))
+        scheme = payload.get("scheme", payload.get("protocol", None))
+        return self.server.app.create_share_token(
+            session,
+            ttl_seconds,
+            base_url=self.request_base_url(),
+            created_by=self.auth_identity().username,
+            layout=layout,
+            tabs=tabs,
+            finder=finder,
+            ui_state=ui_state,
+            sessions=sessions,
+            mode=payload.get("mode", None),
+            read_only=payload.get("read_only", payload.get("readonly", None)),
+            scheme=scheme,
+            max_viewers=payload.get("max_viewers", None),
+            debug_profile=payload.get("debug_profile", payload.get("debugProfile", False)),
+            request_is_https=self.request_is_https(),
+            tls_available=self.server.tls_context is not None,
+        )
+
+class ApiResponseWriter(_HandlerAdapter):
+    """Composed owner for ApiResponseWriter."""
+
+    def write_sse_json(self, event: str, value: Any) -> None:
+        data = json.dumps(value, ensure_ascii=False)
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        for line in data.splitlines() or [""]:
+            self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
+    def write_sse_bytes(self, event: str, value: bytes) -> None:
+        """Write an already-validated compact JSON payload without decoding it."""
+
+        if not isinstance(value, bytes) or not value:
+            raise ValueError("SSE byte payload must be non-empty")
+        event_name = str(event or "").strip()
+        if not event_name.isascii() or not event_name or any(
+            character.isspace() or ord(character) < 33 for character in event_name
+        ):
+            raise ValueError("SSE event name is invalid")
+        self.wfile.write(f"event: {event_name}\n".encode("ascii"))
+        for line in value.splitlines() or [b""]:
+            self.wfile.write(b"data: " + line + b"\n")
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
+    def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/html; charset=utf-8")
+
+    def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
+        self.send_response(status)
+        self.send_header("Location", self.safe_next_path(location))
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        if clear_auth:
+            for header in self.clear_auth_cookie_headers():
+                self.send_header("Set-Cookie", header)
+            self.send_header("Set-Cookie", self.logout_marker_cookie_header())
+        else:
+            self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.record_http_response_bytes(status, 0)
+
+    def write_static_asset(self, asset: str, content_type: str) -> None:
+        path = static_asset_path(asset)
+        if path is None:
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetMissing", asset=asset) + "\n",
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.record_http_response_bytes(HTTPStatus.OK, len(body), content_type)
+
+    def write_static_head(self, asset: str, content_type: str) -> None:
+        path = static_asset_path(asset)
+        if path is None:
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0, content_type)
+            return
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            logger.warning("failed to read static asset %s: %s", asset, exc)
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(
+                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", static_asset_cache_control(self.path))
+        if static_content_type_supports_gzip(content_type):
+            self.send_header("Vary", "Accept-Encoding")
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
+
+    def api_request_id(self) -> str:
+        """Return one validated browser correlation ID or a server-minted replacement."""
+        if self._api_request_id:
+            return self._api_request_id
+        headers = getattr(self, "headers", {})
+        proposed = str(headers.get("X-YOLOmux-Request-ID") or "").strip()
+        if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", proposed):
+            self._api_request_id = proposed
+        else:
+            self._api_request_id = f"r-{uuid.uuid4().hex}"
+        return self._api_request_id
+
+    def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.write_api_response(value, status=status)
+
+    def write_json_bytes(self, data: bytes, status: HTTPStatus = HTTPStatus.OK, *, json_encode_ms: float = 0.0) -> None:
+        self.write_api_response(data, status=status, json_bytes=True, json_encode_ms=json_encode_ms)
+
+    def write_product_bytes(
+        self,
+        data: bytes,
+        product: ProductMetadata,
+        *,
+        promise: tuple[str, int] | None = None,
+    ) -> None:
+        """Frame or forward one trusted producer's opaque product bytes."""
+
+        self.write_api_response(data, product_metadata=product, product_promise=promise)
+
+    def write_api_response(
+        self,
+        value: Any,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        json_bytes: bool = False,
+        product_metadata: ProductMetadata | None = None,
+        product_promise: tuple[str, int] | None = None,
+        json_encode_ms: float = 0.0,
+    ) -> None:
+        """Own the canonical API envelope, causal failure record, and correlated log line."""
+        route = self._route_response
+        status_code = int(status)
+        if status_code in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+            if value is not None and value != "" and value != b"":
+                raise ValueError(f"bodyless API response {status_code} cannot carry a payload")
+            self._route_response_written = True
+            self._write_bodyless_api_response(HTTPStatus(status_code))
+            return
+        if product_metadata is not None:
+            if not isinstance(value, bytes):
+                raise ValueError("opaque product body must be bytes")
+            product = validated_product_metadata(product_metadata, body_length=len(value))
+            expected_protocols = (
+                {RESPONSE_JSON, RESPONSE_JSON_BATCH}
+                if product["format"] == "json"
+                else {RESPONSE_BINARY}
+            )
+            if route is None or route.protocol not in expected_protocols or status_code != HTTPStatus.OK:
+                raise ValueError("opaque product has invalid status, format, or route")
+            if product_promise is not None:
+                if (
+                    not isinstance(product_promise, tuple)
+                    or len(product_promise) != 2
+                    or not isinstance(product_promise[0], str)
+                    or not product_promise[0].strip()
+                    or isinstance(product_promise[1], bool)
+                    or not isinstance(product_promise[1], int)
+                    or product_promise[1] < 0
+                ):
+                    raise ValueError("product promise must be a non-empty key and non-negative epoch")
+                self.server.app.observe_http_product_delivery(product_promise[0], product_promise[1])
+            self._route_response_written = True
+            if product["format"] == "json":
+                framed = ready_response_envelope_bytes(value, self.api_request_id())
+                self._write_json_representation(
+                    framed,
+                    status=HTTPStatus.OK,
+                    json_encode_ms=0.0,
+                    product_metadata=product,
+                )
+            else:
+                self._write_product_representation(
+                    value,
+                    status=HTTPStatus.OK,
+                    content_type=product["content_type"],
+                    disposition=product["disposition"],
+                    filename=product["filename"],
+                    product_metadata=product,
+                )
+            return
+        if route is None:
+            if json_bytes:
+                self._write_json_representation(value, status=status, json_encode_ms=json_encode_ms)
+                return
+            encode_started = time.perf_counter()
+            data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            # Commit the queued ticket BEFORE the bytes reach the client. With a threaded server the
+            # client can issue a causally-later read that reaches the app ledger before this writer
+            # thread resumes, so committing after the flush lets an accepted ticket be momentarily
+            # invisible as outstanding. Commit reflects server-side queued state and is honest
+            # regardless of whether the bytes land; the client-receipt outcome is a separate step.
+            if hasattr(self.server.app, "observe_http_commit"):
+                self.server.app.observe_http_commit(value, status)
+            self._write_json_representation(
+                data,
+                status=status,
+                json_encode_ms=(time.perf_counter() - encode_started) * 1000,
+            )
+            # Record the client receipt only AFTER the write returns: a failed flush (BrokenPipe/
+            # OSError propagates from here) must not claim the accepted receipt reached the client.
+            if hasattr(self.server.app, "observe_http_receipt"):
+                self.server.app.observe_http_receipt(value, status)
+            return
+
+        if json_bytes:
+            try:
+                payload = json.loads(value)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("cached JSON response is invalid") from error
+        else:
+            payload = value
+
+        request_id = self.api_request_id()
+        canonical = (
+            isinstance(payload, dict)
+            and payload.get("state") in {"ready", "queued", "failed"}
+            and isinstance(payload.get("request"), dict)
+        )
+        transient_read_failure = (
+            not canonical
+            and route.method == "GET"
+            and status_code >= HTTPStatus.BAD_REQUEST
+            and isinstance(payload, dict)
+            and (
+                local_service_failure_is_transient(payload)
+                or (
+                    status_code == HTTPStatus.FAILED_DEPENDENCY
+                    and payload.get("terminal") is not True
+                )
+            )
+        )
+        if transient_read_failure:
+            status_code = HTTPStatus.ACCEPTED
+            payload = {
+                "status": "pending",
+                "retry_after_seconds": 1,
+                "reason": "upstream service is refreshing",
+            }
+        if canonical:
+            envelope = copy.deepcopy(payload)
+            existing_request_id = str(envelope["request"].get("id") or "").strip()
+            envelope["request"]["id"] = (
+                existing_request_id
+                if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", existing_request_id)
+                else request_id
+            )
+            self._api_request_id = envelope["request"]["id"]
+        elif status_code == HTTPStatus.ACCEPTED:
+            legacy = payload if isinstance(payload, dict) else {}
+            legacy_state = str(legacy.get("state") or legacy.get("status") or "").strip().lower()
+            operation_id = str(legacy.get("key") or legacy.get("operation_id") or "").strip()
+            if legacy_state in {"queued", "pending"} and operation_id:
+                envelope = {
+                    "state": "queued",
+                    "request": {"id": request_id},
+                    "operation": {
+                        "id": operation_id,
+                        "progress": {
+                            "phase": "accepted",
+                            "legacy": copy.deepcopy(legacy),
+                        },
+                    },
+                    "ok": True,
+                    "terminal": False,
+                }
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in legacy.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+            elif legacy_state == "pending" and route.method == "GET":
+                try:
+                    retry_after_seconds = int(legacy.get("retry_after_seconds") or 0)
+                except (TypeError, ValueError):
+                    retry_after_seconds = 0
+                if not 1 <= retry_after_seconds <= 60:
+                    raise ValueError("pending read response requires a bounded retry interval")
+                envelope = {
+                    "state": "queued",
+                    "request": {"id": request_id},
+                    "ok": True,
+                    "terminal": False,
+                }
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in legacy.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+            elif legacy_state in {"queued", "pending"}:
+                status_code = HTTPStatus.CONFLICT
+                envelope = error_payload(
+                    "operation was not accepted by a durable owner",
+                    message_key="common.requestFailed",
+                    canonical=True,
+                    code="operation_not_accepted",
+                    origin="server.http",
+                    retryable=True,
+                    details={"legacy": copy.deepcopy(legacy)},
+                    stack=[{
+                        "component": "server.http",
+                        "operation": f"{route.method} {route.path}",
+                        "code": "operation_not_accepted",
+                    }],
+                    request_id=request_id,
+                )
+            else:
+                status_code = HTTPStatus.OK
+                envelope = {
+                    "state": "ready",
+                    "request": {"id": request_id},
+                    "data": copy.deepcopy(payload),
+                    "ok": True,
+                    "terminal": True,
+                }
+        elif status_code >= HTTPStatus.BAD_REQUEST:
+            legacy = payload if isinstance(payload, dict) else {}
+            raw_error = legacy.get("error") or legacy.get("reason") or legacy.get("message") or f"HTTP {status_code}"
+            descriptor = legacy.get("user_message") if isinstance(legacy.get("user_message"), dict) else {}
+            legacy_code = str(legacy.get("reason_code") or legacy.get("error_code") or legacy.get("code") or "").strip().lower()
+            normalized_code = re.sub(r"[^a-z0-9_]+", "_", legacy_code).strip("_")
+            status_codes = {
+                HTTPStatus.BAD_REQUEST: "invalid_request",
+                HTTPStatus.UNAUTHORIZED: "authentication_required",
+                HTTPStatus.FORBIDDEN: "forbidden",
+                HTTPStatus.NOT_FOUND: "not_found",
+                HTTPStatus.CONFLICT: "conflict",
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "request_too_large",
+                HTTPStatus.TOO_MANY_REQUESTS: "rate_limited",
+                HTTPStatus.FAILED_DEPENDENCY: "dependency_failed",
+                HTTPStatus.SERVICE_UNAVAILABLE: "service_unavailable",
+                HTTPStatus.GATEWAY_TIMEOUT: "deadline_expired",
+            }
+            code = normalized_code or status_codes.get(status_code, "request_failed")
+            cause = legacy.get("cause") if isinstance(legacy.get("cause"), dict) else None
+            root = {
+                "component": "server.http",
+                "operation": f"{route.method} {route.path}",
+                "code": code,
+            }
+            if cause is not None:
+                root.update(copy.deepcopy(cause))
+            excluded = {"cause", "code", "diagnostic", "error", "error_code", "origin", "reason_code", "retryable", "status", "user_message"}
+            details = {key: copy.deepcopy(item) for key, item in legacy.items() if key not in excluded}
+            if legacy.get("diagnostic"):
+                details["diagnostic"] = str(legacy["diagnostic"])
+            envelope = error_payload(
+                raw_error,
+                message_key=str(descriptor.get("key") or "common.requestFailed"),
+                message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
+                canonical=True,
+                code=code,
+                origin=str(legacy.get("origin") or "server.http"),
+                retryable=(
+                    legacy["retryable"]
+                    if isinstance(legacy.get("retryable"), bool)
+                    else status_code in {
+                        HTTPStatus.REQUEST_TIMEOUT,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        HTTPStatus.BAD_GATEWAY,
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        HTTPStatus.GATEWAY_TIMEOUT,
+                    }
+                ),
+                details=details,
+                stack=[root],
+                request_id=request_id,
+            )
+            envelope["user_message"] = copy.deepcopy(envelope["error"]["message"])
+            envelope["legacy_error"] = str(raw_error)
+            if legacy.get("reason"):
+                envelope["error"]["reason"] = str(legacy["reason"])
+            if legacy.get("diagnostic"):
+                envelope["diagnostic"] = str(legacy["diagnostic"])
+            if legacy.get("reason_code"):
+                envelope["reason_code"] = str(legacy["reason_code"])
+            envelope["status"] = status_code
+            envelope["ok"] = False
+            envelope["terminal"] = True
+        else:
+            envelope = {
+                "state": "ready",
+                "request": {"id": request_id},
+                "data": copy.deepcopy(payload),
+                "ok": True,
+                "terminal": True,
+            }
+
+        state = str(envelope.get("state") or "")
+        if state == "ready":
+            if not canonical:
+                data_record = envelope.get("data")
+                if isinstance(data_record, dict):
+                    reserved = {"data", "error", "operation", "request", "state"}
+                    for key, item in data_record.items():
+                        if key not in reserved and key not in envelope:
+                            envelope[key] = copy.deepcopy(item)
+                envelope["ok"] = True
+                envelope["terminal"] = True
+        elif state == "queued":
+            if not canonical:
+                envelope["ok"] = True
+                envelope["terminal"] = False
+        elif state == "failed":
+            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
+            if not canonical:
+                message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
+                details_record = error_record.get("details") if isinstance(error_record.get("details"), dict) else {}
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in details_record.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+                envelope.setdefault("user_message", copy.deepcopy(message_record))
+                envelope.setdefault("legacy_error", str(message_record.get("fallback") or "request failed"))
+                envelope["status"] = status_code
+                envelope["ok"] = False
+                envelope["terminal"] = True
+
+        request_record = envelope.get("request") if isinstance(envelope.get("request"), dict) else {}
+        if not re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", str(request_record.get("id") or "")):
+            raise ValueError("API response requires a validated request.id")
+        if state == "ready" and (
+            not (HTTPStatus.OK <= status_code < HTTPStatus.MULTIPLE_CHOICES)
+            or status_code == HTTPStatus.ACCEPTED
+            or "data" not in envelope
+            or "error" in envelope
+            or "operation" in envelope
+        ):
+            raise ValueError(f"ready API response has invalid HTTP status {status_code}")
+        bounded_read_pending = (
+            state == "queued"
+            and route.method == "GET"
+            and str(envelope.get("status") or "").strip().lower() == "pending"
+            and isinstance(envelope.get("retry_after_seconds"), int)
+            and 1 <= envelope["retry_after_seconds"] <= 60
+            and "operation" not in envelope
+        )
+        if state == "queued" and (
+            status_code != HTTPStatus.ACCEPTED
+            or (
+                not bounded_read_pending
+                and (
+                    not isinstance(envelope.get("operation"), dict)
+                    or not str(envelope["operation"].get("id") or "")
+                )
+            )
+            or "data" in envelope
+            or "error" in envelope
+        ):
+            raise ValueError("queued API response requires HTTP 202 and operation.id or bounded read pending state")
+        if state == "failed":
+            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
+            message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
+            stack_record = error_record.get("stack") if isinstance(error_record.get("stack"), list) else []
+            valid_stack = bool(stack_record) and all(
+                isinstance(frame, dict)
+                and bool(str(frame.get("component") or ""))
+                and bool(str(frame.get("operation") or ""))
+                and bool(str(frame.get("code") or ""))
+                for frame in stack_record
+            )
+            valid_error = (
+                HTTPStatus.BAD_REQUEST <= status_code <= 599
+                and bool(str(error_record.get("code") or ""))
+                and bool(str(error_record.get("origin") or ""))
+                and isinstance(error_record.get("retryable"), bool)
+                and isinstance(error_record.get("details"), dict)
+                and bool(str(message_record.get("key") or ""))
+                and isinstance(message_record.get("params"), dict)
+                and isinstance(message_record.get("fallback"), str)
+                and valid_stack
+                and "data" not in envelope
+                and "operation" not in envelope
+            )
+            if not valid_error:
+                raise ValueError(f"failed API response has invalid HTTP status or error shape {status_code}")
+
+        if state == "failed":
+            error_record = envelope["error"]
+            # The severity rule is owned by `failure_record_level`, not by this writer: a terminal
+            # operation replayed here carries the same typed code the asynchronous recorder saw, so
+            # the two writers must not be able to disagree about whether it is an error.
+            emit_server_log(
+                failure_record_level(error_record, status=status_code),
+                "api-response",
+                json.dumps({
+                    "request": envelope["request"],
+                    "operation": envelope.get("operation"),
+                    "code": error_record.get("code"),
+                    "origin": error_record.get("origin"),
+                    "stack": error_record.get("stack"),
+                }, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                category="api",
+            )
+
+        encode_started = time.perf_counter()
+        data = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self._route_response_written = True
+        # Commit the queued ticket before the flush (see the note in the route-None branch): a
+        # causally-later client read must not out-race this writer thread's ledger update.
+        if hasattr(self.server.app, "observe_http_commit"):
+            self.server.app.observe_http_commit(envelope, HTTPStatus(status_code))
+        self._write_json_representation(
+            data,
+            status=HTTPStatus(status_code),
+            json_encode_ms=(time.perf_counter() - encode_started) * 1000,
+        )
+        # Record the client receipt only after a successful write, never on a failed flush.
+        if hasattr(self.server.app, "observe_http_receipt"):
+            self.server.app.observe_http_receipt(envelope, HTTPStatus(status_code))
+
+    def _write_bodyless_api_response(self, status: HTTPStatus) -> None:
+        """Write an established bodyless protocol result from the shared response parent."""
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.record_http_response_bytes(status, 0)
+
+    def _write_json_representation(
+        self,
+        data: bytes,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        json_encode_ms: float = 0.0,
+        product_metadata: ProductMetadata | None = None,
+    ) -> None:
+        """Write already-validated JSON bytes without decoding/re-encoding them.
+
+        Only ``write_api_response`` calls this representation writer. Local
+        services may supply cached bytes to the parent without bypassing the
+        envelope, metrics, compression, or auth-cookie owners.
+        """
+        self._write_product_representation(
+            data,
+            status=status,
+            content_type="application/json; charset=utf-8",
+            disposition="inline",
+            filename="",
+            json_encode_ms=json_encode_ms,
+            product_metadata=product_metadata,
+        )
+
+    def _write_product_representation(
+        self,
+        data: bytes,
+        *,
+        status: HTTPStatus,
+        content_type: str,
+        disposition: str,
+        filename: str,
+        json_encode_ms: float = 0.0,
+        product_metadata: ProductMetadata | None = None,
+    ) -> None:
+        """Write one final representation and verify the actual boundary byte count."""
+
+        compression_started = time.perf_counter()
+        headers = getattr(self, "headers", {})
+        accept_encoding = headers.get("Accept-Encoding") if hasattr(headers, "get") else None
+        body, content_encoding = gzip_response_body(data, content_type, accept_encoding)
+        compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
+        # W9: the final wire representation is now fully prepared -- `body` holds the exact bytes the
+        # client will receive, already compressed -- but not one header byte has left the socket yet.
+        # This is the stated boundary for `route_to_representation_ready_ms`: route entry (dispatch
+        # start) to the representation being ready. Stamping it HERE, before `send_response`, keeps it
+        # free of header/body write and the client round trip, which is what makes it a server-side
+        # assembly number rather than an end-to-end one. The compute/compression/write metrics below
+        # are retained beside it as diagnostics, not replaced by it.
+        representation_ready_at = time.perf_counter()
+        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
+        route_to_representation_ready_ms = (
+            round(max(0.0, (representation_ready_at - dispatch_started) * 1000), 3)
+            if isinstance(dispatch_started, (int, float)) else None
+        )
+        head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Accept-Encoding")
+        if disposition == "attachment":
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        if content_encoding:
+            self.send_header("Content-Encoding", content_encoding)
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        write_started = time.perf_counter()
+        if not head_only:
+            written = self.wfile.write(body)
+            if written != len(body):
+                raise OSError(f"response writer emitted {written} of {len(body)} framed bytes")
+        write_ms = (time.perf_counter() - write_started) * 1000
+        wire_bytes = 0 if head_only else len(body)
+        details = {
+            "uncompressed_bytes": len(data),
+            "wire_bytes": wire_bytes,
+            "representation_bytes": len(body),
+            "content_encoding": content_encoding or "identity",
+            "json_encode_ms": round(json_encode_ms, 3),
+            "compression_ms": round(compression_ms, 3),
+            "write_ms": round(write_ms, 3),
+            "head_only": head_only,
+        }
+        if route_to_representation_ready_ms is not None:
+            # Measured at the boundary above (before headers/body write), not here after the write.
+            details["route_to_representation_ready_ms"] = route_to_representation_ready_ms
+        if product_metadata is not None:
+            details["product_format"] = product_metadata["format"]
+            details["product_bytes"] = product_metadata["length"]
+            details["product_sha256"] = product_metadata["sha256"]
+            details["product_disposition"] = product_metadata["disposition"]
+        self.record_http_response_bytes(
+            status,
+            wire_bytes,
+            content_type,
+            details,
+        )
+
+    def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
+        # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
+        # written ~19 times verbatim. This is the one place that convention is spelled out.
+        payload, status = result
+        self.write_json(payload, status=status)
+
+    def write_validated_int_result(self, qs: dict, name: str, default: int, max_value: int, make_result) -> None:
+        # The "?<name>=<int>" routes (tmux/transcript/context/context-items/events/search) all parsed +
+        # range-checked one int the same way, emitting an identical 400 on a bad value before calling the
+        # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
+        value, error = parse_query_int(qs, name, default, max_value=max_value)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.write_app_result(make_result(value))
+
+    def write_validated_float_result(self, qs: dict, name: str, default: float, max_value: float, make_result) -> None:
+        # The activity/session-files routes share one bounded float query parameter. Keep the bad-float
+        # response and cap in one path so the three handlers cannot drift.
+        value, error = parse_query_float(qs, name, default, max_value=max_value)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        self.write_app_result(make_result(value))
+
+    def write_int_query_app_result(self, parsed: Any, name: str, default: int, max_value: int, make_result) -> None:
+        # Own parse_qs + int validation for GET routes whose only validation is one bounded integer.
+        qs = parse_qs(parsed.query)
+        self.write_validated_int_result(qs, name, default, max_value, lambda value: make_result(qs, value))
+
+    def write_text(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        data = body.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.record_http_response_bytes(status, len(data), "text/plain; charset=utf-8")
+
+
 class Handler(AuthMixin, BaseHTTPRequestHandler):
+    @property
+    def filesystem_http_adapter(self) -> FilesystemHttpAdapter:
+        adapter = self.__dict__.get("_filesystem_http_adapter")
+        if adapter is None:
+            adapter = FilesystemHttpAdapter(self)
+            object.__setattr__(self, "_filesystem_http_adapter", adapter)
+        return adapter
+
+    @property
+    def share_http_adapter(self) -> ShareHttpAdapter:
+        adapter = self.__dict__.get("_share_http_adapter")
+        if adapter is None:
+            adapter = ShareHttpAdapter(self)
+            object.__setattr__(self, "_share_http_adapter", adapter)
+        return adapter
+
+    @property
+    def api_response_writer(self) -> ApiResponseWriter:
+        adapter = self.__dict__.get("_api_response_writer")
+        if adapter is None:
+            adapter = ApiResponseWriter(self)
+            object.__setattr__(self, "_api_response_writer", adapter)
+        return adapter
+
     server: "TmuxWebtermHTTPServer"
     protocol_version = "HTTP/1.1"
     _route_response: Any = None
@@ -1271,160 +2589,45 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         dispatch_http_route(self, "GET")
 
     def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not record:
-            return None
-        mode = str(record.get("mode") or "ro")
-        if not self.request_is_https():
-            mode = "ro"
-        max_viewers = int(record.get("max_viewers") or 0)
-        viewers = int(record.get("viewers") or 0)
-        sessions = self.share_record_sessions_for_handler(record)
-        session = sessions[0] if sessions else str(record.get("session") or "")
-        host_dims = {
-            current: {
-                "rows": self.server.host_pty_dimensions_for_session(current)[0],
-                "cols": self.server.host_pty_dimensions_for_session(current)[1],
-            }
-            for current in sessions
-        }
-        rows, cols = self.server.host_pty_dimensions_for_session(session)
-        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
-        return {
-            "view": True,
-            "id": str(record.get("short_id") or ""),
-            "session": session,
-            "sessions": sessions,
-            "mode": mode,
-            "readOnly": mode != "rw",
-            "scheme": "https" if self.request_is_https() else "http",
-            "expiresAt": float(record.get("expires_at") or 0.0),
-            "createdBy": str(record.get("created_by") or ""),
-            "maxViewers": max_viewers,
-            "viewers": viewers,
-            "debugProfile": bool(record.get("debug_profile")),
-            "hostDims": {"rows": rows, "cols": cols},
-            "hostDimsBySession": host_dims,
-            "layout": str(record.get("layout") or ""),
-            "tabs": str(record.get("tabs") or ""),
-            "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
-            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
-            "appearance": ui_state.get("appearance") if isinstance(ui_state.get("appearance"), dict) else {},
-            "uiState": ui_state,
-            "tokenInFragment": True,
-        }
+        # ShareHttpAdapter retains host_pty_dimensions_for_session(session) and
+        # "hostDims": {"rows": rows, "cols": cols} in the bootstrap path.
+        return ShareHttpAdapter.share_bootstrap_payload(self, record)
 
     def share_record_at_viewer_cap(self, record: dict[str, Any]) -> bool:
-        max_viewers = int(record.get("max_viewers") or 0)
-        viewers = int(record.get("viewers") or 0)
-        return max_viewers > 0 and viewers >= max_viewers
+        return ShareHttpAdapter.share_record_at_viewer_cap(self, record)
 
     def share_record_sessions_for_handler(self, record: dict[str, Any]) -> list[str]:
-        session_reader = getattr(self.server.app, "share_record_sessions", None)
-        if callable(session_reader):
-            raw_sessions = session_reader(record)
-        elif isinstance(record.get("sessions"), list):
-            raw_sessions = record.get("sessions")
-        else:
-            raw_sessions = [record.get("session")]
-        result: list[str] = []
-        for raw_session in raw_sessions or []:
-            session = str(raw_session or "").strip()
-            if session and session not in result:
-                result.append(session)
-        return result
+        return ShareHttpAdapter.share_record_sessions_for_handler(self, record)
 
     def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        verifier = getattr(self.server.app, "verify_share_token", None)
-        record = verifier(str(token or "")) if callable(verifier) else None
-        if not isinstance(record, dict):
-            return None
-        if str(record.get("mode") or "ro") != "rw" or not self.request_is_https():
-            return None
-        return normalize_share_input_intent_payload(payload, self.share_record_sessions_for_handler(record))
+        return ShareHttpAdapter.normalize_share_input_intent_for_handler(self, token, payload)
 
     def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
-        intent = str(payload.get("intent") or "")
-        if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
-            upstream_getter = getattr(self.server, "share_terminal_upstream", None)
-            if not callable(upstream_getter):
-                return False
-            upstream = upstream_getter(str(token or ""), str(payload.get("session") or ""))
-            data = json.dumps({"type": "input", "data": str(payload.get("data") or "")}).encode("utf-8")
-            return bool(upstream.write_input(data))
-        if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
-            scroller = getattr(self.server.app, "tmux_scroll", None)
-            if not callable(scroller):
-                return False
-            scroller(str(payload.get("session") or ""), str(payload.get("direction") or ""), int(payload.get("lines") or 0))
-            return True
-        return False
+        return ShareHttpAdapter.apply_share_input_intent_for_handler(self, token, payload)
 
     def handle_share_shell(self, parsed: Any) -> bool:
-        short_id = parsed.path.removeprefix("/share/").strip("/")
-        if not short_id or "/" in short_id:
-            return False
-        finder = getattr(self.server.app, "share_record_for_short_id", None)
-        record = finder(short_id) if callable(finder) else None
-        if not record:
-            return False
-        if self.share_record_at_viewer_cap(record):
-            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
-            return True
-        sessions = self.share_record_sessions_for_handler(record)
-        if not sessions:
-            return False
-        self.write_html(html_page(
-            sessions,
-            "readonly",
-            dev=getattr(self.server, 'dev', False),
-            dangerously_yolo=self.server.app.dangerously_yolo,
-            share=self.share_bootstrap_payload(record),
-            accept_language=self.headers.get("Accept-Language", ""),
-            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
-        ))
-        return True
+        return ShareHttpAdapter.handle_share_shell(self, parsed)
 
     def handle_fs_list(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "/") or "/")
-        self.submit_filesystem_operation("GET /api/fs/list", "list", raw_path)
+        return FilesystemHttpAdapter.handle_fs_list(self, parsed)
 
     def handle_fs_search(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
-        query = str(query_one(qs, "query", "") or "")
-        limit = str(query_one(qs, "limit", "400") or "400")
-        recursive = query_bool(qs, "recursive")
-        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive})
+        return FilesystemHttpAdapter.handle_fs_search(self, parsed)
 
     def handle_fs_index_status(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
-        self.submit_filesystem_operation("GET /api/fs/index-status", "index_status", raw_root)
+        return FilesystemHttpAdapter.handle_fs_index_status(self, parsed)
 
     def handle_fs_read(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path)
+        return FilesystemHttpAdapter.handle_fs_read(self, parsed)
 
     def handle_fs_info(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path)
+        return FilesystemHttpAdapter.handle_fs_info(self, parsed)
 
     def handle_fs_diff(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        from_ref = query_one(qs, "from", None)
-        to_ref = query_one(qs, "to", None)
-        self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
+        return FilesystemHttpAdapter.handle_fs_diff(self, parsed)
 
     def handle_blame(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        ref = query_one(qs, "ref", None)
-        self.submit_filesystem_operation("GET /api/blame", "blame", raw_path, {"ref": ref})
+        return FilesystemHttpAdapter.handle_blame(self, parsed)
 
     def submit_filesystem_operation(
         self,
@@ -1435,82 +2638,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         *,
         reload_yolo_rules: bool = False,
     ) -> None:
-        """Accept one serializable filesystem descriptor without invoking it in the web thread."""
-        share_token = self.share_token()
-        if share_token:
-            scope = f"share:{share_token}"
-        else:
-            identity = self.auth_identity()
-            scope = f"user:{identity.role}:{identity.username}"
-        response = self.server.app.filesystem_operation_http_payload(
-            route=route,
-            operation=operation,
-            path=raw_path,
-            args=args,
-            reload_yolo_rules=reload_yolo_rules,
-            scope=scope,
-        )
-        if response.product is not None:
-            self.write_product_bytes(response.body, response.product)
-            return
-        self.write_json(response.payload, status=response.status)
+        return FilesystemHttpAdapter.submit_filesystem_operation(self, route, operation, raw_path, args, reload_yolo_rules=reload_yolo_rules)
 
     def handle_fs_raw(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        download = query_bool(qs, "download")
-        self.submit_filesystem_relay(
-            "GET /api/fs/raw",
-            "raw",
-            raw_path,
-            {"download": download, "max_bytes": self.file_transfer_max_bytes()},
-        )
+        return FilesystemHttpAdapter.handle_fs_raw(self, parsed)
 
     def handle_fs_zip(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_relay(
-            "GET /api/fs/zip",
-            "zip",
-            raw_path,
-            {"filename": fs_zip_attachment_filename(raw_path), "max_bytes": self.file_transfer_max_bytes()},
-        )
+        return FilesystemHttpAdapter.handle_fs_zip(self, parsed)
 
     def handle_fs_count(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = str(query_one(qs, "path", "") or "")
-        self.submit_filesystem_operation("GET /api/fs/count", "count", raw_path)
+        return FilesystemHttpAdapter.handle_fs_count(self, parsed)
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
-        if not raw_path.lower().endswith((".html", ".htm")):
-            self.write_json(
-                error_payload(
-                    "path must be an HTML file",
-                    message_key="fs.error.htmlFileRequired",
-                    message_params={"path": raw_path},
-                    path=raw_path,
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        self.submit_filesystem_relay("GET /api/fs/html-preview", "html_preview", raw_path, {"locale": locale})
+        return FilesystemHttpAdapter.handle_fs_html_preview(self, parsed)
 
     def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
-        """Forward browser-owned filesystem bytes through the shared product writer."""
-        response = self.server.app.filesystem_operation_relay(
-            route=route,
-            operation=operation,
-            path=raw_path,
-            args=args,
-        )
-        if response.product is not None:
-            self.write_product_bytes(response.body, response.product)
-            return
-        self.write_json(response.payload, status=response.status)
+        return FilesystemHttpAdapter.submit_filesystem_relay(self, route, operation, raw_path, args)
 
     def handle_preview_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1560,186 +2703,26 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         too_large_status: HTTPStatus = HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
         close_on_too_large: bool = True,
     ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
-        length_text = self.headers.get("Content-Length", "")
-        if not length_text and allow_missing:
-            return b"", None, HTTPStatus.OK
-        try:
-            length = int(length_text)
-        except (TypeError, ValueError):
-            missing = not length_text
-            status = missing_status if missing else invalid_status
-            return None, error_payload(
-                missing_message if missing else invalid_message,
-                message_key="request.error.contentLengthRequired" if missing else "request.error.contentLengthInvalid",
-                status=status,
-            ), status
-        if length < 0 or (length == 0 and not allow_empty):
-            return None, error_payload(
-                empty_message,
-                message_key="request.error.contentLengthInvalid",
-                status=empty_status,
-            ), empty_status
-        if length > max_length:
-            if close_on_too_large:
-                self.close_connection = True
-            return None, error_payload(
-                too_large_message,
-                message_key="request.error.contentTooLarge",
-                message_params={"max": max_length},
-                status=too_large_status,
-            ), too_large_status
-        return self.rfile.read(length), None, HTTPStatus.OK
+        return FilesystemHttpAdapter.read_request_body(self, max_length, allow_empty=allow_empty, allow_missing=allow_missing, missing_message=missing_message, invalid_message=invalid_message, empty_message=empty_message, too_large_message=too_large_message, missing_status=missing_status, invalid_status=invalid_status, empty_status=empty_status, too_large_status=too_large_status, close_on_too_large=close_on_too_large)
 
     def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
-        body, error, status = Handler.read_request_body(
-            self,
-            max_length,
-            allow_empty=allow_empty,
-            allow_missing=allow_missing,
-            missing_message="missing or invalid Content-Length",
-            invalid_message="missing or invalid Content-Length",
-            empty_message="content too large",
-            missing_status=HTTPStatus.LENGTH_REQUIRED,
-            invalid_status=HTTPStatus.LENGTH_REQUIRED,
-            empty_status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            too_large_message="content too large",
-        )
-        if error is not None:
-            self.write_json(error, status=status)
-            return None
-        if body == b"" and (allow_empty or allow_missing):
-            return {}
-        try:
-            text = (body or b"").decode("utf-8")
-        except UnicodeDecodeError as exc:
-            self.write_json(
-                error_payload(
-                    "request body must be utf-8 JSON",
-                    message_key="request.error.jsonUtf8",
-                    diagnostic=exc,
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return None
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError as exc:
-            self.write_json(
-                error_payload(
-                    "invalid JSON",
-                    message_key="request.error.invalidJson",
-                    diagnostic=exc,
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return None
-        if not isinstance(payload, dict):
-            self.write_json(
-                error_payload(
-                    "request body must be a JSON object",
-                    message_key="request.error.jsonObject",
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return None
-        return payload
+        # FilesystemHttpAdapter.read_json_body routes through read_request_body on this facade.
+        return FilesystemHttpAdapter.read_json_body(self, max_length, allow_empty=allow_empty, allow_missing=allow_missing)
 
     def handle_fs_write(self, parsed: Any) -> None:
-        payload = self.read_json_body(filesystem.MAX_WRITE_BYTES + 4096)
-        if payload is None:
-            return
-        raw_path = payload.get("path", "")
-        content = payload.get("content", "")
-        expected_mtime = payload.get("expected_mtime")
-        if expected_mtime is not None:
-            try:
-                expected_mtime = int(expected_mtime)
-            except (TypeError, ValueError):
-                self.write_json(
-                    error_payload(
-                        "expected_mtime must be an integer",
-                        message_key="request.error.integer",
-                        message_params={"field": "expected_mtime"},
-                        status=HTTPStatus.BAD_REQUEST,
-                    ),
-                    status=HTTPStatus.BAD_REQUEST,
-                )
-                return
-        try:
-            rules_file_path = yolo_rules.is_rules_file_path(raw_path)
-        except OSError as exc:
-            self.write_json(
-                error_payload(
-                    "YOLO rules path is unavailable",
-                    message_key="yolo.error.invalidRules",
-                    diagnostic=exc,
-                    path=raw_path,
-                    status=HTTPStatus.SERVICE_UNAVAILABLE,
-                ),
-                status=HTTPStatus.SERVICE_UNAVAILABLE,
-            )
-            return
-        if rules_file_path:
-            try:
-                yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
-            except (ValueError, yaml.YAMLError) as exc:
-                self.write_json(
-                    error_payload(
-                        "YOLO rules are invalid",
-                        message_key="yolo.error.invalidRules",
-                        diagnostic=exc,
-                        path=raw_path,
-                        status=HTTPStatus.BAD_REQUEST,
-                    ),
-                    status=HTTPStatus.BAD_REQUEST,
-                )
-                return
-            self.submit_filesystem_operation(
-                "POST /api/fs/write",
-                "write",
-                raw_path,
-                {"content": content, "expected_mtime": expected_mtime},
-                reload_yolo_rules=True,
-            )
-            return
-        self.submit_filesystem_operation(
-            "POST /api/fs/write",
-            "write",
-            raw_path,
-            {"content": content, "expected_mtime": expected_mtime},
-        )
+        return FilesystemHttpAdapter.handle_fs_write(self, parsed)
 
     def handle_fs_delete(self, parsed: Any) -> None:
-        payload = self.read_json_body(4096)
-        if payload is None:
-            return
-        raw_path = payload.get("path", "")
-        self.submit_filesystem_operation("POST /api/fs/delete", "delete", raw_path)
+        return FilesystemHttpAdapter.handle_fs_delete(self, parsed)
 
     def handle_fs_unindex(self, parsed: Any) -> None:
-        payload = self.read_json_body(4096)
-        if payload is None:
-            return
-        raw_path = payload.get("path", payload.get("root", ""))
-        self.submit_filesystem_operation("POST /api/fs/unindex", "unindex", raw_path)
+        return FilesystemHttpAdapter.handle_fs_unindex(self, parsed)
 
     def handle_fs_rename(self, parsed: Any) -> None:
-        payload = self.read_json_body(4096)
-        if payload is None:
-            return
-        raw_path = payload.get("path", "")
-        new_name = payload.get("new_name", "")
-        self.submit_filesystem_operation("POST /api/fs/rename", "rename", raw_path, {"new_name": new_name})
+        return FilesystemHttpAdapter.handle_fs_rename(self, parsed)
 
     def handle_fs_mkdir(self, parsed: Any) -> None:
-        payload = self.read_json_body(4096)
-        if payload is None:
-            return
-        raw_path = payload.get("path", "")
-        self.submit_filesystem_operation("POST /api/fs/mkdir", "mkdir", raw_path)
+        return FilesystemHttpAdapter.handle_fs_mkdir(self, parsed)
 
     def do_POST(self) -> None:
         dispatch_http_route(self, "POST")
@@ -1753,118 +2736,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         return f"{url_scheme}://{host}"
 
     def share_scoped_activity_result(self, result: tuple[dict[str, Any], HTTPStatus]) -> tuple[dict[str, Any], HTTPStatus]:
-        allowed = set(self.share_sessions())
-        if not allowed:
-            return result
-        payload, status = result
-        activity = payload.get("activity") if isinstance(payload, dict) else None
-        if not isinstance(activity, dict):
-            return result
-        scoped = dict(payload)
-        scoped["activity"] = {
-            key: value
-            for key, value in activity.items()
-            if str(key).split(":", 1)[0] in allowed
-        }
-        return scoped, status
+        return ShareHttpAdapter.share_scoped_activity_result(self, result)
 
     def share_scoped_session_metadata_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        allowed = set(self.share_sessions())
-        if not allowed or not isinstance(payload, dict):
-            return payload
-        scoped = dict(payload)
-        sessions = payload.get("sessions")
-        if isinstance(sessions, dict):
-            scoped["sessions"] = {session: info for session, info in sessions.items() if session in allowed}
-        order = payload.get("session_order")
-        if isinstance(order, list):
-            scoped["session_order"] = [session for session in order if session in allowed]
-        return scoped
+        return ShareHttpAdapter.share_scoped_session_metadata_payload(self, payload)
 
     def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.share_scoped_session_metadata_payload(payload)
+        return ShareHttpAdapter.share_scoped_transcripts_payload(self, payload)
 
     def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        session = str(payload.get("session") or "").strip()
-        sessions = payload.get("sessions", None)
-        ttl_seconds = payload.get("ttl_seconds", payload.get("ttl", None))
-        layout = str(payload.get("layout") or "")
-        tabs = str(payload.get("tabs") or "")
-        finder = payload.get("finder", None)
-        ui_state = payload.get("ui_state", payload.get("uiState", None))
-        scheme = payload.get("scheme", payload.get("protocol", None))
-        return self.server.app.create_share_token(
-            session,
-            ttl_seconds,
-            base_url=self.request_base_url(),
-            created_by=self.auth_identity().username,
-            layout=layout,
-            tabs=tabs,
-            finder=finder,
-            ui_state=ui_state,
-            sessions=sessions,
-            mode=payload.get("mode", None),
-            read_only=payload.get("read_only", payload.get("readonly", None)),
-            scheme=scheme,
-            max_viewers=payload.get("max_viewers", None),
-            debug_profile=payload.get("debug_profile", payload.get("debugProfile", False)),
-            request_is_https=self.request_is_https(),
-            tls_available=self.server.tls_context is not None,
-        )
+        return ShareHttpAdapter.handle_share_create(self, payload)
 
     def handle_fs_batch(self, parsed: Any) -> None:
-        del parsed
-        started = time.perf_counter()
-        payload = self.read_json_body(64 * 1024)
-        body_read_ms = (time.perf_counter() - started) * 1000
-        if payload is None:
-            return
-        requests = payload.get("requests", [])
-        if not isinstance(requests, list):
-            self.write_json(
-                error_payload(
-                    "requests must be a list",
-                    message_key="request.error.list",
-                    message_params={"field": "requests"},
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        if len(requests) > filesystem.MAX_BATCH_REQUESTS:
-            self.write_json(
-                error_payload(
-                    f"requests must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
-                    message_key="request.error.tooManyItems",
-                    message_params={"field": "requests", "max": filesystem.MAX_BATCH_REQUESTS},
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        summary = filesystem.filesystem_batch_request_summary(payload)
-        operation_started = time.perf_counter()
-        response, status = self.server.app.fs_batch_http_payload(
-            payload,
-            shared_sessions=self.share_sessions(),
-        )
-        operation_ms = max(0.0, (time.perf_counter() - operation_started) * 1000)
-        self._http_response_compute_ms = max(0.0, (time.perf_counter() - started) * 1000)
-        self._http_response_performance_details = {
-            "fs_batch": True,
-            "fs_batch_offloaded": True,
-            "fs_batch_size": summary["batch_size"],
-            "fs_batch_body_read_ms": round(body_read_ms, 3),
-            "fs_batch_operation_ms": round(operation_ms, 3),
-            "fs_batch_list_ms": 0.0,
-            "fs_batch_info_ms": 0.0,
-            "fs_batch_operations": json.dumps(summary["operations"], sort_keys=True),
-            "fs_batch_path_hashes": json.dumps(summary["path_fingerprints"]),
-            "fs_batch_triggers": json.dumps(summary["triggers"], sort_keys=True),
-            "fs_batch_client_revision": summary["client_revision"],
-            "fs_batch_client_scope": summary["client_scope"],
-        }
-        self.write_json(response, status=status)
+        return FilesystemHttpAdapter.handle_fs_batch(self, parsed)
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
         body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
@@ -1896,39 +2780,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         return self.server.app.client_event(event)
 
     def file_transfer_max_bytes(self) -> int:
-        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
-        if callable(getter):
-            return int(getter())
-        getter = getattr(self.server.app, "upload_max_bytes", None)
-        if callable(getter):
-            return int(getter())
-        return UPLOAD_MAX_BYTES
+        return FilesystemHttpAdapter.file_transfer_max_bytes(self)
 
     def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
-        upload_max_bytes = self.file_transfer_max_bytes()
-        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
-        if error is not None:
-            return {**error, "session": session}, status
-        try:
-            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
-        except ValueError as exc:
-            return error_payload(
-                "invalid upload data",
-                message_key="upload.error.invalidMultipart",
-                diagnostic=exc,
-                session=session,
-                status=HTTPStatus.BAD_REQUEST,
-            ), HTTPStatus.BAD_REQUEST
-        auth_username = self.auth_identity().username
-        if editor_path or base_dir:
-            return self.server.app.upload_editor_files(
-                files,
-                editor_path=editor_path,
-                base_dir=base_dir,
-                auth_username=auth_username,
-                session=session or "editor",
-            )
-        return self.server.app.upload_files(session, files, auth_username=auth_username)
+        # FilesystemHttpAdapter.handle_upload routes through read_request_body on this facade.
+        return FilesystemHttpAdapter.handle_upload(self, session, editor_path=editor_path, base_dir=base_dir)
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
@@ -2516,140 +3372,31 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 time.sleep(0.2)
 
     def write_sse_json(self, event: str, value: Any) -> None:
-        data = json.dumps(value, ensure_ascii=False)
-        self.wfile.write(f"event: {event}\n".encode("utf-8"))
-        for line in data.splitlines() or [""]:
-            self.wfile.write(f"data: {line}\n".encode("utf-8"))
-        self.wfile.write(b"\n")
-        self.wfile.flush()
+        return ApiResponseWriter.write_sse_json(self, event, value)
 
     def write_sse_bytes(self, event: str, value: bytes) -> None:
-        """Write an already-validated compact JSON payload without decoding it."""
-
-        if not isinstance(value, bytes) or not value:
-            raise ValueError("SSE byte payload must be non-empty")
-        event_name = str(event or "").strip()
-        if not event_name.isascii() or not event_name or any(
-            character.isspace() or ord(character) < 33 for character in event_name
-        ):
-            raise ValueError("SSE event name is invalid")
-        self.wfile.write(f"event: {event_name}\n".encode("ascii"))
-        for line in value.splitlines() or [b""]:
-            self.wfile.write(b"data: " + line + b"\n")
-        self.wfile.write(b"\n")
-        self.wfile.flush()
+        return ApiResponseWriter.write_sse_bytes(self, event, value)
 
     def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
-        self.record_http_response_bytes(status, len(data), "text/html; charset=utf-8")
+        return ApiResponseWriter.write_html(self, body, status)
 
     def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
-        self.send_response(status)
-        self.send_header("Location", self.safe_next_path(location))
-        self.send_header("Content-Length", "0")
-        self.send_header("Cache-Control", "no-store")
-        if clear_auth:
-            for header in self.clear_auth_cookie_headers():
-                self.send_header("Set-Cookie", header)
-            self.send_header("Set-Cookie", self.logout_marker_cookie_header())
-        else:
-            self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.record_http_response_bytes(status, 0)
+        return ApiResponseWriter.write_redirect(self, location, status, clear_auth)
 
     def write_static_asset(self, asset: str, content_type: str) -> None:
-        path = static_asset_path(asset)
-        if path is None:
-            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-            self.write_text(
-                server_string(locale, "request.error.staticAssetMissing", asset=asset) + "\n",
-                status=HTTPStatus.NOT_FOUND,
-            )
-            return
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            logger.warning("failed to read static asset %s: %s", asset, exc)
-            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-            self.write_text(
-                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", static_asset_cache_control(self.path))
-        if static_content_type_supports_gzip(content_type):
-            self.send_header("Vary", "Accept-Encoding")
-        if content_encoding:
-            self.send_header("Content-Encoding", content_encoding)
-        self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
-        self.record_http_response_bytes(HTTPStatus.OK, len(body), content_type)
+        return ApiResponseWriter.write_static_asset(self, asset, content_type)
 
     def write_static_head(self, asset: str, content_type: str) -> None:
-        path = static_asset_path(asset)
-        if path is None:
-            self.send_response(HTTPStatus.NOT_FOUND)
-            self.end_headers()
-            self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0, content_type)
-            return
-        try:
-            data = path.read_bytes()
-        except OSError as exc:
-            logger.warning("failed to read static asset %s: %s", asset, exc)
-            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-            self.write_text(
-                server_string(locale, "request.error.staticAssetReadFailed", asset=asset) + "\n",
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-        body, content_encoding = static_asset_response_body(data, content_type, self.headers.get("Accept-Encoding"))
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", static_asset_cache_control(self.path))
-        if static_content_type_supports_gzip(content_type):
-            self.send_header("Vary", "Accept-Encoding")
-        if content_encoding:
-            self.send_header("Content-Encoding", content_encoding)
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-        self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
+        return ApiResponseWriter.write_static_head(self, asset, content_type)
 
     def api_request_id(self) -> str:
-        """Return one validated browser correlation ID or a server-minted replacement."""
-        if self._api_request_id:
-            return self._api_request_id
-        headers = getattr(self, "headers", {})
-        proposed = str(headers.get("X-YOLOmux-Request-ID") or "").strip()
-        if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", proposed):
-            self._api_request_id = proposed
-        else:
-            self._api_request_id = f"r-{uuid.uuid4().hex}"
-        return self._api_request_id
+        return ApiResponseWriter.api_request_id(self)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        self.write_api_response(value, status=status)
+        return ApiResponseWriter.write_json(self, value, status)
 
     def write_json_bytes(self, data: bytes, status: HTTPStatus = HTTPStatus.OK, *, json_encode_ms: float = 0.0) -> None:
-        self.write_api_response(data, status=status, json_bytes=True, json_encode_ms=json_encode_ms)
+        return ApiResponseWriter.write_json_bytes(self, data, status, json_encode_ms=json_encode_ms)
 
     def write_product_bytes(
         self,
@@ -2658,9 +3405,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         *,
         promise: tuple[str, int] | None = None,
     ) -> None:
-        """Frame or forward one trusted producer's opaque product bytes."""
-
-        self.write_api_response(data, product_metadata=product, product_promise=promise)
+        return ApiResponseWriter.write_product_bytes(self, data, product, promise=promise)
 
     def write_api_response(
         self,
@@ -2672,378 +3417,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         product_promise: tuple[str, int] | None = None,
         json_encode_ms: float = 0.0,
     ) -> None:
-        """Own the canonical API envelope, causal failure record, and correlated log line."""
-        route = self._route_response
-        status_code = int(status)
-        if status_code in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
-            if value is not None and value != "" and value != b"":
-                raise ValueError(f"bodyless API response {status_code} cannot carry a payload")
-            self._route_response_written = True
-            self._write_bodyless_api_response(HTTPStatus(status_code))
-            return
-        if product_metadata is not None:
-            if not isinstance(value, bytes):
-                raise ValueError("opaque product body must be bytes")
-            product = validated_product_metadata(product_metadata, body_length=len(value))
-            expected_protocols = (
-                {RESPONSE_JSON, RESPONSE_JSON_BATCH}
-                if product["format"] == "json"
-                else {RESPONSE_BINARY}
-            )
-            if route is None or route.protocol not in expected_protocols or status_code != HTTPStatus.OK:
-                raise ValueError("opaque product has invalid status, format, or route")
-            if product_promise is not None:
-                if (
-                    not isinstance(product_promise, tuple)
-                    or len(product_promise) != 2
-                    or not isinstance(product_promise[0], str)
-                    or not product_promise[0].strip()
-                    or isinstance(product_promise[1], bool)
-                    or not isinstance(product_promise[1], int)
-                    or product_promise[1] < 0
-                ):
-                    raise ValueError("product promise must be a non-empty key and non-negative epoch")
-                self.server.app.observe_http_product_delivery(product_promise[0], product_promise[1])
-            self._route_response_written = True
-            if product["format"] == "json":
-                framed = ready_response_envelope_bytes(value, self.api_request_id())
-                self._write_json_representation(
-                    framed,
-                    status=HTTPStatus.OK,
-                    json_encode_ms=0.0,
-                    product_metadata=product,
-                )
-            else:
-                self._write_product_representation(
-                    value,
-                    status=HTTPStatus.OK,
-                    content_type=product["content_type"],
-                    disposition=product["disposition"],
-                    filename=product["filename"],
-                    product_metadata=product,
-                )
-            return
-        if route is None:
-            if json_bytes:
-                self._write_json_representation(value, status=status, json_encode_ms=json_encode_ms)
-                return
-            encode_started = time.perf_counter()
-            data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            self._write_json_representation(
-                data,
-                status=status,
-                json_encode_ms=(time.perf_counter() - encode_started) * 1000,
-            )
-            if hasattr(self.server.app, "observe_http_delivery"):
-                self.server.app.observe_http_delivery(value, status)
-            return
-
-        if json_bytes:
-            try:
-                payload = json.loads(value)
-            except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
-                raise ValueError("cached JSON response is invalid") from error
-        else:
-            payload = value
-
-        request_id = self.api_request_id()
-        canonical = (
-            isinstance(payload, dict)
-            and payload.get("state") in {"ready", "queued", "failed"}
-            and isinstance(payload.get("request"), dict)
-        )
-        transient_read_failure = (
-            not canonical
-            and route.method == "GET"
-            and status_code >= HTTPStatus.BAD_REQUEST
-            and isinstance(payload, dict)
-            and (
-                local_service_failure_is_transient(payload)
-                or (
-                    status_code == HTTPStatus.FAILED_DEPENDENCY
-                    and payload.get("terminal") is not True
-                )
-            )
-        )
-        if transient_read_failure:
-            status_code = HTTPStatus.ACCEPTED
-            payload = {
-                "status": "pending",
-                "retry_after_seconds": 1,
-                "reason": "upstream service is refreshing",
-            }
-        if canonical:
-            envelope = copy.deepcopy(payload)
-            existing_request_id = str(envelope["request"].get("id") or "").strip()
-            envelope["request"]["id"] = (
-                existing_request_id
-                if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", existing_request_id)
-                else request_id
-            )
-            self._api_request_id = envelope["request"]["id"]
-        elif status_code == HTTPStatus.ACCEPTED:
-            legacy = payload if isinstance(payload, dict) else {}
-            legacy_state = str(legacy.get("state") or legacy.get("status") or "").strip().lower()
-            operation_id = str(legacy.get("key") or legacy.get("operation_id") or "").strip()
-            if legacy_state in {"queued", "pending"} and operation_id:
-                envelope = {
-                    "state": "queued",
-                    "request": {"id": request_id},
-                    "operation": {
-                        "id": operation_id,
-                        "progress": {
-                            "phase": "accepted",
-                            "legacy": copy.deepcopy(legacy),
-                        },
-                    },
-                    "ok": True,
-                    "terminal": False,
-                }
-                reserved = {"data", "error", "operation", "request", "state"}
-                for key, item in legacy.items():
-                    if key not in reserved and key not in envelope:
-                        envelope[key] = copy.deepcopy(item)
-            elif legacy_state == "pending" and route.method == "GET":
-                try:
-                    retry_after_seconds = int(legacy.get("retry_after_seconds") or 0)
-                except (TypeError, ValueError):
-                    retry_after_seconds = 0
-                if not 1 <= retry_after_seconds <= 60:
-                    raise ValueError("pending read response requires a bounded retry interval")
-                envelope = {
-                    "state": "queued",
-                    "request": {"id": request_id},
-                    "ok": True,
-                    "terminal": False,
-                }
-                reserved = {"data", "error", "operation", "request", "state"}
-                for key, item in legacy.items():
-                    if key not in reserved and key not in envelope:
-                        envelope[key] = copy.deepcopy(item)
-            elif legacy_state in {"queued", "pending"}:
-                status_code = HTTPStatus.CONFLICT
-                envelope = error_payload(
-                    "operation was not accepted by a durable owner",
-                    message_key="common.requestFailed",
-                    canonical=True,
-                    code="operation_not_accepted",
-                    origin="server.http",
-                    retryable=True,
-                    details={"legacy": copy.deepcopy(legacy)},
-                    stack=[{
-                        "component": "server.http",
-                        "operation": f"{route.method} {route.path}",
-                        "code": "operation_not_accepted",
-                    }],
-                    request_id=request_id,
-                )
-            else:
-                status_code = HTTPStatus.OK
-                envelope = {
-                    "state": "ready",
-                    "request": {"id": request_id},
-                    "data": copy.deepcopy(payload),
-                    "ok": True,
-                    "terminal": True,
-                }
-        elif status_code >= HTTPStatus.BAD_REQUEST:
-            legacy = payload if isinstance(payload, dict) else {}
-            raw_error = legacy.get("error") or legacy.get("reason") or legacy.get("message") or f"HTTP {status_code}"
-            descriptor = legacy.get("user_message") if isinstance(legacy.get("user_message"), dict) else {}
-            legacy_code = str(legacy.get("reason_code") or legacy.get("error_code") or legacy.get("code") or "").strip().lower()
-            normalized_code = re.sub(r"[^a-z0-9_]+", "_", legacy_code).strip("_")
-            status_codes = {
-                HTTPStatus.BAD_REQUEST: "invalid_request",
-                HTTPStatus.UNAUTHORIZED: "authentication_required",
-                HTTPStatus.FORBIDDEN: "forbidden",
-                HTTPStatus.NOT_FOUND: "not_found",
-                HTTPStatus.CONFLICT: "conflict",
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "request_too_large",
-                HTTPStatus.TOO_MANY_REQUESTS: "rate_limited",
-                HTTPStatus.FAILED_DEPENDENCY: "dependency_failed",
-                HTTPStatus.SERVICE_UNAVAILABLE: "service_unavailable",
-                HTTPStatus.GATEWAY_TIMEOUT: "deadline_expired",
-            }
-            code = normalized_code or status_codes.get(status_code, "request_failed")
-            cause = legacy.get("cause") if isinstance(legacy.get("cause"), dict) else None
-            root = {
-                "component": "server.http",
-                "operation": f"{route.method} {route.path}",
-                "code": code,
-            }
-            if cause is not None:
-                root.update(copy.deepcopy(cause))
-            excluded = {"cause", "code", "diagnostic", "error", "error_code", "origin", "reason_code", "retryable", "status", "user_message"}
-            details = {key: copy.deepcopy(item) for key, item in legacy.items() if key not in excluded}
-            if legacy.get("diagnostic"):
-                details["diagnostic"] = str(legacy["diagnostic"])
-            envelope = error_payload(
-                raw_error,
-                message_key=str(descriptor.get("key") or "common.requestFailed"),
-                message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
-                canonical=True,
-                code=code,
-                origin=str(legacy.get("origin") or "server.http"),
-                retryable=(
-                    legacy["retryable"]
-                    if isinstance(legacy.get("retryable"), bool)
-                    else status_code in {
-                        HTTPStatus.REQUEST_TIMEOUT,
-                        HTTPStatus.TOO_MANY_REQUESTS,
-                        HTTPStatus.BAD_GATEWAY,
-                        HTTPStatus.SERVICE_UNAVAILABLE,
-                        HTTPStatus.GATEWAY_TIMEOUT,
-                    }
-                ),
-                details=details,
-                stack=[root],
-                request_id=request_id,
-            )
-            envelope["user_message"] = copy.deepcopy(envelope["error"]["message"])
-            envelope["legacy_error"] = str(raw_error)
-            if legacy.get("reason"):
-                envelope["error"]["reason"] = str(legacy["reason"])
-            if legacy.get("diagnostic"):
-                envelope["diagnostic"] = str(legacy["diagnostic"])
-            if legacy.get("reason_code"):
-                envelope["reason_code"] = str(legacy["reason_code"])
-            envelope["status"] = status_code
-            envelope["ok"] = False
-            envelope["terminal"] = True
-        else:
-            envelope = {
-                "state": "ready",
-                "request": {"id": request_id},
-                "data": copy.deepcopy(payload),
-                "ok": True,
-                "terminal": True,
-            }
-
-        state = str(envelope.get("state") or "")
-        if state == "ready":
-            if not canonical:
-                data_record = envelope.get("data")
-                if isinstance(data_record, dict):
-                    reserved = {"data", "error", "operation", "request", "state"}
-                    for key, item in data_record.items():
-                        if key not in reserved and key not in envelope:
-                            envelope[key] = copy.deepcopy(item)
-                envelope["ok"] = True
-                envelope["terminal"] = True
-        elif state == "queued":
-            if not canonical:
-                envelope["ok"] = True
-                envelope["terminal"] = False
-        elif state == "failed":
-            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
-            if not canonical:
-                message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
-                details_record = error_record.get("details") if isinstance(error_record.get("details"), dict) else {}
-                reserved = {"data", "error", "operation", "request", "state"}
-                for key, item in details_record.items():
-                    if key not in reserved and key not in envelope:
-                        envelope[key] = copy.deepcopy(item)
-                envelope.setdefault("user_message", copy.deepcopy(message_record))
-                envelope.setdefault("legacy_error", str(message_record.get("fallback") or "request failed"))
-                envelope["status"] = status_code
-                envelope["ok"] = False
-                envelope["terminal"] = True
-
-        request_record = envelope.get("request") if isinstance(envelope.get("request"), dict) else {}
-        if not re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", str(request_record.get("id") or "")):
-            raise ValueError("API response requires a validated request.id")
-        if state == "ready" and (
-            not (HTTPStatus.OK <= status_code < HTTPStatus.MULTIPLE_CHOICES)
-            or status_code == HTTPStatus.ACCEPTED
-            or "data" not in envelope
-            or "error" in envelope
-            or "operation" in envelope
-        ):
-            raise ValueError(f"ready API response has invalid HTTP status {status_code}")
-        bounded_read_pending = (
-            state == "queued"
-            and route.method == "GET"
-            and str(envelope.get("status") or "").strip().lower() == "pending"
-            and isinstance(envelope.get("retry_after_seconds"), int)
-            and 1 <= envelope["retry_after_seconds"] <= 60
-            and "operation" not in envelope
-        )
-        if state == "queued" and (
-            status_code != HTTPStatus.ACCEPTED
-            or (
-                not bounded_read_pending
-                and (
-                    not isinstance(envelope.get("operation"), dict)
-                    or not str(envelope["operation"].get("id") or "")
-                )
-            )
-            or "data" in envelope
-            or "error" in envelope
-        ):
-            raise ValueError("queued API response requires HTTP 202 and operation.id or bounded read pending state")
-        if state == "failed":
-            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
-            message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
-            stack_record = error_record.get("stack") if isinstance(error_record.get("stack"), list) else []
-            valid_stack = bool(stack_record) and all(
-                isinstance(frame, dict)
-                and bool(str(frame.get("component") or ""))
-                and bool(str(frame.get("operation") or ""))
-                and bool(str(frame.get("code") or ""))
-                for frame in stack_record
-            )
-            valid_error = (
-                HTTPStatus.BAD_REQUEST <= status_code <= 599
-                and bool(str(error_record.get("code") or ""))
-                and bool(str(error_record.get("origin") or ""))
-                and isinstance(error_record.get("retryable"), bool)
-                and isinstance(error_record.get("details"), dict)
-                and bool(str(message_record.get("key") or ""))
-                and isinstance(message_record.get("params"), dict)
-                and isinstance(message_record.get("fallback"), str)
-                and valid_stack
-                and "data" not in envelope
-                and "operation" not in envelope
-            )
-            if not valid_error:
-                raise ValueError(f"failed API response has invalid HTTP status or error shape {status_code}")
-
-        if state == "failed":
-            error_record = envelope["error"]
-            emit_server_log(
-                "error",
-                "api-response",
-                json.dumps({
-                    "request": envelope["request"],
-                    "operation": envelope.get("operation"),
-                    "code": error_record.get("code"),
-                    "origin": error_record.get("origin"),
-                    "stack": error_record.get("stack"),
-                }, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                category="api",
-            )
-
-        encode_started = time.perf_counter()
-        data = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self._route_response_written = True
-        self._write_json_representation(
-            data,
-            status=HTTPStatus(status_code),
-            json_encode_ms=(time.perf_counter() - encode_started) * 1000,
-        )
-        if hasattr(self.server.app, "observe_http_delivery"):
-            self.server.app.observe_http_delivery(envelope, HTTPStatus(status_code))
+        return ApiResponseWriter.write_api_response(self, value, status, json_bytes=json_bytes, product_metadata=product_metadata, product_promise=product_promise, json_encode_ms=json_encode_ms)
 
     def _write_bodyless_api_response(self, status: HTTPStatus) -> None:
-        """Write an established bodyless protocol result from the shared response parent."""
-        self.send_response(status)
-        self.send_header("Content-Length", "0")
-        self.send_header("Cache-Control", "no-store")
-        self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.record_http_response_bytes(status, 0)
+        return ApiResponseWriter._write_bodyless_api_response(self, status)
 
     def _write_json_representation(
         self,
@@ -3053,21 +3430,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         json_encode_ms: float = 0.0,
         product_metadata: ProductMetadata | None = None,
     ) -> None:
-        """Write already-validated JSON bytes without decoding/re-encoding them.
-
-        Only ``write_api_response`` calls this representation writer. Local
-        services may supply cached bytes to the parent without bypassing the
-        envelope, metrics, compression, or auth-cookie owners.
-        """
-        self._write_product_representation(
-            data,
-            status=status,
-            content_type="application/json; charset=utf-8",
-            disposition="inline",
-            filename="",
-            json_encode_ms=json_encode_ms,
-            product_metadata=product_metadata,
-        )
+        return ApiResponseWriter._write_json_representation(self, data, status, json_encode_ms=json_encode_ms, product_metadata=product_metadata)
 
     def _write_product_representation(
         self,
@@ -3080,97 +3443,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         json_encode_ms: float = 0.0,
         product_metadata: ProductMetadata | None = None,
     ) -> None:
-        """Write one final representation and verify the actual boundary byte count."""
-
-        compression_started = time.perf_counter()
-        headers = getattr(self, "headers", {})
-        accept_encoding = headers.get("Accept-Encoding") if hasattr(headers, "get") else None
-        body, content_encoding = gzip_response_body(data, content_type, accept_encoding)
-        compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
-        head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Vary", "Accept-Encoding")
-        if disposition == "attachment":
-            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        if content_encoding:
-            self.send_header("Content-Encoding", content_encoding)
-        self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        write_started = time.perf_counter()
-        if not head_only:
-            written = self.wfile.write(body)
-            if written != len(body):
-                raise OSError(f"response writer emitted {written} of {len(body)} framed bytes")
-        write_ms = (time.perf_counter() - write_started) * 1000
-        wire_bytes = 0 if head_only else len(body)
-        details = {
-            "uncompressed_bytes": len(data),
-            "wire_bytes": wire_bytes,
-            "representation_bytes": len(body),
-            "content_encoding": content_encoding or "identity",
-            "json_encode_ms": round(json_encode_ms, 3),
-            "compression_ms": round(compression_ms, 3),
-            "write_ms": round(write_ms, 3),
-            "head_only": head_only,
-        }
-        if product_metadata is not None:
-            details["product_format"] = product_metadata["format"]
-            details["product_bytes"] = product_metadata["length"]
-            details["product_sha256"] = product_metadata["sha256"]
-            details["product_disposition"] = product_metadata["disposition"]
-        self.record_http_response_bytes(
-            status,
-            wire_bytes,
-            content_type,
-            details,
-        )
+        return ApiResponseWriter._write_product_representation(self, data, status=status, content_type=content_type, disposition=disposition, filename=filename, json_encode_ms=json_encode_ms, product_metadata=product_metadata)
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
-        # Every app method returns a (payload, HTTPStatus) pair; the unpack-then-write_json dance was
-        # written ~19 times verbatim. This is the one place that convention is spelled out.
-        payload, status = result
-        self.write_json(payload, status=status)
+        return ApiResponseWriter.write_app_result(self, result)
 
     def write_validated_int_result(self, qs: dict, name: str, default: int, max_value: int, make_result) -> None:
-        # The "?<name>=<int>" routes (tmux/transcript/context/context-items/events/search) all parsed +
-        # range-checked one int the same way, emitting an identical 400 on a bad value before calling the
-        # app. Centralized so the bad-int response stays uniform; make_result(value) -> (payload, status).
-        value, error = parse_query_int(qs, name, default, max_value=max_value)
-        if error:
-            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
-            return
-        self.write_app_result(make_result(value))
+        return ApiResponseWriter.write_validated_int_result(self, qs, name, default, max_value, make_result)
 
     def write_validated_float_result(self, qs: dict, name: str, default: float, max_value: float, make_result) -> None:
-        # The activity/session-files routes share one bounded float query parameter. Keep the bad-float
-        # response and cap in one path so the three handlers cannot drift.
-        value, error = parse_query_float(qs, name, default, max_value=max_value)
-        if error:
-            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
-            return
-        self.write_app_result(make_result(value))
+        return ApiResponseWriter.write_validated_float_result(self, qs, name, default, max_value, make_result)
 
     def write_int_query_app_result(self, parsed: Any, name: str, default: int, max_value: int, make_result) -> None:
-        # Own parse_qs + int validation for GET routes whose only validation is one bounded integer.
-        qs = parse_qs(parsed.query)
-        self.write_validated_int_result(qs, name, default, max_value, lambda value: make_result(qs, value))
+        return ApiResponseWriter.write_int_query_app_result(self, parsed, name, default, max_value, make_result)
 
     def write_text(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = body.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_auth_cookie_if_needed()
-        if self.close_connection:
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
-        self.record_http_response_bytes(status, len(data), "text/plain; charset=utf-8")
+        return ApiResponseWriter.write_text(self, body, status)
 
     def websocket(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -3700,10 +3988,19 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.start_tabber_activity_cache_warmer()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
+        # The system-status snapshot producer belongs to the serving process, not to background
+        # ownership: every server answers /api/system-status about itself, owner or not.
+        if hasattr(self.app, "start_system_status_snapshot_owner"):
+            self.app.start_system_status_snapshot_owner()
         start_agent_auth_status_refresh(force=True)
 
     def shutdown(self) -> None:
         self.persistent_request_stop.set()
+        # Retire the snapshot producer with the first shutdown signal, not at close: a build that
+        # started after a fixture sealed local-service starts would look like the product starting
+        # a service during teardown. `stop` is idempotent, so `server_close` may call it again.
+        if hasattr(self.app, "stop_system_status_snapshot_owner"):
+            self.app.stop_system_status_snapshot_owner()
         super().shutdown()
 
     def server_close(self) -> None:
@@ -3717,6 +4014,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):
             self.app.stop_input_heartbeat_worker()
+        if hasattr(self, "app") and hasattr(self.app, "stop_system_status_snapshot_owner"):
+            self.app.stop_system_status_snapshot_owner()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:

@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
- "catalog_revision": 3,
- "generated_at": "2026-07-13T00:00:00Z",
+ "catalog_revision": 4,
+ "generated_at": "2026-08-02T00:00:00Z",
  "models": [
   {
    "provider": "openai",
@@ -196,6 +196,129 @@
    ]
   },
   {
+   "provider": "openai",
+   "model": "gpt-5.4",
+   "aliases": [
+    "gpt-5.4"
+   ],
+   "source": {
+    "url": "https://developers.openai.com/api/docs/pricing",
+    "kind": "official",
+    "checked_at": "2026-08-02T00:00:00Z"
+   },
+   "rates": [
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "2.50",
+     "effective_from": "2026-07-18T17:21:58Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "read",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "0.25",
+     "effective_from": "2026-07-18T17:21:58Z"
+    },
+    {
+     "direction": "output",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "15.00",
+     "effective_from": "2026-07-18T17:21:58Z"
+    }
+   ]
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.4-mini",
+   "aliases": [
+    "gpt-5.4-mini"
+   ],
+   "source": {
+    "url": "https://developers.openai.com/api/docs/pricing",
+    "kind": "official",
+    "checked_at": "2026-08-02T00:00:00Z"
+   },
+   "rates": [
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "0.75",
+     "effective_from": "2026-07-04T21:04:57Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "read",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "0.075",
+     "effective_from": "2026-07-04T21:04:57Z"
+    },
+    {
+     "direction": "output",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "4.50",
+     "effective_from": "2026-07-04T21:04:57Z"
+    }
+   ]
+  },
+  {
+   "provider": "openai",
+   "model": "gpt-5.5",
+   "aliases": [
+    "gpt-5.5"
+   ],
+   "source": {
+    "url": "https://developers.openai.com/api/docs/pricing",
+    "kind": "official",
+    "checked_at": "2026-08-02T00:00:00Z"
+   },
+   "rates": [
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "5.00",
+     "effective_from": "2026-07-09T07:21:03Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "read",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "0.50",
+     "effective_from": "2026-07-09T07:21:03Z"
+    },
+    {
+     "direction": "output",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "30.00",
+     "effective_from": "2026-07-09T07:21:03Z"
+    }
+   ]
+  },
+  {
    "provider": "anthropic",
    "model": "claude-fable-5",
    "aliases": [
@@ -315,6 +438,65 @@
   },
   {
    "provider": "anthropic",
+   "model": "claude-opus-5",
+   "aliases": [
+    "claude-opus-5"
+   ],
+   "source": {
+    "url": "https://platform.claude.com/docs/en/about-claude/pricing",
+    "kind": "official",
+    "checked_at": "2026-07-30T00:00:00Z"
+   },
+   "rates": [
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "5.00",
+     "effective_from": "2026-07-01T00:00:00Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "read",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "0.50",
+     "effective_from": "2026-07-01T00:00:00Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "write_5m",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "6.25",
+     "effective_from": "2026-07-01T00:00:00Z"
+    },
+    {
+     "direction": "input",
+     "modality": "text",
+     "cache_role": "write_1h",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "10.00",
+     "effective_from": "2026-07-01T00:00:00Z"
+    },
+    {
+     "direction": "output",
+     "modality": "text",
+     "cache_role": "none",
+     "unit": "tokens",
+     "scale": 1000000,
+     "usd": "25.00",
+     "effective_from": "2026-07-01T00:00:00Z"
+    }
+   ]
+  },
+  {
+   "provider": "anthropic",
    "model": "claude-sonnet-4-6",
    "aliases": [
     "claude-sonnet-4-6",
@@ -423,7 +605,8 @@
    "provider": "anthropic",
    "model": "claude-haiku-4-5",
    "aliases": [
-    "claude-haiku-4-5"
+    "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001"
    ],
    "source": {
     "url": "https://platform.claude.com/docs/en/about-claude/pricing",

@@ -226,15 +226,45 @@ let shareReplayDeltaFramePending = false;
 let shareReplayMutationPublisherPaused = false;
 let shareReplayLastDeltaBatch = null;
 let shareReplayLastReplayError = null;
-let shareReplayCurrentEpoch = 0;
-let shareReplayLastSequence = 0;
-let shareReplayDroppedFrames = 0;
-let shareReplayStaleFrames = 0;
-let shareReplayKeyframeRequestCount = 0;
-let shareReplayKeyframeRequestSuppressedCount = 0;
-let shareReplayKeyframeLastRequestAt = 0;
-let shareReplayKeyframeBackoffMs = 0;
-let shareReplayKeyframeInFlight = false;
+class ShareReplayState {
+  constructor() {
+    this.sequence = {epoch: 0, last: 0, dropped: 0, stale: 0};
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+
+  sequenceSnapshot() { return {...this.sequence}; }
+  keyframeRequestSnapshot() { return {...this.keyframeRequest}; }
+  get currentEpoch() { return this.sequence.epoch; }
+  get lastSequence() { return this.sequence.last; }
+  get droppedFrames() { return this.sequence.dropped; }
+  get staleFrames() { return this.sequence.stale; }
+  get keyframeRequests() { return this.keyframeRequest.count; }
+  get keyframeRequestsSuppressed() { return this.keyframeRequest.suppressed; }
+  acceptSequence(epoch, sequence) {
+    this.sequence.epoch = Math.max(0, Math.round(Number(epoch) || 0));
+    this.sequence.last = Math.max(0, Math.round(Number(sequence) || 0));
+  }
+  recordDroppedFrame() { this.sequence.dropped += 1; }
+  recordStaleFrame() { this.sequence.stale += 1; }
+  resetKeyframeRequest() {
+    this.keyframeRequest.inFlight = false;
+    this.keyframeRequest.backoffMs = 0;
+  }
+  suppressKeyframeRequest() { this.keyframeRequest.suppressed += 1; }
+  beginKeyframeRequest(now, backoffMs) {
+    this.keyframeRequest.count += 1;
+    this.keyframeRequest.lastAt = now;
+    this.keyframeRequest.backoffMs = backoffMs;
+    this.keyframeRequest.inFlight = true;
+  }
+  resetViewerSequence(epoch = 0, sequence = 0) {
+    this.acceptSequence(epoch, sequence);
+    this.sequence.dropped = 0;
+    this.sequence.stale = 0;
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+}
+const shareReplayState = new ShareReplayState();
 let shareReplayHostKeyframeTimer = null;
 let shareReplayHostKeyframePendingReason = '';
 let shareReplayHostLastKeyframeAt = 0;
@@ -436,10 +466,19 @@ const EDITOR_SCHEMES = {
   },
 };
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
+function previewRendererStrategy(specification) {
+  return Object.freeze({
+    surfaceClasses: [],
+    cleanup: cleanupStandardPreviewStrategy,
+    signature: null,
+    parse: null,
+    ...specification,
+  });
+}
 const PREVIEW_RENDERERS = Object.freeze([
-  {id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown'},
-  {id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true},
-  {id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -450,11 +489,20 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ico': 'image/x-icon',
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
-  }},
-  {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
-  {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  }}),
+  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
+  previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
+  previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
+  previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
+    '.json': parseJsonStructuredPreviewStrategy,
+    '.geojson': parseGeoJsonStructuredPreviewStrategy,
+    '.ipynb': parseNotebookStructuredPreviewStrategy,
+    '.toml': parseTomlStructuredPreviewStrategy,
+    '.xml': parseXmlStructuredPreviewStrategy,
+    '.drawio': parseDrawioStructuredPreviewStrategy,
+    '.dio': parseDrawioStructuredPreviewStrategy,
+    '.excalidraw': parseExcalidrawStructuredPreviewStrategy,
+  }, render: renderStructuredPreviewStrategy, languageByExtension: {
     '.json': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
@@ -471,9 +519,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.env': 'ini',
     '.properties': 'ini',
     '.props': 'ini',
-  }},
-  {id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text'},
-  {id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text', surfaceClasses: ['data-preview-body'], parse: parseDelimitedPreviewStrategy, delimiterByExtension: {'.csv': ',', '.tsv': '\t'}, render: renderDelimitedPreviewStrategy}),
+  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp3': 'audio/mpeg',
     '.wav': 'audio/wav',
     '.ogg': 'audio/ogg',
@@ -482,8 +530,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.m4a': 'audio/mp4',
     '.aac': 'audio/aac',
     '.opus': 'audio/opus',
-  }},
-  {id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp4': 'video/mp4',
     '.m4v': 'video/mp4',
     '.webm': 'video/webm',
@@ -491,10 +539,10 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.mkv': 'video/x-matroska',
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
-  }},
+  }}),
   // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
   // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', languageByExtension: {
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -510,30 +558,30 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.plantuml': 'text',
     '.srt': 'text',
     '.vtt': 'text',
-  }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
-  }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
     '.parquet': 'application/vnd.apache.parquet',
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
-  }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -542,8 +590,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xz': 'application/x-xz',
     '.7z': 'application/x-7z-compressed',
     '.rar': 'application/vnd.rar',
-  }},
-  {id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview'},
+  }}),
+  previewRendererStrategy({id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview', render: renderUnsupportedPreviewStrategy}),
 ]);
 const PREVIEW_RENDERER_BY_ID = new Map(PREVIEW_RENDERERS.map(renderer => [renderer.id, renderer]));
 const PREVIEW_RENDERER_BY_EXTENSION = new Map();
@@ -729,8 +777,9 @@ let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead"
 let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large' | 'error'
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
+const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed root -> last-seen progressive published generation (drives Quick Open re-query as BFS publishes rows)
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -766,11 +815,19 @@ const fileQuickOpenState = {
   candidates: [],
   loading: false,
   indexWarming: false,
+  // The worst freshness record any answering search root returned, from the one derivation in
+  // fileIndexFreshnessFromPayload(). Null means every answering root vouched for its snapshot.
+  freshness: null,
   error: '',
   requestId: 0,
   debounce: null,
-  indexRetry: null,
   abortController: null,
+  // The active search text the delta cursors below belong to, and the per-root incremental-read state
+  // for the CURRENT requestId. Each searched root keeps one opaque cursor + `more` flag + its opaque
+  // scope digest (so a path-free search_progress signal correlates back to the root it names) so the
+  // server can stream committed match deltas instead of the client re-issuing the whole query.
+  deltaQuery: '',
+  deltaRoots: new Map(),
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -816,8 +873,8 @@ let tmuxSessionMutationSerial = 0;
 let tmuxSessionMutationCurrent = null;
 const panelNodes = new Map();
 const resizeObservers = new Map();
-const transcriptStreams = new Map();
-const summaryStreams = new Map();
+const transcriptLifecycleScopes = new Map();
+const summaryLifecycleScopes = new Map();
 const autoApproveStates = new Map();
 const attentionAcknowledgementRecords = new Map();
 const attentionAcknowledgementRecordLimit = 1024;
@@ -1783,6 +1840,14 @@ const clientEventTransportState = {
   demand: null,
   demandSignature: '',
   demandTimer: null,
+  // The client-event EventSource is modelled as three explicit roles, not one socket. `demand` is the
+  // REQUESTED state (the channels/operations the page currently wants). `source` is the ACTIVE stream:
+  // the one that has fired `ready` and is serving delivered frames. `replacementSource` is the
+  // CANDIDATE: a newly opened stream for a changed demand that has NOT yet fired `ready`, so it is not
+  // yet allowed to serve. `candidateEpisode` is the ONE bounded retry episode governing that candidate
+  // between open and ready; a pre-ready candidate failure that exhausts it must re-drive demand and
+  // demote the active stream rather than strand demand or let the old stream claim to serve the new one.
+  candidateEpisode: null,
   queue: new Map(),
   resourceEpoch: '',
   resourceRevisions: new Map(),
@@ -1790,6 +1855,11 @@ const clientEventTransportState = {
   frame: 0,
   resyncTimer: null,
 };
+// A candidate stream may error transiently before it is ever ready; the browser EventSource
+// auto-reconnects the same URL, so a small bound tolerates those retries within ONE episode before
+// the candidate is abandoned and demand is re-driven. Keep it small so a persistently rejected demand
+// falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
+const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
 // server: client-event resource revisions AND the session-metadata build generation. They all
 // restart at zero in a replacement process, so they reset together, here, once.
@@ -1850,8 +1920,18 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
     const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
+    // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
+    // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
+    // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
+    // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
+    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
+      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+      .map(([operationId]) => operationId)
+      .sort();
     return {
       pending: Array.from(apiOperationState.pending.keys()).sort(),
+      watchDiffPendingOperationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
@@ -1872,7 +1952,7 @@ const backgroundOwnerStatusState = {
   error: '',
   request: null,
   updatedAt: 0,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentStartupState = {
   activityPayload: null,
@@ -1891,13 +1971,13 @@ const yoagentConversationState = {
   displayPath: '',
   streamingMessages: new Map(),
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentJobsState = {
   items: [],
   loading: false,
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentChatState = {
   busy: false,
@@ -2013,9 +2093,30 @@ let pendingPreferencesRender = false;
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let pendingLayoutRenderFrame = 0;
-let layoutMutationGeneration = 0;
-let layoutMutationCompletedGeneration = 0;
-let pendingLayoutMutationGeneration = 0;
+class RuntimeState {
+  constructor() {
+    this.layoutMutation = {generation: 0, completed: 0, pending: 0};
+  }
+
+  layoutMutationSnapshot() { return {...this.layoutMutation}; }
+  get layoutMutationGeneration() { return this.layoutMutation.generation; }
+  get layoutMutationCompletedGeneration() { return this.layoutMutation.completed; }
+  get pendingLayoutMutationGeneration() { return this.layoutMutation.pending; }
+  beginLayoutMutation() {
+    this.layoutMutation.generation += 1;
+    this.layoutMutation.pending = this.layoutMutation.generation;
+    return this.layoutMutation.generation;
+  }
+  consumePendingLayoutMutation(generation) {
+    if (generation === this.layoutMutation.pending) this.layoutMutation.pending = 0;
+  }
+  completeLayoutMutation(generation) {
+    if (!Number.isSafeInteger(generation) || generation <= this.layoutMutation.completed) return false;
+    this.layoutMutation.completed = generation;
+    return true;
+  }
+}
+const runtimeState = new RuntimeState();
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
@@ -2040,8 +2141,23 @@ let fileExplorerPathError = '';
 let fileExplorerLastListError = null;
 let fileImagePreviewPopover = null;
 let fileImagePreviewController = null;
-let fileExplorerInteractionGeneration = 0;
-let fileExplorerOpenGeneration = 0;
+class FileWorkspaceState {
+  constructor() {
+    this.generations = {interaction: 0, open: 0};
+  }
+
+  beginOpen() { this.generations.open += 1; return this.generations.open; }
+  get fileExplorerOpenGeneration() { return this.generations.open; }
+  get fileExplorerInteractionGeneration() { return this.generations.interaction; }
+  openIsCurrent(generation) { return generation === this.generations.open; }
+  interactionGeneration() { return this.generations.interaction; }
+  interactionIsCurrent(generation) { return generation === this.generations.interaction; }
+  invalidateInteraction({invalidateOpen = true} = {}) {
+    this.generations.interaction += 1;
+    if (invalidateOpen) this.generations.open += 1;
+  }
+}
+const fileWorkspaceState = new FileWorkspaceState();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;

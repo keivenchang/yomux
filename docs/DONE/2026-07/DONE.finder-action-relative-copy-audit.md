@@ -1,0 +1,4 @@
+# 2026-07-19 Finder action and relative-copy audit
+
+- Completed `DOIT.finder-actions-relative-path-audit.md`. Finder relative copy now means the visible normalized Finder root, with containment verified against both displayed and resolved paths; unsafe or mixed roots disable the command. Differ/Modified Files remains Git-relative. The shared context/tree owners cover Finder root/session/reload/path/hidden controls, creation, sorting, dates, expansion, selection/keyboard, drag, CRUD, image clipboard, transfer, index actions, readonly state, and the corresponding Differ session/ref/reload/collapse/directory-to-Finder paths.
+- Validation: `tests/test_browser_finder.py` passed 40 real browser cases; `tools/static_build.py --check`, `git diff --check`, and the canonical eight-lane gate passed in 502.94 seconds. Restarted port 8881 from this worktree; its auth-gated `/api/ping` returned 401.

@@ -11,7 +11,6 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http.client import HTTPConnection
 import json
-from numbers import Real
 import os
 from pathlib import Path
 import resource
@@ -25,7 +24,7 @@ import tempfile
 import threading
 import time
 import traceback
-from typing import Any, TypeVar
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import quote
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
@@ -50,6 +49,7 @@ from yolomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
 from yolomux_lib.infra.inotify_capacity import inotify_instance_census
 from yolomux_lib.infra.inotify_capacity import process_fd_owners
 from yolomux_lib.infra.inotify_capacity import read_kernel_limit
+from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import SpawnProcessOwnership
@@ -72,9 +72,13 @@ from tests.aged_state import AgedStateRecipeResult
 from tests.aged_state import AgedStateRoot
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.gate_helpers import CounterDelta
+from tests.gate_helpers import RepeatFailure
+from tests.gate_helpers import assert_counter_delta
+from tests.gate_helpers import repeat
+from tests.gate_helpers import sample_counter_delta
 
 
-T = TypeVar("T")
 UNIX_SOCKET_PATH_LIMIT_BYTES = 107
 GATE_UNIX_SOCKET_PATH_BUDGET_BYTES = 100
 GATE_HTTP_PORT_RANGE = range(7900, 8000)
@@ -137,18 +141,39 @@ class HttpPortLease:
         for candidate in candidates:
             if isinstance(candidate, bool) or not isinstance(candidate, int) or not 0 <= candidate <= 65535:
                 raise ValueError(f"invalid HTTP port candidate: {candidate!r}")
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                listener.bind((host, candidate))
+                listener = cls._bind_listen(host, candidate)
             except OSError as error:
-                listener.close()
                 failures.append((candidate, error))
                 continue
             port = int(listener.getsockname()[1])
             return cls(host=host, port=port, _socket=listener)
         detail = ", ".join(f"{port}: {error}" for port, error in failures)
         raise OSError(f"no requested HTTP port could be reserved on {host}: {detail}")
+
+    @staticmethod
+    def _bind_listen(host: str, candidate: int) -> socket.socket:
+        """The one reservation primitive: an exclusive listening hold on the port.
+
+        The reservation must exclude the same thing the real subject excludes. The gate's
+        subject server (`TmuxWebtermHTTPServer.allow_reuse_address == 1`) binds AND listens
+        with SO_REUSEADDR, so a bind-only reservation does not hold the port against a
+        like-for-like reuse-enabled server -- two SO_REUSEADDR sockets can both bind the same
+        NON-listening address. Binding and then listening makes the hold exclusive against a
+        reuse-enabled competitor (a second SO_REUSEADDR bind to an actively listening address
+        is refused), while SO_REUSEADDR still lets the owner rebind through a predecessor
+        TIME_WAIT. Both `reserve` and `reacquire` route through here so they cannot drift.
+        """
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            listener.bind((host, candidate))
+            listener.listen(1)
+        except OSError:
+            listener.close()
+            raise
+        return listener
 
     @property
     def address(self) -> tuple[str, int]:
@@ -175,14 +200,7 @@ class HttpPortLease:
 
         if self._socket is not None:
             return self.port
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind((self.host, self.port))
-        except OSError:
-            listener.close()
-            raise
-        self._socket = listener
+        self._socket = self._bind_listen(self.host, self.port)
         return self.port
 
     def close(self) -> None:
@@ -430,8 +448,11 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         # process is still mutating and fails with a masked ENOENT.  Route the
         # retirement through the same owner the app fixtures use.
         run_fixture_cleanup_phases("gate_runtime_paths", (
-            ("local-service retirement", lambda: retire_fixture_local_services(ledger, root, label="gate_runtime_paths")),
-            ("runtime root removal", lambda: shutil.rmtree(root)),
+            ("runtime root retirement", lambda: remove_fixture_runtime_root(
+                ledger,
+                root,
+                label="gate_runtime_paths",
+            )),
             ("worker inotify baseline", lambda: assert_fixture_inotify_returned_to_baseline(self_baseline, label="gate_runtime_paths")),
         ))
 
@@ -508,6 +529,7 @@ class GateLiveServer:
     tmux: Any
     paths: GateRuntimePaths
     server_log_boundary: Mapping[str, Any]
+    options: "GateLiveServerOptions" = field(default_factory=lambda: GateLiveServerOptions())
 
     @property
     def port(self) -> int:
@@ -516,6 +538,111 @@ class GateLiveServer:
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
+
+    def finish(
+        self,
+        browsers: Any = None,
+        *,
+        server_log_reader: Callable[[], Mapping[str, Any]] | None = None,
+        wait_for_api_quiescence: bool = True,
+        require_owned_browsers: bool = False,
+    ) -> None:
+        finish_browser_fixture_boundary(
+            browsers,
+            self.base_url,
+            lambda: stop_fixture_http_app(
+                self.app,
+                self.server,
+                self.thread,
+                label=self.options.label,
+            ),
+            settle_app=lambda: settle_fixture_app_evidence_boundary(
+                self.app,
+                label=self.options.label,
+            ),
+            server_log_reader=server_log_reader,
+            server_log_boundary=getattr(
+                self.server,
+                "_fixture_server_log_boundary",
+                self.server_log_boundary,
+            ),
+            wait_for_api_quiescence=wait_for_api_quiescence,
+            require_owned_browsers=require_owned_browsers,
+        )
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _error_type, _error, _traceback):
+        self.finish()
+
+
+@dataclass(frozen=True)
+class GateLiveServerOptions:
+    """Typed differences between fixture-owned HTTP server lifecycles."""
+
+    address: tuple[str, int] = ("127.0.0.1", 0)
+    tls_context: Any = None
+    thread_name: str = "fixture-http-server"
+    label: str = "fixture-owned gate"
+    clear_server_logs: bool = False
+    pin_jobd_scheduler: bool = False
+
+
+def start_fixture_live_server(
+    monkeypatch: pytest.MonkeyPatch,
+    app: Any,
+    options: GateLiveServerOptions,
+    *,
+    tmux: Any = None,
+    paths: GateRuntimePaths | None = None,
+    port_lease: HttpPortLease | None = None,
+) -> GateLiveServer:
+    """Acquire one app/server/thread runtime and roll back every partial start."""
+
+    if options.clear_server_logs:
+        SERVER_LOGS.clear()
+    server_log_boundary = SERVER_LOGS.payload()
+    prepare_fixture_http_app(monkeypatch, app)
+    if port_lease is not None:
+        port_lease.release()
+    server = None
+    thread = None
+    try:
+        if options.pin_jobd_scheduler:
+            pin_fixture_jobd_scheduler(app)
+        if options.tls_context is None:
+            server = TmuxWebtermHTTPServer(options.address, app)
+        else:
+            server = TmuxWebtermHTTPServer(options.address, app, tls_context=options.tls_context)
+        track_fixture_http_requests(server)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            name=options.thread_name,
+            daemon=True,
+        )
+        thread.start()
+    except BaseException as start_error:
+        try:
+            rollback_failed_fixture_http_start(
+                app,
+                server,
+                thread,
+                label=options.label,
+                port_lease=port_lease,
+            )
+        except BaseException as rollback_error:
+            raise start_error.with_traceback(start_error.__traceback__) from rollback_error
+        raise
+    return GateLiveServer(
+        app=app,
+        server=server,
+        thread=thread,
+        tmux=tmux,
+        paths=paths,
+        server_log_boundary=server_log_boundary,
+        options=options,
+    )
 
 
 def retire_expected_fixture_server_log_errors(
@@ -678,22 +805,40 @@ def retire_expected_fixture_typed_api_failure(
     source: str,
     code: str,
 ) -> dict[str, Any]:
-    """Correlate and retire one browser-observed typed failure from the fixture ring."""
+    """Correlate and retire one browser-observed typed caller outcome from the fixture ring.
+
+    ``code`` names an EXPECTED outcome of what the fixture asked for -- a file the test itself
+    deleted, a directory the user browsed to that is not there.  ``failure_record_level``
+    (``yolomux_lib/observability/failure_severity.py``) is the one owner of that distinction and
+    records such a row at ``info``, because ``{"warning", "error"}`` is the release-blocking set the
+    live soak and every retirement helper here collect.  So this retires an INFO row, and it holds
+    the rule from both sides: the transition must contain no release-blocking row at all, and it
+    must contain exactly one info row carrying this source, category and code, correlated to the
+    browser's own API event.  An expected outcome that silently becomes an error again fails the
+    first check; a genuine fault that appears alongside it fails the same check; a fault downgraded
+    into this fixture's window arrives as a second info row and fails the second.
+    """
 
     start = validate_server_log_ring_payload(server._fixture_server_log_boundary)
     current = validate_server_log_ring_payload(SERVER_LOGS.payload())
     transition = validate_server_log_ring_transition(start, current)
-    failures = [
+    blocking = [
         entry
         for entry in transition["newLogs"]
         if str(entry.get("level") or "").lower() in {"warning", "error"}
     ]
-    if len(failures) != 1 or transition["droppedCount"]:
+    outcomes = [
+        entry
+        for entry in transition["newLogs"]
+        if str(entry.get("level") or "").lower() == EXPECTED_OUTCOME_LOG_LEVEL
+        and (str(entry.get("source") or ""), str(entry.get("category") or "")) == (source, "operation")
+    ]
+    if blocking or len(outcomes) != 1 or transition["droppedCount"]:
         raise AssertionError(
-            "typed API failure retirement requires exactly one retained server failure: "
-            f"{json.dumps({'failures': failures, **dict(transition)}, sort_keys=True)}"
+            "typed API outcome retirement requires exactly one retained info row and no release-blocking row: "
+            f"{json.dumps({'blocking': blocking, 'outcomes': outcomes, **dict(transition)}, sort_keys=True)}"
         )
-    entry = failures[0]
+    entry = outcomes[0]
     payload = json.loads(str(entry.get("message") or ""))
     request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
     stack = payload.get("stack") if isinstance(payload.get("stack"), list) else []
@@ -710,18 +855,14 @@ def retire_expected_fixture_typed_api_failure(
             "typed API failure browser/server correlation mismatch: "
             f"{json.dumps({'apiEvent': dict(api_event), 'serverEntry': entry}, sort_keys=True)}"
         )
-    retired = consume_only_expected_server_log_errors(
-        driver,
-        ({
-            "level": entry.get("level"),
-            "source": entry.get("source"),
-            "category": entry.get("category"),
-            "message": entry.get("message"),
-        },),
-        server_log_boundary=start,
-    )
-    if len(retired) != 1 or retired[0].get("id") != entry.get("id"):
-        raise AssertionError("typed API failure did not retire exactly one correlated server entry")
+    # Nothing is consumed here: an info row is not release-blocking, so it never had to be excused.
+    # Asking the browser-visible ring for an EMPTY exact list is what proves that -- it fails if any
+    # unconsumed warning/error row reached /api/logs in this window, including one produced by the
+    # very outcome being retired, which is the check the ring at /api/logs and this transition would
+    # otherwise be able to disagree about.
+    unretired = consume_only_expected_server_log_errors(driver, (), server_log_boundary=start)
+    if unretired:
+        raise AssertionError(f"typed API outcome retirement consumed unexpected rows: {unretired!r}")
     server._fixture_server_log_boundary = current
     driver._yolomux_server_log_boundary = current
     return dict(entry)
@@ -746,6 +887,94 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
             monkeypatch.setattr(app, method_name, lambda: None, raising=False)
     if not callable(getattr(app, "record_performance_sample", None)):
         monkeypatch.setattr(app, "record_performance_sample", lambda *_args, **_kwargs: None, raising=False)
+
+
+@runtime_checkable
+class FixtureSchedulerClient(Protocol):
+    """The jobd scheduler-lease seam the gate fixture pins on setup and releases on teardown.
+
+    Both halves act on one object: the real ``JobClient`` (``yolomux_lib/infra/jobd.py``) and any
+    fixture stand-in must expose the SAME two calls, so setup pins and teardown releases can never
+    diverge onto different owners.  ``start_for_scheduler`` takes the lease that pins jobd up;
+    ``stop_for_scheduler`` releases it; ``holds_scheduler_lease`` reports whether the lease is held.
+    """
+
+    def start_for_scheduler(self) -> bool: ...
+
+    def stop_for_scheduler(self) -> bool: ...
+
+    @property
+    def holds_scheduler_lease(self) -> bool: ...
+
+
+class FixtureSchedulerApp(Protocol):
+    """The app-ownership seam ``pin_fixture_jobd_scheduler`` requires of any fixture app.
+
+    Both the real gate ``TmuxWebtermApp`` and the rollback fake app satisfy this one contract, so
+    the pin routes through a typed seam rather than an ad-hoc attribute assumption, and the same
+    ``job_client`` that setup pins is the one teardown's ``demote_background_owner`` releases.
+    """
+
+    job_client: FixtureSchedulerClient
+
+
+class RecordingSchedulerClient:
+    """A jobd scheduler-lease stand-in that records every pin and release for fixture tests.
+
+    It satisfies ``FixtureSchedulerClient`` so a fixture app with no real broker still exercises
+    the exact pin/release seam, and its counters prove exactly-once release on the rollback
+    teardown path.  It models the real ``JobClient.stop_for_scheduler`` idempotence: teardown
+    calls the release from two owners (``demote_background_owner`` and ``stop_auto_approve_all``),
+    but only the first, while a lease is held, actually releases -- so ``releases`` counts the one
+    effective release, not the two idempotent calls.
+    """
+
+    def __init__(self) -> None:
+        self.start_for_scheduler_calls = 0
+        self.stop_for_scheduler_calls = 0
+        self.releases = 0
+        self._leased = False
+
+    def start_for_scheduler(self) -> bool:
+        self.start_for_scheduler_calls += 1
+        self._leased = True
+        return True
+
+    def stop_for_scheduler(self) -> bool:
+        self.stop_for_scheduler_calls += 1
+        if not self._leased:
+            return True
+        self._leased = False
+        self.releases += 1
+        return True
+
+    @property
+    def holds_scheduler_lease(self) -> bool:
+        return self._leased
+
+
+def pin_fixture_jobd_scheduler(app: FixtureSchedulerApp) -> None:
+    """Pin jobd for the whole fixture window, exactly as the elected owner does in production.
+
+    The gate app is a local background owner: ``DisabledBackgroundOwner.is_owner()`` and
+    ``can_run(role)`` both return True, so a Finder/session-files interaction starts the
+    owner-side session-files background refresh worker, and that worker submits
+    ``session_files_view`` to jobd (``submit_session_files_job`` -> ``job_client.submit``).
+    In production the owner first takes the scheduler lease
+    (``handle_background_owner_acquired`` -> ``job_client.start_for_scheduler``), which spawns
+    jobd and keeps its Unix socket present and warm before any refresh worker submits.  Without
+    this pin the fixture served those owner-side producers against an unpinned jobd, so every
+    jobd interaction was an on-demand cold start that, under -n16 CPU contention, raced an
+    absent socket (``FileNotFoundError`` at ``client.connect``) or timed out on a 0.5s per-call
+    budget -- and the strict browser-journey gate caught the emitted ``local-service:jobd``
+    transport error.  The 5s spawn budget of this single setup pin, plus the 60s idle the
+    fixture sets, guarantees the socket stays present for the bounded window.  Teardown already
+    releases the lease symmetrically via ``demote_background_owner`` -> ``stop_for_scheduler``;
+    only setup was missing its half.  ``start_for_scheduler`` is the same primitive the stateful
+    journey reaches through ``start_background_owner``, so there is one jobd-pin owner, not two.
+    """
+
+    app.job_client.start_for_scheduler()
 
 
 @dataclass
@@ -1138,8 +1367,12 @@ def capture_fixture_local_service_processes(
         seen.add(identity)
         if hasattr(registry, "refresh_spawn_ownership"):
             registry.refresh_spawn_ownership()
-        process = vars(registry).get("process")
-        ownership = vars(registry).get("spawn_ownership")
+        if isinstance(registry, LocalServiceRegistry):
+            process = registry.process
+            ownership = registry.spawn_ownership
+        else:
+            process = vars(registry).get("process")
+            ownership = vars(registry).get("spawn_ownership")
         if process is None and ownership is None:
             continue
         captured.append(FixtureLocalServiceProcess(registry, process, ownership))
@@ -1732,7 +1965,37 @@ def retire_fixture_local_services(
         # those from the process table, then prove none is left.
         ("unowned daemons", lambda: retire_local_service_daemons_beneath(root, label=label)),
         ("surviving daemons", lambda: assert_no_surviving_local_service_daemons(root, label=label)),
+        ("reaper settlement", lambda: settle_fixture_local_service_reapers(registries, label=label)),
     ))
+
+
+def remove_fixture_runtime_root(
+    ledger: FixtureLocalServiceLedger,
+    root: Path,
+    *,
+    label: str,
+) -> None:
+    """Remove one root only after every registry writer has settled successfully."""
+
+    retire_fixture_local_services(ledger, root, label=label)
+    shutil.rmtree(root)
+
+
+def settle_fixture_local_service_reapers(registries: Iterable[Any], *, label: str) -> None:
+    """Settle registry-owned record writers before their runtime directories are removed."""
+
+    errors: list[BaseException] = []
+    for registry in registries:
+        if not isinstance(registry, LocalServiceRegistry):
+            continue
+        try:
+            registry.settle_reaper_threads()
+        except BaseException as error:
+            errors.append(error)
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup(f"{label} local-service reaper settlement failed", errors)
 
 
 def run_fixture_cleanup_phases(label: str, phases: Sequence[tuple[str, Callable[[], None]]]) -> None:
@@ -1826,11 +2089,35 @@ def stop_fixture_app_runtime(app: Any, *, label: str) -> None:
     attempt(app.stop_auto_approve_all)
     attempt(capture_local_services)
     attempt(lambda: stop_fixture_local_service_processes(local_service_processes, label=label))
+    attempt(lambda: settle_fixture_local_service_reapers(
+        fixture_local_service_registries(app),
+        label=label,
+    ))
     if len(errors) == 1:
         raise errors[0]
     if errors:
         raise BaseExceptionGroup(f"{label} fixture runtime teardown failed", errors)
     app._fixture_runtime_stopped = True
+
+
+def settle_fixture_app_evidence_boundary(app: Any, *, label: str) -> None:
+    """Join app-owned producers before strict fixture diagnostics are sampled."""
+
+    tmux_signal_watcher = vars(app).get("tmux_signal_event_watcher")
+    app.stop_client_event_watcher()
+    tmux_signal_thread = vars(tmux_signal_watcher).get("thread") if tmux_signal_watcher is not None else None
+    if tmux_signal_thread is not None and tmux_signal_thread is not threading.current_thread():
+        tmux_signal_thread.join(timeout=2)
+        assert not tmux_signal_thread.is_alive(), (
+            f"{label} tmux-signal watcher did not settle before the browser evidence boundary"
+        )
+    session_files_service = vars(app).get("session_files_service")
+    if session_files_service is not None:
+        assert session_files_service.wait_for_idle(3), (
+            f"{label} session-files work did not settle before the browser evidence boundary"
+        )
+    if vars(app).get("queued_delivery_ledger") is not None:
+        app.wait_for_jobd_operations_terminal(3)
 
 
 def stop_fixture_http_app(app: Any, server: TmuxWebtermHTTPServer, thread: threading.Thread, *, label: str) -> None:
@@ -1997,6 +2284,10 @@ class GateStatefulJourney:
                     fixture_browser,
                     f"http://127.0.0.1:{self.port}",
                     lambda: stop_fixture_http_app(app, server, thread, label="stateful journey"),
+                    settle_app=lambda: settle_fixture_app_evidence_boundary(
+                        app,
+                        label="stateful journey",
+                    ),
                     server_log_boundary=server_log_boundary,
                     require_owned_browsers=fixture_browser is not None,
                 )
@@ -2323,6 +2614,171 @@ def wait_for_fixture_client_event_demand(driver, timeout: float = 4.0, *, expect
     return result["state"]
 
 
+# A genuinely stuck operation must still fail closed, but an in-flight full watch-diff baseline is a
+# known completion receipt, not a hang. Under browser-lane concurrency (many chromedrivers doing real
+# filesystem-watch work) a fresh POST /api/watch/roots can start a /api/fs/watch-diff?full=1 baseline
+# right at the teardown boundary, leaving watchRootsBaselinePending true past the general quiescence
+# timeout. Waiting on that one promise as a receipt is correct; raising the general timeout to paper
+# over it is not. This bound is the fail-closed limit on a baseline that never delivers its receipt.
+_WATCH_DIFF_BASELINE_RECEIPT_SECONDS = 20.0
+
+
+def _read_fixture_operation_state(driver) -> dict[str, Any]:
+    """Read and validate the fixture lifecycle operation state; raise on an unreachable adapter."""
+
+    state = driver.execute_script(
+        """
+        const lifecycle = window.__yolomuxFixtureLifecycle;
+        if (!lifecycle || typeof lifecycle.operationState !== 'function') {
+          return {available: false};
+        }
+        return {available: true, diagnosticMode: lifecycle.diagnosticMode, ...lifecycle.operationState()};
+        """
+    )
+    if not isinstance(state, Mapping) or state.get("available") is not True:
+        raise AssertionError(f"fixture lifecycle operation state is unreachable: {state}")
+    if state.get("diagnosticMode") not in {"retained-js", "browser-console"}:
+        raise AssertionError(f"fixture lifecycle diagnostic mode is invalid: {state}")
+    pending = state.get("pending")
+    if not isinstance(pending, list) or not all(isinstance(operation_id, str) for operation_id in pending):
+        raise AssertionError(f"fixture lifecycle pending operations are malformed: {state}")
+    if (
+        state.get("diagnosticMode") == "retained-js"
+        and not isinstance(state.get("watchRootsPending"), bool)
+    ) or (
+        "watchRootsPending" in state
+        and not isinstance(state.get("watchRootsPending"), bool)
+    ):
+        raise AssertionError(f"fixture lifecycle watch-root state is malformed: {state}")
+    # watchDiffPendingOperationIds partitions `pending` into the baseline's own parked operation IDs
+    # and everything else. operationState() builds both from one Map synchronously, so for retained-JS
+    # it is REQUIRED and every owned ID must be a real pending ID; an owned ID absent from `pending` is
+    # a malformed contradiction, not a race. Browser-console omits this retained-JS-only field, but a
+    # malformed present value fails closed in any mode.
+    owned_ids = state.get("watchDiffPendingOperationIds")
+    if state.get("diagnosticMode") == "retained-js" and owned_ids is None:
+        raise AssertionError(f"fixture lifecycle watch-diff pending ownership is missing: {state}")
+    if owned_ids is not None:
+        if not isinstance(owned_ids, list) or not all(isinstance(operation_id, str) for operation_id in owned_ids):
+            raise AssertionError(f"fixture lifecycle watch-diff pending ownership is malformed: {state}")
+        if not set(owned_ids) <= set(pending):
+            raise AssertionError(f"fixture lifecycle watch-diff pending ownership is not a subset of pending: {state}")
+    return dict(state)
+
+
+def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
+    """Return whether every owned operation surface has reached terminal state."""
+
+    return (
+        not state.get("pending")
+        and int(state.get("batchQueued") or 0) == 0
+        and int(state.get("batchPending") or 0) == 0
+        and int(state.get("batchOperations") or 0) == 0
+        and state.get("activityRefreshing") is not True
+        and state.get("watchRootsPending", False) is False
+        and state.get("finderWatchReady", True) is True
+    )
+
+
+def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
+    """The single non-terminal condition is a known in-flight full watch-diff baseline receipt.
+
+    A held watch-root timer/registration/in-flight registration is not a baseline receipt: those are
+    ordinary pending work that must fail closed at the general timeout. The baseline parks its own
+    operation record in `pending` while it awaits a 202 result, so a bare "a pending op exists" check
+    would reject the very state this gate must open on. Disregard ONLY the baseline-owned operation
+    IDs (`watchDiffPendingOperationIds`); any unrelated pending ID still fails closed.
+    """
+
+    if state.get("diagnosticMode") != "retained-js":
+        return False
+    if state.get("watchRootsBaselinePending", False) is not True:
+        return False
+    if (
+        state.get("watchRootsTimerPending", False) is True
+        or state.get("watchRootsRegistrationPending", False) is True
+        or state.get("watchRootsInFlight", False) is True
+    ):
+        return False
+    baseline_owned = set(state.get("watchDiffPendingOperationIds") or [])
+    unrelated_pending = [
+        operation_id for operation_id in (state.get("pending") or []) if operation_id not in baseline_owned
+    ]
+    if unrelated_pending:
+        return False
+    # Every other surface must be terminal; the baseline's own pending op and its watchRootsPending
+    # flag are the only remaining work, and both clear when the receipt lands.
+    return _fixture_operation_state_quiescent({**state, "pending": [], "watchRootsPending": False})
+
+
+def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str, Any]:
+    """Wait on the in-flight full watch-diff promise as a completion receipt, bounded fail-closed."""
+
+    receipt = driver.execute_async_script(
+        """
+        const boundMs = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const state = (typeof serverWatchRootsState === 'undefined') ? null : serverWatchRootsState;
+        const promise = state ? state.watchDiffPromise : null;
+        if (!promise) { done({hadPromise: false, settled: true}); return; }
+        let finished = false;
+        const finish = (result) => { if (finished) { return; } finished = true; done(result); };
+        const timer = setTimeout(() => finish({hadPromise: true, settled: false, timedOut: true}), boundMs);
+        Promise.resolve(promise).then(
+          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: false}); },
+          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: true}); },
+        );
+        """,
+        int(max(0.0, float(timeout)) * 1000),
+    )
+    if not isinstance(receipt, Mapping):
+        raise AssertionError(f"watch-diff baseline receipt is malformed: {receipt}")
+    return receipt
+
+
+def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Wait for the in-flight baseline receipt, honoring its outcome; fail closed on a real hang.
+
+    Only an actually in-flight async promise consumes the fail-closed bound. Every other outcome is
+    resolved without spinning: a state that claims a baseline is pending while no promise exists is a
+    contradiction and fails immediately, and a promise that resolves or rejects is followed by exactly
+    one state re-read that either accepts quiescence or raises the exact contradictory state.
+    """
+
+    frozen_blocked = dict(blocked_state)
+    deadline = time.monotonic() + _WATCH_DIFF_BASELINE_RECEIPT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise AssertionError(
+                "in-flight full watch-diff baseline did not deliver its completion receipt before the "
+                f"fail-closed bound: {json.dumps(frozen_blocked, sort_keys=True)}"
+            )
+        receipt = _await_in_flight_watch_diff_baseline(driver, remaining)
+        if receipt.get("hadPromise") is not True:
+            # The state claimed a baseline was pending, but there is no in-flight promise to wait on.
+            # That is a contradiction, not an in-flight receipt; do not spin the bound waiting for it.
+            raise AssertionError(
+                "watch-diff baseline was reported pending with no in-flight promise to await: "
+                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                f"state={json.dumps(frozen_blocked, sort_keys=True)}"
+            )
+        if receipt.get("settled") is not True:
+            # The promise is genuinely still in flight; this await consumed its slice of the bound.
+            continue
+        # The promise resolved or rejected. Re-read state exactly once and decide; a still-pending
+        # flag after a settled/rejected receipt is a contradiction, not a reason to keep waiting.
+        state = _read_fixture_operation_state(driver)
+        if _fixture_operation_state_quiescent(state):
+            state["watchDiffBaselineReceipt"] = dict(receipt)
+            return state
+        raise AssertionError(
+            "watch-diff baseline receipt settled but fixture work is still not quiescent: "
+            f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+            f"state={json.dumps(state, sort_keys=True)}"
+        )
+
+
 def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, Any]:
     """Wait until product work and its diagnostic receipts reach owned terminal state."""
 
@@ -2330,48 +2786,21 @@ def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, A
 
     def settled(current):
         nonlocal last_state
-        state = current.execute_script(
-            """
-            const lifecycle = window.__yolomuxFixtureLifecycle;
-            if (!lifecycle || typeof lifecycle.operationState !== 'function') {
-              return {available: false};
-            }
-            return {available: true, diagnosticMode: lifecycle.diagnosticMode, ...lifecycle.operationState()};
-            """
-        )
-        if not isinstance(state, Mapping) or state.get("available") is not True:
-            raise AssertionError(f"fixture lifecycle operation state is unreachable: {state}")
-        if state.get("diagnosticMode") not in {"retained-js", "browser-console"}:
-            raise AssertionError(f"fixture lifecycle diagnostic mode is invalid: {state}")
-        if not isinstance(state.get("pending"), list):
-            raise AssertionError(f"fixture lifecycle pending operations are malformed: {state}")
-        if (
-            state.get("diagnosticMode") == "retained-js"
-            and not isinstance(state.get("watchRootsPending"), bool)
-        ) or (
-            "watchRootsPending" in state
-            and not isinstance(state.get("watchRootsPending"), bool)
-        ):
-            raise AssertionError(f"fixture lifecycle watch-root state is malformed: {state}")
-        last_state = dict(state)
-        complete = (
-            not state.get("pending")
-            and int(state.get("batchQueued") or 0) == 0
-            and int(state.get("batchPending") or 0) == 0
-            and int(state.get("batchOperations") or 0) == 0
-            and state.get("activityRefreshing") is not True
-            and state.get("watchRootsPending", False) is False
-            and state.get("finderWatchReady", True) is True
-        )
-        return last_state if complete else False
+        last_state = _read_fixture_operation_state(current)
+        return last_state if _fixture_operation_state_quiescent(last_state) else False
 
     try:
         settled_state = WebDriverWait(driver, float(timeout)).until(settled)
     except TimeoutException as error:
-        raise AssertionError(
-            "fixture API work did not quiesce before the owned boundary: "
-            f"{json.dumps(last_state, sort_keys=True)}"
-        ) from error
+        if last_state is not None and _blocked_only_by_watch_diff_baseline(last_state):
+            # The one remaining surface is a known in-flight full watch-diff baseline. Wait on its
+            # completion receipt rather than reporting a hang that is not one.
+            settled_state = _wait_out_watch_diff_baseline_receipt(driver, last_state)
+        else:
+            raise AssertionError(
+                "fixture API work did not quiesce before the owned boundary: "
+                f"{json.dumps(last_state, sort_keys=True)}"
+            ) from error
     if settled_state.get("diagnosticMode") == "retained-js":
         settled_state["browserReceiptBarrier"] = dict(acknowledge_browser_diagnostic_receipts(driver))
     return settled_state
@@ -2392,6 +2821,7 @@ def finish_browser_fixture_boundary(
     base_url,
     cleanup,
     *,
+    settle_app=None,
     server_log_reader=None,
     server_log_boundary=None,
     wait_for_api_quiescence=True,
@@ -2428,6 +2858,7 @@ def finish_browser_fixture_boundary(
             fixture_start_boundary = validate_server_log_ring_payload(server_log_boundary)
         except BaseException as error:
             gate_errors.append(error)
+    lifecycle_states = []
     for current_browser in owned_browsers:
         try:
             if wait_for_api_quiescence:
@@ -2444,6 +2875,11 @@ def finish_browser_fixture_boundary(
             diagnostic_mode = lifecycle_state.get("diagnosticMode")
             if diagnostic_mode not in {"retained-js", "browser-console"}:
                 raise AssertionError(f"fixture lifecycle diagnostic mode is invalid: {lifecycle_state}")
+            lifecycle_states.append((current_browser, diagnostic_mode))
+        except BaseException as error:
+            gate_errors.append(error)
+    for current_browser, diagnostic_mode in lifecycle_states:
+        try:
             gate_options = {}
             if server_log_reader is not None:
                 gate_options["server_log_reader"] = server_log_reader
@@ -2456,6 +2892,37 @@ def finish_browser_fixture_boundary(
                 gated_server_ring_cursors.append(
                     validate_server_log_ring_payload(gate_evidence["serverLogCursor"])
                 )
+        except BaseException as error:
+            gate_errors.append(error)
+    for current_browser in owned_browsers:
+        try:
+            lifecycle_state = current_browser.execute_script(
+                """
+                const lifecycle = window.__yolomuxFixtureLifecycle;
+                return lifecycle ? {diagnosticMode: lifecycle.diagnosticMode} : null;
+                """
+            )
+            if not isinstance(lifecycle_state, Mapping):
+                raise AssertionError(f"fixture lifecycle adapter is unreachable at retirement: {lifecycle_state}")
+            diagnostic_mode = lifecycle_state.get("diagnosticMode")
+            if diagnostic_mode not in {"retained-js", "browser-console"}:
+                raise AssertionError(f"fixture lifecycle diagnostic mode is invalid at retirement: {lifecycle_state}")
+            if diagnostic_mode == "browser-console":
+                retire_browser_after_strict_diagnostic_gate(current_browser, require_js_debug_store=False)
+            else:
+                retire_browser_after_strict_diagnostic_gate(current_browser)
+        except BaseException as error:
+            gate_errors.append(error)
+        finally:
+            current_browser._yolomux_server_log_boundary = None
+    # Retire every page before joining app-owned producers. A page that remains live can enqueue an
+    # 8 ms filesystem batch after its quiescence sample, racing a newly accepted jobd operation into
+    # the gap between wait_for_idle() and the ledger read. Atomic retirement closes that admission
+    # source; the final ring snapshot below still catches any warning/error emitted while app work
+    # settles.
+    if settle_app is not None:
+        try:
+            settle_app()
         except BaseException as error:
             gate_errors.append(error)
     if fixture_start_boundary is not None or owned_browsers or gated_server_ring_cursors:
@@ -2487,27 +2954,6 @@ def finish_browser_fixture_boundary(
                     )
         except BaseException as error:
             gate_errors.append(error)
-    for current_browser in owned_browsers:
-        try:
-            lifecycle_state = current_browser.execute_script(
-                """
-                const lifecycle = window.__yolomuxFixtureLifecycle;
-                return lifecycle ? {diagnosticMode: lifecycle.diagnosticMode} : null;
-                """
-            )
-            if not isinstance(lifecycle_state, Mapping):
-                raise AssertionError(f"fixture lifecycle adapter is unreachable at retirement: {lifecycle_state}")
-            diagnostic_mode = lifecycle_state.get("diagnosticMode")
-            if diagnostic_mode not in {"retained-js", "browser-console"}:
-                raise AssertionError(f"fixture lifecycle diagnostic mode is invalid at retirement: {lifecycle_state}")
-            if diagnostic_mode == "browser-console":
-                retire_browser_after_strict_diagnostic_gate(current_browser, require_js_debug_store=False)
-            else:
-                retire_browser_after_strict_diagnostic_gate(current_browser)
-        except BaseException as error:
-            gate_errors.append(error)
-        finally:
-            current_browser._yolomux_server_log_boundary = None
     try:
         cleanup()
     except BaseException as error:
@@ -2646,6 +3092,9 @@ def load_gate_browser(driver, runtime: GateLiveServer, path: str = "/") -> None:
     begin_browser_journey_surface_tracking(driver)
     wait_for_fixture_client_event_demand(driver)
     wait_for_fixture_api_quiescence(driver)
+    assert runtime.app.session_files_service.wait_for_idle(3), (
+        "fixture session-files work did not settle before the browser evidence boundary"
+    )
 
 
 def open_gate_stats_surface(driver, *, timeout: float = 8.0) -> dict[str, Any]:
@@ -2863,8 +3312,8 @@ FINDER_JOURNEY_INSTRUMENT_SOURCE = """
         pendingExpansions: Array.from(fileExplorerPendingExpansions).filter(path => beneath(path, root)).sort(),
         inFlightResources: records.filter(record => record.inFlight).map(record => record.name),
         acceptedGenerations: Object.fromEntries(records.map(record => [record.name, record.generation])),
-        interactionGeneration: fileExplorerInteractionGeneration,
-        openGeneration: fileExplorerOpenGeneration,
+        interactionGeneration: fileWorkspaceState.interactionGeneration(),
+        openGeneration: fileWorkspaceState.fileExplorerOpenGeneration,
         loadingRows: Array.from(panel()?.querySelectorAll('.file-tree-row.loading-children[data-path]') || [])
           .map(node => node.dataset.path)
           .sort(),
@@ -3069,49 +3518,27 @@ def _serve_gate_live_server(
 ) -> Iterable[GateLiveServer]:
     """Shared server lifecycle for bypassed and form-authenticated fixtures."""
 
-    # Every fixture owns one server-log epoch. A reused xdist worker must not carry the prior
-    # fixture's IDs or failures into this fixture's browser/server retirement boundary.
-    SERVER_LOGS.clear()
-    server_log_boundary = SERVER_LOGS.payload()
     app = make_tmux_webterm_app(tuple(gate_tmux.sessions))
-    prepare_fixture_http_app(monkeypatch, app)
-    gate_http_port.release()
-    server = None
-    thread = None
-    try:
-        server = TmuxWebtermHTTPServer(gate_http_port.address, app)
-        track_fixture_http_requests(server)
-        thread = threading.Thread(target=server.serve_forever, name="gate-http-server", daemon=True)
-        thread.start()
-    except BaseException as start_error:
-        try:
-            rollback_failed_fixture_http_start(
-                app,
-                server,
-                thread,
-                label="fixture-owned gate",
-                port_lease=gate_http_port,
-            )
-        except BaseException as rollback_error:
-            raise start_error.with_traceback(start_error.__traceback__) from rollback_error
-        raise
-    runtime = GateLiveServer(
-        app=app,
-        server=server,
-        thread=thread,
+    runtime = start_fixture_live_server(
+        monkeypatch,
+        app,
+        GateLiveServerOptions(
+            address=gate_http_port.address,
+            thread_name="gate-http-server",
+            label="fixture-owned gate",
+            clear_server_logs=True,
+            pin_jobd_scheduler=True,
+        ),
         tmux=gate_tmux,
         paths=gate_runtime_paths,
-        server_log_boundary=server_log_boundary,
+        port_lease=gate_http_port,
     )
     try:
         yield runtime
     finally:
         fixture_browser = request.node.funcargs.get("browser")
-        finish_browser_fixture_boundary(
+        runtime.finish(
             fixture_browser,
-            runtime.base_url,
-            lambda: stop_fixture_http_app(app, server, thread, label="fixture-owned gate"),
-            server_log_boundary=runtime.server_log_boundary,
             require_owned_browsers=fixture_browser is not None,
         )
 
@@ -3180,101 +3607,6 @@ def gate_authenticated_live_server(
         gate_http_port,
         gate_tmux,
     )
-
-
-class RepeatFailure(AssertionError):
-    """An assertion failed during a consecutive reliability run."""
-
-    def __init__(self, iteration: int, total: int, cause: Exception):
-        self.iteration = iteration
-        self.total = total
-        self.cause = cause
-        super().__init__(f"iteration {iteration}/{total} failed: {cause}")
-
-
-def repeat(count: int, assertion: Callable[[int], T]) -> list[T]:
-    """Run ``assertion`` consecutively, passing a one-based iteration number."""
-
-    if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-        raise ValueError("repeat count must be a positive integer")
-    if not callable(assertion):
-        raise TypeError("repeat assertion must be callable")
-    results = []
-    for iteration in range(1, count + 1):
-        try:
-            results.append(assertion(iteration))
-        except Exception as exc:
-            raise RepeatFailure(iteration, count, exc) from exc
-    return results
-
-
-@dataclass(frozen=True)
-class CounterDelta:
-    label: str
-    before: Real
-    after: Real
-
-    @property
-    def delta(self) -> Real:
-        return self.after - self.before
-
-
-def sample_counter_delta(
-    sample: Callable[[], Real],
-    observe_quiescent_window: Callable[[], Any],
-    *,
-    label: str = "counter",
-) -> CounterDelta:
-    """Take exactly two counter samples around a caller-owned quiet observation.
-
-    The observation callback should wait on a bounded, observable condition such
-    as a request completion or event-window close.  It must not mutate or reset
-    the counter; the assertion is deliberately based only on the delta.
-    """
-
-    if not callable(sample) or not callable(observe_quiescent_window):
-        raise TypeError("counter sample and quiescent-window observer must be callable")
-    before = sample()
-    observe_quiescent_window()
-    after = sample()
-    if isinstance(before, bool) or not isinstance(before, Real):
-        raise TypeError(f"{label} first sample is not numeric: {before!r}")
-    if isinstance(after, bool) or not isinstance(after, Real):
-        raise TypeError(f"{label} second sample is not numeric: {after!r}")
-    return CounterDelta(label=label, before=before, after=after)
-
-
-def assert_counter_delta(
-    sample: Callable[[], Real],
-    observe_quiescent_window: Callable[[], Any],
-    *,
-    label: str = "counter",
-    exactly: Real | None = None,
-    at_least: Real | None = None,
-    at_most: Real | None = None,
-) -> CounterDelta:
-    """Assert a two-sample delta without relying on the absolute total."""
-
-    if exactly is not None and (at_least is not None or at_most is not None):
-        raise ValueError("exactly cannot be combined with at_least or at_most")
-    observation = sample_counter_delta(sample, observe_quiescent_window, label=label)
-    delta = observation.delta
-    if exactly is not None and delta != exactly:
-        raise AssertionError(
-            f"{label} delta was {delta!r}, expected exactly {exactly!r} "
-            f"(before={observation.before!r}, after={observation.after!r})"
-        )
-    if at_least is not None and delta < at_least:
-        raise AssertionError(
-            f"{label} delta was {delta!r}, expected at least {at_least!r} "
-            f"(before={observation.before!r}, after={observation.after!r})"
-        )
-    if at_most is not None and delta > at_most:
-        raise AssertionError(
-            f"{label} delta was {delta!r}, expected at most {at_most!r} "
-            f"(before={observation.before!r}, after={observation.after!r})"
-        )
-    return observation
 
 
 def _browser_global_requirements(globals_required: Iterable[str] | Mapping[str, str]) -> dict[str, str]:

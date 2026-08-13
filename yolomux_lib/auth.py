@@ -12,10 +12,14 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+from .infra.atomic_file import atomic_write_text
+from .infra.root_paths import config_dir_from_environ
+from .infra.shared_config_lock import shared_config_lock
+from .infra.shared_config_lock import write_shared_document
 
-CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
+
+CONFIG_DIR = config_dir_from_environ(os.environ)
 AUTH_CONFIG_PATH = CONFIG_DIR / "auth.yaml"
-AUTH_CONFIG_DISPLAY_PATH = "~/.config/yolomux/auth.yaml"
 PLACEHOLDER_AUTH_USERNAME = "user"
 PLACEHOLDER_AUTH_PASSWORD = "password"
 GUEST_AUTH_USERNAME = "guest"
@@ -206,18 +210,26 @@ def commented_auth_config_text(users: tuple[AuthUser, ...]) -> str:
 
 
 def initialize_auth_config(path: Path) -> tuple[AuthUser, ...]:
-    if path.exists():
+    """Load auth.yaml, preserving one credential hash per plaintext credential.
+
+    Password hashing uses a fresh random salt.  Therefore reading plaintext,
+    deriving a hash, publishing it, and returning that hash must be one shared
+    transaction: two processes that derive independently could otherwise each
+    return a valid but different hash, immediately invalidating one login.
+    """
+    with shared_config_lock(path):
         secure_auth_config_permissions(path)
-        users = read_auth_users(path)
-        if legacy_placeholder_auth_active(users):
-            write_auth_config(path, commented_auth_config_text(starter_auth_users()))
-            return ()
-        normalized = hash_plaintext_auth_users(users)
-        if normalized != users:
-            write_auth_config(path, auth_config_text(normalized))
-        return normalized
-    write_auth_config(path, commented_auth_config_text(starter_auth_users()))
-    return ()
+        if path.exists():
+            users = read_auth_users(path)
+            if legacy_placeholder_auth_active(users):
+                atomic_write_text(path, commented_auth_config_text(starter_auth_users()), mode=0o600)
+                return ()
+            normalized = hash_plaintext_auth_users(users)
+            if normalized != users:
+                atomic_write_text(path, auth_config_text(normalized), mode=0o600)
+            return normalized
+        atomic_write_text(path, commented_auth_config_text(starter_auth_users()), mode=0o600)
+        return ()
 
 
 def current_auth_users() -> tuple[AuthUser, ...]:
@@ -298,12 +310,10 @@ def load_auth_cookie_secret(path: Path = AUTH_COOKIE_SECRET_PATH) -> bytes:
 AUTH_COOKIE_SECRET = load_auth_cookie_secret()
 
 
-def write_auth_config(path: Path, text: str) -> None:
+def write_auth_config(path: Path, text: str, *, expected_revision: str | None = None) -> None:
+    """Replace auth.yaml only when its optional captured revision still matches."""
     secure_auth_config_permissions(path)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    path.chmod(0o600)
+    write_shared_document(path, text, expected_revision=expected_revision)
 
 
 def secure_auth_config_permissions(path: Path) -> None:

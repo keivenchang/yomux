@@ -7,7 +7,6 @@ import argparse
 import json
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 from selenium import webdriver
@@ -18,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests.browser_helpers.webdriver_lease import WebDriverLease
 from yolomux_lib.live_browser_soak import evidence_failed
 from yolomux_lib.live_browser_soak import record_failure
 from yolomux_lib.live_browser_soak import run_soak
@@ -32,29 +32,27 @@ CLEANUP_TIMEOUT_SECONDS = 15
 
 
 def cleanup_driver(driver: object, timeout_seconds: float = CLEANUP_TIMEOUT_SECONDS) -> dict[str, str] | None:
-    """Bound cleanup to this WebDriver and its service process only."""
-    result: list[WebDriverException] = []
+    """Retire this WebDriver through the one shared lease, translating its proof into the soak's artifact.
 
-    def quit_driver() -> None:
-        try:
-            driver.quit()
-        except WebDriverException as error:
-            result.append(error)
-
-    worker = threading.Thread(target=quit_driver, name="live-browser-soak-cleanup", daemon=True)
-    worker.start()
-    worker.join(timeout_seconds)
-    if worker.is_alive():
-        service = driver.service
-        process = service.process
-        if process is not None:
-            process.terminate()
+    The lease is the single owner of teardown: bounded quit -> TERM -> KILL -> reap -> final proof,
+    every step guarded by the chromedriver's captured generation so it never signals a PID it cannot
+    prove is still its own. This function only maps that result onto the typed outcomes the soak
+    records - a hung quit that the lease had to signal is a `WebDriverCleanupTimeout`; a quit that
+    raised surfaces its original exception; a process the lease could not prove gone is never reported
+    as a clean cleanup.
+    """
+    lease = WebDriverLease.from_driver(driver, quit_timeout=timeout_seconds)
+    result = lease.retire()
+    if result.quit_timed_out:
+        if result.proven_gone:
             message = "driver quit exceeded cleanup deadline; terminated its WebDriver service process"
         else:
-            message = "driver quit exceeded cleanup deadline; WebDriver service process was unavailable"
+            message = "driver quit exceeded cleanup deadline; could not prove its WebDriver service process gone"
         return {"phase": "cleanup", "terminal": "WebDriverCleanupTimeout", "message": message}
-    if result:
-        return terminal_failure("cleanup", result[0])
+    if result.quit_error is not None:
+        return terminal_failure("cleanup", result.quit_error)
+    if not result.proven_gone:
+        return {"phase": "cleanup", "terminal": "WebDriverCleanupNotProven", "message": f"driver quit returned but its service process could not be proven gone: {result.errors}"}
     return None
 
 

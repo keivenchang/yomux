@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Refuse a staged static-source change whose staged generated assets are stale.
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+if git -C "$repo_root" diff --cached --quiet -- static_src/; then
+    exit 0
+fi
+
+index_root="$(mktemp -d "${TMPDIR:-/tmp}/yolomux-static-hook.XXXXXX")"
+cleanup() {
+    rm -rf "$index_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+index_tree="$(git -C "$repo_root" write-tree)"
+git -C "$repo_root" archive --format=tar "$index_tree" | tar -xf - -C "$index_root"
+git_dir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
+printf 'gitdir: %s\n' "$git_dir" > "$index_root/.git"
+python3 "$index_root/tools/static_build.py" --check

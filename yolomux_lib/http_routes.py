@@ -373,6 +373,18 @@ def get_share_shell(request: Any, parsed: Any, route: Route) -> bool:
     return request.handle_share_shell(parsed)
 
 
+def get_healthz(request: Any, parsed: Any, route: Route) -> None:
+    """Answer the process supervisor's unauthenticated liveness probe from the HTTP listener alone.
+
+    boot.sh polls this while restarting, before any operator cookie exists. It must never consult
+    tmux, jobd, watchd, statusd, the filesystem, or any local service: this is liveness for the
+    listener, not readiness for the system. Reporting anything richer would both leak system state
+    to an unauthenticated caller and make an unrelated subsystem able to fail a restart.
+    """
+    del parsed, route
+    request.write_json({"ok": True})
+
+
 def get_ping(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_json({"ok": True, "time": time.time()})
@@ -656,13 +668,37 @@ def get_background_status(request: Any, parsed: Any, route: Route) -> None:
 
 
 def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
+    del route
+    scope = str(query_one(request_query(request, parsed), "measurement_scope", "") or "")
+    if scope not in {"", "capture"}:
+        request.write_json({"ok": False, "error": "unsupported measurement scope"}, status=HTTPStatus.BAD_REQUEST)
+        return
+    if scope:
+        request.write_json({"perf": request.server.app.performance_metrics_payload(measurement_scope=scope)})
+        return
     request.write_json(request.server.app.performance_diagnostics_payload())
 
 
 def get_system_status(request: Any, parsed: Any, route: Route) -> None:
+    """Serve the published system-status body. This handler assembles nothing.
+
+    It reads one already-encoded snapshot and writes it through the shared opaque-product writer,
+    so the request thread does no collection, no `json.dumps`, and none of the response envelope's
+    `copy.deepcopy` of a ~70 KB body. When no current snapshot exists the same call returns an
+    explicitly typed unavailable/stale body instead of rebuilding on this thread.
+    """
+
     del parsed, route
-    request.write_json(request.server.app.system_status_payload())
+    body, product = request.server.app.system_status_snapshot_response()
+    request.write_product_bytes(body, product)
+
+
+def get_system_status_advanced(request: Any, parsed: Any, route: Route) -> None:
+    """Serve the separately retained Advanced-diagnostics body, on the same read-only terms."""
+
+    del parsed, route
+    body, product = request.server.app.system_status_snapshot_response(advanced=True)
+    request.write_product_bytes(body, product)
 
 
 def get_server_logs(request: Any, parsed: Any, route: Route) -> None:
@@ -1543,6 +1579,7 @@ CORE_ROUTES = (
     Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/login", PUBLIC, get_login, protocol=RESPONSE_HTML, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, protocol=RESPONSE_REDIRECT, group="core"),
+    Route("GET", "/healthz", PUBLIC, get_healthz, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/stats-delta", "readonly", get_stats_delta, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
@@ -1564,6 +1601,10 @@ CORE_ROUTES = (
     Route("GET", "/api/activity-summary", "readonly", get_activity_summary, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/background/status", "readonly", get_background_status, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/system-status", "readonly", get_system_status, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    # Advanced diagnostics are a separate retained body, fetched when a reader opens the
+    # disclosure rather than assembled into every five-second poll. It reads a published snapshot
+    # only, so unlike the route above it never touches a normal-session local service.
+    Route("GET", "/api/system-status/advanced", "readonly", get_system_status_advanced, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/logs", "readonly", get_server_logs, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/auto-approve", "readonly", get_auto_approve, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),

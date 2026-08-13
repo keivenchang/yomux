@@ -1,5 +1,6 @@
 import errno
 import json
+import select
 import socket
 import threading
 import fcntl
@@ -8,8 +9,17 @@ import time
 
 import pytest
 
+from yolomux_lib.local_services import registry as registry_module
 from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services import runtime
+from yolomux_lib.local_services.client import LocalServiceClient
+
+
+@pytest.fixture(autouse=True)
+def _isolated_local_service_traffic():
+    """Every traffic assertion measures only its own requests."""
+    with rpc.local_service_traffic_scope():
+        yield
 
 
 class FragmentedConnection:
@@ -172,16 +182,21 @@ def test_current_rpc_timeout_never_replays_work_through_legacy_fallback(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("service_duration_ms", "expected_error"),
+    ("service_duration_ms", "expected_attribution"),
     [
         (15.0, "peer_handler_slow"),
         (3.0, "unattributed_latency"),
     ],
 )
-def test_current_rpc_deadline_attributes_only_measured_peer_handler_time(
-    tmp_path, monkeypatch, service_duration_ms, expected_error,
+def test_current_rpc_deadline_returns_the_delivered_response_with_a_budget_breach_label(
+    tmp_path, monkeypatch, service_duration_ms, expected_attribution,
 ):
-    """A response over the client deadline names only a proven handler span."""
+    """A complete, request-id-matched response past the telemetry budget is DELIVERED, not raised.
+
+    The deadline is a telemetry budget, not a correctness bound: the response is returned and the
+    measured attribution (a slow handler versus latency before the handler ran) is recorded as a
+    diagnostic on the delivered record, never as an error.
+    """
     envelope = rpc.new_envelope("testd", "status", {"action": "status"}, timeout_seconds=0.01)
     response_envelope = rpc.LocalRpcEnvelope(
         service="testd",
@@ -218,8 +233,23 @@ def test_current_rpc_deadline_attributes_only_measured_peer_handler_time(
     monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: DelayedResponseSocket())
     monkeypatch.setattr(rpc, "monotonic_clock", lambda: next(clock))
 
-    with pytest.raises(rpc.LocalRpcError, match=expected_error):
-        rpc.request(tmp_path / "testd.sock", envelope, timeout_seconds=0.1)
+    delivered_envelope, payload, binary = rpc.request_with_envelope(
+        tmp_path / "testd.sock", envelope, timeout_seconds=0.1
+    )
+
+    # The past-budget response is returned intact, not raised.
+    assert delivered_envelope is not None
+    assert delivered_envelope.request_id == envelope.request_id
+    assert payload == {"ok": True}
+    assert binary == b""
+
+    # The budget breach is telemetry on the delivered record, not a failure. `status` is a probe
+    # method, so the completion lands in the probe class.
+    probe = rpc.local_service_traffic_ledger("testd").snapshot()["probe"]
+    assert (probe["completed"], probe["errors"]) == (1, 0)
+    assert probe["errors_by_reason"] == {}
+    assert probe["over_budget"] == 1
+    assert probe["over_budget_by_reason"] == {expected_attribution: 1}
 
 
 def test_current_rpc_absent_socket_never_replays_work_through_legacy_fallback(tmp_path, monkeypatch):
@@ -270,6 +300,33 @@ def _wait_for_service_socket(socket_path, expected_mode=0o600):
     pytest.fail(f"local service socket did not become ready with mode {oct(expected_mode)}: {mode}")
 
 
+def _connect_to_service(service_socket_path, *, timeout=1.0, deadline_seconds=2.0):
+    """Connect to a starting local service, which publishes its socket file before it listens.
+
+    ``run_local_rpc_service`` creates the path with ``bind()`` -- already mode 0600 under its umask
+    -- and calls ``listen()`` afterwards, so the file's existence and mode are true for a service
+    that cannot accept yet. A connect issued in that window fails with ECONNREFUSED against a
+    service starting normally, which is what a loaded gate saw. The product never treats the file
+    as readiness either: the registry waits for a real ping and retries. This is the test-side
+    equivalent, and it retries the connection the caller actually wants rather than probing with an
+    extra one that would consume a handler slot and change what the capacity tests observe.
+    """
+
+    deadline = time.monotonic() + deadline_seconds
+    while True:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        try:
+            client.connect(str(service_socket_path))
+        except ConnectionRefusedError:
+            client.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+            continue
+        return client
+
+
 def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, peer_uid=None):
     if monkeypatch is not None:
         monkeypatch.setattr(runtime, "peer_uid", lambda _connection: peer_uid)
@@ -311,8 +368,7 @@ def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clie
     assert oct(socket_path.stat().st_mode & 0o777) == "0o600"
     assert oct(lock_path.stat().st_mode & 0o777) == "0o600"
 
-    slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    slow.connect(str(service_socket_path))
+    slow = _connect_to_service(service_socket_path)
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"}, timeout_seconds=2.0)
     response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=2.0)
     slow.close()
@@ -359,9 +415,7 @@ def test_local_service_runtime_carries_accept_read_and_handler_phases(tmp_path, 
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
 
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(1.0)
-        client.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as client:
         rpc.write_message(client, envelope, envelope.payload)
         response_envelope, response, _binary, legacy = rpc.read_message(client)
 
@@ -412,15 +466,11 @@ def test_local_service_runtime_reports_bounded_capacity_rejection(tmp_path, monk
     )
     worker.start()
     _wait_for_service_socket(socket_path)
-    first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    first.settimeout(1.0)
-    first.connect(str(service_socket_path))
+    first = _connect_to_service(service_socket_path)
     hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
     rpc.write_message(first, hold, hold.payload)
     assert started.wait(timeout=1.0)
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
-        second.settimeout(1.0)
-        second.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as second:
         busy = json.loads(second.makefile("rb").readline())
     release.set()
     response_envelope, response, _binary, legacy = rpc.read_message(first)
@@ -466,9 +516,7 @@ def test_local_service_runtime_does_not_idle_shutdown_with_active_handler(tmp_pa
     )
     worker.start()
     _wait_for_service_socket(socket_path)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(1.0)
-    client.connect(str(service_socket_path))
+    client = _connect_to_service(service_socket_path)
     hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
     rpc.write_message(client, hold, hold.payload)
     try:
@@ -489,9 +537,7 @@ def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, 
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid() + 1)
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(1.0)
-        client.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as client:
         response = json.loads(client.makefile("rb").readline())
     stop_event.set()
     worker.join(timeout=1.0)
@@ -603,3 +649,656 @@ def test_local_service_transport_has_no_pickle_or_decompression_surface():
     assert "pickle.loads" not in combined
     assert "import gzip" not in combined
     assert "import zlib" not in combined
+
+
+# --- M6: retained per-service request/error/latency aggregate -----------------------------
+
+
+def _traffic(service):
+    return rpc.local_service_traffic_ledger(service).snapshot()
+
+
+def _run_traffic_service(
+    socket_path,
+    lock_path,
+    stop_event,
+    *,
+    service_pid=4242,
+    concurrent_handlers=8,
+    slow_seconds=0.0,
+    on_slow=None,
+):
+    def handle(request, _request_binary):
+        action = request.get("action")
+        if action == "shutdown":
+            stop_event.set()
+            return {"ok": True}, b""
+        if action in ("ping", "status"):
+            return {"ok": True, "version": rpc.LOCAL_RPC_VERSION, "pid": service_pid}, b""
+        if action == "slow":
+            if on_slow is not None:
+                # Lets a caller hold the handler slot for exactly as long as it needs,
+                # instead of guessing a sleep long enough to stay saturated.
+                on_slow()
+            time.sleep(slow_seconds)
+            return {"ok": True}, b""
+        if action == "refuse":
+            return {"ok": False, "error": "fixture refused", "error_code": "fixture_refused"}, b""
+        return {"ok": True, "echo": action}, b""
+
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name="trafficd",
+            stop_event=stop_event,
+            handle=handle,
+            on_idle=lambda: False,
+            on_client=lambda: None,
+            concurrent_handlers=concurrent_handlers,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    _wait_for_service_socket(socket_path)
+    return worker
+
+
+def _stop_traffic_service(worker, stop_event, socket_path):
+    stop_event.set()
+    worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+    deadline = time.monotonic() + 2.0
+    while socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert socket_path.exists() is False
+
+
+def _fan_out(count, work, workers=16):
+    """Run ``work(index)`` ``count`` times across concurrent threads and return every result.
+
+    A failure inside a worker is re-raised here.  Leaving it in the worker thread turned a
+    real product failure into a ``None`` result and an ``AttributeError`` on the next line,
+    which is how the gate reported ``BrokenPipeError`` as ``'NoneType' has no attribute 'get'``.
+    """
+    results = [None] * count
+    failures = []
+    barrier = threading.Barrier(workers)
+    indexes = list(range(count))
+    cursor = threading.Lock()
+    position = [0]
+
+    def run():
+        barrier.wait(timeout=10.0)
+        while True:
+            with cursor:
+                if position[0] >= count:
+                    return
+                index = indexes[position[0]]
+                position[0] += 1
+            try:
+                results[index] = work(index)
+            except Exception as exc:  # re-raised in the calling thread below
+                failures.append(exc)
+                return
+
+    threads = [threading.Thread(target=run, daemon=True) for _ in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False
+    if failures:
+        raise failures[0]
+    return results
+
+
+def test_local_service_traffic_ledger_publishes_exact_count_total_and_max():
+    ledger = rpc.LocalServiceTrafficLedger("unitd")
+
+    for sample in (1.0, 7.0, 3.0):
+        ledger.record_completion(rpc.LOCAL_SERVICE_TRAFFIC_WORK, client_elapsed_ms=sample, service_duration_ms=sample / 2)
+    # A clock that ran backwards is not a duration; it must not lower the total or the max.
+    ledger.record_completion(rpc.LOCAL_SERVICE_TRAFFIC_WORK, client_elapsed_ms=-5.0)
+
+    work = ledger.snapshot()["work"]
+    assert (work["accepted"], work["completed"], work["errors"]) == (4, 4, 0)
+    assert work["client_latency_ms"] == {"count": 4, "total_ms": 11.0, "max_ms": 7.0, "avg_ms": 2.75}
+    assert work["service_latency_ms"] == {"count": 4, "total_ms": 5.5, "max_ms": 3.5, "avg_ms": 1.375}
+    assert ledger.snapshot()["schema_version"] == rpc.LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION
+
+
+def test_local_service_traffic_registry_is_injectable_without_touching_production_singleton():
+    injected = rpc.LocalServiceTrafficRegistry()
+    independent = rpc.LocalServiceTrafficRegistry()
+    rpc.local_service_traffic_ledger("isolated", registry=injected).record_failure(
+        rpc.LOCAL_SERVICE_TRAFFIC_WORK,
+        rpc.LOCAL_SERVICE_REASON_TRANSPORT,
+    )
+
+    assert rpc.local_service_traffic_snapshot(registry=injected)["isolated"]["work"]["errors"] == 1
+    assert rpc.local_service_traffic_snapshot(registry=independent) == {}
+
+
+def test_local_service_traffic_scope_owns_cross_thread_accounting_and_rejects_ambient_reset():
+    def record(index):
+        rpc.local_service_traffic_ledger("scoped").record_failure(
+            rpc.LOCAL_SERVICE_TRAFFIC_WORK,
+            f"failure-{index}",
+        )
+
+    with pytest.raises(RuntimeError, match="active scope"):
+        rpc.reset_local_service_traffic()
+    _fan_out(8, record, workers=4)
+    assert rpc.local_service_traffic_snapshot()["scoped"]["work"]["errors"] == 8
+
+
+def test_local_service_traffic_ledger_bounds_reason_vocabulary_without_losing_a_request():
+    ledger = rpc.LocalServiceTrafficLedger("unitd")
+    distinct = rpc.LOCAL_SERVICE_TRAFFIC_MAX_REASONS + 4
+
+    for index in range(distinct):
+        ledger.record_failure(rpc.LOCAL_SERVICE_TRAFFIC_WORK, f"reason_{index}")
+
+    work = ledger.snapshot()["work"]
+    assert work["errors"] == work["accepted"] == distinct
+    assert sum(work["errors_by_reason"].values()) == distinct
+    assert len(work["errors_by_reason"]) <= rpc.LOCAL_SERVICE_TRAFFIC_MAX_REASONS + 1
+    assert work["errors_by_reason"][rpc.LOCAL_SERVICE_REASON_OTHER] == 4
+
+
+def test_local_service_traffic_ledger_counts_only_proven_epoch_changes():
+    ledger = rpc.LocalServiceTrafficLedger("unitd")
+
+    ledger.note_epoch("pid:11")
+    assert ledger.snapshot()["epoch_changes"] == 0
+    ledger.note_epoch("pid:11")
+    assert ledger.snapshot()["epoch_changes"] == 0
+    ledger.note_epoch("pid:12")
+    ledger.note_epoch("")
+
+    assert ledger.snapshot()["epoch"] == "pid:12"
+    assert ledger.snapshot()["epoch_changes"] == 1
+
+
+def test_local_service_traffic_classifies_every_failure_by_typed_reason():
+    """Absence, refusal, both deadline expiries, identity and revision stay separable."""
+    observed = {
+        rpc.local_service_failure_reason(FileNotFoundError(errno.ENOENT, "gone")),
+        rpc.local_service_failure_reason(ConnectionRefusedError(errno.ECONNREFUSED, "refused")),
+        rpc.local_service_failure_reason(TimeoutError("slow")),
+        rpc.local_service_failure_reason(rpc.LocalRpcError("peer_handler_slow")),
+        rpc.local_service_failure_reason(rpc.LocalRpcError("unattributed_latency")),
+        rpc.local_service_failure_reason(rpc.LocalRpcError("response request_id mismatch")),
+        rpc.local_service_failure_reason(rpc.LocalRpcError("unsupported RPC version")),
+        rpc.local_service_failure_reason(rpc.LocalRpcError("invalid RPC envelope")),
+        rpc.local_service_response_reason({"ok": False, "error": rpc.LOCAL_SERVICE_ERROR_BUSY, "capacity_rejected": True}),
+        rpc.local_service_response_reason({"ok": False, "error": "nope", "error_code": "handler_failed"}),
+        rpc.local_service_response_reason({"ok": False, "error": "nope"}),
+    }
+
+    assert observed == {
+        rpc.LOCAL_SERVICE_REASON_ABSENT,
+        rpc.LOCAL_SERVICE_REASON_REFUSED,
+        rpc.LOCAL_SERVICE_REASON_TIMEOUT,
+        rpc.LOCAL_SERVICE_REASON_DEADLINE_HANDLER,
+        rpc.LOCAL_SERVICE_REASON_DEADLINE_UNATTRIBUTED,
+        rpc.LOCAL_SERVICE_REASON_IDENTITY_MISMATCH,
+        rpc.LOCAL_SERVICE_REASON_REVISION_MISMATCH,
+        rpc.LOCAL_SERVICE_REASON_PROTOCOL,
+        rpc.LOCAL_SERVICE_REASON_OVERLOAD,
+        "handler_failed",
+        rpc.LOCAL_SERVICE_REASON_SERVICE_ERROR,
+    }
+    assert rpc.local_service_response_reason({"ok": True}) == ""
+    assert rpc.local_service_response_reason({"result": 1}) == ""
+
+
+def test_local_service_traffic_counts_one_hundred_concurrent_successes_exactly(tmp_path, monkeypatch):
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    worker = _run_traffic_service(socket_path, lock_path, stop_event, concurrent_handlers=32)
+
+    def call(index):
+        envelope = rpc.new_envelope("trafficd", "echo", {"action": f"echo-{index}"}, timeout_seconds=10.0)
+        return rpc.request(socket_path, envelope, timeout_seconds=10.0)[0]
+
+    responses = _fan_out(100, call, workers=8)
+    _stop_traffic_service(worker, stop_event, socket_path)
+
+    assert all(response["ok"] is True for response in responses)
+    work = _traffic("trafficd")["work"]
+    assert (work["accepted"], work["completed"], work["errors"]) == (100, 100, 0)
+    assert work["errors_by_reason"] == {}
+    assert work["client_latency_ms"]["count"] == 100
+    assert work["service_latency_ms"]["count"] == 100
+    assert _traffic("trafficd")["probe"]["accepted"] == 0
+
+
+def test_local_service_traffic_accounts_every_attempt_under_capacity_rejection(tmp_path, monkeypatch):
+    """Contended fan-out: completions plus typed overload refusals equal the attempts exactly."""
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    worker = _run_traffic_service(socket_path, lock_path, stop_event, concurrent_handlers=1, slow_seconds=0.005)
+
+    def call(index):
+        envelope = rpc.new_envelope("trafficd", "slow", {"action": "slow"}, timeout_seconds=10.0)
+        return rpc.request(socket_path, envelope, timeout_seconds=10.0)[0]
+
+    responses = _fan_out(100, call, workers=16)
+    _stop_traffic_service(worker, stop_event, socket_path)
+
+    rejected = sum(1 for response in responses if response.get("capacity_rejected") is True)
+    work = _traffic("trafficd")["work"]
+    assert work["accepted"] == 100
+    assert work["completed"] + work["errors"] == 100
+    assert rejected > 0, "fixture did not reach the capacity limit"
+    assert work["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_OVERLOAD: rejected}
+    assert work["completed"] == 100 - rejected
+    assert work["client_latency_ms"]["count"] == work["completed"]
+
+
+def test_a_capacity_refusal_written_before_the_peer_closed_is_not_lost(tmp_path, monkeypatch):
+    """The listener refuses at capacity on accept and closes without reading the request.
+
+    A client descheduled between ``connect()`` and its first send therefore fails with
+    EPIPE while the complete typed refusal already sits in its own receive queue.  The
+    full gate hit exactly this under load: ``BrokenPipeError`` escaped ``rpc.request``
+    and the attempt was counted as ``transport_error`` rather than the proven overload.
+    """
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold_the_only_handler_slot():
+        holding.set()
+        assert release.wait(timeout=10.0) is True
+
+    worker = _run_traffic_service(
+        socket_path, lock_path, stop_event, concurrent_handlers=1, on_slow=hold_the_only_handler_slot,
+    )
+    holder = threading.Thread(
+        target=lambda: rpc.request(
+            socket_path, rpc.new_envelope("trafficd", "slow", {"action": "slow"}, timeout_seconds=10.0), timeout_seconds=10.0,
+        ),
+        daemon=True,
+    )
+    holder.start()
+    assert holding.wait(timeout=10.0) is True
+
+    real_write_message = rpc.write_message
+    write_failures = []
+
+    def write_after_the_peer_has_closed(connection, envelope, payload, binary=b"", *, legacy=False):
+        # Stand in for the scheduler delay the loaded gate produced between connect() and
+        # the first send: wait for the peer's hangup rather than sleeping and hoping.
+        poller = select.poll()
+        poller.register(connection, select.POLLIN | select.POLLHUP)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if any(event & select.POLLHUP for _fd, event in poller.poll(100)):
+                break
+        try:
+            return real_write_message(connection, envelope, payload, binary, legacy=legacy)
+        except ConnectionError as exc:
+            write_failures.append(exc)
+            raise
+
+    monkeypatch.setattr(rpc, "write_message", write_after_the_peer_has_closed)
+    envelope = rpc.new_envelope("trafficd", "echo", {"action": "echo"}, timeout_seconds=10.0)
+    payload = rpc.request(socket_path, envelope, timeout_seconds=10.0)[0]
+    monkeypatch.undo()
+
+    # Without this the test could stop exercising the race and still pass.
+    assert [type(failure).__name__ for failure in write_failures] == ["BrokenPipeError"]
+    assert payload["capacity_rejected"] is True
+    assert payload["error"] == rpc.LOCAL_SERVICE_ERROR_BUSY
+    work = _traffic("trafficd")["work"]
+    assert work["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_OVERLOAD: 1}
+    # The holder is still inside its handler, so only the refused attempt has an outcome yet.
+    assert (work["accepted"], work["completed"], work["errors"]) == (1, 0, 1)
+
+    release.set()
+    holder.join(timeout=10.0)
+    assert holder.is_alive() is False
+    _stop_traffic_service(worker, stop_event, socket_path)
+    settled = _traffic("trafficd")["work"]
+    assert (settled["accepted"], settled["completed"], settled["errors"]) == (2, 1, 1)
+
+
+def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_path, monkeypatch):
+    """Negative control for the recovery read: nothing on the wire means nothing to recover."""
+    socket_path = tmp_path / "silentd.sock"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(8)
+    accepted = threading.Event()
+
+    def close_without_writing():
+        connection, _address = listener.accept()
+        connection.close()
+        accepted.set()
+
+    closer = threading.Thread(target=close_without_writing, daemon=True)
+    closer.start()
+
+    real_write_message = rpc.write_message
+
+    def write_after_the_peer_has_closed(connection, envelope, payload, binary=b"", *, legacy=False):
+        assert accepted.wait(timeout=10.0) is True
+        poller = select.poll()
+        poller.register(connection, select.POLLIN | select.POLLHUP)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if any(event & select.POLLHUP for _fd, event in poller.poll(100)):
+                break
+        return real_write_message(connection, envelope, payload, binary, legacy=legacy)
+
+    monkeypatch.setattr(rpc, "write_message", write_after_the_peer_has_closed)
+    envelope = rpc.new_envelope("silentd", "echo", {"action": "echo"}, timeout_seconds=10.0)
+    with pytest.raises(BrokenPipeError):
+        rpc.request(socket_path, envelope, timeout_seconds=10.0)
+    monkeypatch.undo()
+
+    closer.join(timeout=10.0)
+    listener.close()
+    work = _traffic("silentd")["work"]
+    assert work["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_TRANSPORT: 1}
+    assert (work["accepted"], work["completed"], work["errors"]) == (1, 0, 1)
+
+
+@pytest.mark.parametrize(
+    ("service_duration_ms", "expected_attribution"),
+    [
+        (15.0, rpc.LOCAL_RPC_OVER_BUDGET_HANDLER),
+        (3.0, rpc.LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED),
+    ],
+)
+def test_local_service_traffic_labels_a_delivered_over_budget_response_as_diagnostics(
+    tmp_path, monkeypatch, service_duration_ms, expected_attribution,
+):
+    """A delivered response past the budget is a COMPLETION that carries a diagnostic label.
+
+    It separates a slow handler from latency before the handler ran, but it is never an error:
+    the deadline is a telemetry budget, not a correctness bound.
+    """
+    envelope = rpc.new_envelope("trafficd", "history", {"action": "history"}, timeout_seconds=0.01)
+    response_envelope = rpc.LocalRpcEnvelope(
+        service="trafficd",
+        method="history",
+        request_id=envelope.request_id,
+        trace_id=envelope.trace_id,
+        deadline_ms=envelope.deadline_ms,
+        priority=envelope.priority,
+        owner_generation=envelope.owner_generation,
+        config_generation=envelope.config_generation,
+        payload={"ok": True},
+        service_duration_ms=service_duration_ms,
+    )
+    frame = FragmentedConnection([])
+    rpc.write_message(frame, response_envelope, response_envelope.payload)
+
+    class DelayedResponseSocket(FragmentedConnection):
+        def __init__(self):
+            super().__init__([frame.sent])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, _path):
+            pass
+
+    clock = iter((10.0, 10.012))
+    monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: DelayedResponseSocket())
+    monkeypatch.setattr(rpc, "monotonic_clock", lambda: next(clock))
+
+    payload, _binary = rpc.request(tmp_path / "trafficd.sock", envelope, timeout_seconds=0.1)
+    assert payload == {"ok": True}
+
+    work = _traffic("trafficd")["work"]
+    # Delivered, so it is a completion with zero errors -- and it carries a diagnostic breach label.
+    assert (work["accepted"], work["completed"], work["errors"]) == (1, 1, 0)
+    assert work["errors_by_reason"] == {}
+    assert work["over_budget"] == 1
+    assert work["over_budget_by_reason"] == {expected_attribution: 1}
+    # A delivered response contributes latency, unlike the former raised expiry.
+    assert work["client_latency_ms"]["count"] == 1
+    assert work["client_latency_ms"]["max_ms"] == pytest.approx(12.0, abs=0.5)
+
+
+def test_local_service_traffic_counts_every_transport_failure_attempt(tmp_path):
+    absent = tmp_path / "never-served.sock"
+
+    def call(index):
+        envelope = rpc.new_envelope("trafficd", "echo", {"action": f"echo-{index}"}, timeout_seconds=1.0)
+        with pytest.raises(FileNotFoundError):
+            rpc.request(absent, envelope, timeout_seconds=1.0, fallback_legacy=True)
+        return True
+
+    assert _fan_out(100, call, workers=16) == [True] * 100
+
+    work = _traffic("trafficd")["work"]
+    assert (work["accepted"], work["completed"], work["errors"]) == (100, 0, 100)
+    assert work["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_ABSENT: 100}
+
+
+def test_local_service_traffic_excludes_observer_probes_from_user_work(tmp_path, monkeypatch):
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    worker = _run_traffic_service(socket_path, lock_path, stop_event, concurrent_handlers=8)
+
+    def send(method, action, probe=False):
+        envelope = rpc.new_envelope("trafficd", method, {"action": action}, timeout_seconds=10.0)
+        return rpc.request(socket_path, envelope, timeout_seconds=10.0, probe=probe)[0]
+
+    for _ in range(7):
+        assert send("echo", "echo")["ok"] is True
+    # The registry's own liveness reads are monitoring traffic by method, wherever they are sent from.
+    for _ in range(3):
+        assert send("ping", "ping")["ok"] is True
+    # The future observer wraps its whole probe cycle, including nested lifecycle RPCs it does not own.
+    with rpc.local_service_probe_scope():
+        for _ in range(5):
+            assert send("echo", "echo")["ok"] is True
+    # A probe fanned out to a thread that cannot inherit the context declares itself explicitly.
+    for _ in range(2):
+        assert send("echo", "echo", probe=True)["ok"] is True
+    assert rpc.local_service_traffic_class("echo") == rpc.LOCAL_SERVICE_TRAFFIC_WORK
+    _stop_traffic_service(worker, stop_event, socket_path)
+
+    snapshot = _traffic("trafficd")
+    assert (snapshot["work"]["accepted"], snapshot["work"]["completed"]) == (7, 7)
+    assert (snapshot["probe"]["accepted"], snapshot["probe"]["completed"]) == (10, 10)
+    assert snapshot["work"]["client_latency_ms"]["count"] == 7
+    assert snapshot["probe"]["client_latency_ms"]["count"] == 10
+
+
+def test_local_service_traffic_survives_service_restart_with_cumulative_totals(tmp_path, monkeypatch):
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+
+    def send(method, action):
+        envelope = rpc.new_envelope("trafficd", method, {"action": action}, timeout_seconds=10.0)
+        return rpc.request(socket_path, envelope, timeout_seconds=10.0)[0]
+
+    first_stop = threading.Event()
+    first = _run_traffic_service(socket_path, lock_path, first_stop, service_pid=4242)
+    assert send("ping", "ping")["pid"] == 4242
+    for _ in range(5):
+        assert send("echo", "echo")["ok"] is True
+    _stop_traffic_service(first, first_stop, socket_path)
+
+    for _ in range(3):
+        with pytest.raises(FileNotFoundError):
+            send("echo", "echo")
+
+    second_stop = threading.Event()
+    second = _run_traffic_service(socket_path, lock_path, second_stop, service_pid=5150)
+    assert send("ping", "ping")["pid"] == 5150
+    for _ in range(4):
+        assert send("echo", "echo")["ok"] is True
+    _stop_traffic_service(second, second_stop, socket_path)
+
+    snapshot = _traffic("trafficd")
+    assert snapshot["epoch"] == "pid:5150"
+    assert snapshot["epoch_changes"] == 1
+    assert (snapshot["work"]["accepted"], snapshot["work"]["completed"], snapshot["work"]["errors"]) == (12, 9, 3)
+    assert snapshot["work"]["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_ABSENT: 3}
+    assert (snapshot["probe"]["accepted"], snapshot["probe"]["completed"]) == (2, 2)
+
+
+def test_local_service_traffic_max_names_the_slowest_request(tmp_path, monkeypatch):
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    worker = _run_traffic_service(socket_path, lock_path, stop_event, concurrent_handlers=8, slow_seconds=0.04)
+
+    def send(action):
+        envelope = rpc.new_envelope("trafficd", "echo", {"action": action}, timeout_seconds=10.0)
+        return rpc.request(socket_path, envelope, timeout_seconds=10.0)[0]
+
+    for _ in range(5):
+        assert send("echo")["ok"] is True
+    assert send("slow")["ok"] is True
+    _stop_traffic_service(worker, stop_event, socket_path)
+
+    latency = _traffic("trafficd")["work"]["service_latency_ms"]
+    assert latency["count"] == 6
+    assert latency["max_ms"] >= 35.0
+    # The one slow handler dominates the other five combined, so the maximum cannot be a
+    # minimum, a mean, or the last sample.
+    assert latency["total_ms"] < 2 * latency["max_ms"]
+    assert latency["avg_ms"] == round(latency["total_ms"] / 6, 3)
+
+
+def test_local_service_traffic_agrees_with_the_process_global_teardown_counter(tmp_path):
+    """The typed per-service ledger and registry's untyped global counter cannot diverge."""
+    client = LocalServiceClient("traffic-check", "tests.fixture", tmp_path / "traffic-check.sock")
+    before = registry_module.transport_diagnostics()["teardowns_total"]
+
+    for _ in range(9):
+        response, _binary, failure = client._request_once({"action": "submit"}, 0.2)
+        assert response["_transport_error"] == "absent"
+        assert failure is not None
+
+    after = registry_module.transport_diagnostics()["teardowns_total"]
+    work = _traffic("traffic-check")["work"]
+    assert after - before == 9
+    assert work["errors"] == 9
+    assert work["errors_by_reason"] == {rpc.LOCAL_SERVICE_REASON_ABSENT: 9}
+
+
+def test_local_service_traffic_snapshot_bounds_the_retained_service_count():
+    for index in range(rpc.LOCAL_SERVICE_TRAFFIC_MAX_SERVICES + 5):
+        rpc.local_service_traffic_ledger(f"svc-{index}").record_failure(
+            rpc.LOCAL_SERVICE_TRAFFIC_WORK, rpc.LOCAL_SERVICE_REASON_TRANSPORT,
+        )
+
+    snapshot = rpc.local_service_traffic_snapshot()
+    assert len(snapshot) <= rpc.LOCAL_SERVICE_TRAFFIC_MAX_SERVICES + 1
+    assert snapshot[rpc.LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE]["work"]["errors"] == 5
+    assert sum(entry["work"]["accepted"] for entry in snapshot.values()) == rpc.LOCAL_SERVICE_TRAFFIC_MAX_SERVICES + 5
+
+
+def test_local_service_traffic_keeps_probe_and_work_separate_under_concurrency(tmp_path, monkeypatch):
+    """Probe attribution is per-context: concurrent probe threads cannot taint user work."""
+    socket_path = tmp_path / "trafficd.sock"
+    lock_path = tmp_path / "trafficd.lock"
+    monkeypatch.setattr(runtime, "peer_uid", lambda _connection: os.getuid())
+    stop_event = threading.Event()
+    worker = _run_traffic_service(socket_path, lock_path, stop_event, concurrent_handlers=32)
+    threads_per_class = 8
+    calls_per_thread = 10
+    barrier = threading.Barrier(threads_per_class * 2)
+    failures = []
+
+    def send():
+        envelope = rpc.new_envelope("trafficd", "echo", {"action": "echo"}, timeout_seconds=10.0)
+        if rpc.request(socket_path, envelope, timeout_seconds=10.0)[0].get("ok") is not True:
+            failures.append("unexpected response")
+
+    def run(as_probe):
+        barrier.wait(timeout=10.0)
+        if as_probe:
+            with rpc.local_service_probe_scope():
+                for _ in range(calls_per_thread):
+                    send()
+            return
+        for _ in range(calls_per_thread):
+            send()
+
+    threads = [
+        threading.Thread(target=run, args=(index < threads_per_class,), daemon=True)
+        for index in range(threads_per_class * 2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30.0)
+        assert thread.is_alive() is False
+    _stop_traffic_service(worker, stop_event, socket_path)
+
+    expected = threads_per_class * calls_per_thread
+    snapshot = _traffic("trafficd")
+    assert failures == []
+    assert (snapshot["work"]["accepted"], snapshot["work"]["completed"]) == (expected, expected)
+    assert (snapshot["probe"]["accepted"], snapshot["probe"]["completed"]) == (expected, expected)
+    assert snapshot["work"]["errors"] == snapshot["probe"]["errors"] == 0
+
+
+def test_a_client_reaches_a_service_whose_socket_is_published_before_it_listens(tmp_path, monkeypatch):
+    """The published socket file is not yet a listening socket, and a client must survive that.
+
+    `run_local_rpc_service` binds the path -- creating it with its final 0600 mode -- and calls
+    `listen()` afterwards. Every readiness predicate built on the file (existence plus mode) is
+    therefore true while the service still refuses connections, and a connect issued in that window
+    fails with ECONNREFUSED against a service that is starting normally. A loaded gate hit exactly
+    that window; this forces it by delaying `listen()`.
+    """
+
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    original_listen = socket.socket.listen
+
+    def delayed_listen(self, backlog=0):
+        time.sleep(0.3)
+        return original_listen(self, backlog)
+
+    monkeypatch.setattr(socket.socket, "listen", delayed_listen)
+    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+    try:
+        # The readiness predicate the tests use is already satisfied here, before `listen()` ran.
+        assert socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600
+        # Negative control, and the exact pre-fix failure: a single connect in this window is
+        # refused, so this test can never pass because the window failed to open.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as premature:
+            premature.settimeout(1.0)
+            with pytest.raises(ConnectionRefusedError):
+                premature.connect(str(service_socket_path))
+        with _connect_to_service(service_socket_path) as client:
+            envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
+            rpc.write_message(client, envelope, envelope.payload)
+            _response_envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
+    finally:
+        stop_event.set()
+        worker.join(timeout=2.0)

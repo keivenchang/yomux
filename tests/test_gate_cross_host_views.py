@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from yolomux_lib.infra.host_identity import HostIdentity
+from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 
 CROSS_HOST_VIEWS_MODULE = "yolomux_lib.cross_host_views"
@@ -28,16 +29,15 @@ def _module() -> Any:
 
 
 def _host_identity() -> HostIdentity:
-    return HostIdentity(
+    return FixtureHostIdentityBuilder(
         stable_host_id="fixture-host-a",
         display_hostname="lin1",
         boot_id="fixture-boot-a",
         pid=4242,
-        process_start_identity="proc:5252",
         process_start_ticks=5252,
         instance_nonce="fixture-instance-a",
         stable_host_id_source="gate fixture",
-    )
+    ).build()
 
 
 def _live_database(path: Path) -> sqlite3.Connection:

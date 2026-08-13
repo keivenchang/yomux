@@ -17,6 +17,7 @@ from yolomux_lib.filesystem import io_ops as filesystem_io
 from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.filesystem import git_ops
+from yolomux_lib.search import bfs_index
 from yolomux_lib.workspace import metadata
 
 from _git_helpers import git, init_repo
@@ -62,9 +63,19 @@ def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
 
 
 def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog, tmp_path):
+    caplog.set_level("INFO", logger=filesystem_search.__name__)
     project = tmp_path / "project"
     project.mkdir()
-    blocked = str(tmp_path / ".azure" / "token")
+    # Register the project as the ONE candidate root so the shared prefilter covers `safe`; with no root
+    # configured there is genuinely nothing to reindex and the prefilter correctly returns [].
+    monkeypatch.setattr(filesystem_search.file_index, "_iter_candidate_index_roots", lambda: [project])
+    # A secret sibling OUTSIDE every index root: no candidate root covers it, so the shared
+    # exclusion prefilter drops it before authorization -- silently, and without a warning.
+    secret = str(tmp_path / ".azure" / "token")
+    # A change UNDER the index root whose parent no longer exists: admitted by the prefilter
+    # (inside the root, not excluded) but unindexable at authorization time (parent gone -> 404).
+    # It must be skipped with exactly ONE deduplicated diagnostic and never abort the batch.
+    vanished = str(project / "gone" / "app.py")
     safe = str(project / "app.py")
     dirty = []
     monkeypatch.setattr(
@@ -76,11 +87,16 @@ def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypat
     monkeypatch.setattr(filesystem_search.file_index, "schedule_refreshes", lambda: 0)
     filesystem_search._LOGGED_BLOCKED_REINDEX_PATHS.clear()
 
-    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
-    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
+    assert filesystem_search.reindex_roots_for_paths([secret, vanished, safe], reason="fs-watch") == []
+    assert filesystem_search.reindex_roots_for_paths([secret, vanished, safe], reason="fs-watch") == []
 
+    # The safe path under the index root is marked dirty on every batch: neither a blocked
+    # sibling nor an unindexable one starves it.
     assert dirty == [Path(safe), Path(safe)]
-    assert caplog.messages.count(f"Skipping blocked filesystem watch path: {blocked}") == 1
+    # The out-of-root secret is dropped by the prefilter without any log spam.
+    assert not any("token" in message for message in caplog.messages)
+    # A disappearing path is diagnostic, not a release-blocking warning.
+    assert [record.levelname for record in caplog.records if vanished in record.message] == ["INFO"]
 
 
 def test_list_directory_returns_entries(tmp_path):
@@ -339,6 +355,7 @@ def test_filesystem_batch_watch_signature_reuses_the_directory_listing_scan(tmp_
             "include_watch_signature": True,
         }],
         "client_scope": "browser",
+        filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
     })
 
     assert len(scans) == 1
@@ -749,6 +766,30 @@ def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
     assert bypasses == []
 
 
+def test_unindex_follower_derives_refreshing_elsewhere_from_the_one_verdict(tmp_path, monkeypatch):
+    # W6: the follower unindex path is a background-refresh control outcome, so
+    # its `ok`/`refreshing_elsewhere` must come from the single classifier, not
+    # from reading the raw `accepted` boolean twice. A live remote owner that
+    # accepts the unindex is refreshing elsewhere; a rejected one is not.
+    monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: False)
+
+    monkeypatch.setattr(
+        filesystem_search.file_index,
+        "request_background_owner_refresh",
+        lambda _payload: {"ok": True, "accepted": True, "role": "search-index", "fallback": False},
+    )
+    accepted = filesystem_search.unindex_root(str(tmp_path))
+    assert accepted == {"root": str(tmp_path), "ok": True, "refreshing_elsewhere": True}
+
+    monkeypatch.setattr(
+        filesystem_search.file_index,
+        "request_background_owner_refresh",
+        lambda _payload: {"ok": False, "accepted": False, "role": "search-index", "fallback": True},
+    )
+    rejected = filesystem_search.unindex_root(str(tmp_path))
+    assert rejected == {"root": str(tmp_path), "ok": False, "refreshing_elsewhere": False}
+
+
 def test_listing_reports_stage_timings_without_exposing_entry_names(tmp_path):
     (tmp_path / "child").mkdir()
     (tmp_path / "private-name.txt").write_text("content\n", encoding="utf-8")
@@ -1035,6 +1076,106 @@ def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation
     third = git_ops.git_repo_info(repo, include_status=False)
     assert third["branch"] == "main"
     assert len(calls) == 4, "watcher-owned invalidation must make Finder recompute"
+
+
+def _reset_repository_generation(root):
+    git_ops._REPOSITORY_GENERATIONS.pop(str(Path(root).expanduser().resolve(strict=False)), None)
+
+
+def test_private_repository_signature_distinguishes_same_commit_branch_switch_without_git_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "file.txt").write_text("content\n", encoding="utf-8")
+    git(repo, "add", "file.txt")
+    git(repo, "commit", "-m", "one")
+
+    on_master = git_ops.private_repository_signature(repo)
+    # A second branch at the SAME commit: identical tree, identical OID, different symbolic ref.
+    git(repo, "branch", "other")
+    git(repo, "checkout", "other")
+    on_other = git_ops.private_repository_signature(repo)
+
+    assert on_master != on_other, "an identical-tree branch switch must change the signature"
+    assert on_master[1] == on_other[1], "the OID is unchanged across a same-commit branch switch"
+    assert on_master[0] == "master" and on_other[0] == "other"
+    # The signature is path-free: it never names a `.git` control path.
+    assert not any(".git" in part for part in (*on_master, *on_other))
+
+
+def test_private_repository_signature_is_unknown_for_non_repo_and_unborn(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert git_ops.private_repository_signature(plain) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    init_repo(unborn)  # a repository with a symbolic HEAD but no commit yet
+    assert git_ops.private_repository_signature(unborn) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+
+
+def test_repository_generation_advances_on_identical_tree_branch_switch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "file.txt").write_text("content\n", encoding="utf-8")
+    git(repo, "add", "file.txt")
+    git(repo, "commit", "-m", "one")
+    _reset_repository_generation(repo)
+
+    first = git_ops.repository_generation(repo)
+    assert first == 1
+    assert git_ops.repository_generation(repo) == first, "an unchanged HEAD does not advance the generation"
+
+    git(repo, "branch", "other")
+    git(repo, "checkout", "other")
+    assert git_ops.repository_generation(repo) == first + 1, "a same-commit branch switch advances the generation"
+    assert git_ops.repository_generation(repo) == first + 1
+
+
+def test_repository_generation_isolates_a_malformed_signature_between_tenants(tmp_path):
+    tenant_a = tmp_path / "a"
+    tenant_b = tmp_path / "b"
+    tenant_a.mkdir()
+    tenant_b.mkdir()
+    # Tenant A is a healthy repository; tenant B is not a repository at all (malformed HEAD).
+    init_repo(tenant_a)
+    (tenant_a / "file.txt").write_text("a\n", encoding="utf-8")
+    git(tenant_a, "add", "file.txt")
+    git(tenant_a, "commit", "-m", "one")
+    _reset_repository_generation(tenant_a)
+    _reset_repository_generation(tenant_b)
+
+    assert git_ops.repository_generation(tenant_b) == 0, "an unreadable repository holds a null generation"
+    assert git_ops.repository_generation(tenant_a) == 1
+    git(tenant_a, "branch", "other")
+    git(tenant_a, "checkout", "other")
+    # A's real branch switch advances A; B's malformed state neither advances nor is disturbed.
+    assert git_ops.repository_generation(tenant_a) == 2
+    assert git_ops.repository_generation(tenant_b) == 0
+
+
+def test_repository_generation_holds_through_a_transient_unreadable_head(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _reset_repository_generation(root)
+    state = {"head_oid": "c0ffee", "head_rc": 0}
+
+    def runner(args):
+        if args[:1] == ["rev-parse"]:
+            return subprocess.CompletedProcess(args, state["head_rc"], f"{state['head_oid']}\n", "")
+        return subprocess.CompletedProcess(args, 0, "master\n", "")
+
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # A transient failure to read HEAD is inconclusive: hold the generation.
+    state["head_rc"] = 1
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # Recovering to the SAME signature must not flap the generation.
+    state["head_rc"] = 0
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # A genuine HEAD change after recovery advances exactly once.
+    state["head_oid"] = "beefbeef"
+    assert git_ops.repository_generation(root, runner=runner) == 2
 
 
 def test_git_repo_info_cache_ttl_is_stable_and_desynchronizes_repo_roots():
@@ -1690,6 +1831,78 @@ def test_search_files_canonicalizes_symlink_root(tmp_path):
     assert payload["files"][0]["realpath"] == os.path.realpath(real_root / "ABC-2218.md")
 
 
+def test_search_files_does_not_serve_startup_metadata_before_first_directory_publish(monkeypatch, tmp_path):
+    root = tmp_path / "notes"
+    root.mkdir()
+    target = root / "ABC-2218.md"
+    target.write_text("# notes\n", encoding="utf-8")
+    file_index = filesystem_search.file_index
+    file_index.clear_memory_indexes()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
+    startup_claimed = threading.Event()
+    release_build = threading.Event()
+
+    def held_runner(build_root, skip_dirs, **options):
+        build = bfs_index.ProgressiveBuild(
+            build_root,
+            skip_dirs,
+            exclude_path=options.get("exclude_path"),
+            exclude_signature=options.get("exclude_signature", ""),
+            generation=options["generation"],
+            operation=options.get("operation", ""),
+            tombstone_identity=options.get("tombstone_identity"),
+        )
+        with build:
+            assert build.enqueue_startup()
+            startup_claimed.set()
+            assert release_build.wait(10)
+            build.run()
+        return True
+
+    real_search_disk_index = file_index.search_disk_index
+
+    def search_after_startup_claim(*args, **kwargs):
+        assert startup_claimed.wait(10)
+        return real_search_disk_index(*args, **kwargs)
+
+    monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", held_runner)
+    monkeypatch.setattr(file_index, "search_disk_index", search_after_startup_claim)
+    try:
+        payload = filesystem.search_files(str(root), "ABC-2218", 20, recursive=True)
+        assert [item["path"] for item in payload["files"]] == [str(target)]
+        assert payload["files"][0]["realpath"] == str(target)
+        policy = filesystem_search._search_index_policy(root)
+        startup_metadata = file_index._authoritative_store_metadata(root)
+        assert startup_metadata is not None
+        assert file_index._row_serving_snapshot_metadata(startup_metadata) is False
+        assert file_index._load_disk(root, policy["skip_dirs"], policy["exclude_signature"]) is None
+    finally:
+        release_build.set()
+        with file_index._REGISTRY_LOCK:
+            index = file_index._REGISTRY[str(root)]
+        assert index.completion.wait(10)
+
+    def live_walk_forbidden(*_args, **_kwargs):
+        raise AssertionError("a published layer-one snapshot must own the search result")
+
+    monkeypatch.setattr(filesystem_search, "_search_full_tree", live_walk_forbidden)
+    published = filesystem.search_files(str(root), "ABC-2218", 20, recursive=True)
+    assert [item["path"] for item in published["files"]] == [str(target)]
+    assert published["index_state"] == "ready"
+    try:
+        policy = filesystem_search._search_index_policy(root)
+        published_metadata = file_index._raw_snapshot_metadata(
+            root,
+            policy["skip_dirs"],
+            policy["exclude_signature"],
+        )
+        assert published_metadata is not None
+        assert file_index._row_serving_snapshot_metadata(published_metadata) is True
+        assert file_index._load_disk(root, policy["skip_dirs"], policy["exclude_signature"]) is not None
+    finally:
+        file_index.clear_memory_indexes()
+
+
 def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_path):
     root = tmp_path / "vortex"
     logs = root / "commits" / "logs"
@@ -2254,3 +2467,56 @@ def test_list_directory_flags_symlinks_with_target(tmp_path):
 
     assert by_name["real_file.txt"]["is_symlink"] is False
     assert "symlink_target" not in by_name["real_file.txt"]
+
+
+def test_lexical_path_rule_and_worker_parse_are_one_rule_split_at_the_thread_boundary(monkeypatch):
+    """One rule, two entry points: the lexical half is web-safe, the parse half may block.
+
+    `os.path.expanduser` on `~user/...` is an NSS/passwd lookup that can hang on a networked
+    passwd source, so it belongs to the worker.  `parsed_request_path` is the only caller that
+    adds it, and it reaches the refusals through `validate_request_path_lexical` rather than
+    restating them, so acceptance and execution cannot disagree.
+    """
+
+    expansions = []
+    real_expanduser = os.path.expanduser
+
+    def recording_expanduser(path):
+        expansions.append(path)
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", recording_expanduser)
+
+    # The lexical half returns the request string untouched and consults no name service.
+    assert filesystem_paths.validate_request_path_lexical("~alice/repo/note.txt") == "~alice/repo/note.txt"
+    assert filesystem_paths.validate_request_path_lexical("/repo/note.txt") == "/repo/note.txt"
+    assert expansions == [], expansions
+
+    # The worker half applies the same rule, then expands.
+    assert filesystem_paths.parsed_request_path("~/repo/note.txt") == Path(real_expanduser("~/repo/note.txt"))
+    assert expansions == ["~/repo/note.txt"], expansions
+
+    # Every refusal is decided before the expansion, by the shared owner.
+    expansions.clear()
+    for raw, message_key in (
+        ("", "fs.error.pathRequired"),
+        (None, "fs.error.pathRequired"),
+        ("~alice/bad\nname", "fs.error.pathIllegal"),
+        ("~alice/bad\x00name", "fs.error.pathIllegal"),
+        ("relative/note.txt", "fs.error.pathAbsolute"),
+    ):
+        for entry_point in (filesystem_paths.validate_request_path_lexical, filesystem_paths.parsed_request_path):
+            with pytest.raises(FilesystemError) as refusal:
+                entry_point(raw)
+            assert refusal.value.message_key == message_key, (entry_point.__name__, raw)
+    assert expansions == [], "a refused request must never reach the name service"
+
+    # The rule has exactly one implementation: only the lexical owner raises these three.
+    source = Path(filesystem_paths.__file__).read_text(encoding="utf-8")
+    for message_key in ("fs.error.pathRequired", "fs.error.pathIllegal", "fs.error.pathAbsolute"):
+        assert source.count(message_key) == 1, f"{message_key} has a second implementation"
+    # Compiled names, not source text: the lexical owner cannot reach a name-service call at all,
+    # and the expansion exists in exactly one function.
+    assert "expanduser" not in filesystem_paths.validate_request_path_lexical.__code__.co_names
+    assert "expanduser" in filesystem_paths.parsed_request_path.__code__.co_names
+    assert "validate_request_path_lexical" in filesystem_paths.parsed_request_path.__code__.co_names

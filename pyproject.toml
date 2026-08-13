@@ -1,8 +1,8 @@
 # Standard Python project metadata. `pip install -e ".[yoagent]"` installs YOLOmux's deps and
 # the `yolomux` command; pip itself enforces `requires-python` and resolves the dependency groups,
 # so Python-version and dependency prerequisites are checked by the standard tooling (not ad-hoc).
-# The web-terminal assets (xterm.js, via npm) and the served bundle are a separate build step —
-# see `make setup` / the Makefile, which wraps this plus `npm install` + `tools/static_build.py`.
+# The tracked web-terminal assets and generated served bundle stay outside the Python wheel. Source
+# and editable installs use static/vendor directly; see `make xterm` for pinned upstream verification.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -28,11 +28,12 @@ yoagent = [
 ]
 # Test / dev tooling.
 dev = [
+  "pytest-timeout",
   "pytest-xdist",
 ]
 
 [project.scripts]
-yolomux = "yolomux_lib.cli:main"
+yolomux = "yolomux:main"
 
 [tool.setuptools]
 py-modules = ["yolomux"]

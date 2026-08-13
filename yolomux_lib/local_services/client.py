@@ -5,6 +5,9 @@ from __future__ import annotations
 import errno
 import traceback
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -12,10 +15,12 @@ from time import monotonic as monotonic_clock
 from typing import Any
 
 from ..server_logs import emit_server_log
+from .registry import LOCAL_SERVICE_START_TIMEOUT_SECONDS
 from .registry import LocalServiceRegistry
 from .registry import LocalServiceSpec
 from .rpc import LOCAL_RPC_DEADLINE_REASONS
 from .rpc import LOCAL_RPC_VERSION
+from .rpc import LOCAL_SERVICE_ERROR_BUSY
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request as local_service_request
@@ -33,14 +38,73 @@ class TransportFailure:
     client_elapsed_ms: float
 
 
-def local_service_failure_is_transient(response: Mapping[str, object]) -> bool:
+class DeferredTransportErrors:
+    """Operation-scoped owner for transport failures that may recover before its deadline."""
+
+    def __init__(self, client: "LocalServiceClient") -> None:
+        self.client = client
+        self.failure: TransportFailure | None = None
+
+    def capture(self, failure: TransportFailure) -> None:
+        self.failure = failure
+
+    def publish(self) -> None:
+        if self.failure is not None:
+            self.client._emit_transport_error(self.failure)
+            self.failure = None
+
+
+_DEFERRED_TRANSPORT_ERRORS: ContextVar[tuple[DeferredTransportErrors, ...]] = ContextVar(
+    "local_service_deferred_transport_errors",
+    default=(),
+)
+
+
+@contextmanager
+def defer_local_service_transport_errors(client: "LocalServiceClient"):
+    """Keep retryable poll diagnostics private until the operation owner publishes one."""
+
+    scope = DeferredTransportErrors(client)
+    token = _DEFERRED_TRANSPORT_ERRORS.set((*_DEFERRED_TRANSPORT_ERRORS.get(), scope))
+    try:
+        yield scope
+    finally:
+        _DEFERRED_TRANSPORT_ERRORS.reset(token)
+
+
+def deferred_transport_errors(client: object):
+    """Return a real deferral scope for typed clients and a no-op scope for test doubles."""
+
+    if isinstance(client, LocalServiceClient):
+        return defer_local_service_transport_errors(client)
+    return nullcontext(None)
+
+
+@dataclass(frozen=True)
+class LocalServicePollingCapabilities:
+    lifecycle_recovery: bool
+
+
+def local_service_polling_capabilities(client: object) -> LocalServicePollingCapabilities:
+    """Describe retry ownership without guessing from attributes on arbitrary client doubles."""
+
+    return LocalServicePollingCapabilities(lifecycle_recovery=isinstance(client, LocalServiceClient))
+
+
+def local_service_failure_is_transient(
+    response: Mapping[str, Any],
+    *,
+    capabilities: LocalServicePollingCapabilities | None = None,
+) -> bool:
     """Return whether a local-service failure is safe for a bounded retry."""
 
     if response.get("ok") is True or response.get("terminal") is True:
         return False
     transport_error = str(response.get("_transport_error") or "").strip().lower()
-    if transport_error in {"timeout", "absent", "refused"}:
+    if transport_error == "timeout":
         return True
+    if transport_error in {"absent", "refused"}:
+        return capabilities is None or capabilities.lifecycle_recovery
     error = str(response.get("error") or "").strip().lower()
     # A deadline breach is the same physical event as the `timeout` above -- the peer could not
     # answer in time -- so it must be retryable for the same reason.  Matching one hand-written
@@ -52,29 +116,33 @@ def local_service_failure_is_transient(response: Mapping[str, object]) -> bool:
         status = int(response.get("status") or 0)
     except (TypeError, ValueError):
         status = 0
-    return status == HTTPStatus.SERVICE_UNAVAILABLE or error in {"refreshing", "service busy"}
+    return status == HTTPStatus.SERVICE_UNAVAILABLE or error in {"refreshing", LOCAL_SERVICE_ERROR_BUSY}
 
 
 class LocalServiceClient:
     """Thin typed client that owns shared registry/RPC behavior once."""
 
-    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, extra_args: tuple[str, ...] = (), code_revision: str = "", build_revision: int = 0, service_dir: Path | None = None):
+    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, start_timeout_seconds: float | None = None, extra_args: tuple[str, ...] = (), code_revision: str = "", build_revision: int = 0, service_dir: Path | None = None):
         requested_socket_path = Path(socket_path)
         requested_service_dir = Path(service_dir) if service_dir is not None else requested_socket_path.parent
         self.service = service
         self.socket_path = safe_socket_path(requested_socket_path, prefix=f"yolomux-{service}")
+        spec_start_timeout = LOCAL_SERVICE_START_TIMEOUT_SECONDS if start_timeout_seconds is None else start_timeout_seconds
         self.registry = LocalServiceRegistry(
             requested_service_dir,
-            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, extra_args=extra_args, code_revision=code_revision, build_revision=build_revision),
+            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, start_timeout_seconds=spec_start_timeout, extra_args=extra_args, code_revision=code_revision, build_revision=build_revision),
             socket_path=self.socket_path,
             service_dir=requested_service_dir,
         )
+        self._reported_terminal_startup_reason = ""
 
     def _request_once(
         self,
         payload: dict[str, Any],
         timeout: float,
         request_binary: bytes = b"",
+        *,
+        probe: bool = False,
     ) -> tuple[dict[str, Any], bytes, TransportFailure | None]:
         action = str(payload.get("action") or "request")
         request_id = ""
@@ -82,12 +150,16 @@ class LocalServiceClient:
         try:
             envelope = new_envelope(self.service, action, payload, timeout_seconds=timeout)
             request_id = envelope.request_id
+            # The transport owns the retained per-service request/error/latency aggregate;
+            # `probe` only forwards the caller's explicit classification for a monitoring
+            # probe that cannot run inside `local_service_probe_scope()`.
             response, binary = local_service_request(
                 self.socket_path,
                 envelope,
                 binary=request_binary,
                 timeout_seconds=timeout,
                 fallback_legacy=True,
+                probe=probe,
             )
         except (OSError, LocalRpcError) as exc:
             self.registry.note_rpc_failure(type(exc).__name__)
@@ -150,13 +222,22 @@ class LocalServiceClient:
             delivery=self._transport_error(exc),
         )
 
+    def _report_transport_error(self, failure: TransportFailure) -> None:
+        for scope in reversed(_DEFERRED_TRANSPORT_ERRORS.get()):
+            if scope.client is self:
+                scope.capture(failure)
+                return
+        self._emit_transport_error(failure)
+
     def request_with_binary(
         self,
         payload: dict[str, Any],
         timeout: float = 0.5,
         request_binary: bytes = b"",
+        *,
+        probe: bool = False,
     ) -> tuple[dict[str, Any], bytes]:
-        response, binary, error = self._request_once(payload, timeout, request_binary)
+        response, binary, error = self._request_once(payload, timeout, request_binary, probe=probe)
         # A missing or refused socket is a demand against a service that may
         # have completed idle shutdown while its launcher still owns an
         # unreaped child. The shared registry is the only lifecycle owner: it
@@ -165,7 +246,7 @@ class LocalServiceClient:
         # cannot establish a serving socket.
         if response.get("_transport_error") not in {"absent", "refused"}:
             if error is not None:
-                self._emit_transport_error(error)
+                self._report_transport_error(error)
             return response, binary
         if not self.registry.ensure_started():
             if not self.registry.starts_allowed():
@@ -177,20 +258,40 @@ class LocalServiceClient:
                     "_transport_error": "stopped",
                 }, b""
             if error is not None:
-                self._emit_transport_error(error)
+                self._report_transport_error(error)
             return response, binary
-        response, binary, retry_error = self._request_once(payload, timeout, request_binary)
+        response, binary, retry_error = self._request_once(payload, timeout, request_binary, probe=probe)
         if retry_error is not None:
-            self._emit_transport_error(retry_error)
+            self._report_transport_error(retry_error)
         return response, binary
 
-    def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
-        response, _binary = self.request_with_binary(payload, timeout=timeout)
+    def request(self, payload: dict[str, Any], timeout: float = 0.5, *, probe: bool = False) -> dict[str, Any]:
+        response, _binary = self.request_with_binary(payload, timeout=timeout, probe=probe)
         return response
 
     def ensure_started(self) -> bool:
-        return self.registry.ensure_started()
+        started = self.registry.ensure_started()
+        if started:
+            self._reported_terminal_startup_reason = ""
+            return True
+        failure = self.registry.failure_response()
+        reason = str(failure.get("reason") or "")
+        if failure.get("terminal") is True and reason != self._reported_terminal_startup_reason:
+            emit_server_log(
+                "error",
+                f"local-service:{self.service}",
+                reason,
+                category="startup",
+                dedupe_key=f"local-service:{self.service}:startup:{reason}",
+                dedupe_seconds=5.0,
+                route=f"local-service:{self.service}",
+                event="startup",
+                delivery="terminal",
+            )
+            self._reported_terminal_startup_reason = reason
+        return False
 
     def retry(self) -> bool:
         self.registry.retry()
-        return self.registry.ensure_started()
+        self._reported_terminal_startup_reason = ""
+        return self.ensure_started()

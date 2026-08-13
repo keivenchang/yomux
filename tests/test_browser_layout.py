@@ -4,6 +4,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.helpers.browser_scenarios import assert_terminal_wheel_observation, terminal_wheel_observation
+from tests.helpers.journey_phases import JourneySentinel, STATS_LOGS_PHASES, YOCHAT_PHASES
+from tests.helpers.agent_status_fixtures import agent_status_glyph_html as _agent_status_glyph_html
+from tests.helpers.agent_status_fixtures import tabber_window_button_html as _tabber_window_button_html
+from tests.helpers.agent_status_fixtures import working_agent_glyph_html as _working_agent_glyph_html
+from tests.subsystems import browser_harness_lifecycle
 
 from tests.browser_helpers import browser_layout as browser_layout_module
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
@@ -19,87 +25,10 @@ from yolomux_lib.server_logs import ServerLogRing
 from yolomux_lib.watchd_client import WatchClient
 
 
-def test_browser_wait_timeout_has_one_xdist_only_floor():
-    assert browser_wait_timeout(5, worker="gw0") == XDIST_BROWSER_WAIT_FLOOR_SECONDS
-    assert browser_wait_timeout(15, worker="gw0") == 15
-    assert browser_wait_timeout(5, worker="") == 5
-
-
-def test_session_scoped_browser_reuse_is_the_default(monkeypatch):
-    monkeypatch.delenv(SESSION_SCOPED_BROWSER_REUSE_ENV, raising=False)
-    assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "session"
-
-
-def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch):
-    """The browser gate must expose --check's specific failure, not invent one."""
-    completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=1,
-        stdout="",
-        stderr="stale static assets: yolomux.js\n",
-    )
-    monkeypatch.setattr(browser_layout_module.subprocess, "run", lambda *_args, **_kwargs: completed)
-    monkeypatch.setattr(browser_layout_module, "_BUNDLE_FRESHNESS_CHECKED", False)
-
-    with pytest.raises(AssertionError) as raised:
-        browser_layout_module._require_current_generated_bundle()
-    assert str(raised.value) == "stale static assets: yolomux.js\n"
-
-
-def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch):
-    calls = []
-
-    class SwitchTo:
-        def window(self, handle):
-            calls.append(("switch", handle))
-
-    class Driver:
-        window_handles = ["primary", "popout"]
-        current_window_handle = "primary"
-        _yolomux_primary_window_handle = "primary"
-        switch_to = SwitchTo()
-
-        def close(self):
-            calls.append(("close",))
-
-        def execute_cdp_cmd(self, command, params):
-            calls.append(("cdp", command, params))
-
-        def execute_script(self, source):
-            calls.append(("script", source))
-            return "http://current.test" if source == "return location.origin;" else None
-
-        def delete_all_cookies(self):
-            calls.append(("cookies",))
-
-        def get_log(self, kind):
-            calls.append(("log", kind))
-            return []
-
-        def get(self, url):
-            calls.append(("get", url))
-
-        def set_window_size(self, width, height):
-            calls.append(("size", width, height))
-
-    monkeypatch.setattr(browser_layout_module, "_FIXTURE_HTTP_BASE", "http://fixture.test")
-    monkeypatch.setattr(browser_layout_module, "remove_browser_test_new_document_scripts", lambda driver: calls.append(("scripts",)))
-    browser_layout_module._reset_reused_browser_state(Driver())
-
-    assert ("close",) in calls
-    assert ("get", "about:blank") in calls
-    assert calls.index(("get", "about:blank")) < next(
-        index for index, call in enumerate(calls) if call[0] == "script" and "document.body.focus" in call[1]
-    )
-    assert ("log", "browser") in calls
-    assert ("size", *DEFAULT_BROWSER_WINDOW_SIZE) in calls
-    cdp = [(call[1], call[2]) for call in calls if call[0] == "cdp"]
-    assert ("Browser.resetPermissions", {}) in cdp
-    assert ("Browser.setDownloadBehavior", {"behavior": "deny"}) in cdp
-    assert ("Emulation.clearDeviceMetricsOverride", {}) in cdp
-    assert ("Emulation.setEmulatedMedia", {"features": []}) in cdp
-    assert ("Storage.clearDataForOrigin", {"origin": "http://current.test", "storageTypes": "all"}) in cdp
-    assert ("Storage.clearDataForOrigin", {"origin": "http://fixture.test", "storageTypes": "all"}) in cdp
+def test_browser_wait_timeout_has_one_xdist_only_floor(): browser_harness_lifecycle.assert_browser_wait_timeout_has_one_xdist_only_floor()
+def test_session_scoped_browser_reuse_is_the_default(monkeypatch): browser_harness_lifecycle.assert_session_scoped_browser_reuse_is_the_default(monkeypatch)
+def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch): browser_harness_lifecycle.assert_browser_bundle_guard_passes_through_static_build_failure(monkeypatch)
+def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch): browser_harness_lifecycle.assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch)
 
 
 def test_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch):
@@ -289,7 +218,8 @@ def test_live_runtime_raw_html_builder_has_no_external_callers():
 def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     source = (REPO_ROOT / "tests" / "browser_helpers" / "browser_layout.py").read_text(encoding="utf-8")
 
-    assert source.count("page.write_text(") == 1  # the single serve_repo_fixture_page write owner
+    assert source.count("_FIXTURE_CONTENT_ROOT.write_page(") == 1
+    assert "REPO_ROOT / f\".browser-fixture-" not in source
     assert source.count("serve_repo_fixture_page(") == 3  # one definition plus the two fixture loaders
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
@@ -978,69 +908,6 @@ def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(br
     assert long_name["scrollWidth"] <= long_name["clientWidth"], long_name
 
 
-_CLAUDE_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
-  <rect width="24" height="24" rx="5.5" fill="#cf7554"/>
-  <g fill="#fff7f1">
-    <path d="M11.1 2.4h1.8l1.1 7.9-2 .6-2-.6 1.1-7.9z"/>
-    <path d="m17.8 4.3 1.4 1.1-4.3 6.7-2.1-1.3 5-6.5z"/>
-    <path d="m21.5 10.2.3 1.8-8.2 2-1-2.3 8.9-1.5z"/>
-    <path d="m20.2 16.8-1.1 1.4-6.7-4.3 1.3-2.1 6.5 5z"/>
-    <path d="m13.8 21.5-1.8.3-2-8.2 2.3-1 1.5 8.9z"/>
-    <path d="m6.2 19.7-1.4-1.1 4.3-6.7 2.1 1.3-5 6.5z"/>
-    <path d="m2.5 13.8-.3-1.8 8.2-2 1 2.3-8.9 1.5z"/>
-    <path d="m3.8 7.2 1.1-1.4 6.7 4.3-1.3 2.1-6.5-5z"/>
-    <circle cx="12" cy="12" r="2.2"/>
-  </g>
-</svg>"""
-
-_CODEX_WORKING_ICON_SVG = """<svg viewBox="0 0 24 24" aria-hidden="true">
-  <path fill="#667ef8" d="M7.3 20.8c-3.1 0-5.7-2.4-5.9-5.5-.2-2.4 1.1-4.6 3.1-5.7C4.8 5.9 7.9 3 11.8 3c3.3 0 6.2 2.2 7 5.4 2.4.7 4 2.8 4 5.4 0 3.2-2.6 5.8-5.8 5.8-.9 1.1-2.2 1.8-3.8 1.8-1.2 0-2.3-.4-3.1-1.1-.8.3-1.8.5-2.8.5z"/>
-  <path fill="#fff" d="M6.4 8.2c.5-.5 1.2-.5 1.7 0l2.8 2.8c.5.5.5 1.2 0 1.7l-2.8 2.8c-.5.5-1.2.5-1.7 0s-.5-1.2 0-1.7l1.9-1.9-1.9-1.9c-.5-.5-.5-1.3 0-1.8zM13 13.2h5.1c.7 0 1.2.5 1.2 1.2s-.5 1.2-1.2 1.2H13c-.7 0-1.2-.5-1.2-1.2s.5-1.2 1.2-1.2z"/>
-</svg>"""
-
-
-def _agent_status_glyph_html(kind, state, element_id, *, subwindow=False):
-    svg = _CLAUDE_WORKING_ICON_SVG if kind == "claude" else _CODEX_WORKING_ICON_SVG
-    label = f"{'Claude' if kind == 'claude' else 'Codex'} {state}"
-    dot_classes = [
-        "status-indicator",
-        "status-indicator--dot",
-        f"status-indicator--{state}",
-        "heartbeat-pulse",
-        "agent-window-activity-icon",
-        "agent-window-status-dot",
-        f"agent-window-activity-icon--{state}",
-    ]
-    if state in ("attention", "cooldown"):
-        dot_classes.append("attention-pulse")
-    return f"""
-      <span class="agent-window-activity{' agent-window-activity--subwindow' if subwindow else ''} agent-window-activity--{state}" title="{label}" aria-label="{label}" style="--attention-animation-delay:0s">
-        <span id="{element_id}" class="agent-icon {kind} agent-window-activity-icon agent-window-agent-icon agent-window-activity-icon--{state} agent-window-agent-icon--{state}" aria-label="{label}" title="{label}">
-          {svg}
-        </span>
-        <span id="{element_id}-dot" class="{' '.join(dot_classes)}" aria-hidden="true">●</span>
-      </span>
-    """
-
-
-def _working_agent_glyph_html(kind, element_id, *, subwindow=False):
-    return _agent_status_glyph_html(kind, "working", element_id, subwindow=subwindow)
-
-
-def _tabber_window_button_html(kind, label, glyph_html, active=False):
-    active_class = " active" if active else ""
-    return f"""
-      <span class="tabber-window-token tmux-window-bar" data-tmux-window-label-mode="names" data-tmux-window-bar-context="info">
-        <span class="tab tmux-window-button tabber-window-button{active_class}" data-tabber-window-button="shared">
-          <span class="tmux-window-name-label">
-            {glyph_html}
-            <span class="tmux-window-name-text">{label}</span>
-          </span>
-        </span>
-      </span>
-    """
-
-
 def test_repo_chip_menu_uses_shared_left_aligned_branch_and_status_columns(browser, tmp_path):
     load_static_html_fixture(browser, tmp_path, "repo-chip-grid-columns.html", page_html("""
       <div class="terminal-context-menu repo-chip-menu" style="width:760px">
@@ -1125,7 +992,11 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
             const text = view?.textContent?.trim() || '';
             return view && !view.hidden && text.length > 30 && !/^loading/i.test(text) ? {
               visible: view.offsetParent !== null,
-              grid: Boolean(view.querySelector('.js-debug-system-grid')),
+              // The default Daemons view is the service roster, not the retired card grid. The
+              // grid survives only inside the collapsed Advanced diagnostics section, so its
+              // absence here is the layout contract, not a missing render.
+              roster: Boolean(view.querySelector('[data-js-debug-roster]')),
+              grid: view.querySelector('.js-debug-system-grid') === null,
               inside: view.scrollWidth <= view.clientWidth + 1 || getComputedStyle(view).overflowX === 'auto',
             } : false;
             """
@@ -1444,21 +1315,31 @@ def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path
         lambda driver: driver.execute_script(
             """
             if (typeof refreshDebugSystemViews !== 'function' || typeof jsDebugSystemState !== 'object') return false;
+            // The YO!stats sampler moved from a standalone card into statsd's own roster row
+            // disclosure, so this drives the payload through the roster and opens that row. Its
+            // contents are built lazily, which is why the row has to be expanded first.
             const base = {
               ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {}, caches: {},
-              client_events: {}, chat: {}, cpu_budget: {}, local_services: {totals: {}, services: [{
-                service: 'statsd', sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
-                  state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,
-                }},
-              }]}, top_endpoints: [], top_background_work: [],
+              client_events: {}, chat: {}, cpu_budget: {}, local_services: {
+                schema_version: 3, inventory: ['statsd'], totals: {}, services: [{
+                  id: 'statsd', service: 'statsd', label: 'YO!stats', state: 'running', pid: 4242, metrics: {},
+                  sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
+                    state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,
+                  }},
+                }],
+              }, top_endpoints: [], top_background_work: [],
             };
             jsDebugSystemState.payload = base;
             refreshDebugSystemViews();
+            const toggle = document.querySelector('[data-js-debug-roster-toggle="statsd"]');
+            if (!toggle) return false;
+            if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
             const warning = document.querySelector('[data-js-debug-usage-health="warning"]');
             if (!warning || warning.getAttribute('role') !== 'alert' || !warning.textContent.includes('usage atoms are stale')) return false;
             base.local_services.services[0].usage.health = {
               state: 'ok', reason: 'transcripts and usage atoms are advancing', last_accepted_atom_age_seconds: 1,
             };
+            jsDebugSystemState.payload = {...base, generated_at: base.generated_at + 1};
             refreshDebugSystemViews();
             const healthy = document.querySelector('[data-js-debug-usage-health="ok"]');
             return {
@@ -1857,8 +1738,8 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
           clearJsDebugGraphData();
           resetJsDebugHistoryReadiness();
           jsDebugStatsPollState.firstSampleReceived = false;
-          jsDebugGraphRangeSeconds = rangeSeconds;
-          jsDebugGraphResolutionOverrideSeconds = 60;
+          debugRuntimeState.graphRangeSeconds = rangeSeconds;
+          debugRuntimeState.graphResolutionOverrideSeconds = 60;
           const client = YOLOmuxStatsCurrent.createBrowserClient({
             fetch: fixtureFetch,
             EventSource: FixtureEventSource,
@@ -1956,7 +1837,7 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
         const originalResolution = debugGraphDisplayResolutionMs;
         const base = originalNow();
         clearJsDebugGraphData();
-        jsDebugGraphRangeSeconds = 900;
+        debugRuntimeState.graphRangeSeconds = 900;
         for (let index = 90; index >= 0; index -= 1) {
           const start = Math.floor((base - (index * 10000)) / 10000) * 10;
           debugGraphApplyServerRecord({start, duration: 10, cpu_total_percent: 25 + (index % 5), cpu_count: 1});
@@ -2096,6 +1977,8 @@ def test_current_stats_api_sse_log_preserves_reader_scroll_in_place_and_on_rebui
 
 
 def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path, monkeypatch):
+    journey = JourneySentinel(STATS_LOGS_PHASES)
+    journey.enter("shared-runtime-setup")
     secret = "fixture-share-token-never-log"
     socket_path = tmp_path / "watchd-producer.sock"
     watchd_client = WatchClient(socket_path=socket_path)
@@ -2261,7 +2144,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
           const initialHiddenPoll = await pollDebugLogs();
           const initialHiddenRequests = requests.logs;
           loadJsDebugStatsUiPreferences();
-          jsDebugSubTab = 'logs';
+          debugRuntimeState.subTab = 'logs';
           saveJsDebugStatsUiPreferences();
           applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
             focusSession: debugPaneItemId,
@@ -2470,7 +2353,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
           const hiddenRequests = requests.logs;
 
           loadJsDebugStatsUiPreferences();
-          jsDebugSubTab = 'logs';
+          debugRuntimeState.subTab = 'logs';
           saveJsDebugStatsUiPreferences();
           applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
             focusSession: debugPaneItemId,
@@ -2687,6 +2570,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
         """,
         watchd_record,
     )
+    journey.enter("stats-and-logs-observations")
     assert metrics.get("error") is None, metrics
     initial_phase = metrics["initialPhase"]
     redacted = "[redacted-share-token]"
@@ -2891,6 +2775,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     assert all(metrics["narrow"].values()), metrics
     assert metrics["emptySelection"] == {"size": 0, "rows": 0, "pressed": []}, metrics
 
+    journey.enter("empty-filter-reload")
     reload_url = browser.current_url.split("?", 1)[0] + "?sessions=1"
     browser.get(reload_url)
     wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
@@ -2933,6 +2818,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     # The empty saved level set above hides rows while no records exist, so it cannot by itself prove
     # the saved filter survived the reload.  Save a non-empty level set, reload with records present,
     # and require the reloaded filter to drop the warning record and keep the error record.
+    journey.enter("persisted-filter-reload")
     persisted_logs = ServerLogRing()
     persisted_error = persisted_logs.emit(
         "error",
@@ -2983,7 +2869,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
                 """
                 return {
                   panel: document.querySelector('.js-debug-panel') !== null,
-                  subTab: typeof jsDebugSubTab === 'string' ? jsDebugSubTab : '',
+                  subTab: typeof debugRuntimeState === 'object' && typeof debugRuntimeState.subTab === 'string' ? debugRuntimeState.subTab : '',
                   views: [...document.querySelectorAll('[data-js-debug-subview]')]
                     .map(view => ({name: view.dataset.jsDebugSubview, hidden: view.hidden})),
                 };
@@ -3156,6 +3042,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
         applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
         """
     )
+    journey.manifest()
 
 
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone, *, stride=2):
@@ -5976,78 +5863,7 @@ def test_standalone_svg_blocked_tags_share_dom_and_string_policy(browser, tmp_pa
 
 
 def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmux(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
-            return typeof sessionPaneIsAlternateScreen === 'function'
-              && document.querySelector('#term-1 .xterm') !== null
-              && socket?.readyState === WebSocket.OPEN;
-            """
-        )
-    )
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        const container = document.getElementById('term-1');
-        const screen = container.querySelector('.xterm');
-        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
-        const forwarded = [];
-        screen.addEventListener('wheel', event => {
-          if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
-            forwarded.push({deltaY: event.deltaY, deltaMode: event.deltaMode});
-          }
-        });
-        const signalState = alternateOn => ({
-          ok: true,
-          sessions: {'1': {}},
-          windows: [{
-            key: '1:0', session: '1', window_index: '0', active: true,
-            panes: [{
-              window_key: '1:0', session: '1', window_index: '0', pane_index: '0',
-              target: '%11', pane_id: '%11', current_command: alternateOn ? 'claude' : 'bash',
-              active: true, alternate_on: alternateOn, pid: 1234, dead: false,
-            }],
-          }],
-        });
-
-        tmuxSignalState = signalState(true);
-        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
-        const mouseForwarded = forwarded.slice();
-        for (let index = 0; index < 5; index += 1) {
-          screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 7, deltaMode: 0, bubbles: true, cancelable: true}));
-        }
-        const touchpadForwarded = forwarded.slice(mouseForwarded.length);
-
-        tmuxSignalState = signalState(false);
-        const beforeNormal = forwarded.length;
-        screen.dispatchEvent(new WheelEvent('wheel', {deltaY: 105, deltaMode: 0, bubbles: true, cancelable: true}));
-        setTimeout(() => {
-          const tmuxScrollFrames = socket.sent
-            .map(message => {
-              try { return JSON.parse(message); } catch (_error) { return null; }
-            })
-            .filter(message => message?.type === 'tmux-scroll');
-          done({
-            mouseForwarded,
-            touchpadForwarded,
-            normalForwarded: forwarded.slice(beforeNormal),
-            tmuxScrollFrames,
-            alternateAfterSwitch: sessionPaneIsAlternateScreen('1'),
-            errors: jsDebugFailureEvents('error'),
-            rejections: jsDebugFailureEvents('rejection'),
-          });
-        }, 60);
-        """
-    )
-    assert metrics["mouseForwarded"] == [{"deltaY": 1, "deltaMode": 1}] * 3, metrics
-    assert metrics["touchpadForwarded"] == [{"deltaY": 1, "deltaMode": 1}], metrics
-    assert metrics["normalForwarded"] == [], metrics
-    assert metrics["tmuxScrollFrames"] == [{"type": "tmux-scroll", "direction": "down", "lines": 3}], metrics
-    assert metrics["alternateAfterSwitch"] is False, metrics
-    assert metrics["errors"] == [], metrics
-    assert metrics["rejections"] == [], metrics
+    assert_terminal_wheel_observation(terminal_wheel_observation(browser, tmp_path))
 
 
 def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_inertia(browser, tmp_path):
@@ -9540,9 +9356,35 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
         const done = arguments[0];
         (async () => {
           const originalEnsureSession = ensureSession;
+          const originalEnsureTerminalRunning = ensureTerminalRunning;
+          const originalUpdatePanelSlot = updatePanelSlot;
+          const originalRenderAutoApproveButtons = renderAutoApproveButtons;
+          const originalUpdatePanelInactiveOverlays = updatePanelInactiveOverlays;
           const originalApiFetchJson = apiFetchJson;
           const originalFetch = window.fetch;
           try {
+            const topologyCounts = {
+              slotUpdates: {},
+              autoApproveRenders: 0,
+              inactiveOverlayReconciliations: 0,
+              terminalStarts: {},
+            };
+            updatePanelSlot = (panel, session, slot) => {
+              topologyCounts.slotUpdates[session] = (topologyCounts.slotUpdates[session] || 0) + 1;
+              return originalUpdatePanelSlot(panel, session, slot);
+            };
+            renderAutoApproveButtons = () => {
+              topologyCounts.autoApproveRenders += 1;
+              return originalRenderAutoApproveButtons();
+            };
+            updatePanelInactiveOverlays = () => {
+              topologyCounts.inactiveOverlayReconciliations += 1;
+              return originalUpdatePanelInactiveOverlays();
+            };
+            ensureTerminalRunning = session => {
+              topologyCounts.terminalStarts[session] = (topologyCounts.terminalStarts[session] || 0) + 1;
+              return originalEnsureTerminalRunning(session);
+            };
             let resolveEnsure;
             ensureSession = () => new Promise(resolve => { resolveEnsure = resolve; });
             transcriptMetadataState.loaded = false;
@@ -9561,6 +9403,7 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
               visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
               state: tabFrameState?.dataset.terminalConnectionState || '',
             };
+            const topologyTransactionCounts = structuredClone(topologyCounts);
             resolveEnsure(false);
             await window.__yolomuxTestWaitFor(
               () => document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]'),
@@ -9602,12 +9445,18 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
             window.fetch = () => Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
             await apiFetch('/api/test-recovery');
             return {
-              tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck,
+              tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck, topologyTransactionCounts,
               windowCleared: !terminalConnectionStateNode('1'),
-              backendHealth: {shown: Boolean(degraded), cleared: !document.querySelector('[data-backend-health]')},
+              // Permanently-mounted control (GUI.md invariant): healthy is data-backend-health="" on the
+              // same node, never its absence. "cleared" therefore means recovered to the empty/inert state.
+              backendHealth: {shown: Boolean(degraded), cleared: document.querySelector('[data-backend-health]')?.dataset.backendHealth === ''},
             };
           } finally {
             ensureSession = originalEnsureSession;
+            ensureTerminalRunning = originalEnsureTerminalRunning;
+            updatePanelSlot = originalUpdatePanelSlot;
+            renderAutoApproveButtons = originalRenderAutoApproveButtons;
+            updatePanelInactiveOverlays = originalUpdatePanelInactiveOverlays;
             apiFetchJson = originalApiFetchJson;
             window.fetch = originalFetch;
           }
@@ -9627,6 +9476,12 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
     assert metrics["tabAck"]["visible"] is True, metrics
     assert metrics["tabAck"]["state"] == "connecting", metrics
     assert metrics["tabFrameAck"] == {"visible": True, "state": "connecting"}, metrics
+    assert metrics["topologyTransactionCounts"] == {
+        "slotUpdates": {"2": 1},
+        "autoApproveRenders": 1,
+        "inactiveOverlayReconciliations": 1,
+        "terminalStarts": {"2": 1},
+    }, metrics
     assert metrics["failedTab"] == {"stillVisible": True, "retry": True}, metrics
     assert metrics["windowAck"]["elapsedMs"] <= 50, metrics
     assert metrics["windowAck"]["state"] == "switching", metrics
@@ -10005,6 +9860,8 @@ def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_seque
 
 
 def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):
+    journey = JourneySentinel(YOCHAT_PHASES)
+    journey.enter("shared-runtime-setup")
     try:
         load_live_runtime_boot_fixture(
             browser,
@@ -10021,6 +9878,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             "return document.querySelector('#panel-__chat__ [data-chat-input]') && window.__eventSources.length > 0"
         )
     )
+    journey.enter("bootstrap-and-live-message")
     initial = browser.execute_script(
         """
         const panel = document.getElementById('panel-__chat__');
@@ -10070,6 +9928,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
     assert initial["errors"] == [] and initial["rejections"] == []
 
     exact_body = "😀 👍🏽 👩‍💻 👨‍👩‍👧‍👦 🏳️‍🌈 🇺🇸 1️⃣ ☕️ مرحبا 😀"
+    journey.enter("notification-and-read-cursor")
     browser.execute_script(
         """
         setFocusedPanelItem(chatItemId, {userInitiated: true});
@@ -10318,6 +10177,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
         )
     )
 
+    journey.enter("typing-and-search")
     typing_requests = browser.execute_script(
         """
         const input = document.querySelector('#panel-__chat__ [data-chat-input]');
@@ -10417,6 +10277,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
     ), "X hides both the Cmd/Ctrl-F search chrome and its results"
 
     browser.set_window_size(430, 650)
+    journey.enter("composer-and-emoji")
     composer_size = browser.execute_script(
         """
         const panel = document.getElementById('panel-__chat__');
@@ -10519,6 +10380,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
     )
     assert 0 <= tall_picker_geometry["composerPanelBottomGap"] <= 12, tall_picker_geometry
 
+    journey.enter("send-reconciliation")
     retry_body = "retry once 👩‍💻"
     browser.execute_script(
         """
@@ -10595,6 +10457,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
         ),
     )
 
+    journey.enter("yoagent-and-media")
     browser.execute_script(
         """
         window.__fixtureHoldChatYoagent = true;
@@ -10703,6 +10566,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
     )
     assert_only_expected_browser_network_error(browser, url=media_url, reason="404")
     browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
+    journey.enter("reload-paging-and-cleanup")
     reload_result = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -10795,6 +10659,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
         """
     )
     assert cleanup == {"panelConnected": False, "observer": None, "controller": None, "emojiOpen": False}
+    journey.manifest()
 
 
 def test_yochat_follows_new_messages_only_from_the_tail_and_resets_initial_chrome(browser, tmp_path):
@@ -11561,10 +11426,10 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     assert activity_metrics["inActions"] is True, activity_metrics
     assert activity_metrics["actionChildren"] == 1, activity_metrics
     assert activity_metrics["activityRight"] <= activity_metrics["refreshLeft"] + 1, activity_metrics
-    button = WebDriverWait(browser, 5).until(
-        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    )
-    button.click()
+    # W12: re-resolve the compact root button and click by coordinate. A retained WebElement would go
+    # stale if a legitimate coalesced topbar re-render (renderSessionButtons rebuilds the menu bar)
+    # lands in the WebDriver round-trip gap - the -n8 load failure this whole test class removes.
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -11649,12 +11514,11 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
 
     # A second phone tap is a disclosure toggle, not a grace-period reopen. This keeps the compact
     # root usable as a one-tap close affordance without changing full desktop menu hover behavior.
-    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    button.click()
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     assert WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
     )
-    browser.execute_script("arguments[0].click()", button)
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     closed = WebDriverWait(browser, 5).until(
         lambda driver: (state if not (state := driver.execute_script(
             """
@@ -11674,8 +11538,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
 
     # Checked navigation is still navigation: File -> Finder must close the compact root instead of
     # inheriting keep-open behavior merely because Finder is currently visible/checked.
-    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    button.click()
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     file_button = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -11730,6 +11593,68 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         )
     )
     assert finder_closed is True
+
+
+def test_live_compact_menus_root_button_survives_coalesced_rerender_at_tap(browser, tmp_path):
+    # A legitimate coalesced topbar re-render (SSE/status/locale/metrics) can land between resolving
+    # the closed compact menu root button and the tap that opens it. renderSessionButtons wipes and
+    # rebuilds the whole menu bar (30_app_menus.js: sessionButtons.innerHTML = '' -> createAppMenuBar()),
+    # so a *retained* WebElement is torn down and the tap strands - this is what the -n8 browser lane
+    # caught at test_live_compact_menus_root_opens_on_touch_sized_topbar. A real finger hit-tests the
+    # live DOM at event time, so the oracle must re-resolve the selector at the point of use. This test
+    # forces that exact re-render deterministically (no load dependence) and proves both halves.
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"], dangerously_yolo=True, available_agents=["claude", "codex", "term"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
+    )
+    browser.execute_script(
+        """
+        mobileSinglePaneMode = () => true;
+        syncTopbarPacking = () => [];
+        terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
+        renderSessionButtons({force: true});
+        """
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+
+    # RED-before: a retained handle, then the coalesced re-render, then the click -> stale element.
+    # This is the removed anti-pattern; it documents that the race is real and load-independent.
+    stranded = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    )
+    browser.execute_script("renderSessionButtons({force: true});")  # menu is CLOSED -> not deferred, rebuilds the bar
+    with pytest.raises(WebDriverException, match="stale element reference"):
+        stranded.click()
+
+    # GREEN-after: force the SAME re-render, then re-resolve-and-click via the shared W12 parent. It
+    # resolves the selector fresh and clicks by coordinate (no retained WebElement), so the rebuilt
+    # button is tapped and the compact root opens.
+    browser.execute_script("renderSessionButtons({force: true});")
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
+    assert WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
+    )
+
+    # Property (root-class contract): once the root is OPEN, renderSessionButtonsMeasured DEFERS every
+    # coalesced re-render (the appMenuIsOpen() guard in 30_app_menus.js), so command nodes resolved
+    # while a menu is open cannot be rebuilt/stranded. This is why the File/Finder taps in the sibling
+    # test - resolved with the menu open, then acted on immediately - stay safe without re-resolution.
+    probed = browser.execute_script(
+        """
+        const command = document.querySelector('.app-menu--nested-root > .app-menu-popover .app-menu-command');
+        window.__probeMenuCommand = command || null;
+        return Boolean(command);
+        """
+    )
+    assert probed is True
+    browser.execute_script("renderSessionButtons({force: true});")
+    assert browser.execute_script("return window.__probeMenuCommand?.isConnected === true") is True
 
 
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):

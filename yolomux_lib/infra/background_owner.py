@@ -7,10 +7,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import socket
 import threading
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,16 +18,20 @@ from typing import Callable
 
 from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
-from .common import STATE_DIR
+from .common import RUNTIME_DIR
+from .host_identity import HostIdentity
+from .host_identity import LocalProcessDiagnostic
+from .host_identity import current_host_identity
+from .host_identity import is_current_local_process
+from .host_identity import process_start_identity
 from ..control import send_yolomux_control_request
 
 
-BACKGROUND_OWNER_DIR = STATE_DIR / "background-owner"
+BACKGROUND_OWNER_DIR = RUNTIME_DIR / "background-owner"
 BACKGROUND_OWNER_PROTOCOL_VERSION = 2
 GENERATION_INDEX_FILENAME = "index.json"
 GENERATION_INDEX_VERSION = 1
 GENERATION_INDEX_MAX_RECORDS = 64
-BACKGROUND_OWNER_STALE_SECONDS = 10.0
 BACKGROUND_OWNER_HEARTBEAT_SECONDS = 1.0
 # The owner-control socket is local, but a concurrent browser/E2E test pool can
 # delay its handler briefly. Keep takeover bounded while avoiding a spurious
@@ -92,6 +94,8 @@ def _generation_sort_key(record: dict[str, Any]) -> tuple[int, int, int, str]:
 
 
 def pid_is_alive(pid: int) -> bool:
+    """Raw liveness probe that persisted-record callers must use through the central fence."""
+
     if pid <= 0:
         return False
     try:
@@ -118,6 +122,7 @@ class BackgroundOwnerRegistry:
         monotonic: Callable[[], float] = time.monotonic,
         pid: int | None = None,
         hostname: str | None = None,
+        host_identity: HostIdentity | None = None,
         priority: int = 0,
         capabilities: dict[str, int] | None = None,
     ):
@@ -132,15 +137,21 @@ class BackgroundOwnerRegistry:
         self.project_root = str(project_root or Path.cwd())
         self.clock = clock
         self.monotonic = monotonic
-        self.pid = os.getpid() if pid is None else int(pid)
-        self.hostname = hostname or socket.gethostname()
+        self.host_identity = host_identity or current_host_identity()
+        self.pid = self.host_identity.pid if pid is None else int(pid)
+        self.hostname = hostname or self.host_identity.display_hostname
+        self.process_start_identity = (
+            self.host_identity.process_start_identity
+            if self.pid == self.host_identity.pid
+            else process_start_identity(self.pid) or ""
+        )
         self.priority = int(priority)
         self.capabilities = {
             str(name): max(0, int(value))
             for name, value in (capabilities or {}).items()
         }
         self.started_at_ns = time.time_ns()
-        self.nonce = uuid.uuid4().hex
+        self.nonce = self.host_identity.instance_nonce
         self.generation_id = f"{self.started_at_ns}-{self.pid}-{self.nonce[:12]}"
         self.record_path = self.generations_dir / f"{self.generation_id}.json"
         self.on_demote = on_demote
@@ -168,11 +179,16 @@ class BackgroundOwnerRegistry:
         }
         self.last_transition = "new"
         self.last_transition_details: dict[str, Any] = {}
+        self.process_diagnostics: list[dict[str, Any]] = []
 
     def owner_payload(self) -> dict[str, Any]:
         return {
-            "pid": self.pid,
-            "hostname": self.hostname,
+            **self.host_identity.process_record_fields(
+                pid=self.pid,
+                start_identity=self.process_start_identity,
+                display_hostname=self.hostname,
+                instance_nonce=self.nonce,
+            ),
             "port": self.port,
             "project_root": self.project_root,
             "control_socket": self.control_socket,
@@ -182,6 +198,37 @@ class BackgroundOwnerRegistry:
             "priority": self.priority,
             "capabilities": dict(self.capabilities),
         }
+
+    def process_fence(self, record: dict[str, Any]) -> LocalProcessDiagnostic:
+        return is_current_local_process(
+            record,
+            host_identity=self.host_identity,
+            start_identity_reader=process_start_identity,
+            pid_probe=pid_is_alive,
+        )
+
+    def owner_heartbeat_is_stale(self, record: dict[str, Any]) -> bool:
+        """Return whether a valid owner heartbeat exceeded the takeover fence."""
+
+        try:
+            heartbeat = float(record.get("last_heartbeat") or 0.0)
+        except (TypeError, ValueError):
+            return False
+        return heartbeat > 0.0 and self.clock() - heartbeat > BACKGROUND_OWNER_UNRESPONSIVE_SECONDS
+
+    def record_process_diagnostic(
+        self,
+        record: dict[str, Any],
+        diagnostic: LocalProcessDiagnostic,
+        *,
+        path: Path | None = None,
+    ) -> None:
+        payload = diagnostic.as_dict()
+        payload["generation_id"] = str(record.get("generation_id") or "")
+        if path is not None:
+            payload["path"] = str(path)
+        self.process_diagnostics.append(payload)
+        self.process_diagnostics = self.process_diagnostics[-GENERATION_INDEX_MAX_RECORDS:]
 
     def generation_record(self) -> dict[str, Any]:
         return {
@@ -278,28 +325,34 @@ class BackgroundOwnerRegistry:
         return [record for _path, record in self.read_generation_record_items()]
 
     def live_generation_records(self) -> list[dict[str, Any]]:
-        now = self.clock()
         records = []
-        stale_paths: list[Path] = []
+        stale_items: list[tuple[Path, dict[str, Any]]] = []
         for path, record in self.read_generation_record_items():
-            try:
-                pid = int(record.get("pid") or 0)
-                heartbeat = float(record.get("last_heartbeat") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if not pid_is_alive(pid):
-                stale_paths.append(path)
-                continue
-            if heartbeat and now - heartbeat > BACKGROUND_OWNER_STALE_SECONDS:
-                stale_paths.append(path)
-                continue
-            records.append(record)
-        if stale_paths:
-            self._prune_generation_records(stale_paths)
+            diagnostic = self.process_fence(record)
+            if diagnostic.current:
+                records.append(record)
+            elif diagnostic.may_remove_stale_record:
+                stale_items.append((path, record))
+            else:
+                self.record_process_diagnostic(record, diagnostic, path=path)
+        if stale_items:
+            self._prune_generation_records(stale_items)
         return records
 
-    def _prune_generation_records(self, paths: list[Path]) -> None:
-        names = {path.stem for path in paths}
+    def _prune_generation_records(self, items: list[tuple[Path, dict[str, Any]]]) -> None:
+        approved: list[tuple[Path, dict[str, Any]]] = []
+        for path, candidate in items:
+            record = read_json_file(path, candidate)
+            if not isinstance(record, dict):
+                continue
+            diagnostic = self.process_fence(record)
+            if diagnostic.may_remove_stale_record:
+                approved.append((path, record))
+            else:
+                self.record_process_diagnostic(record, diagnostic, path=path)
+        names = {str(record.get("generation_id") or path.stem) for path, record in approved}
+        if not names:
+            return
         try:
             with file_lock(self.generation_index_path, dir_mode=0o700):
                 index = self._read_generation_index_unlocked()
@@ -309,7 +362,7 @@ class BackgroundOwnerRegistry:
                 self._write_generation_index_unlocked(records)
         except OSError:
             pass
-        for path in paths:
+        for path, _record in approved:
             try:
                 path.unlink()
             except (FileNotFoundError, OSError):
@@ -368,6 +421,15 @@ class BackgroundOwnerRegistry:
             return {"ok": False, "error": "no owner record"}
         if current.get("generation_id") == self.generation_id:
             return {"ok": True, "message": "already owner"}
+        diagnostic = self.process_fence(current)
+        if not diagnostic.current:
+            self.record_process_diagnostic(current, diagnostic, path=self.owner_path)
+            return {
+                "ok": False,
+                "error": "owner_process_not_current_local",
+                "reason_code": diagnostic.reason.value,
+                "diagnostic": diagnostic.as_dict(),
+            }
         request = {
             "action": "background_release_owner",
             "requester": self.owner_payload(),
@@ -405,8 +467,34 @@ class BackgroundOwnerRegistry:
                 self.write_owner_record()
                 return True
             owner_record = self.read_owner_record()
+            owner_diagnostic = None
+            owner_heartbeat_stale = False
+            if isinstance(owner_record, dict) and owner_record.get("generation_id") != self.generation_id:
+                owner_diagnostic = self.process_fence(owner_record)
+                if not owner_diagnostic.current and not owner_diagnostic.may_remove_stale_record:
+                    self.record_process_diagnostic(owner_record, owner_diagnostic, path=self.owner_path)
+                    self.status = "blocked_by_foreign_owner"
+                    self.last_error = owner_diagnostic.reason.value
+                    self.last_transition = "blocked"
+                    self.last_transition_details = {
+                        "owner": owner_record,
+                        "diagnostic": owner_diagnostic.as_dict(),
+                    }
+                    self.counters["takeover_failed"] = self.counters.get("takeover_failed", 0) + 1
+                    return False
+                owner_heartbeat_stale = owner_diagnostic.current and self.owner_heartbeat_is_stale(owner_record)
             if self.acquire_owner_lock():
-                transition = "takeover" if owner_record and owner_record.get("generation_id") != self.generation_id else "acquired"
+                if owner_diagnostic is not None and owner_diagnostic.current and not owner_heartbeat_stale:
+                    release = self.request_current_owner_release()
+                    if not release.get("ok"):
+                        self.release_owner_lock()
+                        self.status = "blocked_by_unreachable_owner"
+                        self.last_error = str(release.get("error") or "live owner record did not release")
+                        self.last_transition = "blocked"
+                        self.last_transition_details = {"owner": owner_record, "release": release}
+                        self.counters["takeover_failed"] = self.counters.get("takeover_failed", 0) + 1
+                        return False
+                transition = "takeover" if owner_diagnostic is not None else "acquired"
                 acquired_status = self.mark_owner_acquired(transition, owner_record)
             else:
                 release = self.request_current_owner_release()
@@ -528,12 +616,21 @@ class BackgroundOwnerRegistry:
         self.release_owner("stop")
         if self.thread is not None:
             self.thread.join(timeout=2.0)
-        try:
-            self.record_path.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
+        record = read_json_file(self.record_path, None)
+        if isinstance(record, dict):
+            diagnostic = self.process_fence(record)
+            owns_record = (
+                diagnostic.current
+                and record.get("generation_id") == self.generation_id
+                and record.get("instance_nonce") == self.nonce
+            )
+            if owns_record:
+                try:
+                    self.record_path.unlink()
+                except (FileNotFoundError, OSError):
+                    pass
+            else:
+                self.record_process_diagnostic(record, diagnostic, path=self.record_path)
 
     def run(self) -> None:
         while not self.stop_event.wait(BACKGROUND_OWNER_HEARTBEAT_SECONDS):
@@ -644,11 +741,11 @@ class BackgroundOwnerRegistry:
         record = owner_record if isinstance(owner_record, dict) else self.read_owner_record()
         if not isinstance(record, dict):
             return "missing_owner_record"
-        try:
-            heartbeat = float(record.get("last_heartbeat") or 0.0)
-        except (TypeError, ValueError):
-            heartbeat = 0.0
-        if heartbeat and self.clock() - heartbeat > BACKGROUND_OWNER_UNRESPONSIVE_SECONDS:
+        diagnostic = self.process_fence(record)
+        if not diagnostic.current:
+            self.record_process_diagnostic(record, diagnostic, path=self.owner_path)
+            return diagnostic.reason.value
+        if self.owner_heartbeat_is_stale(record):
             return "stale_owner_heartbeat"
         return ""
 
@@ -659,6 +756,21 @@ class BackgroundOwnerRegistry:
             self.record_refresh_request(role)
             return {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False}
         current = self.read_owner_record()
+        if isinstance(current, dict):
+            diagnostic = self.process_fence(current)
+            if not diagnostic.current:
+                self.record_process_diagnostic(current, diagnostic, path=self.owner_path)
+                error = diagnostic.reason.value
+                self.last_error = error
+                return {
+                    "ok": False,
+                    "accepted": False,
+                    "role": role,
+                    "error": error,
+                    "reason_code": diagnostic.reason.value,
+                    "diagnostic": diagnostic.as_dict(),
+                    "fallback": True,
+                }
         reason = self.owner_unresponsive_reason(current)
         if reason:
             self.last_error = reason
@@ -697,6 +809,7 @@ class BackgroundOwnerRegistry:
                 "last_transition": self.last_transition,
                 "last_transition_details": dict(self.last_transition_details),
                 "last_error": self.last_error,
+                "process_diagnostics": list(self.process_diagnostics),
                 "search_index": {
                     "role": BACKGROUND_ROLE_SEARCH_INDEX,
                     "owner": bool(search_index_state.get("owner")),
@@ -708,9 +821,19 @@ class BackgroundOwnerRegistry:
             }
 
 
-class DisabledBackgroundOwner:
-    def owner_payload(self) -> dict[str, Any]:
-        return {}
+class DisabledBackgroundOwner(BackgroundOwnerRegistry):
+    """Process-local owner adapter that preserves the shared owner API and coalescing.
+
+    Managed instances receive a unique root before this process imports the app, so
+    they need no same-root election.  Explicit roots retain BackgroundOwnerRegistry:
+    a path alone is not evidence that only one server uses it.
+    """
+
+    def __init__(self, *, port: int | None = None, project_root: str | None = None):
+        super().__init__(port=port, project_root=project_root)
+        self.owner = True
+        self.status = "local"
+        self.last_transition = "local"
 
     def live_generation_records(self) -> list[dict[str, Any]]:
         return []
@@ -725,50 +848,37 @@ class DisabledBackgroundOwner:
         return True
 
     def can_run(self, role: str) -> bool:
+        return role in self.roles
+
+    def attempt_takeover(self) -> bool:
         return True
 
     def release_owner(self, reason: str = "release") -> None:
         return None
 
-    def record_refresh_request(self, role: str) -> None:
-        return None
-
-    def record_fallback(self, role: str) -> None:
-        return None
-
-    def record_avoided_recompute(self, role: str) -> None:
-        return None
-
-    def record_follower_stale_read(self, role: str) -> None:
-        return None
-
-    def record_search_index_bytes_written(self, byte_count: int) -> None:
-        return None
-
-    def refresh_queue_payload(self) -> dict[str, Any]:
-        return {
-            "coalesce_window_seconds": BACKGROUND_REFRESH_COALESCE_SECONDS,
-            "recent_pending_count": 0,
-            "recent_pending_by_role": {},
-            "next_expires_seconds": 0.0,
-        }
-
-    def request_owner_refresh(self, role: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        return {"ok": True, "accepted": True, "role": role, "local_owner": True, "fallback": False}
-
     def status_payload(self) -> dict[str, Any]:
+        roles = {role: BackgroundRoleState(role=role, owner=True, status="local", refresh_requests=self.refresh_requests.get(role, 0), fallback_count=self.fallback_counts.get(role, 0), last_error=self.last_error).__dict__ for role in self.roles}
+        owner = self.owner_payload()
         return {
             "owner": True,
-            "status": "disabled",
-            "roles": {role: BackgroundRoleState(role=role, owner=True, status="disabled").__dict__ for role in BACKGROUND_ROLES},
+            "status": "local",
+            "generation": owner,
+            "latest_generation": owner,
+            "current_owner": owner,
+            "roles": roles,
+            "counters": dict(self.counters),
             "refresh_queue": self.refresh_queue_payload(),
+            "last_transition": "local",
+            "last_transition_details": {},
+            "last_error": self.last_error,
+            "process_diagnostics": [],
             "search_index": {
                 "role": BACKGROUND_ROLE_SEARCH_INDEX,
                 "owner": True,
                 "mode": "indexing-server",
-                "current_server": {},
-                "owner_server": {},
-                "status": "disabled",
+                "current_server": owner,
+                "owner_server": owner,
+                "status": "local",
             },
         }
 

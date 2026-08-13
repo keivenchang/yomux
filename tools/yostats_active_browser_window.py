@@ -44,6 +44,8 @@ from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import tracked_local_service_groups
 from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
+from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tests.browser_helpers.webdriver_lease import process_start_key
 from tools.yostats_capture_common import positive_int, process_cpu_seconds
 
 
@@ -489,23 +491,38 @@ def stop_benchmark_group(process: subprocess.Popen | None) -> None:
             pass
 
 
-def bounded_driver_quit(driver: webdriver.Chrome, quit_timeout: float = 15.0) -> None:
-    """Quit the browser without becoming the next unbounded orphan owner.
+def bounded_driver_quit(
+    driver: webdriver.Chrome,
+    quit_timeout: float = 15.0,
+    *,
+    identity_fn=process_start_key,
+    signal_fn=None,
+) -> None:
+    """Quit the browser through the one shared lease, then proof-sweep any orphan renderer subtree.
 
-    driver.quit() itself can hang against a wedged chromedriver; run it on a
-    helper thread with a deadline and fall back to killing the chromedriver
-    PID plus its live descendants (the Chrome renderer/GPU subtree).
+    The chromedriver process is retired by the single WebDriverLease owner - bounded quit -> TERM ->
+    KILL -> reap -> final proof - so a wedged chromedriver never leaves this tool the next unbounded
+    orphan owner, and the lease never signals a PID it cannot prove is still its own. Killing
+    chromedriver normally reaps its Chrome children, but a wedged chromedriver can orphan the renderer
+    subtree; we capture each descendant's immutable start-key proof BEFORE the retirement and SIGKILL
+    only those we can still prove are the exact processes we owned. A reused or reparented PID reads a
+    different key (or none) and is left untouched - the same reuse/reparent guard the lease applies to
+    the chromedriver PID.
     """
+    kill = os.kill if signal_fn is None else signal_fn
     service_process = getattr(getattr(driver, "service", None), "process", None)
     chromedriver_pid = int(service_process.pid) if service_process is not None else 0
-    quitter = threading.Thread(target=lambda: driver.quit(), daemon=True)
-    quitter.start()
-    quitter.join(timeout=quit_timeout)
-    if not quitter.is_alive():
-        return
-    for pid in ([chromedriver_pid] if chromedriver_pid else []) + (descendants_of(chromedriver_pid) if chromedriver_pid else []):
+    # Capture the renderer subtree's proofs up front, before retirement can reparent or exit them.
+    descendant_proofs = {pid: identity_fn(pid) for pid in descendants_of(chromedriver_pid)} if chromedriver_pid else {}
+    WebDriverLease.from_driver(driver, quit_timeout=quit_timeout, identity_fn=identity_fn, signal_fn=kill).retire()
+    for pid, captured in descendant_proofs.items():
+        if captured is None:
+            continue
+        current = identity_fn(pid)
+        if current is None or current != captured:
+            continue  # exited, or the PID was reused: never signal an unproved process
         try:
-            os.kill(pid, signal.SIGKILL)
+            kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             continue
 

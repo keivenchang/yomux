@@ -1,10 +1,11 @@
-import json
 from pathlib import Path
 import re
 import subprocess
 
 import pytest
-import yaml
+
+from tests.helpers.prompt_corpus import PromptCorpus
+from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 from yolomux_lib.agent_tui import AgentTuiCapture
 from yolomux_lib.agent_tui import AgentTuiCursor
@@ -18,28 +19,11 @@ from yolomux_lib.agent_tui import send_prompt
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
 PROMOTED_CAPTURE_DIR = PROMPT_CORPUS_DIR / "captures"
-
-
-def load_structured_fixture(path):
-    text = path.read_text(encoding="utf-8")
-    if path.suffix == ".json":
-        return json.loads(text)
-    return yaml.safe_load(text)
-
-
-def fixture_visible_text(path):
-    data = load_structured_fixture(path)
-    return str(data.get("raw_capture") or data.get("visible_text") or "")
+PROMPT_CORPUS = PromptCorpus(PROMPT_CORPUS_DIR, PromptCorpusPreset.AGENT_TUI)
 
 
 def load_prompt_corpus_cases():
-    inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "inventory.yaml")
-    cases = []
-    for fixture in inventory["fixtures"]:
-        case = dict(fixture)
-        case["text"] = fixture_visible_text(PROMPT_CORPUS_DIR / fixture["file"])
-        cases.append(case)
-    return cases
+    return [{**case["inventory"], "text": case["text"]} for case in PROMPT_CORPUS.cases()]
 
 
 PROMPT_CORPUS_ASK_CASES = [case for case in load_prompt_corpus_cases() if case["expected"]["ask"]]
@@ -49,11 +33,11 @@ def load_promoted_capture_cases():
     inventory_path = PROMOTED_CAPTURE_DIR / "inventory.yaml"
     if not inventory_path.exists():
         return []
-    inventory = load_structured_fixture(inventory_path)
+    inventory = PROMPT_CORPUS.load(inventory_path)
     cases = []
     for fixture in inventory["fixtures"]:
         path = PROMOTED_CAPTURE_DIR / fixture["file"]
-        data = load_structured_fixture(path)
+        data = PROMPT_CORPUS.load(path)
         cases.append({"id": fixture["id"], "inventory": fixture, "data": data, "path": path})
     return cases
 
@@ -79,7 +63,7 @@ def cursor_from_capture(data):
 
 def test_agent_tui_capture_yaml_files_include_client_version_and_date():
     for path in PROMPT_CORPUS_DIR.rglob("*.yaml"):
-        data = load_structured_fixture(path)
+        data = PROMPT_CORPUS.load(path)
         if "raw_capture" not in data:
             continue
         version_slug = data.get("client_version_slug")
@@ -95,10 +79,10 @@ def test_agent_tui_capture_yaml_files_include_client_version_and_date():
 
 
 def test_synthetic_prompt_corpus_cases_are_in_synthetic_dir():
-    inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "inventory.yaml")
+    inventory = PROMPT_CORPUS.inventory()
     for fixture in inventory["fixtures"]:
         path = PROMPT_CORPUS_DIR / fixture["file"]
-        data = load_structured_fixture(path)
+        data = PROMPT_CORPUS.load(path)
         is_synthetic = str(data.get("client_version_slug") or "").endswith("-synthetic")
         assert (Path(fixture["file"]).parts[0] == "synthetic") is is_synthetic, fixture["file"]
     assert not list(PROMPT_CORPUS_DIR.rglob("*.json"))
@@ -490,7 +474,7 @@ def test_promoted_agent_tui_captures_reclassify_to_expected_state(case):
 
 
 def test_codex_node_shell_approval_fixture_stays_yolo_approval():
-    data = load_structured_fixture(PROMOTED_CAPTURE_DIR / "shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml")
+    data = PROMPT_CORPUS.load(PROMOTED_CAPTURE_DIR / "shell_approval_touch_command__codex-cli-0.141.0_20260620.yaml")
     cursor = cursor_from_capture(data)
 
     state = classify_agent_pane(

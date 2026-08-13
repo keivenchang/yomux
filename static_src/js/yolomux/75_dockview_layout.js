@@ -17,6 +17,7 @@ const dockviewLayoutState = {
   applyingFromLayout: false,
   adoptingFromDockview: false,
   syncQueued: false,
+  syncQueuedLayoutSignature: '',
   hostLayoutFrame: 0,
   pendingLoadFrame: 0,
   pendingCompletionFrame: 0,
@@ -1685,16 +1686,34 @@ function queueDockviewLayoutAdoption() {
   if (dockviewLayoutState.applyingFromLayout || dockviewLayoutState.adoptingFromDockview) return;
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
+  dockviewLayoutState.syncQueuedLayoutSignature = layoutSlotsExactSignature(layoutSlots);
   queueMicrotask(adoptDockviewLayout);
 }
 
 function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
+  const queuedLayoutSignature = dockviewLayoutState.syncQueuedLayoutSignature;
+  dockviewLayoutState.syncQueuedLayoutSignature = '';
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
   if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
+  if (queuedLayoutSignature && queuedLayoutSignature !== layoutSlotsExactSignature(layoutSlots)) {
+    // A server/app mutation won while this vendor callback was queued. Reassert that newer layout;
+    // adopting the stale Dockview snapshot would make a renamed or newly created tab inactive.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   let next = layoutSlotsFromDockviewJson(api.toJSON());
+  const missingPendingSessions = pendingTmuxSessionNames()
+    .filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
+  if (missingPendingSessions.length) {
+    // A Dockview callback may observe an intermediate vendor snapshot after the app has already
+    // committed a rename/create. Reassert the exact app layout instead of inventing placement for
+    // the omitted pending terminal; stable user-owned removals still adopt normally.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   const missingSurfaces = layoutFileSurfaceItems().filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
   if (missingSurfaces.length) {
     next = layoutWithSidePaneItems(next, missingSurfaces, {side: paneSideLeft});
@@ -1703,8 +1722,10 @@ function adoptDockviewLayout() {
   if (!layoutHasRestorableContent(next)) return;
   const nextSignature = layoutSlotsSignature(next);
   if (nextSignature === layoutSlotsSignature(layoutSlots)) {
+    // fromJSON creates tab renderers while applyingFromLayout is true, so their first render
+    // deliberately leaves the shell empty. The queued adoption is the first callback after that
+    // guard clears: populate tab chrome here without repeating mounted-panel reconciliation.
     dockviewRefreshTabs();
-    dockviewSyncMountedPanels();
     return;
   }
   dockviewLayoutState.lastAppliedLayoutSignature = nextSignature;
@@ -1912,13 +1933,11 @@ function dockviewSlotForGroupId(groupId, usedSlots = new Set()) {
 
 function dockviewEnsureMountedTerminal(item, panel) {
   if (!isTmuxSession(item)) return;
-  queueMicrotask(() => {
-    if (!panel?.isConnected || !itemInLayout(item)) return;
-    const slot = slotForItem(item);
-    if (slot && activeItemForSide(slot) !== item) return;
-    if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
-    if (typeof scheduleFit === 'function') scheduleFit(item);
-  });
+  if (!panel?.isConnected || !itemInLayout(item)) return;
+  const slot = slotForItem(item);
+  if (slot && activeItemForSide(slot) !== item) return;
+  if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
+  if (typeof scheduleFit === 'function') scheduleFit(item);
 }
 
 function createDockviewPanelRenderer() {
@@ -1936,10 +1955,10 @@ function createDockviewPanelRenderer() {
     }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
-    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
-    updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
+    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
+    updatePanelSlot(panel, item, slot);
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
     dockviewEnsureMountedTerminal(item, panel);
@@ -1959,10 +1978,8 @@ function createDockviewPanelRenderer() {
     onHide: pool,
     dispose: pool,
     layout: () => {
-      if (isTmuxSession(item)) {
-        dockviewEnsureMountedTerminal(item, panel);
-        scheduleFit(item);
-      }
+      if (dockviewLayoutState.applyingFromLayout || !isTmuxSession(item)) return;
+      dockviewEnsureMountedTerminal(item, panel);
     },
   };
 }

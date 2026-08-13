@@ -1667,6 +1667,7 @@ function newTmuxSessionLifecycleRecord(session, phase = 'stable', topologyEpoch 
     pendingUntil: tmuxSessionLifecyclePendingPhases.has(phase) ? Date.now() + pendingTmuxSessionGraceMs : 0,
     requestLeases: new Set(),
     controllers: new Set(),
+    lifecycleScopes: new Set(),
     sources: new Set(),
     timers: new Set(),
     consumerDetachments: 0,
@@ -1709,6 +1710,15 @@ function tmuxSessionLifecycleOwnSource(session, source) {
   return token;
 }
 
+function tmuxSessionLifecycleOwnScope(token, scope) {
+  if (token?.record && scope) token.record.lifecycleScopes.add(scope);
+  return scope;
+}
+
+function tmuxSessionLifecycleReleaseScope(token, scope) {
+  token?.record?.lifecycleScopes?.delete(scope);
+}
+
 function tmuxSessionLifecycleReleaseSource(token, source) {
   token?.record?.sources?.delete(source);
   if (source?._tmuxSessionLifecycleToken === token) delete source._tmuxSessionLifecycleToken;
@@ -1733,6 +1743,8 @@ function retireTmuxSessionLifecycleRecord(record) {
   record.pendingUntil = 0;
   for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
   record.controllers.clear();
+  for (const scope of record.lifecycleScopes) scope.dispose?.('session-retired');
+  record.lifecycleScopes.clear();
   for (const source of record.sources) source.close?.();
   record.sources.clear();
   for (const timer of record.timers) clearTimeout(timer);
@@ -3910,16 +3922,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
     const normalized = normalizeDirectoryPath(path || '');
     if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
+    // Fence this validation's "missing" outcome against newer per-path state: a stale/late validation
+    // (kind-mismatch or exact-path 404) that completes after a newer valid render landed must not
+    // overwrite it. Same generation fence shared with the reload/poll/media producers.
+    const generation = openFileContentGeneration.get(normalized) || 0;
     fetchFilePathInfo(normalized, {user: true})
       .then(async info => {
         if (info?.kind === 'file') {
           await recoverOpenFileAfterMissing(normalized, info);
         } else if (info?.kind) {
-          markOpenFileMissing(normalized);
+          if (openFileContentGenerationIsCurrent(normalized, generation)) markOpenFileMissing(normalized);
         }
       })
       .catch(error => {
-        if (Number(error?.status) === 404) {
+        if (Number(error?.status) === 404 && openFileContentGenerationIsCurrent(normalized, generation)) {
           markOpenFileMissing(normalized);
           if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
@@ -4730,15 +4746,24 @@ function commandPaletteLabel() {
   return t('palette.quickOpen');
 }
 
+// The one Quick Open freshness sentence, from the one derivation. Empty when every answering root
+// vouched for its snapshot.
+function commandPaletteFreshnessText() {
+  return fileIndexFreshnessMessage(fileQuickOpenState.freshness);
+}
+
 function commandPaletteEmptyText() {
   if (fileQuickOpenState.loading) return t('search.searching');
   if (fileQuickOpenState.indexWarming) return t('finder.index.indexing');
   if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
-  return t('palette.noMatches');
+  // "No matches" from a snapshot nobody is updating is a false negative. Say why instead.
+  return commandPaletteFreshnessText() || t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
+  return [fileQuickOpenState.loading ? t('palette.searchingFiles') : '', commandPaletteFreshnessText()]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -4746,7 +4771,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  const parts = [];
+  if (fileQuickOpenState.loading) parts.push(commandPaletteLoadingTextHtml(t('palette.searchingFiles')));
+  // Stale results stay visible and usable below; this line only tells the user what they are looking at.
+  const freshness = commandPaletteFreshnessText();
+  if (freshness) parts.push(`<span class="command-palette-freshness">${esc(freshness)}</span>`);
+  return parts.join('');
 }
 
 function commandPaletteResultsHtml(items, query) {
@@ -4840,6 +4870,9 @@ function renderCommandPaletteResults() {
     const html = commandPaletteStatusHtml();
     status.hidden = !html;
     status.setAttribute('aria-label', text);
+    // Not colour-only: the aria-live region carries the same sentence a sighted user reads, and the
+    // stale marker is a class, never a bare colour swap.
+    status.classList.toggle('stale', Boolean(commandPaletteFreshnessText()));
     status.innerHTML = html;
   }
   commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
@@ -4868,6 +4901,7 @@ function openCommandPalette(options = {}) {
   fileQuickOpenState.root = fileQuickOpenRootForSearch();
   fileQuickOpenState.candidates = [];
   fileQuickOpenState.loading = false;
+  fileQuickOpenState.freshness = null;
   fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
@@ -4918,31 +4952,18 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
-function clearFileQuickOpenIndexRetry() {
-  if (fileQuickOpenState.indexRetry) clearTimeout(fileQuickOpenState.indexRetry);
-  fileQuickOpenState.indexRetry = null;
-}
-
-function scheduleFileQuickOpenIndexRetry(query, requestId) {
-  clearFileQuickOpenIndexRetry();
-  fileQuickOpenState.indexRetry = setTimeout(() => {
-    fileQuickOpenState.indexRetry = null;
-    if (requestId !== fileQuickOpenState.requestId) return;
-    if (commandPaletteState.node?.hidden) return;
-    if (commandPaletteState.query !== query) return;
-    refreshFileQuickOpenCandidates(query);
-  }, fileQuickOpenIndexRetryMs);
-}
-
 function abortFileQuickOpenSearch() {
   if (fileQuickOpenState.abortController) {
     try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
   fileQuickOpenState.abortController = null;
-  clearFileQuickOpenIndexRetry();
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
+  // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
+  // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
+  resetFileQuickOpenDeltaCursors('');
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -4966,11 +4987,32 @@ function dedupeFileSearchResults(files) {
 function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
   return {
     root: normalizeStoredFileExplorerIndexedDir(payload?.root || payload?.root_realpath || searchRoot) || searchRoot,
+    searchRoot,
     files: Array.isArray(payload?.files) ? payload.files : [],
+    // The opaque baseline cursor the client seeds incremental delta reads with (null when nothing is
+    // committed yet — the client re-baselines from the next snapshot once the crawl publishes layer 1),
+    // and the canonical realpath whose digest correlates a path-free search_progress signal to this root.
+    cursor: payload?.initial_cursor ?? null,
+    realpath: String(payload?.root_realpath || payload?.root || searchRoot),
     // This is deliberately data-driven. The UI must not turn an explicit in-progress
     // backend response into a completed empty search just because it has no rows yet.
     indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    // Same rule for the opposite failure: a snapshot served without a live producer must not read as
+    // a current answer. One derivation, shared with the Finder index badge.
+    freshness: fileIndexFreshnessFromPayload(payload),
   };
+}
+
+// Quick Open blends rows from several roots into one list, so the user cannot tell which row came
+// from which snapshot. Report the worst freshness any answering root returned: orphaned before
+// stale, then the oldest snapshot.
+function fileQuickOpenWorstFreshness(records) {
+  const stale = (Array.isArray(records) ? records : []).filter(record => record?.stale === true);
+  const rank = record => (record.state === 'orphaned' ? 2 : 1);
+  return stale
+    .slice()
+    .sort((left, right) => (rank(right) - rank(left))
+      || ((right.ageSeconds === null ? -1 : right.ageSeconds) - (left.ageSeconds === null ? -1 : left.ageSeconds)))[0] || null;
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
@@ -4982,6 +5024,10 @@ async function refreshFileQuickOpenCandidates(query = '') {
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
+  // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
+  // mutate this palette, and the roots/query it belonged to may have changed entirely.
+  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -5029,7 +5075,11 @@ async function refreshFileQuickOpenCandidates(query = '') {
       // A new or externally indexed root can take a moment to publish its first durable snapshot.
       // The backend explicitly marks that response as warming; it is not a completed empty search.
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
-      if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
+      // Stale rows stay in the list. What changes is that the palette now says they are stale.
+      fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
+      // Seed one delta cursor per answering root so a search_progress signal can stream the crawl's
+      // newly-published matches into this list without re-issuing the whole query (steps 6-7).
+      seedFileQuickOpenDeltaCursors(successful, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -5037,6 +5087,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (error?.name === 'AbortError') return;
     fileQuickOpenState.candidates = [];
     fileQuickOpenState.indexWarming = false;
+    fileQuickOpenState.freshness = null;
     fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},
@@ -5049,6 +5100,223 @@ async function refreshFileQuickOpenCandidates(query = '') {
       renderCommandPaletteResults();
     }
   }
+}
+
+// One bounded delta page reads at most this many committed matches per root, matching the server's
+// per-response cap (yolomux_lib/filesystem/search.py). It also bounds the blended candidate array so a
+// long crawl cannot grow it without limit.
+const fileQuickOpenResultLimit = 500;
+// A single search_progress signal can fan out to at most this many delta pages per root, so a large
+// backlog drains across a few signals instead of one unbounded loop inside a push handler.
+const fileQuickOpenDeltaPagesPerSignal = 8;
+
+// Clear every cursor: a new query/root supersedes them, and delta responses for the retired requestId
+// must no longer mutate the palette. `deltaQuery` records the search text the surviving cursors serve.
+function resetFileQuickOpenDeltaCursors(query = '') {
+  fileQuickOpenState.deltaRoots = new Map();
+  fileQuickOpenState.deltaQuery = String(query || '');
+}
+
+// After a snapshot settles, register one incremental-read cursor per answering root. `cursor` is the
+// opaque baseline (null until the root commits its first rows); `scopeId` is the opaque digest a
+// path-free search_progress signal carries, so a signal correlates to the exact root it names.
+function seedFileQuickOpenDeltaCursors(results, requestId) {
+  const deltaRoots = new Map();
+  for (const result of Array.isArray(results) ? results : []) {
+    const searchRoot = result.searchRoot || result.root;
+    if (!searchRoot) continue;
+    const normalizedRoot = normalizeStoredFileExplorerIndexedDir(result.root) || String(result.root || '');
+    deltaRoots.set(normalizedRoot, {
+      searchRoot,
+      normalizedRoot,
+      cursor: result.cursor ?? null,
+      realpath: String(result.realpath || result.root || searchRoot),
+      scopeId: fileSearchScopeId(result.realpath || result.root || searchRoot),
+      more: false,
+      fetching: false,
+      requestId,
+    });
+  }
+  fileQuickOpenState.deltaRoots = deltaRoots;
+}
+
+// Fold true duplicates the way the snapshot read does, then keep only the best `limit` rows by the ONE
+// shared palette score. Ranked here solely to bound the array a delta stream keeps appending to; the
+// render path re-ranks for display, so a late high-rank upsert can still move above earlier rows.
+function rankAndPruneFileQuickOpenCandidates(candidates, query, limit = fileQuickOpenResultLimit) {
+  const deduped = dedupeFileSearchResults(candidates);
+  if (deduped.length <= limit) return deduped;
+  const scoreOf = file => commandPaletteItemScore(
+    fileQuickOpenItem(file.path || '', {
+      kind: file.kind || 'file',
+      relativePath: file.relative_path || file.name || '',
+      sortBonus: file.uploaded === true ? -500 : 0,
+    }),
+    query,
+    {surface: 'files'},
+  );
+  return deduped
+    .map((file, index) => ({file, index, score: scoreOf(file)}))
+    .sort((left, right) => (right.score - left.score) || (left.index - right.index))
+    .slice(0, limit)
+    .map(entry => entry.file);
+}
+
+// Apply one root's committed delta page to the blended candidate set: an `upsert` replaces (or adds)
+// the row for its path, a `delete` removes it. Cross-root isolation is inherent — every path is
+// absolute and each change is stamped with the root that produced it, so one root's delete can never
+// drop another root's row. Returns the deduped, bounded candidate array.
+function mergeFileQuickOpenChanges(candidates, changes, indexedRoot) {
+  const byPath = new Map();
+  const order = [];
+  for (const file of Array.isArray(candidates) ? candidates : []) {
+    const path = file?.path || '';
+    if (!path) continue;
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, file);
+  }
+  for (const change of Array.isArray(changes) ? changes : []) {
+    const path = String(change?.path || '');
+    if (!path) continue;
+    const operation = String(change?.operation || 'upsert');
+    if (operation === 'delete') {
+      if (byPath.delete(path)) {
+        const at = order.indexOf(path);
+        if (at >= 0) order.splice(at, 1);
+      }
+      continue;
+    }
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, {
+      name: change.name || basenameOf(path),
+      path,
+      relative_path: change.relative_path || change.name || '',
+      kind: change.kind || 'file',
+      size: change.size,
+      mtime: change.mtime,
+      realpath: change.realpath || path,
+      uploaded: change.uploaded === true,
+      indexed_root: indexedRoot,
+    });
+  }
+  return order.map(path => byPath.get(path)).filter(Boolean);
+}
+
+// Ingest one delta HTTP payload for `normalizedRoot`. A response for a superseded requestId is dropped
+// (a stale query can never mutate a newer palette). A rebase_required verdict is reported to the
+// caller for the one explicit snapshot-repair path; otherwise the changes merge in, dedupe, rerank
+// once, prune to the limit, and the root's cursor + `more` advance. Returns the delta status.
+function ingestFileQuickOpenDeltaPayload(normalizedRoot, requestId, payload) {
+  if (requestId !== fileQuickOpenState.requestId) return {applied: false, stale: true};
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.requestId !== requestId) return {applied: false, stale: true};
+  if (payload?.rebase_required) {
+    deltaRoot.more = false;
+    return {applied: false, rebase: true, reason: String(payload.reason || '')};
+  }
+  const changes = Array.isArray(payload?.changes) ? payload.changes : [];
+  deltaRoot.cursor = payload?.cursor ?? deltaRoot.cursor;
+  deltaRoot.more = payload?.more === true;
+  if (changes.length) {
+    fileQuickOpenState.candidates = rankAndPruneFileQuickOpenCandidates(
+      mergeFileQuickOpenChanges(fileQuickOpenState.candidates, changes, deltaRoot.normalizedRoot),
+      fileQuickOpenState.deltaQuery,
+    );
+    // A delta that lands rows clears the transient "Indexing…" state: the palette now has committed
+    // matches, so it must not keep claiming an empty warming index.
+    if (fileQuickOpenState.candidates.length) fileQuickOpenState.indexWarming = false;
+    renderCommandPaletteResults();
+  }
+  return {applied: true, more: deltaRoot.more, changed: changes.length};
+}
+
+// Incremental delta streaming is live only while a files-mode palette is open on a real search query;
+// a signal that arrives after close/reopen or in command mode must pump nothing.
+function fileQuickOpenDeltasActive() {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return false;
+  if (commandPaletteEffectiveMode() !== 'files') return false;
+  return Boolean(commandPaletteSearchQuery(commandPaletteState.query));
+}
+
+// Read ONE bounded committed-delta page for a root through the same authenticated /api/fs/search
+// endpoint, appending `&cursor=`. Deltas deliberately do NOT share the snapshot's AbortController:
+// they outlive the initial fetch and are fenced by requestId inside ingest instead of by abort.
+async function fetchFileQuickOpenDeltaPage(deltaRoot) {
+  const requestId = deltaRoot.requestId;
+  const query = fileQuickOpenState.deltaQuery;
+  const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
+  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
+    + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
+  const payload = await apiFetchJson(url);
+  return ingestFileQuickOpenDeltaPayload(deltaRoot.normalizedRoot, requestId, payload);
+}
+
+// Drain a root's committed backlog after a progress signal: one in-flight request per root
+// (`fetching`), bounded pages per signal, looping while the server says `more`. A root with no
+// baseline cursor yet (its first layer just published) or a `rebase_required` verdict falls back to
+// the ONE explicit full-snapshot repair path rather than a second incremental path.
+async function pumpFileQuickOpenDeltasForRoot(normalizedRoot) {
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.fetching) return;
+  if (!fileQuickOpenDeltasActive()) return;
+  if (deltaRoot.cursor === null || deltaRoot.cursor === undefined) {
+    requeryOpenFileQuickOpenForIndexChange({force: true});
+    return;
+  }
+  deltaRoot.fetching = true;
+  try {
+    for (let page = 0; page < fileQuickOpenDeltaPagesPerSignal; page += 1) {
+      const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+      if (!current || current.requestId !== deltaRoot.requestId) return;
+      if (!fileQuickOpenDeltasActive()) return;
+      let status;
+      try {
+        status = await fetchFileQuickOpenDeltaPage(current);
+      } catch (error) {
+        console.warn('quick-open delta read failed', error);
+        return;
+      }
+      if (status.stale) return;
+      if (status.rebase) {
+        requeryOpenFileQuickOpenForIndexChange({force: true});
+        return;
+      }
+      if (!status.more) return;
+    }
+  } finally {
+    const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+    if (current) current.fetching = false;
+  }
+}
+
+// The search_progress bus handler: a path-free {scope_id, generation, revision, coverage} frame. Pump
+// deltas only for the root whose opaque digest the frame names — a signal for any other root (or a
+// closed palette) does nothing, so one client's crawl never re-queries another root's palette.
+function handleFileSearchProgressSignal(payload) {
+  const scopeId = String(payload?.scope_id || '');
+  if (!scopeId || !fileQuickOpenDeltasActive()) return;
+  for (const deltaRoot of fileQuickOpenState.deltaRoots.values()) {
+    if (deltaRoot.scopeId !== scopeId) continue;
+    pumpFileQuickOpenDeltasForRoot(deltaRoot.normalizedRoot)
+      .catch(error => console.warn('quick-open delta pump failed', error));
+  }
+}
+
+// The ONE explicit repair path for Quick Open: a full snapshot re-query that re-baselines every cursor.
+// The incremental delta stream (steps 6-7) handles the ordinary crawl-advance case; this fires only for
+// the cases a cursor cannot bridge — a `rebase_required` verdict, a root that has no committed baseline
+// yet, or an authoritative background-refresh completion that rebuilt the index underneath the palette.
+// Guarded to the open files-mode palette with a live search query. It yields to an in-flight search
+// unless `force` (an authoritative completion event) is set, so a signal cannot abort a search
+// mid-flight into a stuck spinner.
+function requeryOpenFileQuickOpenForIndexChange({force = false} = {}) {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return;
+  if (commandPaletteEffectiveMode() !== 'files') return;
+  if (!commandPaletteSearchQuery(commandPaletteState.query)) return;
+  if (!force && fileQuickOpenState.loading) return;
+  refreshFileQuickOpenCandidates(commandPaletteState.query)
+    .catch(error => console.warn('quick-open index-change refresh failed', error));
 }
 
 function shouldNotifyTransitionKey(key) {
@@ -6201,8 +6469,8 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  const completionGeneration = Number(options.completionGeneration || pendingLayoutMutationGeneration) || 0;
-  if (completionGeneration === pendingLayoutMutationGeneration) pendingLayoutMutationGeneration = 0;
+  const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
+  runtimeState.consumePendingLayoutMutation(completionGeneration);
   if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
@@ -6233,15 +6501,15 @@ function applyLayoutSlots(nextSlots, options = {}) {
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
   });
-  for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  if (!dockviewLayoutActive()) {
+    for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  }
   scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
-  renderAutoApproveButtons();
-  updatePanelInactiveOverlays();
   const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
@@ -6270,17 +6538,31 @@ function layoutRenderRequest(request = {}) {
 
 function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= layoutMutationCompletedGeneration) return;
-  layoutMutationCompletedGeneration = generation;
+  if (!runtimeState.completeLayoutMutation(generation)) return;
   window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+}
+
+function waitForLayoutMutationCompletion(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0
+      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+    return Promise.resolve(generation);
+  }
+  return new Promise(resolve => {
+    const complete = event => {
+      if (Number(event?.detail?.generation || 0) < generation) return;
+      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      resolve(generation);
+    };
+    window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
 }
 
 function beginLayoutMutationCompletion(state = null) {
   if (Number.isSafeInteger(state?.completionGeneration) && state.completionGeneration > 0) {
     return state.completionGeneration;
   }
-  const generation = ++layoutMutationGeneration;
-  pendingLayoutMutationGeneration = generation;
+  const generation = runtimeState.beginLayoutMutation();
   if (state) state.completionGeneration = generation;
   return generation;
 }
@@ -6315,6 +6597,7 @@ function performLayoutRender(request = {}) {
     if (!dockviewLayoutActive()) {
       renderPaneTabStrips();
       syncPanelVisibility(previousActive);
+      renderAutoApproveButtons();
     }
     completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;

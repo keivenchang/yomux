@@ -736,6 +736,8 @@ def validate_snapshot(value: object) -> SnapshotWire:
     validate_cost_report(data["cost_report"])
     if buckets and buckets[-1]["open"] != data["rightmost_open"]:
         raise ProtocolValidationError("rightmost_open disagrees with the final bucket")
+    if buckets and buckets[-1]["open"] and buckets[-1]["start"] + concrete != end:
+        raise ProtocolValidationError("open bucket must end at window_end")
     return cast(SnapshotWire, value)
 
 

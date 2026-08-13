@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from yolomux_lib import activity_summary
+from yolomux_lib import app as app_module
 from yolomux_lib import github_client
 from yolomux_lib import jobd
 from yolomux_lib import metadata as metadata_module
@@ -54,18 +55,50 @@ def _init_repo_with_commit(repo):
     git(repo, "commit", "-m", "init")
 
 
-def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, started, ready):
-    """Exercise the private cache from an independent spawned worker process."""
+def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, ready, in_builder, release):
+    """Exercise the private cache from an independent spawned worker process.
+
+    Readiness is signalled in two decoupled phases so the parent's single-flight oracle never
+    hangs on cold fork+import latency:
+
+    * ``ready`` fires once this process has spawned and imported ``yolomux_lib`` and is about to
+      enter ``cached_repository_snapshot``.  Everything before this point -- the fork and the cold
+      import -- scales unboundedly with host load, so the parent waits on ``ready`` conditioned on
+      this process staying alive rather than against a wall clock.
+    * ``in_builder`` fires from inside the single-flight builder, i.e. once this worker has won the
+      cross-process ``file_lock``.  The parent bounds only this post-readiness product step, which
+      is load-independent, so a stall here is a genuine lock deadlock rather than a slow start.
+
+    ``YOLOMUX_TEST_WORKER_COLD_DELAY`` is an opt-in load-simulation seam (default ``0`` -- inert in
+    every normal run): it injects a deterministic pre-readiness delay so the acceptance harness can
+    reproduce arbitrary fork+import latency without depending on real host contention.
+    """
     session_files.common.STATE_DIR = Path(state_dir_text)
+    cold_delay = float(os.environ.get("YOLOMUX_TEST_WORKER_COLD_DELAY", "0") or "0")
+    if cold_delay:
+        time.sleep(cold_delay)
+    ready.set()
 
     def build(_repo, _from_ref, _to_ref):
         with Path(counter_text).open("a", encoding="utf-8") as handle:
             handle.write("build\n")
-        started.set()
-        ready.wait(timeout=5.0)
+        in_builder.set()
+        assert release.wait(timeout=10.0), "builder was never released by the parent"
         return {"statuses": {}}
 
     session_files.cached_repository_snapshot(Path(repo_text), None, None, 9, build)
+
+
+def _await_worker_ready(process, ready):
+    """Block until a spawned worker signals readiness, tolerating unbounded cold-start latency.
+
+    This absorbs fork+cold-import time (which scales with host load) without a patience budget: it
+    waits as long as the worker is alive and fails immediately only if the worker crashed before
+    reaching the builder -- a genuine defect, not a slow start.
+    """
+    while not ready.wait(timeout=0.2):
+        if not process.is_alive():
+            raise AssertionError(f"worker exited before readiness (exitcode={process.exitcode})")
 
 
 def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_text(tmp_path):
@@ -174,15 +207,29 @@ def test_registered_task_result_preserves_opaque_body_and_metadata(monkeypatch):
     assert result.product == product
 
 
+def _fs_descriptor(**fields):
+    """One filesystem job descriptor carrying this process's captured access policy.
+
+    The shared daemon refuses a descriptor without one, so tests must build them the way a real
+    accepting server does rather than hand-rolling `{"op": ..., "path": ...}`.
+    """
+    return {**fields, jobd.filesystem.FS_ACCESS_POLICY_FIELD: jobd.filesystem.access_policy_descriptor()}
+
+
+def _fs_batch_payload(**fields):
+    """One filesystem batch payload carrying this process's captured access policy."""
+    return {**fields, jobd.filesystem.FS_ACCESS_POLICY_FIELD: jobd.filesystem.access_policy_descriptor()}
+
+
 def test_filesystem_operation_task_reads_in_jobd(tmp_path):
     path = tmp_path / "note.txt"
     path.write_text("jobd owns this read\n", encoding="utf-8")
 
-    result = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps({
-        "op": "read",
-        "path": str(path),
-        "args": {},
-    }).encode("utf-8")))
+    result = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps(_fs_descriptor(
+        op="read",
+        path=str(path),
+        args={},
+    )).encode("utf-8")))
 
     assert result["content"] == "jobd owns this read\n"
 
@@ -192,11 +239,11 @@ def test_filesystem_operation_task_preserves_raw_bytes(tmp_path):
     body = b"\x00raw\xff"
     path.write_bytes(body)
 
-    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
-        "op": "raw",
-        "path": str(path),
-        "args": {"download": True},
-    }).encode("utf-8"))
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps(_fs_descriptor(
+        op="raw",
+        path=str(path),
+        args={"download": True},
+    )).encode("utf-8"))
 
     assert result.body == body
     assert result.product["format"] == "opaque_bytes"
@@ -208,11 +255,11 @@ def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path)
     path = tmp_path / "preview.html"
     path.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
 
-    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
-        "op": "html_preview",
-        "path": str(path),
-        "args": {"locale": "he"},
-    }).encode("utf-8"))
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps(_fs_descriptor(
+        op="html_preview",
+        path=str(path),
+        args={"locale": "he"},
+    )).encode("utf-8"))
 
     assert result.product["format"] == "opaque_bytes"
     assert result.product["content_type"] == "text/html; charset=utf-8"
@@ -225,49 +272,338 @@ def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path)
     assert "&lt;script&gt;window.answer = 42;&lt;/script&gt;" in document
 
 
-def test_filesystem_operation_relay_waits_in_jobd_and_returns_opaque_bytes(tmp_path):
+def test_jobd_broker_past_its_idle_window_stays_up_while_a_client_lease_is_held(tmp_path):
+    """A held client lease pins the broker across a slow interaction; without one it idle-exits.
+
+    This is the ownership seam behind the full-gate e2e differ flake
+    (`test_e2e_browser_harness.py::test_direct_internal_differ_fixture_path_reaches_terminal_state`):
+    the broker is per-test isolated, but its socket is removed when it decides it is idle, and a
+    saturated gate can stretch the gap between two `/api/fs/batch` calls past the idle window while
+    the browser boots and clicks. `_idle_should_stop` and the `shutdown_if_idle` action are the
+    exact guards that keep the broker alive -- but ONLY while a lease is held. Pin both directions
+    deterministically by forcing the clock past the window rather than by waiting under load.
+    """
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    # Force the broker well past its idle window with no queued or running work.
+    broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+    assert not broker.leases and broker._queued_count() == 0
+    # With no client holding it, an idle broker is free to remove its own socket.
+    assert broker._idle_should_stop() is True
+    idle_response, _ = broker.handle({"action": "shutdown_if_idle"})
+    assert idle_response == {"ok": True, "shutdown": True}
+    # A held client lease is what a request in flight leaves behind; it must veto both guards, so
+    # the broker cannot vanish out from under a slow browser between two filesystem calls.
+    broker.stop_event = multiprocessing.get_context("spawn").Event()
+    broker.leases["lease-1"] = {"client_pid": os.getpid()}
+    assert broker._idle_should_stop() is False
+    leased_response, _ = broker.handle({"action": "shutdown_if_idle"})
+    assert leased_response == {"ok": True, "shutdown": False, "leases": 1}
+    assert broker.stop_event.is_set() is False
+
+
+def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
+    """The fs-batch/differ completion worker pins the broker with a client lease while it polls.
+
+    W15 #4 root cause: under a saturated gate the completion worker's product poll is starved past
+    the broker's idle window, so between two ``/api/fs/batch`` calls the broker removes its own
+    socket, the next relay fails with ``LocalRpcError: unattributed_latency``, and the Finder shows
+    "request failed". Prove the completion path holds ONE registry client lease that vetoes idle
+    shutdown at the exact moment it polls -- even with the broker forced well past its idle window --
+    and releases it at the end so idle shutdown is NOT weakened (an unheld broker still idles out).
+    """
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+
+    class BrokerLeaseRegistry:
+        """Exercise the lease handlers synchronously; transport timing is not this contract."""
+
+        def __init__(self):
+            self.acquired: list[str] = []
+            self.released: list[str] = []
+
+        def acquire_lease(self, existing_lease_id=""):
+            response = broker.handle({
+                "action": "lease",
+                "client_pid": os.getpid(),
+                "lease_id": existing_lease_id,
+            })[0]
+            self.acquired.append(str(response.get("lease_id") or ""))
+            return response
+
+        def release_lease(self, lease_id):
+            self.released.append(lease_id)
+            return broker.handle({"action": "release", "lease_id": lease_id})[0]
+
+    registry = BrokerLeaseRegistry()
+    app = app_module.TmuxWebtermApp([], status_service_mode=True)
+    app.jobd_fs_batch_lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": registry})())
+    try:
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+
+        observed: dict[str, object] = {}
+
+        def poll_probe(_producer, _deadline_at):
+            # At the poll the lease MUST be held. Force the broker well past its idle window and prove
+            # it refuses to shut down because of the held lease, not because the clock is fresh.
+            broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+            observed["held_during_poll"] = app.jobd_fs_batch_lease.held
+            observed["clients_during_poll"] = broker.handle({"action": "status"})[0]["clients"]
+            observed["idle_should_stop"] = broker._idle_should_stop()
+            observed["shutdown_if_idle"] = broker.handle({"action": "shutdown_if_idle"})[0]
+            return {"responses": [{"id": 0, "ok": True}]}
+
+        monkeypatch.setattr(app, "wait_for_jobd_operation_product", poll_probe)
+        monkeypatch.setattr(app, "terminalize_operation", lambda *args, **kwargs: None)
+
+        producer = app_module.JobdProductOperation(job_id="job-1", product_key="key-1", generation=1)
+        app.complete_filesystem_batch_operation("op-1", "req-1", (0,), producer, time.time() + 5.0)
+
+        assert observed["held_during_poll"] is True
+        assert observed["clients_during_poll"] == 1
+        assert observed["idle_should_stop"] is False, "a held lease must veto idle shutdown mid-poll"
+        assert observed["shutdown_if_idle"] == {"ok": True, "shutdown": False, "leases": 1}
+
+        # Released at the end: idle shutdown is NOT weakened -- an unheld broker still idles out.
+        assert app.jobd_fs_batch_lease.held is False
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+        assert registry.acquired == registry.released
+        broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+        assert broker._idle_should_stop() is True
+    finally:
+        app.stop_jobd_operation_service()
+
+
+def test_watch_diff_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
+    """The watch-diff completion worker pins the broker with a client lease while it polls.
+
+    Same Seam-B lease mechanism as
+    ``test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window`` -- ``GET
+    /api/fs/watch-diff`` simply was not covered. The watch-diff completion worker submits every
+    child batch and then polls each product under one deadline; under a saturated gate the gap
+    between the submit ``produce`` and the product poll can exceed the broker's idle window, so the
+    broker removes its own socket mid-interaction and the poll fails with a jobd 404 (the live
+    ``GET /api/fs/watch-diff`` failure). Prove the completion path holds ONE registry client lease
+    that vetoes idle shutdown at the exact moment it polls -- even with the broker forced well past
+    its idle window -- and releases it at the end so idle shutdown is NOT weakened (an unheld broker
+    still idles out).
+    """
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=5.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    try:
+        app = app_module.TmuxWebtermApp([], status_service_mode=True)
+        app.job_client = jobd.JobClient(socket_path)
+        # The app's watch-diff path holds this exact lease owner -- the SAME one fs/batch holds --
+        # so bind it to the test broker's client.
+        app.jobd_fs_batch_lease = app_module.JobdInteractionLease(app.job_client)
+        deadline = time.monotonic() + 2.0
+        while not app.job_client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert app.job_client.registry.healthy() is True
+        # No interaction yet: the broker holds no client lease.
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+
+        # A receipt-only child batch forces `resolve_filesystem_watch_batches` to poll the broker
+        # (mirrors a cold submit that returned a receipt, not a warm product). The completion
+        # worker's real acquire/release around submit+resolve is the code under test.
+        producer = app_module.JobdProductOperation(job_id="job-1", product_key="watch-key-0", generation=1)
+        batch = app_module.FilesystemWatchBatchProduct(
+            producer=producer,
+            ready_product=None,
+            root_offset=0,
+            root_count=1,
+        )
+        monkeypatch.setattr(app, "submit_filesystem_watch_batches", lambda *args, **kwargs: (batch,))
+        monkeypatch.setattr(app, "materialize_filesystem_watch_products", lambda *args, **kwargs: {})
+        monkeypatch.setattr(app, "terminalize_operation", lambda *args, **kwargs: None)
+
+        observed: dict[str, object] = {}
+
+        def poll_probe(_producer, _deadline_at, *, cancel_event=None):
+            # At the poll the lease MUST be held. Force the broker well past its idle window and prove
+            # it refuses to shut down because of the held lease, not because the clock is fresh.
+            broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+            observed["held_during_poll"] = app.jobd_fs_batch_lease.held
+            observed["clients_during_poll"] = broker.handle({"action": "status"})[0]["clients"]
+            observed["idle_should_stop"] = broker._idle_should_stop()
+            observed["shutdown_if_idle"] = broker.handle({"action": "shutdown_if_idle"})[0]
+            return {"responses": [{"id": 0, "ok": True}]}
+
+        monkeypatch.setattr(app, "wait_for_jobd_operation_product", poll_probe)
+
+        fence = app_module.FilesystemWatchReceiptFence()
+        fence.accept("op-1")
+        app.complete_filesystem_watch_diff_operation(
+            fence,
+            "req-1",
+            {},
+            ["/tmp/watch-root"],
+            time.time() + 5.0,
+            "seed-1",
+        )
+
+        assert observed["held_during_poll"] is True
+        assert observed["clients_during_poll"] == 1
+        assert observed["idle_should_stop"] is False, "a held lease must veto idle shutdown mid-poll"
+        assert observed["shutdown_if_idle"] == {"ok": True, "shutdown": False, "leases": 1}
+
+        # Released at the end: idle shutdown is NOT weakened -- an unheld broker still idles out.
+        assert app.jobd_fs_batch_lease.held is False
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+        broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+        assert broker._idle_should_stop() is True
+    finally:
+        broker.handle({"action": "shutdown"})
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def _poll_broker_product(broker, coalesce_key, *, wait_seconds=5.0):
+    """Poll one broker's product store the way the web side now does (no blocking `relay`)."""
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        response, returned = broker.handle({"action": "product", "coalesce_key": coalesce_key})
+        if returned and response.get("state") in {"ready", "stale"}:
+            return response, returned
+        if response.get("state") == "none" and response.get("inflight") is not True:
+            return response, returned
+        time.sleep(0.02)
+    raise AssertionError("broker product never became ready")
+
+
+def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay(tmp_path, monkeypatch):
+    """The retired `relay` action's job -- a browser byte download -- is served by zero-wait produce.
+
+    `produce` submits and inspects the store atomically (no handler blocks), and the web side polls
+    `product` for the bytes.  The former blocking `relay` action must no longer exist.
+    """
     path = tmp_path / "payload.bin"
     body = b"\x00raw\xff"
     path.write_bytes(body)
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    broker._start_scheduler()
-    try:
-        response, returned = broker.handle({
-            "action": "relay",
-            "task": "filesystem_operation",
-            "payload": {"op": "raw", "path": str(path), "args": {"download": True}},
-            "priority": "interactive",
-            "deadline_ms": 5_000,
-        })
-    finally:
-        broker.stop_event.set()
-        broker._on_shutdown()
+    submitted: list[tuple[Future, object, tuple[object, ...]]] = []
 
-    assert response["ok"] is True
+    class Executor:
+        def submit(self, function, *args):
+            future = Future()
+            submitted.append((future, function, args))
+            return future
+
+    monkeypatch.setattr(broker, "_executor", lambda *_args: Executor())
+    assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
+    unknown, _empty = broker.handle({"action": "relay"})
+    assert unknown == {"ok": False, "error": "unknown jobd action"}
+
+    response, returned = broker.handle({
+        "action": "produce",
+        "task": "filesystem_operation",
+        "payload": _fs_descriptor(op="raw", path=str(path), args={"download": True}),
+        "priority": "interactive",
+        "coalesce_key": "relay-raw",
+        "generation": 1,
+        "deadline_ms": 5_000,
+        "delivery": "ready_or_receipt",
+    })
+    assert returned == b""
+    assert response["state"] == "queued"
+
+    broker._pump()
+    future, function, args = submitted.pop()
+    future.set_result(function(*args))
+    broker._pump()
+    response, returned = broker.handle({"action": "product", "coalesce_key": "relay-raw"})
+
     assert response["state"] == "ready"
     assert response["product"]["format"] == "opaque_bytes"
     assert returned == body
 
 
-def test_filesystem_operation_relay_preserves_typed_filesystem_failure(tmp_path):
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Unix FIFO saturation fixture is POSIX-only")
+def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_handler_slots(tmp_path):
+    """Cold byte work occupies the worker, not one RPC handler for its lifetime.
+
+    A FIFO read is a deterministic cold job: the jobd worker cannot finish until this test opens
+    the writer. Both zero-wait produce calls and a product poll must nevertheless complete over
+    the real Unix listener before that release. The retired relay would have parked one handler
+    per request at this point and exhausted a two-slot listener.
+    """
+    socket_path = tmp_path / "jobd.sock"
+    first_fifo = tmp_path / "first.fifo"
+    second_fifo = tmp_path / "second.fifo"
+    os.mkfifo(first_fifo)
+    os.mkfifo(second_fifo)
+    broker = jobd.PersistentJobBroker(socket_path, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+    try:
+        receipts = []
+        for index, path in enumerate((first_fifo, second_fifo), start=1):
+            response, body = client.produce(
+                "filesystem_operation",
+                _fs_descriptor(op="raw", path=str(path), args={"download": True}),
+                priority="interactive",
+                coalesce_key=f"former-relay-{index}",
+                generation=1,
+                deadline_ms=5_000,
+                delivery="receipt",
+            )
+            assert body == b""
+            receipts.append(response)
+        assert [row["job"]["status"] for row in receipts] == ["queued", "queued"]
+
+        pending, body = client.product("former-relay-1")
+        assert body == b""
+        assert pending["ok"] is True
+        assert pending["state"] in {"pending", "none"}
+        assert pending.get("inflight") is True
+
+        with first_fifo.open("wb", buffering=0) as writer:
+            writer.write(b"first")
+        ready, returned = _poll_broker_product(broker, "former-relay-1")
+        assert ready["state"] in {"ready", "stale"}
+        assert returned == b"first"
+    finally:
+        # Unblock the queued second worker before broker shutdown.
+        with second_fifo.open("wb", buffering=0) as writer:
+            writer.write(b"second")
+        broker.stop_event.set()
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def test_zero_wait_produce_preserves_typed_filesystem_failure(tmp_path):
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     broker._start_scheduler()
     try:
-        response, returned = broker.handle({
-            "action": "relay",
+        submit, _empty = broker.handle({
+            "action": "produce",
             "task": "filesystem_operation",
-            "payload": {"op": "raw", "path": str(tmp_path / "missing.bin"), "args": {}},
+            "payload": _fs_descriptor(op="raw", path=str(tmp_path / "missing.bin"), args={}),
             "priority": "interactive",
+            "coalesce_key": "relay-missing",
+            "generation": 1,
             "deadline_ms": 5_000,
+            "delivery": "receipt",
         })
+        job_id = submit["job"]["job_id"]
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            result = broker.handle({"action": "result", "job_id": job_id})[0]
+            if result["job"]["status"] == "failed":
+                break
+            time.sleep(0.02)
     finally:
         broker.stop_event.set()
         broker._on_shutdown()
 
-    assert response["ok"] is False
-    assert returned == b""
-    assert response["job"]["failure"]["status"] == 404
-    assert response["job"]["failure"]["filesystem_error"]["path"].endswith("missing.bin")
+    assert result["job"]["status"] == "failed"
+    assert result["job"]["failure"]["status"] == 404
+    assert result["job"]["failure"]["filesystem_error"]["path"].endswith("missing.bin")
 
 
 @pytest.mark.parametrize(
@@ -285,7 +621,7 @@ def test_filesystem_operation_parent_preserves_typed_failures(monkeypatch, tmp_p
         path.write_bytes(contents)
     if maximum is not None:
         monkeypatch.setattr(jobd.filesystem, "MAX_READ_BYTES", maximum)
-    payload = json.dumps({"op": operation, "path": str(path), "args": {}}).encode("utf-8")
+    payload = json.dumps(_fs_descriptor(op=operation, path=str(path), args={})).encode("utf-8")
 
     with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
         jobd._filesystem_operation(payload)
@@ -323,11 +659,14 @@ def test_session_files_view_skips_deleted_root_from_durable_transcript_cache(tmp
     }, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
 
     assert result["status"] == 200
-    assert any(
-        warning.get("key") == "common.pathNotFound"
-        and warning.get("params", {}).get("reason_code") == "root_gone"
-        for warning in result["payload"]["warnings"]
-    )
+    # A retired worktree crosses the worker boundary as ONE typed repo row, not as a warning and
+    # not as one row per remembered file.
+    assert result["payload"]["warnings"] == []
+    assert result["payload"]["files"] == []
+    gone = [repo for repo in result["payload"]["repos"] if repo.get("missing") is True]
+    assert len(gone) == 1, result["payload"]["repos"]
+    assert gone[0]["repo"] == str(retired_root)
+    assert gone[0]["touched_count"] == 1
     assert cache_path.exists()
 
 
@@ -514,23 +853,101 @@ def test_session_files_view_regression_matrix_reuses_git_snapshot_until_repo_gen
 
 
 def test_repository_snapshot_cache_single_flights_across_spawned_workers(tmp_path):
+    """Single-flight holds across real processes on the real cross-process ``file_lock``.
+
+    The oracle is decoupled from cold spawn/import latency by a two-phase readiness handshake (see
+    ``_build_repository_snapshot_in_child``).  The parent waits for the first worker's ``ready`` and
+    its ``in_builder`` before it even starts the second worker, so the second is guaranteed to
+    contend against a lock the first already holds -- genuine cross-process contention -- while no
+    wall-clock budget is placed on fork+import.  A stalled worker still fails the test: a crash
+    surfaces via ``_await_worker_ready``/``exitcode``, and a real lock deadlock surfaces via the
+    bounded ``in_builder`` wait, which measures only the load-independent, post-readiness product
+    step.  ``builds == ["build"]`` remains the single-flight invariant and is not weakened.
+    """
     repo = tmp_path / "repo"
     _init_repo_with_commit(repo)
     context = multiprocessing.get_context("spawn")
-    started = context.Event()
+    first_ready = context.Event()
+    second_ready = context.Event()
+    in_builder = context.Event()
     release = context.Event()
     counter = tmp_path / "build-count.txt"
-    args = (str(repo), str(tmp_path / "state"), str(counter), started, release)
-    first = context.Process(target=_build_repository_snapshot_in_child, args=args)
-    second = context.Process(target=_build_repository_snapshot_in_child, args=args)
+    state_dir = str(tmp_path / "state")
+    counter_text = str(counter)
+    first = context.Process(
+        target=_build_repository_snapshot_in_child,
+        args=(str(repo), state_dir, counter_text, first_ready, in_builder, release),
+    )
+    second = context.Process(
+        target=_build_repository_snapshot_in_child,
+        args=(str(repo), state_dir, counter_text, second_ready, in_builder, release),
+    )
+    # Phase 1: the first worker becomes the builder and holds the cross-process lock.
     first.start()
-    assert started.wait(timeout=5.0), "first worker never entered the snapshot builder"
+    _await_worker_ready(first, first_ready)
+    assert in_builder.wait(timeout=30.0), "first worker never reached the single-flight builder (deadlock)"
+    # Phase 2: only now start the second worker, so it must contend against the held lock rather
+    # than race a not-yet-locked cache.  Its readiness proves it imported and reached the builder
+    # entry; single-flight must then keep it out of the builder entirely.
     second.start()
+    _await_worker_ready(second, second_ready)
     release.set()
-    first.join(timeout=10.0)
-    second.join(timeout=10.0)
+    first.join(timeout=30.0)
+    second.join(timeout=30.0)
+    assert not first.is_alive() and not second.is_alive(), "a worker never retired"
     assert first.exitcode == second.exitcode == 0
     assert counter.read_text(encoding="utf-8").splitlines() == ["build"]
+
+
+def test_repository_snapshot_cache_single_flights_concurrent_callers_deterministically(tmp_path, monkeypatch):
+    """Single-flight, proven without a spawn-latency race: a concurrent second caller waits.
+
+    `test_..._across_spawned_workers` proves the SAME collapse across real processes, but its
+    5s `started.wait` bound is a patience surface -- under a saturated full gate a spawned worker
+    can take longer than that merely to import, which is a scheduling artifact, not a single-flight
+    defect. This companion pins the invariant with in-process threads and an explicit barrier, so
+    ordering is fixed by the handshake rather than by timing: while the first caller holds
+    `file_lock` inside the builder, the second caller blocks on that same lock and, once released,
+    is served the freshly written cache instead of launching a second build.
+    """
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    builds: list[int] = []
+    builds_lock = threading.Lock()
+    first_in_builder = threading.Event()
+    release_first = threading.Event()
+
+    def build(_repo, _from_ref, _to_ref):
+        with builds_lock:
+            builds.append(1)
+            ordinal = len(builds)
+        if ordinal == 1:
+            first_in_builder.set()
+            assert release_first.wait(timeout=10.0), "first caller was never released"
+        return {"statuses": {}}
+
+    results: dict[str, tuple[dict, bool]] = {}
+
+    def call(name):
+        results[name] = session_files.cached_repository_snapshot(repo, None, None, 9, build)
+
+    first = threading.Thread(target=call, args=("first",))
+    second = threading.Thread(target=call, args=("second",))
+    first.start()
+    assert first_in_builder.wait(timeout=10.0), "first caller never entered the builder"
+    # The first caller now holds the cross-caller lock inside the builder; the second must block on
+    # it rather than start its own build. Give it a beat to reach the lock, then release the first.
+    second.start()
+    second.join(timeout=2.0)
+    assert second.is_alive(), "second caller did not block behind the single-flight lock"
+    release_first.set()
+    first.join(timeout=10.0)
+    second.join(timeout=10.0)
+    assert not first.is_alive() and not second.is_alive()
+    assert builds == [1], builds
+    assert results["first"][1] is False, results["first"]
+    assert results["second"][1] is True, results["second"]
 
 
 def test_repository_snapshot_cache_keeps_ref_comparisons_separate(tmp_path, monkeypatch):
@@ -760,6 +1177,45 @@ def _wait_for_result(client: jobd.JobClient, job_id: str, *, timeout_seconds: fl
     raise AssertionError(f"job {job_id} did not settle")
 
 
+def test_jobd_control_plane_is_ready_before_blocked_data_plane_setup(tmp_path, monkeypatch):
+    socket_path = tmp_path / "jobd.sock"
+    executor_setup_started = threading.Event()
+    release_executor_setup = threading.Event()
+    priority_calls = []
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+
+    def blocked_executor_setup(_worker_count):
+        executor_setup_started.set()
+        assert release_executor_setup.wait(5.0)
+        raise RuntimeError("fixture executor setup failure")
+
+    monkeypatch.setattr(service, "_new_executor", blocked_executor_setup)
+    monkeypatch.setattr(jobd, "apply_service_process_priority", lambda: priority_calls.append(threading.current_thread().name) or True)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not client.registry.healthy():
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+    deadline = time.monotonic() + 1.0
+    while service.scheduler_thread is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert service.scheduler_thread is not None
+    assert priority_calls == ["jobd-scheduler"]
+
+    submitted = client.submit("json_compact", {"ready": True}, priority="interactive", coalesce_key="blocked-setup")
+    assert submitted["ok"] is True
+    assert executor_setup_started.wait(1.0)
+    assert client.registry.healthy() is True
+    assert priority_calls == ["jobd-scheduler"]
+
+    release_executor_setup.set()
+    assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
+    worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
 def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path):
     socket_path = tmp_path / "jobd.sock"
     service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
@@ -792,7 +1248,13 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     assert result["job"]["result"] == {"a": [2], "z": 1}
     assert produced["state"] == "ready"
     assert json.loads(produced_body) == {"a": [2], "z": 1}
-    assert status["queues"] == {"interactive": 0, "freshness": 0, "maintenance": 0}
+    assert status["queues"] == {"point": 0, "mutation": 0, "interactive": 0, "freshness": 0, "maintenance": 0}
+    assert status["lanes"] == {
+        "point": {"capacity": jobd.JOBD_POINT_WORKERS, "active": 0, "queued": 0},
+        "mutation": {"capacity": jobd.JOBD_MUTATION_WORKERS, "active": 0, "queued": 0},
+        "interactive": {"capacity": jobd.JOBD_INTERACTIVE_WORKERS, "active": 0, "queued": 0},
+        "bulk": {"capacity": 1, "active": 0, "queued": 0},
+    }
     assert status["cache"]["records"] == 1
     assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
     worker.join(timeout=2.0)
@@ -1149,6 +1611,248 @@ def test_jobd_interactive_saturation_queues_until_reserved_capacity_is_released(
     assert len(submitted_futures) == 2
 
 
+def test_jobd_point_lane_dispatches_while_every_bulk_and_interactive_slot_is_held(tmp_path, monkeypatch):
+    """A held bulk job must not put an editor open or an index probe behind it."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for number in range(service.general_worker_count):
+        holder = service._queue_record("text_facts", {"text": f"bulk-{number}"}, "freshness", number, f"bulk-{number}")
+        holder.status = "running"
+        holder.future = Future()
+        holders.append(holder)
+    for number in range(jobd.JOBD_INTERACTIVE_WORKERS):
+        holder = service._queue_record("text_facts", {"text": f"batch-{number}"}, "interactive", number, f"batch-{number}")
+        holder.status = "running"
+        holder.future = Future()
+        holders.append(holder)
+    lanes_by_submission: list[str] = []
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": (
+        lanes_by_submission.append(jobd.PersistentJobBroker._lane_for_priority(priority)) or Executor()
+    ))
+    read = service._queue_record("filesystem_operation", {"op": "read"}, "point", 1, "point-read")
+    index_status = service._queue_record("filesystem_operation", {"op": "index_status"}, "point", 1, "point-index")
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert read.status == "running"
+    assert index_status.status == "running"
+    assert lanes_by_submission == ["point", "point"]
+    status = service.common_status()
+    assert status["lanes"]["point"] == {"capacity": jobd.JOBD_POINT_WORKERS, "active": 2, "queued": 0}
+    assert status["lanes"]["bulk"]["active"] == service.general_worker_count
+    assert status["lanes"]["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+
+
+def test_jobd_point_lane_capacity_is_bounded_and_releases_in_order(tmp_path, monkeypatch):
+    """Point capacity is explicitly bounded: one slow point read cannot strand the rest, and
+    point work cannot become unbounded process capacity of its own."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    points = [
+        service._queue_record("json_compact", {"order": order}, "point", 1, f"point-{order}")
+        for order in range(jobd.JOBD_POINT_WORKERS + 1)
+    ]
+
+    service._pump()
+
+    assert [record.status for record in points[:jobd.JOBD_POINT_WORKERS]] == ["running"] * jobd.JOBD_POINT_WORKERS
+    assert points[-1].status == "queued"
+    assert len(submitted_futures) == jobd.JOBD_POINT_WORKERS
+    assert service.common_status()["lanes"]["point"] == {
+        "capacity": jobd.JOBD_POINT_WORKERS,
+        "active": jobd.JOBD_POINT_WORKERS,
+        "queued": 1,
+    }
+
+    submitted_futures[0].set_result(b'{"order":0}')
+    service._pump()
+
+    assert points[0].status == "completed"
+    assert points[-1].status == "running"
+    assert len(submitted_futures) == jobd.JOBD_POINT_WORKERS + 1
+
+
+def test_jobd_every_declared_priority_is_owned_by_exactly_one_bounded_lane(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+
+    assert set(jobd.JOBD_PRIORITIES) == set(jobd.JOBD_PRIORITY_LANES)
+    assert jobd.JOBD_PRIORITIES == tuple(jobd.JOBD_PRIORITY_LANES)
+    assert set(jobd.JOBD_PRIORITY_LANES.values()) == set(jobd.JOBD_LANE_PRIORITIES)
+    assert all(service._lane_capacity(lane) >= 1 for lane in jobd.JOBD_LANE_PRIORITIES)
+    with pytest.raises(ValueError, match="no jobd lane owns priority"):
+        jobd.PersistentJobBroker._lane_for_priority("nonexistent")
+    assert service._submit({"task": "text_facts", "payload": {"text": "x"}, "priority": "nonexistent"}) == {
+        "ok": False,
+        "error": "invalid priority",
+    }
+
+
+def test_point_read_admits_against_its_own_lane_while_the_bulk_queue_is_full(tmp_path):
+    """A full bulk/freshness queue must not refuse an idle point read as `queue full`.
+
+    Before the per-lane cap, one global `JOBD_MAX_QUEUE` sat ahead of every lane: 64 queued
+    freshness records made a fresh point submission return `queue full` while the point lane read
+    capacity 2, active 0.  The cap is per-lane now, so each lane stays bounded (the backpressure
+    intent) without one lane's queue starving another's admission.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    for number in range(jobd.JOBD_MAX_QUEUE):
+        submission, error = jobd.PersistentJobBroker._validated_submission({
+            "task": "session_files_view", "priority": "freshness",
+            "payload": {"session": f"s{number}"}, "generation": 1,
+            "coalesce_key": f"freshness-{number}", "deadline_ms": 60_000,
+        })
+        assert error is None, error
+        assert service._submit_validated(submission)["ok"] is True
+
+    # The freshness (bulk) lane's queue is full; the point lane is idle.
+    assert service._queued_count(lane="bulk") >= jobd.JOBD_MAX_QUEUE
+    assert service._queued_count(lane="point") == 0
+    assert service._future_slots(lane="point") == 0
+
+    submission, error = jobd.PersistentJobBroker._validated_submission({
+        "task": "session_files_view", "priority": "point",
+        "payload": {"session": "point-read"}, "generation": 1,
+        "coalesce_key": "point-read", "deadline_ms": 60_000,
+    })
+    assert error is None, error
+    result = service._submit_validated(submission)
+    assert result["ok"] is True, result
+    assert result["coalesced"] is False
+    # And the point lane's own cap still holds against a flood of point submissions.
+    assert service._queued_count(lane="point") == 1
+
+
+def test_jobd_fresh_only_joins_in_flight_work_but_never_serves_a_stored_product(tmp_path, monkeypatch):
+    """The mtime-granularity case: one coalesce key, two different contents.
+
+    A stat identity is only as fine as the filesystem timestamp tick, so a rewrite inside one tick
+    that keeps the same size produces an identical key for different bytes.  A `fresh_only`
+    submission must therefore refuse the stored product while still joining in-flight work.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    key = "filesystem-operation:same-tick-same-size"
+    submission = {
+        "task": "json_compact", "payload": {"op": "read", "path": "/repo/note.md"},
+        "priority": "point", "generation": 1, "coalesce_key": key, "delivery": "ready_or_receipt",
+    }
+
+    # First read completes and stores a product under the key.
+    first, _first_body = service._produce(dict(submission))
+    service._pump()
+    submitted_futures[0].set_result(b'{"content":"before"}')
+    service._pump()
+    stored_metadata, stored_body = service._product({"coalesce_key": key})
+    assert first["coalesced"] is False
+    assert stored_metadata["state"] == "ready" and stored_body == b'{"content":"before"}'
+
+    # The file is rewritten inside the same mtime tick with the same size, so the key is unchanged.
+    reused, reused_body = service._produce(dict(submission))
+    assert reused["state"] == "ready", "the default path deliberately reuses a retained product"
+    assert reused_body == b'{"content":"before"}'
+
+    fresh, fresh_body = service._produce(dict(submission, fresh_only=True))
+    assert fresh_body == b"", "fresh_only must not hand back the retained product"
+    assert fresh["state"] == "queued"
+    assert fresh["coalesced"] is False, "a completed record must not satisfy a fresh_only submission"
+    service._pump()
+    assert len(submitted_futures) == 2, "fresh_only must run the work again"
+
+    # A second fresh_only submission while that work is in flight still coalesces: in-flight work
+    # has produced nothing, so it cannot be stale.
+    joined, _joined_body = service._produce(dict(submission, fresh_only=True))
+    assert joined["coalesced"] is True
+    assert joined["job"]["job_id"] == fresh["job"]["job_id"]
+    service._pump()
+    assert len(submitted_futures) == 2
+
+    # While the fresh job is in flight the waiter must not accept the older stored bytes.
+    inflight_metadata, _inflight_body = service._product({"coalesce_key": key})
+    assert inflight_metadata["state"] == "stale" and inflight_metadata["inflight"] is True
+
+    submitted_futures[1].set_result(b'{"content":"after"}')
+    service._pump()
+    final_metadata, final_body = service._product({"coalesce_key": key})
+    assert final_metadata["state"] == "ready"
+    assert final_body == b'{"content":"after"}'
+
+
+def test_jobd_coalesces_identical_in_flight_point_reads_into_one_execution(tmp_path, monkeypatch):
+    """Repeated identical point reads share one execution and every receipt names that job."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    submission = {
+        "task": "json_compact",
+        "payload": {"op": "read", "path": "/repo/note.md"},
+        "priority": "point",
+        "generation": 1,
+        "coalesce_key": "filesystem-operation:content-identity",
+        "delivery": "receipt",
+    }
+
+    first, _first_body = service._produce(dict(submission))
+    service._pump()
+    second, _second_body = service._produce(dict(submission))
+    third, _third_body = service._produce(dict(submission))
+
+    assert first["coalesced"] is False
+    assert second["coalesced"] is True and third["coalesced"] is True
+    job_ids = {response["job"]["job_id"] for response in (first, second, third)}
+    assert len(job_ids) == 1
+    assert len(submitted_futures) == 1
+    assert service.product_counters["json_compact"]["accepted"] == 1
+    assert service.product_counters["json_compact"]["coalesced"] == 2
+
+    submitted_futures[0].set_result(b'{"content":"body"}')
+    service._pump()
+
+    metadata, body = service._product({"coalesce_key": submission["coalesce_key"]})
+    assert metadata["state"] == "ready"
+    assert body == b'{"content":"body"}'
+    assert metadata["schedule"]["lane"] == "point"
+    assert metadata["schedule"]["task"] == "json_compact"
+    assert metadata["schedule"]["queue_wait_ms"] >= 0.0
+    assert metadata["schedule"]["execution_ms"] >= 0.0
+    assert metadata["schedule"]["running_started_at"] > 0.0
+
+    # A changed content identity is a different key, so it can never be answered by the retained
+    # product above -- coalescing never serves bytes for content that has since changed.
+    changed = dict(submission, coalesce_key="filesystem-operation:content-identity-2")
+    changed_metadata, changed_body = service._product({"coalesce_key": changed["coalesce_key"]})
+    assert changed_metadata["state"] == "none" and changed_body == b""
+
+
 def test_jobd_rejects_malformed_worker_result_and_bounds_retained_records(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     malformed = service._queue_record("text_facts", {"text": "bad"}, "interactive", 1, "bad")
@@ -1220,12 +1924,12 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
 
     assert broken.status == "failed"
     assert broken.error == "worker crashed"
-    assert service.interactive_executor is None
+    assert service.executors["interactive"] is None
 
 
 def test_jobd_rejects_newer_protocol_before_dispatch(tmp_path):
@@ -1293,7 +1997,13 @@ def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_ex
 
     assert timed_out.status == "timed_out"
     assert service.common_status()["product_counters"]["text_facts"]["timed_out"] == 1
-    assert service.common_status()["last_failure"] == "deadline exceeded while executing"
+    # A timed-out job is HISTORICAL work failure and must not read as a CURRENT daemon
+    # failure. Publishing it as `last_failure` pinned a healthy, serving jobd to
+    # degraded/terminal_failure in the health observer - permanently, because nothing
+    # clears it. Two meanings, two names; both directions asserted.
+    _status = service.common_status()
+    assert _status["last_job_failure"] == "deadline exceeded while executing"
+    assert not _status.get("last_failure"), _status.get("last_failure")
     assert waiting.status == "queued"
     timed_out.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
     service._pump()
@@ -1329,7 +2039,7 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     recovered = service._queue_record("json_compact", {"z": 1, "a": 2}, "interactive", 2, "recovered")
     deadline = time.monotonic() + 5.0
@@ -1348,8 +2058,9 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, and v18 adds byte-product relay requests for browser filesystem consumers.
-    assert jobd.JOBD_PROTOCOL_VERSION == 18
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, and v22 retires the blocking `relay` action in favor of zero-wait produce plus a web-side product poll.
+    assert jobd.JOBD_PROTOCOL_VERSION == 22
+    assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS
@@ -1455,7 +2166,7 @@ def test_filesystem_batch_task_preserves_64_item_ids_and_results(tmp_path):
 
     result = json.loads(jobd.run_registered_task(
         "filesystem_batch",
-        json.dumps({"requests": requests, "client_scope": "browser"}).encode("utf-8"),
+        json.dumps(_fs_batch_payload(requests=requests, client_scope="browser")).encode("utf-8"),
     ))
 
     assert [response["id"] for response in result["responses"]] == [request["id"] for request in requests]
@@ -1466,7 +2177,7 @@ def test_filesystem_batch_task_preserves_64_item_ids_and_results(tmp_path):
     with pytest.raises(ValueError, match="at most 64"):
         jobd.run_registered_task(
             "filesystem_batch",
-            json.dumps({"requests": [*requests, {"id": "overflow", "type": "info", "path": str(root)}]}).encode("utf-8"),
+            json.dumps(_fs_batch_payload(requests=[*requests, {"id": "overflow", "type": "info", "path": str(root)}])).encode("utf-8"),
         )
 
 
@@ -1505,7 +2216,7 @@ def test_filesystem_batch_task_uses_the_bounded_binary_product_budget(monkeypatc
         lambda _payload: {"responses": [{"id": "large", "ok": True, "payload": {"text": large_payload}}]},
     )
 
-    result = jobd.run_registered_task("filesystem_batch", b'{"requests":[]}')
+    result = jobd.run_registered_task("filesystem_batch", json.dumps(_fs_batch_payload(requests=[])).encode("utf-8"))
 
     assert len(result) > jobd.JOBD_MAX_RESULT_BYTES
     assert len(result) <= jobd.JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES
@@ -1529,7 +2240,7 @@ def test_jobd_produce_executes_one_typed_64_item_filesystem_batch(tmp_path):
 
     metadata, body = client.produce(
         "filesystem_batch",
-        {"requests": requests, "client_scope": "browser"},
+        _fs_batch_payload(requests=requests, client_scope="browser"),
         priority="interactive",
         generation=1,
         coalesce_key="filesystem-batch-integration",
@@ -1627,7 +2338,7 @@ def test_filesystem_batch_large_real_rpc_uses_binary_product_not_result_metadata
             "path": str(directory),
             "trigger_counts": {"tree-render": 1},
         })
-    payload = {"requests": requests, "client_scope": "browser"}
+    payload = _fs_batch_payload(requests=requests, client_scope="browser")
     request_bytes = len(json.dumps({
         "action": "produce",
         "task": "filesystem_batch",
@@ -1719,7 +2430,7 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
         def shutdown(self, **_kwargs):
             return None
 
-    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["bulk"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     assert failing.status == "failed"
     assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
@@ -1770,7 +2481,7 @@ def test_jobd_status_lists_all_running_records_without_product_payloads(tmp_path
     assert status["worker_pids"] == []
 
 
-def test_jobd_status_and_shutdown_cover_general_and_interactive_executors(tmp_path):
+def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
     shutdown_pids: list[int] = []
 
@@ -1786,17 +2497,21 @@ def test_jobd_status_and_shutdown_cover_general_and_interactive_executors(tmp_pa
         def shutdown(self, **_kwargs):
             shutdown_pids.append(self.pid)
 
-    service.executor = Executor(101)  # type: ignore[assignment]
-    service.interactive_executor = Executor(102)  # type: ignore[assignment]
+    service.executors["bulk"] = Executor(101)  # type: ignore[assignment]
+    service.executors["interactive"] = Executor(102)  # type: ignore[assignment]
+    service.executors["point"] = Executor(103)  # type: ignore[assignment]
+    service.executors["mutation"] = Executor(104)  # type: ignore[assignment]
 
     status = service.common_status()
     service._on_shutdown()
 
-    assert status["worker_count"] == 3
-    assert status["worker_pids"] == [101, 102]
-    assert sorted(shutdown_pids) == [101, 102]
-    assert service.executor is None
-    assert service.interactive_executor is None
+    assert status["worker_count"] == (
+        2 + jobd.JOBD_INTERACTIVE_WORKERS + jobd.JOBD_POINT_WORKERS + jobd.JOBD_MUTATION_WORKERS
+    )
+    assert status["worker_pids"] == [101, 102, 103, 104]
+    assert sorted(shutdown_pids) == [101, 102, 103, 104]
+    assert set(service.executors) == set(jobd.JOBD_LANE_PRIORITIES)
+    assert all(executor is None for executor in service.executors.values())
 
 
 def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):

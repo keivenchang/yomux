@@ -1,7 +1,15 @@
+import json
+import re
+
 from selenium.webdriver.common.by import By
+
+from yolomux_lib import filesystem
+from yolomux_lib import web
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+
+_BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
 
 def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, tmp_path):
@@ -172,6 +180,44 @@ def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp
     assert len(metrics["resultPaths"]) == 64
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
+
+
+def test_live_bundle_batches_at_the_bound_a_real_boot_page_states(browser, tmp_path):
+    """The size the flush splits at must be the bound a REAL rendered page states.
+
+    `fileExplorerFsBatchRequestLimit` is what /api/fs/batch posts are chunked at, and it fails
+    closed to one item when the boot payload states no bound — so a page that does not deliver
+    `filesystemBatchLimits`, or a bundle that reads it before `bootstrap` exists, turns every
+    Finder listing into one HTTP request per entry while every payload-level assertion stays
+    green. Take the bound from the production `html_page` render (parsed, not grepped) and
+    require the const a live bundle actually batches with to equal it.
+    """
+    rendered = web.html_page(["1"], "admin")
+    stated = json.loads(_BOOTSTRAP_SCRIPT_RE.search(rendered).group(1)).get("filesystemBatchLimits")
+    assert stated == {
+        "maxRequests": filesystem.MAX_BATCH_REQUESTS,
+        "triggerCountLimit": filesystem.BATCH_TRIGGER_COUNT_LIMIT,
+    }, stated
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        fs_entries={"/home/test": []},
+    )
+    live = browser.execute_script(
+        """
+        return {
+          maxRequests: fileExplorerFsBatchRequestLimit,
+          triggerCountLimit: fileExplorerFsBatchTriggerCountLimit,
+          bootstrapType: typeof bootstrap,
+          payload: (typeof bootstrap === 'object' && bootstrap && bootstrap.filesystemBatchLimits) || null,
+        };
+        """
+    )
+    assert live["bootstrapType"] == "object", live
+    assert live["payload"] == stated, live
+    assert {"maxRequests": live["maxRequests"], "triggerCountLimit": live["triggerCountLimit"]} == stated, live
 
 
 def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):
@@ -1471,12 +1517,21 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
-    hover_detail = browser.execute_script(
-        """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/vortex/repo-a/src"]');
-        row.__yolomuxRepoHoverController.openNow();
-        return document.getElementById('fileTreeRepoPopover')?.textContent || '';
-        """
+    hover_row = next(
+        row
+        for row in browser.find_elements(By.CSS_SELECTOR, '.file-tree-row[data-path="/home/test/vortex/repo-a/src"]')
+        if row.is_displayed() and row.rect["width"] > 0 and row.rect["height"] > 0
+    )
+    browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", hover_row)
+    fast_pointer_actions(browser).move_to_element(hover_row).perform()
+    hover_detail = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const text = document.getElementById('fileTreeRepoPopover')?.textContent || '';
+            return text.includes('★') && text.includes('Modified by 1') ? text : '';
+            """
+        )
+        or False
     )
     assert "★" in hover_detail and "Modified by 1" in hover_detail, hover_detail
     assert metrics["fetchedPaths"] >= 1, metrics
@@ -1730,13 +1785,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         "loaded": True,
         "errors": [],
         "repos": [{"repo": "/home/test/vortex/parser-toolkits"}],
-        "files": [
-            {
-                "repo": "/home/test/vortex/parser-toolkits",
-                "path": "acceptance/utils/tests/check/reasoning/table.py",
-                "abs_path": path,
-            },
-        ],
+        "files": [{"repo": "/home/test/vortex/parser-toolkits", "path": "acceptance/utils/tests/check/reasoning/table.py", "abs_path": path}],
     }
     fs_entries = {
         "/home/test": [{"name": "vortex", "kind": "dir"}],
@@ -1792,6 +1841,9 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
           fileVisible: tree.querySelector(`.file-tree-row[data-path="${path}"]`) !== null,
           fileCurrent: tree.querySelector(`.file-tree-row[data-path="${path}"]`)?.classList.contains('current-file') || false,
           expandedSet: Array.from(fileExplorerExpanded),
+          listedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch')
+            .flatMap(item => item.path === '/api/fs/list' ? [new URLSearchParams(item.search || '').get('path')]
+              : (item.body?.requests || []).filter(request => request.type === 'list').map(request => request.path)),
         };
         """
     )
@@ -1801,10 +1853,13 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     assert metrics["mode"] == "sync", metrics
     assert metrics["plan"]["root"] == "/home/test", metrics
     assert metrics["plan"]["session"] == "2", metrics
-    assert metrics["plan"]["expandPaths"] == [path], metrics
+    parent = "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check/reasoning"
+    assert metrics["plan"]["expandPaths"] == metrics["plan"]["affectedDirs"] == [parent], metrics
     assert metrics["fileVisible"] is True, metrics
     assert metrics["fileCurrent"] is True, metrics
+    assert path not in metrics["listedPaths"] and parent in metrics["listedPaths"], metrics
     assert "/home/test/vortex/parser-toolkits/acceptance/utils/tests/check/reasoning" in metrics["expandedSet"], metrics
+
     collapsed = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

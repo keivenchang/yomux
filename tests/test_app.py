@@ -1,4 +1,6 @@
-from concurrent.futures import ThreadPoolExecutor
+import argparse
+import ast
+from concurrent.futures import Future, ThreadPoolExecutor
 import copy
 import hashlib
 from http import HTTPStatus
@@ -6,37 +8,50 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import threading
 import time
 from types import SimpleNamespace
-from urllib.parse import parse_qs
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import yaml
 
 from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
+from yolomux_lib import cli as cli_module
 from yolomux_lib.stats_current import host_collectors
+from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
+from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
+from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
+from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
+from tests.subsystems import app_darwin_memory
 from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
-from yolomux_lib.common import AgentInfo
-from yolomux_lib.common import PaneInfo
-from yolomux_lib.common import SessionInfo
-from yolomux_lib.common import UploadedFile
+from yolomux_lib.common import AgentInfo, PaneInfo, SessionInfo, UploadedFile
+from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEGRADED_STATES
+from yolomux_lib.backend_health.observer import observed_health
+from yolomux_lib.backend_health.store import BackendHealthStore
+from yolomux_lib.backend_health.store import HealthSnapshot
+from yolomux_lib.backend_health.store import ResourceObservation
 from yolomux_lib.local_services.rpc import encode_metadata
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from yolomux_lib.local_services.rpc import new_envelope
+from yolomux_lib.local_services import runtime as local_service_runtime
+from yolomux_lib.local_services.client import TransportFailure
 from yolomux_lib import server_logs
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
 from yolomux_lib.yoagent import transports as transport_module
+
+from tests.gate_harness import stop_fixture_app_runtime
 
 from _git_helpers import git
 from _git_helpers import init_repo
@@ -44,69 +59,21 @@ from _git_helpers import init_repo
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
+# The browser abandons an accepted operation at `apiFetchDefaultDeadlineMs`, not at the backend's
+# 120s budget, so that is the deadline a user-visible editor open has to beat.  Read from the
+# checked-in source rather than restated, so raising one and not the other cannot pass silently.
+BROWSER_OPERATION_DEADLINE_SECONDS = int(re.search(
+    r"^const apiFetchDefaultDeadlineMs = (\d+);$",
+    (Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "10_core_utils.js").read_text(encoding="utf-8"),
+    re.MULTILINE,
+).group(1)) / 1000.0
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
-def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):
-    counters = app_module.DarwinVmStatistics64()
-    counters.internal_page_count = 30
-    counters.wire_count = 10
-    counters.compressor_page_count = 20
-    counters.external_page_count = 40
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
-    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: SimpleNamespace(used_bytes=25))
-    native_values = {
-        "kern.memorystatus_level": 80,
-        "kern.memorystatus_vm_pressure_level": 2,
-    }
-    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: native_values.get(name))
-
-    assert app_module.current_darwin_system_memory_details() == app_module.DarwinSystemMemoryDetails(
-        physical_memory_bytes=1000,
-        memory_used_bytes=600,
-        cached_files_bytes=400,
-        app_memory_bytes=300,
-        wired_memory_bytes=100,
-        compressed_memory_bytes=200,
-        swap_used_bytes=25,
-        pressure_percent=20.0,
-        pressure_level=2,
-    )
-
-
-def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch):
-    counters = app_module.DarwinVmStatistics64()
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
-    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
-    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: None)
-
-    details = app_module.current_darwin_system_memory_details()
-
-    assert details is not None
-    assert details.swap_used_bytes is None
-    assert details.pressure_percent is None
-    assert details.pressure_level is None
-
-
+def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch): app_darwin_memory.assert_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch)
+def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch): app_darwin_memory.assert_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch)
 @pytest.mark.parametrize(("native_level", "expected"), [(1, 1), (2, 2), (4, 4), (0, None), (3, None), (5, None)])
-def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected):
-    counters = app_module.DarwinVmStatistics64()
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
-    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
-    monkeypatch.setattr(
-        app_module,
-        "darwin_sysctl_value",
-        lambda name, value_type: native_level if name == "kern.memorystatus_vm_pressure_level" else 80,
-    )
-
-    details = app_module.current_darwin_system_memory_details()
-
-    assert details is not None
-    assert details.pressure_percent == 20.0
-    assert details.pressure_level == expected
+def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected): app_darwin_memory.assert_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected)
 
 
 def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
@@ -503,6 +470,46 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
+def test_the_recovery_map_resolves_on_a_real_app_and_starts_nothing():
+    """M9: the recovery map names client attributes a REAL `TmuxWebtermApp` actually has.
+
+    `tests/test_backend_health_catalog.py` reads the map by AST and pins each expression; that
+    catches a service dropped from the map, but an AST expression naming `self.watch_clientt`
+    would still parse. This resolves the map on a live app and asserts each value is the bound
+    `retry` of that app's own client object.
+
+    Nothing here calls a retry: `LocalServiceClient.retry` clears the latched failure and then
+    calls `ensure_started`, so calling one would spawn a real daemon out of a unit test. Binding
+    is what is under test, and binding starts nothing.
+    """
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        entrypoints = webapp.local_services_recovery_entrypoints()
+        assert tuple(entrypoints) == ("statsd", "jobd", "statusd", "watchd", "approvald")
+        owners = {
+            "statsd": webapp.stats_current_client,
+            "jobd": webapp.job_client,
+            "statusd": webapp.status_client,
+            "watchd": webapp.watch_client,
+            "approvald": webapp.approval_client,
+        }
+        for service, entrypoint in entrypoints.items():
+            assert entrypoint.__self__ is owners[service], service
+            assert entrypoint.__func__ is type(owners[service]).retry, service
+        # indexd is not in the map because its client has no wrapper to map to.
+        assert not hasattr(webapp.search_indexer, "retry")
+
+        control = webapp.local_services_recovery_control()
+        assert isinstance(control, app_module.LocalServiceRecoveryControl)
+        # The one resolution that must NOT reach a client: an unmapped service returns False
+        # rather than reaching into a registry, so this is safe to call for real.
+        assert control.retry("indexd") is False
+        assert control.retry("") is False
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+
 def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -680,6 +687,222 @@ def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
     }
 
 
+# --------------------------------------------------------------------------------------
+# M8 of DOIT.p0.daemon-monitor -- the retained health reaches the System row, and does NOT
+# reach it by reading a file on the HTTP request thread.
+# --------------------------------------------------------------------------------------
+
+
+def _stub_local_service_rows(monkeypatch, webapp) -> None:
+    """Six cheap rows, so these tests measure the health join and nothing else."""
+    monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp, "statsd_runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {"service": "statusd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp, "runtime_process_ledger", lambda: {})
+
+
+def _recorded_health_store(tmp_path, port: int = 7802):
+    """A real store with real retained history for jobd, and for no other service.
+
+    The other five stay unrecorded on purpose, so the same fixture proves both halves: a
+    row that has retained health, and a row that must say it has none.
+    """
+    store = BackendHealthStore(port, state_dir=tmp_path)
+    store.record(HealthSnapshot(observed_at=100.0, resources=(
+        ResourceObservation(resource="jobd", state="starting", reason_code="none", pid=4242, process_start_identity="proc:98"),
+    )))
+    store.record(HealthSnapshot(observed_at=102.0, resources=(
+        ResourceObservation(resource="jobd", state="down", reason_code="exited", pid=0, process_start_identity=""),
+    )))
+    return store
+
+
+def test_the_system_status_row_publishes_the_retained_health_it_was_attached_to(monkeypatch, tmp_path):
+    """M8's user-visible outcome: the System row carries the retained observation."""
+    store = _recorded_health_store(tmp_path)
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["schema_version"] == LOCAL_SERVICES_SCHEMA_VERSION, payload["schema_version"]
+    assert payload["health"]["available"] is True and payload["health"]["revision"] == 2
+    assert payload["health"]["port"] == 7802 and payload["health"]["reason_code"] == ""
+    rows = {row["id"]: row for row in payload["services"]}
+    jobd_health = rows["jobd"]["health"]
+    assert (jobd_health["state"], jobd_health["reason_code"]) == ("down", "exited")
+    assert jobd_health["since_revision"] == 2
+    assert [entry["new_state"] for entry in jobd_health["transitions"]] == ["starting", "down"]
+    # Every row keeps the three bounded process metrics it published before M8, unchanged.
+    for row in payload["services"]:
+        assert set(row["metrics"]) == {"cpu_now_percent", "rss_bytes", "uptime_seconds"}, row["id"]
+        assert set(row["health"]["metrics"]) == {
+            "restart_count", "observations", "request_count", "error_count",
+            "completed_count", "latency_average_ms", "latency_max_ms",
+        }, row["id"]
+    # A service the observer never recorded says so; it does not borrow jobd's numbers.
+    assert rows["statusd"]["health"]["unavailable_reason_code"] == "resource_unobserved"
+
+
+def test_the_row_reaches_the_retained_health_without_reading_its_file(monkeypatch, tmp_path):
+    """PERMANENT NEGATIVE CONTROL: no per-request read of the backend-health document.
+
+    The recorded M8 decision is that the observing process pushes its live store in and the
+    HTTP thread reads the in-memory document. This proves it two ways at once. The document
+    is DELETED from disk before the projection runs, so a payload that still carries revision
+    2 cannot have come from the file; and `BackendHealthStore.load` -- the only method that
+    opens it -- is replaced with a failure, so reintroducing a `load()` on the request path
+    fails here instead of quietly adding a locked read to every `/api/system-status`.
+    """
+    store = _recorded_health_store(tmp_path, port=7803)
+    document_path = store.document_path
+    assert document_path.is_file()
+    document_path.unlink()
+
+    def refuse_load(self):
+        raise AssertionError("the System projection read the backend-health file on the request thread")
+
+    monkeypatch.setattr(BackendHealthStore, "load", refuse_load)
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        first = webapp.runtime_local_services()
+        second = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first["health"]["revision"] == 2 and second["health"]["revision"] == 2
+    assert not document_path.exists(), document_path
+    for payload in (first, second):
+        jobd_health = next(row for row in payload["services"] if row["id"] == "jobd")["health"]
+        assert jobd_health["state"] == "down" and jobd_health["transitions_total"] == 2
+
+
+def test_the_retained_store_is_read_once_per_projection_not_once_per_row(monkeypatch, tmp_path):
+    """Six rows, one read. `status()` deep-copies a bounded document; six copies is six times
+    the cost of the one this projection needs."""
+    store = _recorded_health_store(tmp_path, port=7804)
+    reads: list[int] = []
+    real_status = store.status
+
+    def counted_status():
+        reads.append(1)
+        return real_status()
+
+    monkeypatch.setattr(store, "status", counted_status)
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(payload["services"]) == 6
+    assert sum(reads) == 1, sum(reads)
+
+
+def test_an_app_with_no_observer_attached_says_so_instead_of_publishing_zeros(monkeypatch):
+    """Every process that never armed an observer -- and every test -- renders honestly."""
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        assert webapp.backend_health_store is None
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["health"] == {
+        "available": False,
+        "reason_code": "observer_unattached",
+        "schema_version": 0,
+        "port": 0,
+        "observer_epoch": "",
+        "observer_epoch_started_at": 0.0,
+        "revision": 0,
+        "written_at": 0.0,
+        "age_seconds": None,
+        "history_coverage": "",
+        "history_reset_reason": "",
+        "persistence_state": "",
+        "persistence_reason_code": "",
+        "resources": 0,
+        # The four liveness fields, and why each one is shaped the way it is when NOTHING is
+        # attached. They are published rather than omitted so the block has one stable shape for
+        # every consumer, but not one of them may carry a measurement nobody took:
+        #   observer_alive        -- None, not False. False reads as "we looked and it is dead";
+        #                            nobody looked. `available: False` above already carries
+        #                            absence, and a derived boolean beside it is a second, weaker
+        #                            copy a consumer can misread as an observation.
+        #   observer_cycles       -- None, not 0. A bare 0 cannot be told apart from an ATTACHED
+        #                            observer that has genuinely completed no cycle yet, which is
+        #                            a real separate state with its own reason code.
+        #   observer_cycle_age_seconds -- None, because zero seconds since the last probe would
+        #                            read as "probed this instant".
+        #   observer_liveness_reason_code -- the honest one, and the reason the other three are
+        #                            absent. This is the field a reader can act on.
+        "observer_alive": None,
+        "observer_cycles": None,
+        "observer_cycle_age_seconds": None,
+        "observer_liveness_reason_code": "observer_unattached",
+    }
+    # NEGATIVE CONTROL: the failure mode this test is named for is a zero coming back. Any of the
+    # three absent fields turning into `0`/`False` re-publishes a measurement nobody took, and the
+    # exact-dict assertion above would still pass if a future field were added carrying one.
+    for key in ("observer_alive", "observer_cycles", "observer_cycle_age_seconds"):
+        assert payload["health"][key] is None, (key, payload["health"][key])
+    # Every NUMERIC zero in the block, named. These six are structural facts about a document that
+    # was never written -- not measurements -- and the census fails the moment a new field arrives
+    # carrying a zero, which the exact-dict assertion above cannot do on its own.
+    zeros = {
+        key: value
+        for key, value in payload["health"].items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    }
+    assert set(zeros) == {
+        "schema_version", "port", "revision", "written_at", "resources", "observer_epoch_started_at",
+    }, zeros
+    for row in payload["services"]:
+        assert row["health"]["unavailable_reason_code"] == "observer_unattached", row["id"]
+        assert row["health"]["metrics"]["restart_count"]["value"] is None, row["id"]
+
+
+def test_a_degraded_writer_is_visible_on_the_snapshot_health_block(monkeypatch, tmp_path):
+    """A store that cannot write says so in memory only, which is why the row reads memory."""
+    def refuse_write(*args, **kwargs):
+        raise OSError("no space left on device")
+
+    store = BackendHealthStore(7805, state_dir=tmp_path, writer=refuse_write)
+    result = store.record(HealthSnapshot(observed_at=100.0, resources=(
+        ResourceObservation(resource="jobd", state="ready", reason_code="none", pid=42, process_start_identity="proc:98"),
+    )))
+    assert result.published is False
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["health"]["persistence_state"] == "degraded", payload["health"]
+    assert payload["health"]["persistence_reason_code"] == "write_failed", payload["health"]
+
+
 def test_session_http_guards_use_shared_decorator():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
@@ -702,16 +925,15 @@ def test_yoagent_controller_facade_allows_only_declared_dependencies(monkeypatch
     monkeypatch.setattr(app_module, "normalized_prompt_state", lambda _prompt=None: {"source": "patched"})
     assert deps.normalized_prompt_state() == {"source": "patched"}
 
-    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
-    facade_source = app_source[app_source.index("class YoagentAppDeps:"):app_source.index("class TmuxWebtermApp:")]
-    route_source = (Path(app_module.__file__).parent / "http_routes.py").read_text(encoding="utf-8")
-    assert "def __getattr__" not in facade_source
-    assert "return self.yoagent_controller." not in app_source
-    assert "self.yoagent_controller.poll_yoagent_jobs_once()" in app_source
-    assert "self.poll_yoagent_jobs_once()" not in app_source
-    assert "request.server.app.yoagent_chat(" not in route_source
-    assert "request.server.app.yoagent_controller.yoagent_chat(" in route_source
-
+    app_tree = ast.parse(Path(app_module.__file__).read_text(encoding="utf-8"))
+    deps_class = next(node for node in app_tree.body if isinstance(node, ast.ClassDef) and node.name == "YoagentAppDeps")
+    assert not any(isinstance(node, ast.FunctionDef) and node.name == "__getattr__" for node in deps_class.body)
+    poll_calls = [node for node in ast.walk(app_tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "poll_yoagent_jobs_once"]
+    assert len(poll_calls) == 1
+    assert ast.unparse(poll_calls[0].func.value) == "app.yoagent_controller"
+    route_tree = ast.parse((Path(app_module.__file__).parent / "http_routes.py").read_text(encoding="utf-8"))
+    chat_calls = [node for node in ast.walk(route_tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "yoagent_chat"]
+    assert chat_calls and all(ast.unparse(node.func.value) == "request.server.app.yoagent_controller" for node in chat_calls)
 
 def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
     class MissingProcStat:
@@ -729,7 +951,13 @@ def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
     assert app_module.current_system_cpu_times() == (200.0, 80.0)
 
 
-def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monkeypatch):
+# These four used to drive one-line `app_module` wrappers over `host_collectors`. The wrappers fed
+# only the unregistered `collect_current_stats_gpu`, so they were removed with it; the parsing they
+# covered belongs to `host_collectors`, which is the owner statsd actually calls, and that is what
+# these now drive directly.
+
+
+def test_generic_gpu_devices_use_aggregate_devices_without_process_scans(monkeypatch):
     responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU Model A, 75, 4000, 8000\n")])
     calls = []
 
@@ -739,52 +967,50 @@ def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monk
 
     monkeypatch.setattr(host_collectors.subprocess, "run", run)
 
-    metrics = app_module.stats_GPU_gpu_metrics()
+    devices = host_collectors.generic_gpu_devices()
 
-    assert metrics["devices"]["gpu:0"]["util_percent"] == 75.0
-    assert metrics["devices"]["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
-    assert metrics["devices"]["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
-    assert metrics["devices"]["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
-    assert metrics == {"devices": metrics["devices"]}
+    assert devices["gpu:0"]["util_percent"] == 75.0
+    assert devices["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
+    assert devices["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
+    assert devices["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
+    assert list(devices) == ["gpu:0"]
     assert calls == [["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
-def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
+def test_macos_gpu_devices_read_ioreg_activity_and_unified_memory(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
+    devices = host_collectors.gpu_devices()
 
-    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 0}
-    assert metrics == {"devices": metrics["devices"]}
+    assert devices["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 0}
+    assert list(devices) == ["gpu:0"]
 
 
-def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatch):
+def test_macos_gpu_devices_read_the_current_device_utilization_key(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"Device Utilization %": 8, "In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
-
-    assert metrics["devices"]["gpu:0"]["util_percent"] == 8.0
+    assert host_collectors.gpu_devices()["gpu:0"]["util_percent"] == 8.0
 
 
-def test_stats_macos_gpu_metrics_drops_records_without_utilization(monkeypatch):
+def test_macos_gpu_devices_drop_records_without_utilization(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    assert app_module.stats_macos_gpu_metrics("Apple M4 Pro") == {}
+    assert host_collectors.gpu_devices() == {}
 
 
-def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
+def test_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
     payload = json.dumps({
         "SPHardwareDataType": [{"chip_type": "Apple M4 Pro", "number_processors": "proc 14:10:4:0"}],
         "SPMemoryDataType": [{"dimm_type": "LPDDR5"}],
@@ -793,7 +1019,7 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    assert app_module.stats_macos_hardware_metadata() == {
+    assert host_collectors.macos_hardware_metadata() == {
         "cpu_label": "Apple M4 Pro · 14 cores (10 performance + 4 efficiency)",
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
@@ -865,6 +1091,303 @@ def test_cpu_budget_marks_a_missing_statsd_push_stale():
     assert payload["source"] == "statsd_push"
     assert payload["sample_age_seconds"] is None
     assert payload["stale"] is True
+
+
+# -- a value nobody sampled is ABSENT, not 0 -------------------------------------------------------
+#
+# Found in a real browser against a live dev server: the Daemons panel's "Web process" row printed
+# `Memory 0.0B`, `CPU 0%` and `System CPU 0%`, all stamped data-metric-state="measured", while
+# /proc/1492916/status said VmRSS 166028 kB and ps said %CPU 10.5. `stats_cpu_sample` is the only
+# writer of that cache and it had never fired -- the same payload's cpu_budget said
+# "sample_age_seconds": null, "stale": true. Every layer on the path turned that absence into a
+# confident zero, and the roster then summed the fabricated 0 into a Memory total it presented as
+# complete, silently dropping ~163MB of real RSS.
+
+
+def test_an_unpushed_stats_sample_is_absent_not_zero():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    sample = webapp.latest_stats_sample()
+
+    assert sample["cpu_percent"] is None
+    assert sample["system_cpu_percent"] is None
+    assert sample["rss_bytes"] is None
+    assert sample["reason_code"] == app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE
+    assert sample["reason"]
+    # pid/started_at are read here, not sampled, so they stay real.
+    assert sample["pid"] == os.getpid()
+    # Uptime is NOT in this record. A copy here would be a second owner that freezes at the last
+    # delivered push while still reading `measured`; it is derived at render time instead.
+    assert "uptime_seconds" not in sample
+
+
+def test_the_system_status_server_block_publishes_typed_absences_not_zeros():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    for key in ("cpu_percent", "system_cpu_percent", "rss_bytes"):
+        assert block[key]["state"] == "unavailable", key
+        assert block[key]["value"] is None, key
+        assert block[key]["reason_code"] == app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE, key
+        assert block[key]["reason"], key
+    # Uptime is always known, so it is measured beside the three that are not.
+    assert block["uptime_seconds"]["state"] == "measured"
+    assert block["pid"] == os.getpid()
+
+
+def test_the_system_status_server_block_publishes_a_real_push_as_measured():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": time.time(), "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    assert block["rss_bytes"] == {"state": "measured", "value": 163 * 1024 * 1024, "reason_code": "", "reason": ""}
+    assert block["cpu_percent"]["state"] == "measured"
+    assert block["cpu_percent"]["value"] == 15.8
+    # A genuinely measured 0.0 is still a measurement; only an absent value is unavailable.
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": time.time(), "pid": os.getpid(), "cpu_percent": 0.0, "system_cpu_percent": 0.0, "rss_bytes": 1},
+    })
+    assert webapp.system_status_server_block(webapp.latest_stats_sample())["cpu_percent"] == {
+        "state": "measured", "value": 0.0, "reason_code": "", "reason": "",
+    }
+
+
+def test_a_sample_for_another_process_is_refused_by_the_receiver():
+    """Where the wrong-process guarantee actually lives.
+
+    statsd no longer reads the shared background-owner ELECTION record to find the web
+    process; the address is handed to it by that process over its own control channel. The
+    protection against a sample landing in the WRONG web process is therefore this check, at
+    the receiver, which cannot be forged by a stale or hostile file: a sample whose pid is not
+    this process's pid is refused and never reaches the cache.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+
+    response = webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": 100.0, "pid": os.getpid() + 1, "cpu_percent": 99.0, "system_cpu_percent": 99.0, "rss_bytes": 1},
+    })
+
+    assert response == {"ok": False, "error": "stats CPU sample PID mismatch"}
+    # ...and nothing was written, so the panel still reports the honest absence.
+    assert webapp.latest_stats_sample()["rss_bytes"] is None
+    assert webapp.system_status_server_block(webapp.latest_stats_sample())["rss_bytes"]["state"] == "unavailable"
+
+
+def test_a_frozen_cpu_sample_stops_being_measured_instead_of_freezing():
+    """A sample that ARRIVED and then stopped is not a current measurement.
+
+    `cpu_budget` already aged its own copy of this record and reported `stale`, but the
+    `server` envelopes carried no age, so a stalled sampler kept rendering its last value
+    as `measured` forever -- a dead sampler reading as a healthy idle process.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    pushed_at = 1000.0
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": pushed_at, "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+    sample = webapp.latest_stats_sample()
+    stale_after = host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS
+
+    fresh = webapp.system_status_server_block(sample, now=pushed_at + stale_after)
+    assert fresh["rss_bytes"]["state"] == "measured"
+    assert fresh["cpu_percent"]["value"] == 15.8
+
+    frozen = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 0.001)
+    for key in ("cpu_percent", "system_cpu_percent", "rss_bytes"):
+        assert frozen[key]["state"] == "unavailable", key
+        assert frozen[key]["value"] is None, key
+        assert frozen[key]["reason_code"] == app_module.STATS_SAMPLE_STALE_REASON_CODE, key
+        assert "no longer being measured" in frozen[key]["reason"], key
+    # A stale sample is a DIFFERENT fact from one that never arrived: delivery worked once.
+    assert frozen["rss_bytes"]["reason_code"] != app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE
+    # Uptime is a function of this process's start time, not a sampled quantity, so it survives.
+    assert frozen["uptime_seconds"]["state"] == "measured"
+
+
+def test_uptime_keeps_advancing_while_a_stalled_cpu_sample_goes_unavailable(monkeypatch):
+    """Uptime must come from THIS process's clock, not from the last delivered push.
+
+    The block's comment said uptime was derived from `SERVER_STARTED_AT`, but it published
+    `envelope(sample["uptime_seconds"])`, and that field was only written when a statsd CPU
+    push arrived. So when delivery stalled, CPU and RSS correctly turned `unavailable` past
+    the stale window while uptime FROZE at its last pushed value and stayed labeled
+    `measured` -- a number that had stopped moving, presented as current, at exactly the
+    moment the reader opened the panel to find out what had broken.
+
+    A live smoke could not catch it: pushes were healthy the whole time, so the cached
+    uptime advanced (8m 5s -> 8m 14s) and looked right. It only freezes when delivery does.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    started_at = 500.0
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", started_at)
+    pushed_at = 1000.0
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": pushed_at, "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+    # ONE sample, delivered once and never again. Everything below renders that same record.
+    sample = webapp.latest_stats_sample()
+    stale_after = host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS
+
+    earlier = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 10.0)
+    later = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 70.0)
+
+    # The sampled metrics are correctly unavailable at both moments: statsd stopped.
+    for block in (earlier, later):
+        assert block["cpu_percent"]["state"] == "unavailable"
+        assert block["rss_bytes"]["state"] == "unavailable"
+    # Uptime is still measured -- and it MOVED, by exactly the wall time between the two
+    # renders. A frozen uptime would report the same number twice.
+    assert earlier["uptime_seconds"]["state"] == "measured"
+    assert later["uptime_seconds"]["state"] == "measured"
+    assert later["uptime_seconds"]["value"] - earlier["uptime_seconds"]["value"] == 60.0
+    assert earlier["uptime_seconds"]["value"] == pushed_at + stale_after + 10.0 - started_at
+    # ...and there is only ONE owner of that number, so nothing can freeze it again.
+    assert "uptime_seconds" not in sample, "a delivered sample must not carry a second uptime owner"
+
+
+def test_one_response_cannot_answer_sample_freshness_two_ways(monkeypatch):
+    """A response must describe ONE moment.
+
+    Found by auditing a live smoke artifact: a single `/api/system-status` body reported
+    `server.cpu_percent` as `cpu_sample_stale` "5s old" while the SAME body's `cpu_budget`
+    said `sample_age_seconds: 0.358, stale: False`. Two answers to one question.
+
+    The cause is read ordering, not delivery: the sample was read BEFORE the slow
+    `runtime_report_core` work and rendered after it, so it aged during assembly, while
+    `cpu_budget` re-read the cache afterwards and saw a newer push. A response that takes
+    long enough to build manufactures its own staleness and flips the row to an em dash for
+    a reason that has nothing to do with statsd.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        def push(at, rss):
+            webapp.handle_control_request({"action": "stats_cpu_sample", "sample": {
+                "time": at, "pid": os.getpid(), "cpu_percent": 10.0,
+                "system_cpu_percent": 5.0, "rss_bytes": rss,
+            }})
+
+        # What statsd had pushed when the request arrived: already older than the window.
+        push(time.time() - 4.0, 1234)
+
+        def slow_report(**_kwargs):
+            # statsd keeps pushing on its 1s cadence while the report is assembled.
+            push(time.time(), 4321)
+            return {"ok": True}
+
+        # The ordering invariant belongs to the body the snapshot producer builds, which is where
+        # the slow assembly now happens; the route itself no longer builds anything.
+        monkeypatch.setattr(webapp, "runtime_report_core", slow_report)
+        payload = webapp.system_status_core_payload()
+    finally:
+        webapp.control_server.stop()
+
+    budget = payload["cpu_budget"]
+    server = payload["server"]
+    assert budget["stale"] is False and budget["sample_age_seconds"] < 3.0
+
+    # ...so the same response must not simultaneously call that sample stale.
+    assert server["cpu_percent"]["state"] == "measured", server["cpu_percent"]
+    assert server["rss_bytes"]["value"] == 4321, "the response must render the sample it judged"
+
+
+def test_a_sample_with_no_timestamp_never_reports_an_invented_age():
+    """An unknowable age must not be rendered as a number.
+
+    The first cut of the staleness check reached for `int(age_seconds or 0)`, which turned a
+    sample whose age is exactly what is unknown into a confident "is 0s old" -- the same
+    fabricated measurement this whole branch exists to remove, reintroduced by the fix for it.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    with webapp.stats_collection_state.sample_lock:
+        webapp.stats_collection_state.sample_record.cached_payload = {
+            "pid": os.getpid(), "started_at": 100.0,
+            "cpu_percent": 3.5, "system_cpu_percent": 12.0, "rss_bytes": 4096,
+        }
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    assert block["rss_bytes"]["state"] == "unavailable"
+    assert block["rss_bytes"]["reason_code"] == app_module.STATS_SAMPLE_UNDATED_REASON_CODE
+    assert "0s old" not in block["rss_bytes"]["reason"]
+    assert "no timestamp" in block["rss_bytes"]["reason"]
+
+
+def test_the_cpu_sample_staleness_policy_has_exactly_one_owner():
+    """The reader's "recent" and the producer's "how often" must be one policy.
+
+    They were a bare `3.0` in app.py and `HOST_CPU_CADENCE_SECONDS = 1.0` in stats_current.
+    """
+
+    assert host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS == (
+        host_collectors.HOST_CPU_CADENCE_SECONDS
+        * host_collectors.HOST_CPU_SAMPLE_STALE_CADENCES
+    )
+    assert stats_current_service.HOST_CPU_CADENCE_SECONDS == host_collectors.HOST_CPU_CADENCE_SECONDS
+    # The retired literal must not come back in either staleness site.
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+    assert "sample_age_seconds > 3.0" not in source
+
+
+def test_a_never_sampled_cpu_budget_has_no_current_percent():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    payload = webapp.server_cpu_budget_payload(now=None)
+
+    # `CpuBudgetRecord.current_percent` defaults to 0.0. Publishing it as a number claimed a
+    # measurement that the same payload's `sample_age_seconds: None` says was never taken.
+    assert payload["current_percent"] is None
+    assert payload["stale"] is True
+    assert payload["budget_percent"] == app_module.SERVER_CPU_BUDGET_PERCENT
+
+
+def test_an_absent_sample_does_not_cancel_a_cpu_budget_breach():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.server_cpu_budget_top_consumers = lambda **options: []
+    breaching = app_module.SERVER_CPU_BUDGET_PERCENT + 20.0
+    webapp.update_server_cpu_budget({"time": 100.0, "cpu_percent": breaching})
+    assert webapp.stats_collection_state.cpu_budget_record.exceeded_since == 100.0
+
+    # Reading the absence as 0.0% would fall into the "under budget" branch and clear the breach.
+    webapp.update_server_cpu_budget({"time": 101.0, "cpu_percent": None})
+
+    assert webapp.stats_collection_state.cpu_budget_record.exceeded_since == 100.0
+    assert webapp.stats_collection_state.cpu_budget_record.current_percent == breaching
+
+
+# `test_the_cpu_collector_appends_nothing_when_no_sample_was_pushed` used to sit here. It exercised
+# `TmuxWebtermApp.collect_current_stats_cpu`, which the collector registry never registered, so the
+# guard it asserted had no production call site and the live producer kept fabricating a first
+# `0.0`. The collector is gone and the contract moved to the root owner: see
+# `tests/test_stats_current_service.py::test_the_first_cpu_sample_reports_absence_because_it_had_no_baseline`
+# and `::test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing`, which drive the REAL
+# `host_collectors.CpuSampler` rather than a fake that returns non-zero.
 
 
 def test_background_status_includes_performance_summary():
@@ -1089,6 +1612,27 @@ def test_capture_measurement_metrics_exclude_other_browser_records():
     assert row["request_total_ms_max"] == 9.0
     assert row["accept_to_route_ms_max"] == 4.0
     assert webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "other"}) == {"ok": False, "error": "unsupported measurement scope"}
+
+
+def test_capture_measurement_metrics_retains_a_200_request_run_amid_global_churn():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        for index in range(200):
+            webapp.record_performance_sample(
+                "http-endpoint",
+                "GET /api/system-status",
+                details={"measurement_scope": "capture", "measurement_request_id": f"run-{index}"},
+            )
+        for index in range(app_module.PERFORMANCE_RECORD_LIMIT + 10):
+            webapp.record_performance_sample("http-endpoint", f"GET /api/churn/{index}")
+        response = webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "capture"})
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    recent = response["performance"]["recent"]
+    assert len(recent) == 200
+    assert [row["details"]["measurement_request_id"] for row in recent] == [f"run-{index}" for index in range(200)]
 
 
 def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monkeypatch):
@@ -1364,9 +1908,13 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     monkeypatch.setattr(webapp, "transcripts_payload", lambda force=False: transcript_forces.append(force) or {"sessions": {}, "cache": {"hit": True}})
     monkeypatch.setattr(webapp, "current_stats_sample", lambda: pytest.fail("System diagnostics must not collect CPU"))
     monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {
+        # Every real producer stamps `time`; without it this fixture described a sample that
+        # cannot occur, and the payload's currency could not be judged at all.
+        "time": time.time(),
         "pid": 321,
         "started_at": 100.0,
-        "uptime_seconds": 25.0,
+        # No `uptime_seconds`: a delivered sample has nothing to say about how long THIS
+        # process has run, and a copy here froze the panel's uptime at the last push.
         "cpu_percent": 3.5,
         "system_cpu_percent": 12.0,
         "rss_bytes": 4096,
@@ -1379,14 +1927,20 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     assert transcript_forces == [False]
     assert payload["ok"] is True
     assert payload["generated_at"] > 0
+    # The three sampled metrics are typed envelopes from `local_service_projection.measurement`,
+    # the same shape every local service publishes -- not the plain floats this block used to be.
+    # Uptime is the same shape but a DIFFERENT source: this process's own clock, measured against
+    # the moment the response describes, so it cannot be frozen by a stalled sampler.
+    uptime = payload["server"].pop("uptime_seconds")
+    assert uptime["state"] == "measured"
+    assert uptime["value"] == payload["generated_at"] - app_module.SERVER_STARTED_AT
     assert payload["server"] == {
         "version": app_module.YOLOMUX_VERSION,
         "pid": 321,
         "started_at": 100.0,
-        "uptime_seconds": 25.0,
-        "cpu_percent": 3.5,
-        "system_cpu_percent": 12.0,
-        "rss_bytes": 4096,
+        "cpu_percent": {"state": "measured", "value": 3.5, "reason_code": "", "reason": ""},
+        "system_cpu_percent": {"state": "measured", "value": 12.0, "reason_code": "", "reason": ""},
+        "rss_bytes": {"state": "measured", "value": 4096, "reason_code": "", "reason": ""},
     }
     assert payload["tmux_signal_watcher"] == {
         "state": "never-started",
@@ -2694,7 +3248,10 @@ def test_status_generation_waiter_uses_immediate_probe_and_stop_aware_cadence(mo
     assert events[0][1]["generation"] == 8
 
 
-def test_status_generation_waiter_suppresses_generation_only_snapshot_change(monkeypatch):
+def test_status_generation_waiter_publishes_a_minimal_revision_only_patch(monkeypatch):
+    # W4: a generation-only snapshot change (rows identical, revision 7 -> 8) is no longer suppressed.
+    # The browser needs the new revision to clear its own stale marker, and it must learn it from a
+    # minimal patch rather than an HTTP refetch, so exactly one revision-only patch is published.
     webapp = app_module.TmuxWebtermApp([])
     events = []
     record = webapp.client_watch_service.event_watcher_record
@@ -2720,7 +3277,15 @@ def test_status_generation_waiter_suppresses_generation_only_snapshot_change(mon
     finally:
         webapp.control_server.stop()
 
-    assert events == []
+    assert len(events) == 1
+    event_type, event_payload = events[0]
+    assert event_type == "auto_approve_changed"
+    assert event_payload["patch"] is True
+    assert event_payload["collection"] == "sessions"
+    assert event_payload["changes"] == {}
+    assert event_payload["fields"] == {"agent_window_snapshot_revision": 8}
+    # A valid re-measured snapshot means the browser applies the patch directly, never refetches.
+    assert event_payload["refresh"] is False
     assert record.status_generation == 8
     assert webapp.client_watch_service.auto_approve_payload["agent_window_snapshot_revision"] == 8
 
@@ -2885,12 +3450,26 @@ def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessi
     changed = copy.deepcopy(same)
     changed["agent_window_snapshot_revision"] = 9
     changed["sessions"]["2"]["agent_windows"][0]["state"] = "needs-input"
+    identical = copy.deepcopy(same)
     try:
-        assert webapp.auto_approve_client_event_patch(previous, same) is None
+        # W4: a genuine no-op (same rows AND same revision) still suppresses the patch entirely.
+        assert webapp.auto_approve_client_event_patch(same, identical) is None
+        # W4: a revision-only advance (rows unchanged, revision 7 -> 8) must still emit a MINIMAL
+        # patch so the browser learns the new revision and clears its stale marker without an HTTP
+        # refetch. Empty changes, no row rebuild, one field.
+        revision_only = webapp.auto_approve_client_event_patch(previous, same)
         patch = webapp.auto_approve_client_event_patch(same, changed)
     finally:
         webapp.control_server.stop()
 
+    assert revision_only == {
+        "patch": True,
+        "collection": "sessions",
+        "changes": {},
+        "removed_keys": [],
+        "fields": {"agent_window_snapshot_revision": 8},
+        "removed_fields": [],
+    }
     assert patch == {
         "patch": True,
         "collection": "sessions",
@@ -3424,6 +4003,7 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         webapp.control_server.stop()
 
 
+def test_app_domain_owners_are_composed_and_preserve_facade_overrides(monkeypatch): assert_composed_owners_preserve_facade_overrides(monkeypatch)
 def test_client_event_watcher_parallel_lifecycle_attributes_are_retired():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
@@ -4856,13 +5436,31 @@ def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
     ]
 
 
+def stub_transcripts_payload_refresh(calls, *, started=True, pending_generation=1):
+    """One test double for the whole refresh contract, recording each call.
+
+    A substitute for this method must answer BOTH halves of it: whether it started a build, and --
+    through ``pending_generation_out``, under the guard lock -- the generation of the build that
+    answers the caller. Independent per-test lambdas answered only the first half, so any caller
+    reading the promised build identity got nothing from any of them.
+    """
+
+    def refresh(publish=False, defer=False, *, not_before=None, pending_generation_out=None):
+        calls.append((publish, defer))
+        if pending_generation_out is not None:
+            pending_generation_out.append(pending_generation if started else 0)
+        return started
+
+    return refresh
+
+
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     monkeypatch.setattr(app_module, "yolomux_client_revision", lambda: "client-rev-test")
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda *args, **kwargs: False)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh([], started=False))
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -4907,7 +5505,7 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     refreshes = []
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
     try:
         webapp.set_transcripts_payload_cache(webapp.build_session_metadata_payload())
         first = webapp.transcripts_payload()
@@ -5075,7 +5673,7 @@ def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(mo
     monkeypatch.setattr(app_module, "session_to_json", fake_session_to_json)
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refresh_calls.append((publish, defer)) or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refresh_calls))
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -5245,7 +5843,11 @@ def queued_transcripts_follow_up_app(monkeypatch):
     monkeypatch.setattr(
         app_module.TmuxWebtermApp,
         "start_transcripts_payload_refresh",
-        lambda self, publish=False, defer=False, not_before=None: bool(started.append(publish)) or True,
+        lambda self, publish=False, defer=False, *, not_before=None, pending_generation_out=None: (
+            bool(started.append(publish))
+            or bool(pending_generation_out is not None and pending_generation_out.append(1))
+            or True
+        ),
     )
     record = webapp.activity_transcript_service.transcripts_payload_cache_record
     worker = object()
@@ -5296,6 +5898,62 @@ def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_
     next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
     assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
     assert started == [True]
+
+
+def transcripts_payload_guard_app():
+    """A bare app that owns only the single-flight build guard and its cache record."""
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.client_events = SimpleNamespace(epoch="epoch-under-test")
+    webapp.activity_transcript_service = SimpleNamespace(
+        transcripts_payload_cache_lock=threading.RLock(),
+        transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
+        transcript_tail_cache_lock=threading.Lock(),
+        transcript_tail_cache={},
+        context_items_cache_lock=threading.Lock(),
+        context_items_cache={},
+    )
+    return webapp, webapp.activity_transcript_service.transcripts_payload_cache_record
+
+
+def test_a_forced_read_keeps_the_inflight_build_identity_when_that_build_finishes_in_the_start_gap(monkeypatch):
+    """The build that answers a forced read is decided under the guard lock, never re-read after it.
+
+    Regression: `start_metadata_refresh_for_request` refused the guard under one lock acquisition
+    and then took a SECOND one to name the generation the caller must wait for. An in-flight build
+    that already observed the request could finish in that gap, leaving `worker is None` and no
+    queued rebuild, so the forced caller was told `no_build_accepted` and handed pending generation
+    zero -- which every payload already satisfies -- for a build that had in fact just answered it.
+    """
+
+    webapp, record = transcripts_payload_guard_app()
+    in_flight = object()
+    generation = webapp.begin_transcripts_payload_work(in_flight)
+    # The request predates the in-flight build, so that build already observes it and no follow-up
+    # is queued: this is the branch whose answer the second read used to lose.
+    requested_at = record.worker_started_at - 1.0
+
+    real_start = app_module.TmuxWebtermApp.start_transcripts_payload_refresh
+
+    def start_then_finish_the_inflight_build(self, *args, **kwargs):
+        outcome = real_start(self, *args, **kwargs)
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record.release_worker()
+        return outcome
+
+    monkeypatch.setattr(
+        app_module.TmuxWebtermApp,
+        "start_transcripts_payload_refresh",
+        start_then_finish_the_inflight_build,
+    )
+
+    refreshing, pending_generation = webapp.start_metadata_refresh_for_request(requested_at, publish=True)
+
+    assert (refreshing, pending_generation) == (True, generation)
+    assert webapp.forced_metadata_pending_cache_fields(pending_generation) == {
+        "pending_generation": generation,
+        "pending_identity": webapp.metadata_identity(generation),
+    }
 
 
 def test_clear_transcript_caches_guard_assertion_fails_when_queued_intent_survives(monkeypatch):
@@ -5470,7 +6128,7 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): calls.append("jobd"))
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -5496,7 +6154,7 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): None)
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -6625,7 +7283,7 @@ def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monk
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"7770": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fail_tmux)
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
 
@@ -7387,12 +8045,22 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert webapp.metadata_warm_record.worker is not None
 
         root_index = app_module.file_index.RootIndex(tmp_path)
-        fail_once(lambda: app_module.file_index._start_build(root_index, set()))
-        assert root_index.building is False
-        assert root_index.thread is None
-        app_module.file_index._start_build(root_index, set())
-        assert root_index.building is True
-        assert root_index.thread is not None
+        # `_start_build` now (P0-3) only installs a worker on the registry owner for the key AND only
+        # when the background owner can build; register the owner and (this app is not the elected
+        # owner in this test) allow builds, as every real caller's precondition does.
+        monkeypatch.setattr(app_module.file_index, "background_owner_can_build", lambda: True)
+        with app_module.file_index._REGISTRY_LOCK:
+            app_module.file_index._REGISTRY[str(tmp_path)] = root_index
+        try:
+            fail_once(lambda: app_module.file_index._start_build(root_index, set()))
+            assert root_index.building is False
+            assert root_index.thread is None
+            app_module.file_index._start_build(root_index, set())
+            assert root_index.building is True
+            assert root_index.thread is not None
+        finally:
+            with app_module.file_index._REGISTRY_LOCK:
+                app_module.file_index._REGISTRY.pop(str(tmp_path), None)
 
         fail_once(lambda: webapp.yoagent_controller.start_yoagent_action_result_watcher({"session": "1"}, {}))
         assert webapp.yoagent_action_waits == {}
@@ -7407,6 +8075,178 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert webapp.yoagent_prewarm_record.prewarm_worker is not None
     finally:
         webapp.control_server.stop()
+
+
+def test_metadata_warm_publish_and_start_are_atomic_under_fixture_teardown(monkeypatch):
+    # A metadata-warm worker must never be observable to the fixture teardown between the moment its
+    # record is published under metadata_warm_lock and the moment Thread.start actually runs. Before
+    # the fix the start owner released metadata_warm_lock after publishing and started the worker
+    # outside the lock, so gate_harness.stop_fixture_app_runtime could acquire the same lock in that
+    # gap, capture a published-but-unstarted worker, and raise
+    # `RuntimeError: cannot join thread before it is started` from join_metadata_warmer.
+
+    class FixtureApp:
+        def __init__(self) -> None:
+            self.metadata_warm_lock = threading.Lock()
+            self.metadata_warm_record = app_module.MetadataWarmRecord()
+
+        def background_can_run(self, _role):
+            return True
+
+        def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
+            raise AssertionError("background owner should be able to run in this test")
+
+        def warm_metadata_cache(self, _sessions, _stop_event):
+            # Model the production worker's terminal self-eviction so the record retains no worker
+            # after the teardown joins it (records must not survive root cleanup).
+            with self.metadata_warm_lock:
+                if self.metadata_warm_record.worker is threading.current_thread():
+                    self.metadata_warm_record.worker = None
+
+        # The remaining owners gate_harness.stop_fixture_app_runtime drives are irrelevant to this
+        # race; stub them so only the real metadata capture-and-join path is exercised.
+        def stop_client_event_watcher(self):
+            pass
+
+        def stop_jobd_operation_service(self):
+            pass
+
+        def demote_background_owner(self):
+            pass
+
+        def stop_auto_approve_all(self):
+            pass
+
+    fixture = FixtureApp()
+
+    producer_at_start = threading.Event()
+    proceed = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(self):
+        # Pause the worker immediately before the real Thread.start so the teardown thread has a
+        # deterministic window to attempt its capture while the worker is still unstarted.
+        if self.name == "metadata-warm":
+            producer_at_start.set()
+            assert proceed.wait(10), "metadata-warm worker was never released"
+        return original_start(self)
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", paused_start)
+
+    def run_producer():
+        app_module.TmuxWebtermApp.warm_metadata_cache_async(fixture, {})
+
+    teardown_error: list[BaseException] = []
+
+    def run_teardown():
+        try:
+            stop_fixture_app_runtime(fixture, label="metadata-warm publish/start race")
+        except BaseException as error:  # noqa: BLE001 - capture so the assertion can inspect it
+            teardown_error.append(error)
+
+    producer = threading.Thread(target=run_producer, name="race-producer")
+    teardown = threading.Thread(target=run_teardown, name="race-teardown")
+
+    producer.start()
+    assert producer_at_start.wait(10), "producer never reached the pre-start pause"
+    # Producer is parked immediately before metadata-warm Thread.start. After the fix it still holds
+    # metadata_warm_lock here, so the teardown blocks; before the fix the lock is already free and the
+    # teardown captures the unstarted worker.
+    teardown.start()
+    # Before the fix the teardown runs to completion (capturing + joining the unstarted worker) without
+    # blocking; after the fix it is blocked on metadata_warm_lock until the producer is released.
+    teardown.join(timeout=1)
+    proceed.set()
+    teardown.join(timeout=10)
+    producer.join(timeout=10)
+
+    assert teardown_error == [], f"teardown observed a published-but-unstarted worker: {teardown_error!r}"
+    with fixture.metadata_warm_lock:
+        assert fixture.metadata_warm_record.worker is None
+
+
+def test_tabber_warmer_publish_and_start_are_atomic_under_fixture_teardown(monkeypatch):
+    # tabber_warmer_record.thread is captured by gate_harness.capture_thread_owners under the same
+    # tabber_cache_lock the start owner uses, then joined by stop_tabber_warmer - the identical
+    # capture-and-join shape that broke metadata-warm. Before the fix start_tabber_activity_cache_warmer
+    # published record.thread under the lock, released it, then started the worker outside it, so the
+    # teardown could capture a published-but-unstarted warmer thread and raise
+    # `RuntimeError: cannot join thread before it is started`.
+
+    class FixtureApp:
+        def __init__(self) -> None:
+            self.activity_transcript_service = SimpleNamespace(
+                tabber_cache_lock=threading.RLock(),
+                tabber_warmer_record=state_services.TabberActivityWarmerRecord(),
+            )
+
+        def background_can_run(self, _role):
+            return True
+
+        def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
+            raise AssertionError("background owner should be able to run in this test")
+
+        def tabber_activity_cache_warmer_loop(self, record):
+            # Model the production warmer's terminal self-eviction so no thread survives cleanup.
+            with self.activity_transcript_service.tabber_cache_lock:
+                if (
+                    self.activity_transcript_service.tabber_warmer_record is record
+                    and record.thread is threading.current_thread()
+                ):
+                    record.thread = None
+                    record.running = False
+
+        def stop_client_event_watcher(self):
+            pass
+
+        def stop_jobd_operation_service(self):
+            pass
+
+        def demote_background_owner(self):
+            pass
+
+        def stop_auto_approve_all(self):
+            pass
+
+    fixture = FixtureApp()
+
+    producer_at_start = threading.Event()
+    proceed = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(self):
+        if self.name == "tabber-activity-cache":
+            producer_at_start.set()
+            assert proceed.wait(10), "tabber-activity warmer was never released"
+        return original_start(self)
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", paused_start)
+
+    def run_producer():
+        app_module.TmuxWebtermApp.start_tabber_activity_cache_warmer(fixture)
+
+    teardown_error: list[BaseException] = []
+
+    def run_teardown():
+        try:
+            stop_fixture_app_runtime(fixture, label="tabber-warmer publish/start race")
+        except BaseException as error:  # noqa: BLE001 - capture so the assertion can inspect it
+            teardown_error.append(error)
+
+    producer = threading.Thread(target=run_producer, name="race-producer")
+    teardown = threading.Thread(target=run_teardown, name="race-teardown")
+
+    producer.start()
+    assert producer_at_start.wait(10), "producer never reached the pre-start pause"
+    teardown.start()
+    teardown.join(timeout=1)
+    proceed.set()
+    teardown.join(timeout=10)
+    producer.join(timeout=10)
+
+    assert teardown_error == [], f"teardown observed a published-but-unstarted warmer: {teardown_error!r}"
+    with fixture.activity_transcript_service.tabber_cache_lock:
+        assert fixture.activity_transcript_service.tabber_warmer_record.thread is None
 
 
 def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
@@ -7765,56 +8605,6 @@ def test_filesystem_change_summary_counts_entry_changes():
 
 
 
-def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    submitted_roots = []
-    signatures = [
-        (("/repo", ("/repo", "dir", 100, 0, (("one.txt", "file", 100, 10),))),),
-        (("/repo", ("/repo", "dir", 200, 0, (("two.txt", "file", 200, 20),))),),
-        (("/repo", ("/repo", "dir", 300, 0, (("three.txt", "file", 300, 30),))),),
-    ]
-
-    class ReadyBatchJob:
-        def produce(self, task, payload, **kwargs):
-            assert task == "filesystem_batch"
-            signature = signatures[0 if not submitted_roots else 2][0][1]
-            submitted_roots.append([request["path"] for request in payload["requests"]])
-            responses = [
-                {
-                    "id": request["id"],
-                    "ok": True,
-                    "status": 200,
-                    "payload": {"path": request["path"], "entries": []},
-                    "watch_signature": list(signature),
-                }
-                for request in payload["requests"]
-            ]
-            return {
-                "ok": True,
-                "state": "ready",
-                "job": {"job_id": f"job-{len(submitted_roots)}", "status": "completed", "generation": kwargs["generation"]},
-                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
-            }, json.dumps({"responses": responses, "performance": {"operation_ms": 1.0}}).encode("utf-8")
-
-    webapp.job_client = ReadyBatchJob()
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[0]) == ["fs_changed"]
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[1]) == ["fs_changed"]
-        webapp.client_watch_service.filesystem_last_full_at = time.monotonic() - app_module.FILESYSTEM_WATCH_KEYFRAME_SECONDS - 1.0
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[2]) == ["fs_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert [payload["mode"] for _event_type, payload in events] == ["full", "diff", "full"]
-    assert events[0][1]["directories"]
-    assert events[1][1]["refresh"] is True
-    assert "directories" not in events[1][1]
-    assert events[2][1]["directories"]
-    assert submitted_roots == [["/repo"], ["/repo"]]
-
-
 def test_filesystem_watch_signature_for_roots_matches_watch_batch_signature(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -8112,13 +8902,10 @@ def test_filesystem_watch_diff_force_full_acceptance_does_not_submit_refresh_or_
     class CapturingCompletionService:
         stop_event = threading.Event()
 
-        def reserve(self):
-            return True
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
-        def release_reservation(self):
-            raise AssertionError("accepted operation must retain its completion reservation")
-
-        def submit_reserved(self, function, *args):
+        def submit_reserved(self, reservation, function, *args):
             self.submission = (function, args)
             return True
 
@@ -8161,13 +8948,10 @@ def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_fail
     class RejectingCompletionService:
         stop_event = threading.Event()
 
-        def reserve(self):
-            return True
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
-        def release_reservation(self):
-            raise AssertionError("submit_reserved owns the accepted reservation")
-
-        def submit_reserved(self, _function, *_args):
+        def submit_reserved(self, reservation, _function, *_args):
             return False
 
         def stop(self):
@@ -8191,8 +8975,76 @@ def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_fail
     assert result["error"]["stack"][-1]["operation"] == "jobd.produce"
 
 
-def test_filesystem_watch_diff_rejects_105_roots_without_partial_or_multi_job_submission(monkeypatch):
+def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dropping_any(monkeypatch, tmp_path):
+    """105 roots is inside the 128-root client contract, so it is accepted and split, not rejected.
+
+    This used to assert a 400 with `maximum: 64`, which made the accepted 65-128 range fail by
+    construction; the malformed 400 then reached the browser as an HTTP 500.
+    """
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     roots = [f"/repo-{index:03d}" for index in range(105)]
+    submitted = []
+
+    class RecordingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{len(submitted)}", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+    class CapturingCompletionService:
+        stop_event = threading.Event()
+        submission = None
+
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
+
+        def submit_reserved(self, reservation, function, *args):
+            self.submission = (function, args)
+            return True
+
+        def stop(self):
+            self.stop_event.set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RecordingBatchJob()
+    webapp.jobd_operation_service = CapturingCompletionService()
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+    try:
+        payload, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-105-roots",
+        )
+        submitted_during_acceptance = list(submitted)
+        completion, completion_args = webapp.jobd_operation_service.submission
+        batches = webapp.submit_filesystem_watch_batches(completion_args[3], completion_args[5])
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"] == "r-web-105-roots"
+    assert payload["operation"]["context"]["roots"] == 105
+    assert payload["operation"]["context"]["batches"] == 2
+    assert completion == webapp.complete_filesystem_watch_diff_operation
+    assert completion_args[3] == roots
+    assert submitted_during_acceptance == [], "acceptance must not submit any job on the request thread"
+    assert [len(batch_payload["requests"]) for _task, batch_payload, _kwargs in submitted] == [64, 41]
+    assert [
+        str(request["path"])
+        for _task, batch_payload, _kwargs in submitted
+        for request in batch_payload["requests"]
+    ] == roots
+    assert [batch.root_offset for batch in batches] == [0, 64]
+
+
+def test_filesystem_watch_diff_rejects_more_roots_than_the_client_watch_contract_admits(monkeypatch):
+    roots = [f"/repo-{index:03d}" for index in range(app_module.CLIENT_WATCH_ROOT_LIMIT + 1)]
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
     monkeypatch.setattr(
@@ -8203,17 +9055,22 @@ def test_filesystem_watch_diff_rejects_105_roots_without_partial_or_multi_job_su
     try:
         payload, status = webapp.filesystem_watch_diff_http_payload(
             force_full=True,
-            request_id="r-web-105-roots",
+            request_id="r-web-over-contract-roots",
         )
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.BAD_REQUEST
     assert payload["state"] == "failed"
-    assert payload["request"]["id"] == "r-web-105-roots"
+    assert payload["request"]["id"] == "r-web-over-contract-roots"
     assert payload["error"]["code"] == "invalid_request"
-    assert payload["error"]["details"]["roots"] == 105
-    assert payload["error"]["details"]["maximum"] == 64
+    assert payload["error"]["details"]["roots"] == len(roots)
+    assert payload["error"]["details"]["maximum"] == app_module.CLIENT_WATCH_ROOT_LIMIT
+    assert payload["error"]["stack"] == [{
+        "component": "server.http",
+        "operation": "GET /api/fs/watch-diff",
+        "code": "invalid_request",
+    }]
 
 
 def test_filesystem_watch_diff_releases_completion_reservation_when_operation_acceptance_fails(monkeypatch):
@@ -8226,19 +9083,19 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
             self.reservations = 0
             self.workers = []
 
-        def reserve(self):
+        def reserve(self, lane="bulk"):
             self.reservations += 1
-            return True
+            return _StubOperationReservation(on_release=self._release)
 
-        def release_reservation(self):
+        def _release(self):
             self.reservations -= 1
 
-        def submit_reserved(self, function, *args):
+        def submit_reserved(self, reservation, function, *args):
             def run():
                 try:
                     function(*args)
                 finally:
-                    self.release_reservation()
+                    reservation.release()
 
             worker = threading.Thread(target=run)
             self.workers.append(worker)
@@ -8276,127 +9133,6 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
         webapp.control_server.stop()
 
     assert completion_service.reservations == 0
-
-
-def test_periodic_filesystem_full_frame_submits_jobd_without_inline_listing(monkeypatch):
-    current = tuple(
-        (f"/repo-{index:03d}", (f"/repo-{index:03d}", "dir", index + 1, 0, ()))
-        for index in range(64)
-    )
-    roots = [item[0] for item in current]
-    submitted = []
-    published = []
-
-    class PendingBatchJob:
-        def produce(self, task, payload, **kwargs):
-            submitted.append((task, payload, kwargs))
-            index = len(submitted)
-            return {
-                "ok": True,
-                "state": "queued",
-                "job": {"job_id": f"job-{index}", "status": "queued", "generation": kwargs["generation"]},
-                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
-            }, b""
-
-    class CapturingCompletionService:
-        stop_event = threading.Event()
-
-        def reserve(self):
-            return True
-
-        def release_reservation(self):
-            return None
-
-        def submit_reserved(self, function, *args):
-            self.submission = (function, args)
-            return True
-
-        def stop(self):
-            self.stop_event.set()
-
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = PendingBatchJob()
-    webapp.jobd_operation_service = CapturingCompletionService()
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
-    monkeypatch.setattr(
-        app_module.filesystem,
-        "list_directory",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("periodic full frame must not list in web")),
-    )
-    try:
-        events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
-        repeated_events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-
-    assert events == []
-    assert repeated_events == []
-    assert published == []
-    assert [len(call[1]["requests"]) for call in submitted] == [64]
-    assert all(call[0] == "filesystem_batch" for call in submitted)
-    assert all(call[2]["delivery"] == "ready_or_receipt" for call in submitted)
-
-
-def test_completed_filesystem_full_frame_publishes_latest_token_and_discards_stale_token(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    published = []
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
-    first_signature = (("/repo", ("/repo", "dir", 1, 0, ())),)
-    second_signature = (("/repo", ("/repo", "dir", 2, 0, ())),)
-    try:
-        first_token = webapp.record_filesystem_watch_snapshot(first_signature)
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.filesystem_full_inflight_token = first_token
-            webapp.client_watch_service.filesystem_payload_signature = "previous-token"
-        first_payload = {"mode": "full", "token": first_token, "roots": ["/repo"], "directories": []}
-        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == ["fs_changed"]
-        with webapp.client_watch_service.lock:
-            first_full_at = webapp.client_watch_service.filesystem_last_full_at
-            assert webapp.client_watch_service.filesystem_payload_signature == first_token
-            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
-
-        second_token = webapp.record_filesystem_watch_snapshot(second_signature)
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.filesystem_full_inflight_token = first_token
-            webapp.client_watch_service.filesystem_payload_signature = second_token
-        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == []
-        with webapp.client_watch_service.lock:
-            assert webapp.client_watch_service.filesystem_payload_signature == second_token
-            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
-            assert webapp.client_watch_service.filesystem_last_full_at == first_full_at
-    finally:
-        webapp.control_server.stop()
-
-    assert published == [("fs_changed", first_payload)]
-
-
-def test_periodic_filesystem_full_frame_shutdown_clears_inflight_without_error(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    token = webapp.record_filesystem_watch_snapshot((("/repo", ("/repo", "dir", 1, 0, ())),))
-    batch = app_module.FilesystemWatchBatchProduct(
-        producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:test", generation=1),
-    )
-    failures = []
-    monkeypatch.setattr(webapp, "record_filesystem_watch_product_failure", lambda error, trigger: failures.append((error, trigger)))
-    with webapp.client_watch_service.lock:
-        webapp.client_watch_service.filesystem_full_inflight_token = token
-    webapp.jobd_operation_service.stop_event.set()
-    try:
-        webapp.complete_filesystem_ready_event(
-            token,
-            "watch",
-            {"mode": "full", "token": token, "removed_roots": []},
-            ["/repo"],
-            (batch,),
-            time.time() + 1.0,
-        )
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-
-    assert failures == []
-    assert webapp.client_watch_service.filesystem_full_inflight_token == ""
 
 
 def test_filesystem_watch_diff_plan_returns_full_when_since_is_stale():
@@ -8799,6 +9535,181 @@ def test_context_product_receipt_completes_through_operation_event_and_replay(mo
     assert replay == published[-1][1]
 
 
+def _script_jobd_transport(monkeypatch, tmp_path, responses):
+    client = jobd.JobClient(tmp_path / "scripted-jobd.sock")
+    script = list(responses)
+    emitted = []
+    monkeypatch.setattr(client, "_request_once", lambda *_args, **_kwargs: script.pop(0))
+    monkeypatch.setattr(client, "_emit_transport_error", emitted.append)
+    return client, emitted
+
+
+def _timeout_transport_failure(action):
+    return TransportFailure(
+        error=TimeoutError("scripted receive timeout"),
+        traceback_text="Traceback (most recent call last):\nTimeoutError: scripted receive timeout",
+        action=action,
+        request_id=f"request-{action}",
+        client_elapsed_ms=501.0,
+    )
+
+
+def test_jobd_result_timeout_then_ready_is_silent_inside_operation_budget(monkeypatch, tmp_path):
+    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
+    completed = {"ok": True, "job": {"job_id": "job-1", "status": "completed", "result": {"ready": True}}}
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
+        (timeout, b"", _timeout_transport_failure("result")),
+        (completed, b"", None),
+    ])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
+    try:
+        assert webapp.wait_for_jobd_operation_job("job-1", time.time() + 1.0) == completed["job"]
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert emitted == []
+
+
+def test_session_files_result_timeout_then_completed_reuses_silent_result_poll_owner(monkeypatch, tmp_path):
+    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
+    payload = {"session": "5", "files": [{"path": "recovered.py"}], "repos": [], "errors": []}
+    completed = {
+        "ok": True,
+        "job": {
+            "job_id": "session-files-1",
+            "status": "completed",
+            "result": {"payload": payload, "status": int(HTTPStatus.OK)},
+        },
+    }
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
+        (timeout, b"", _timeout_transport_failure("result")),
+        (completed, b"", None),
+    ])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
+    try:
+        assert webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 1.0) == (
+            payload,
+            HTTPStatus.OK,
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert emitted == []
+
+
+def test_session_files_result_deadline_preserves_typed_failure_and_one_diagnostic(monkeypatch, tmp_path):
+    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
+        (timeout, b"", _timeout_transport_failure("result")),
+    ])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    try:
+        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
+            webapp.wait_for_session_files_operation_job("session-files-1", time.time() - 1.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert raised.value.failure["status"] == "deadline_expired"
+    assert raised.value.failure["transient_polls"] == 1
+    assert len(emitted) == 1
+
+
+def test_session_files_unrecoverable_absent_client_fails_immediately_with_cause():
+    calls = []
+
+    class AbsentJobClient:
+        def result(self, job_id):
+            calls.append(job_id)
+            return {
+                "ok": False,
+                "error": "jobd socket absent",
+                "_transport_error": "absent",
+                "cause": {"kind": "service_absent", "frames": [{"operation": "jobd.result"}]},
+            }
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = AbsentJobClient()
+    started = time.monotonic()
+    try:
+        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
+            webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert time.monotonic() - started < 2.0
+    assert calls == ["session-files-1"]
+    assert raised.value.failure["_transport_error"] == "absent"
+    assert raised.value.failure["cause"] == {
+        "kind": "service_absent",
+        "frames": [{"operation": "jobd.result"}],
+    }
+
+
+@pytest.mark.parametrize("producer_state", ["failed", "cancelled", "superseded", "timed_out"])
+def test_session_files_result_terminal_states_fail_without_retry(monkeypatch, tmp_path, producer_state):
+    terminal = {
+        "ok": True,
+        "job": {"job_id": "session-files-1", "status": producer_state, "error": "producer ended"},
+    }
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [(terminal, b"", None)])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    try:
+        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
+            webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 1.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert raised.value.failure["status"] == producer_state
+    assert emitted == []
+
+
+def test_jobd_product_timeout_then_ready_is_silent_inside_operation_budget(monkeypatch, tmp_path):
+    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
+    body = json.dumps({"ready": True}).encode("utf-8")
+    ready = {"ok": True, "state": "ready", "generation": 7}
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
+        (timeout, b"", _timeout_transport_failure("product")),
+        (ready, body, None),
+    ])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-1", generation=7)
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
+    try:
+        assert webapp.wait_for_jobd_operation_product(producer, time.time() + 1.0) == {"ready": True}
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert emitted == []
+
+
+def test_jobd_product_deadline_publishes_one_deferred_transport_error(monkeypatch, tmp_path):
+    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
+    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
+        (timeout, b"", _timeout_transport_failure("product")),
+    ])
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = client
+    producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-1", generation=7)
+    try:
+        with pytest.raises(app_module.JobdOperationUnavailable) as raised:
+            webapp.wait_for_jobd_operation_product(producer, time.time() - 1.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert raised.value.code == "deadline_expired"
+    assert raised.value.failure["transient_polls"] == 1
+    assert raised.value.failure["last_transient_transport"] == "timeout"
+    assert len(emitted) == 1
+    assert emitted[0].request_id == "request-product"
+
+
 def test_context_product_completed_without_mapping_terminalizes_protocol_failure(monkeypatch, tmp_path):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "malformed"}}) + "\n", encoding="utf-8")
@@ -8957,6 +9868,9 @@ def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypat
             {**batch["requests"][0], "id": 0},
             {**batch["requests"][1], "id": 1},
         ],
+        # The accepting server's own policy rides with the batch; the shared daemon authorizes
+        # with it instead of its launcher's environment.
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
     }
     assert produce[4]["delivery"] == "ready_or_receipt"
     assert result_status == HTTPStatus.OK
@@ -8975,6 +9889,126 @@ def _filesystem_json_product(body: bytes) -> dict[str, object]:
         "disposition": "inline",
         "filename": "",
     }
+
+
+# Every lexical shape `filesystem.validate_request_path_lexical` refuses, one row per rule it owns.
+# `POST /api/fs/mkdir {}` is the observed case: the browser and the route sweep both send a body
+# with no path, and the web thread can prove that request cannot succeed without touching the
+# filesystem.  Accepting it anyway returns 202, burns a bounded jobd operation slot, and
+# terminalizes `invalid_request` out of band -- after the response the caller already read, so
+# the failure surfaces as an unattributable server-log error instead of this request's 400.
+INVALID_FILESYSTEM_OPERATION_REQUESTS = (
+    ("POST /api/fs/mkdir", "mkdir", "", {}, "fs.error.pathRequired"),
+    ("POST /api/fs/write", "write", "", {"content": ""}, "fs.error.pathRequired"),
+    ("POST /api/fs/delete", "delete", "", {}, "fs.error.pathRequired"),
+    ("POST /api/fs/rename", "rename", "", {"new_name": "kept.txt"}, "fs.error.pathRequired"),
+    ("POST /api/fs/unindex", "unindex", "", {}, "fs.error.pathRequired"),
+    ("GET /api/fs/read", "read", "relative/note.txt", {}, "fs.error.pathAbsolute"),
+    ("GET /api/fs/list", "list", "/repo/bad\nname", {}, "fs.error.pathIllegal"),
+    # `new_name` is the only other refusal decidable without a descriptor, and jobd coerces it
+    # with `str(... or "")`, so `None` and `""` are the same request to the worker.
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": ""}, "fs.error.nameRequired"),
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": None}, "fs.error.nameRequired"),
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": "../escape"}, "fs.error.nameIllegal"),
+)
+
+
+@pytest.mark.parametrize(
+    ("route", "operation", "path", "operation_args", "message_key"),
+    INVALID_FILESYSTEM_OPERATION_REQUESTS,
+)
+def test_filesystem_operation_refuses_an_invalid_path_before_accepting_it(
+    monkeypatch,
+    tmp_path,
+    route,
+    operation,
+    path,
+    operation_args,
+    message_key,
+):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    submissions = []
+
+    class RecordingFilesystemJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append(("produce", task, payload))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-invalid-path", "status": "queued", "generation": kwargs["generation"]},
+            }, b""
+
+        def product(self, product_key):
+            submissions.append(("product", product_key))
+            return {"ok": True, "state": "none", "inflight": True, "generation": 0}, b""
+
+        def result(self, job_id):
+            submissions.append(("result", job_id))
+            return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RecordingFilesystemJob()
+    server_logs.SERVER_LOGS.clear()
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route=route,
+            operation=operation,
+            path=path,
+            args=dict(operation_args),
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.BAD_REQUEST, response
+    assert response.product is None and response.body == b"", response
+    # No job submitted, no receipt persisted, and no completion slot held.
+    assert submissions == [], submissions
+    assert webapp.queued_delivery_ledger.open_operations() == []
+    assert webapp.jobd_operation_service.futures == set()
+    assert response.payload["user_message"]["key"] == message_key, response.payload
+    assert response.payload["terminal"] is True, response.payload
+    assert response.payload["path"] == path, response.payload
+    # The refusal is this request's answer, not an operator-visible server failure.
+    failures = [
+        entry
+        for entry in server_logs.SERVER_LOGS.payload()["logs"]
+        if str(entry.get("level") or "") in {"warning", "error"}
+    ]
+    assert failures == [], failures
+
+
+def test_filesystem_acceptance_never_expands_a_user_name_on_the_request_thread(monkeypatch):
+    """Acceptance owns the lexical rule only, because expanding `~user` can block the web process.
+
+    `os.path.expanduser("~alice/repo")` is an NSS/passwd lookup.  On a networked passwd source
+    (LDAP/NIS/SSSD) that lookup can hang for the name-service timeout, and this process answers
+    every HTTP request on one thread, so a single stalled lookup stalls all of them -- precisely
+    the blocking work the jobd operation queue exists to keep off the request thread.  The
+    expansion belongs to `filesystem.parsed_request_path`, which only the worker calls.
+    """
+
+    def refuse(path):
+        raise AssertionError(f"HTTP acceptance expanded a user name on the request thread: {path!r}")
+
+    monkeypatch.setattr(os.path, "expanduser", refuse)
+    accept = app_module.TmuxWebtermApp.refused_filesystem_operation_request
+    # A valid `~user/...` descriptor is accepted without ever consulting the name service.
+    assert accept("mkdir", "~alice/repo/new", {}) is None
+    assert accept("read", "~alice/repo/note.txt", {}) is None
+    assert accept("rename", "~alice/repo/note.txt", {"new_name": "kept.txt"}) is None
+    # And the refusals still fire on the same thread, from the same lexical owner.
+    for operation, path, args, message_key in (
+        ("mkdir", "", {}, "fs.error.pathRequired"),
+        ("list", "relative/note.txt", {}, "fs.error.pathAbsolute"),
+        ("list", "~alice/bad\nname", {}, "fs.error.pathIllegal"),
+        ("rename", "~alice/repo/note.txt", {"new_name": "../escape"}, "fs.error.nameIllegal"),
+    ):
+        refusal = accept(operation, path, args)
+        assert refusal is not None, (operation, path)
+        payload, status = refusal
+        assert status == HTTPStatus.BAD_REQUEST
+        assert payload["user_message"]["key"] == message_key, payload
 
 
 def test_filesystem_operation_cold_receipt_leaves_request_thread_before_worker_finishes(monkeypatch, tmp_path):
@@ -9212,6 +10246,202 @@ def test_filesystem_operation_cold_failure_replay_preserves_typed_status(monkeyp
     assert replay["status"] == status
 
 
+class _TerminalFailureFilesystemJob:
+    """One jobd client that drives a filesystem operation to the failure under test.
+
+    ``worker_failure`` is the typed filesystem failure the worker reports through ``result`` --
+    the ordinary outcome of touching a path.  ``product_failure`` is the daemon failing instead:
+    a non-transient product read, which is how a jobd that died mid-operation reaches the app.
+    """
+
+    def __init__(self, *, worker_failure=None, product_failure=None):
+        self.worker_failure = worker_failure
+        self.product_failure = product_failure
+
+    def produce(self, _task, _payload, **kwargs):
+        return {
+            "ok": True,
+            "state": "queued",
+            "job": {"job_id": "job-fs-terminal", "status": "running", "generation": kwargs["generation"]},
+            "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+        }, b""
+
+    def product(self, _product_key):
+        if self.product_failure is not None:
+            return dict(self.product_failure), b""
+        return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+    def result(self, job_id):
+        assert job_id == "job-fs-terminal"
+        return {
+            "ok": False,
+            "job": {"job_id": job_id, "status": "failed", "failure": dict(self.worker_failure)},
+        }
+
+
+def _run_terminal_filesystem_operation(monkeypatch, tmp_path, job_client):
+    """Accept one filesystem operation, let it terminalize, and return the new server-log rows."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job_client
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        del payload
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/tmp/yo-deleted-worktree",
+        )
+        assert response.status == HTTPStatus.ACCEPTED, response.payload
+        assert terminal.wait(5.0), "the operation never terminalized"
+        operation_id = response.payload["operation"]["id"]
+        result, status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+    return result, status, rows
+
+
+@pytest.mark.parametrize(
+    ("case", "status", "message_key", "expected_level", "expected_code"),
+    (
+        ("path-not-found", HTTPStatus.NOT_FOUND, "common.pathNotFound", "info", "path_not_found"),
+        ("permission-denied", HTTPStatus.FORBIDDEN, "fs.error.operationFailed", "info", "permission_denied"),
+    ),
+)
+def test_expected_filesystem_outcome_is_not_recorded_as_an_operator_error(
+    monkeypatch,
+    tmp_path,
+    case,
+    status,
+    message_key,
+    expected_level,
+    expected_code,
+):
+    """Browsing to a path that is gone or unreadable is the caller's outcome, not a server error.
+
+    The user's Differ session pointed at a worktree that had been deleted, so every listing
+    produced a genuine 404 -- and each one was written to the operator log at ``level=error``,
+    which is release-blocking evidence.  ``{"warning", "error"}`` is the blocking set, so the
+    record has to land below both while staying byte-identical for correlation and dedupe.
+    """
+
+    worker_failure = {
+        "filesystem_error": {
+            "error": f"typed filesystem failure {int(status)}",
+            "user_message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "typed failure"},
+            "status": int(status),
+            "path": "/tmp/yo-deleted-worktree",
+        },
+        "status": int(status),
+    }
+    result, result_status, rows = _run_terminal_filesystem_operation(
+        monkeypatch,
+        tmp_path,
+        _TerminalFailureFilesystemJob(worker_failure=worker_failure),
+    )
+
+    assert result_status == status, result
+    assert result["error"]["code"] == expected_code, result
+    operation_rows = [entry for entry in rows if entry["source"] == "jobd-operation"]
+    assert len(operation_rows) == 1, rows
+    assert operation_rows[0]["level"] == expected_level, operation_rows
+    assert operation_rows[0]["category"] == "operation", operation_rows
+    assert json.loads(operation_rows[0]["message"])["code"] == expected_code, operation_rows
+    # `{"warning", "error"}` is what the live browser soak collects as `serverLogErrors` and what
+    # every gate retirement helper filters on, so the outcome has to land outside both.
+    blocking = [
+        entry for entry in rows
+        if entry["level"] in {"warning", "error"} and entry["source"] in {"jobd-operation", "api-response"}
+    ]
+    assert blocking == [], rows
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    (
+        ("daemon-died", "service_unavailable"),
+        ("dependency-failed", "dependency_failed"),
+    ),
+)
+def test_genuine_operation_fault_is_still_recorded_as_an_operator_error(monkeypatch, tmp_path, case, expected_code):
+    """The direction that matters more: a component that failed still writes an error row."""
+
+    if case == "daemon-died":
+        job_client = _TerminalFailureFilesystemJob(product_failure={
+            "ok": False,
+            "terminal": True,
+            "error": "jobd exited while the operation was running",
+        })
+    else:
+        # A worker failure the filesystem itself could not explain: `os_error` keeps a bare OSError
+        # at 500, and `typed_filesystem_operation_failed_result` names anything >= 500
+        # `dependency_failed`.
+        job_client = _TerminalFailureFilesystemJob(worker_failure={
+            "filesystem_error": {
+                "error": "filesystem operation failed",
+                "user_message": {"key": "fs.error.operationFailed", "params": {}, "fallback": "filesystem operation failed"},
+                "status": int(HTTPStatus.INTERNAL_SERVER_ERROR),
+                "path": "/tmp/yo-deleted-worktree",
+            },
+            "status": int(HTTPStatus.INTERNAL_SERVER_ERROR),
+        })
+
+    result, result_status, rows = _run_terminal_filesystem_operation(monkeypatch, tmp_path, job_client)
+
+    assert int(result_status) >= 500, result
+    assert result["error"]["code"] == expected_code, result
+    operation_rows = [entry for entry in rows if entry["source"] == "jobd-operation"]
+    assert len(operation_rows) == 1, rows
+    assert operation_rows[0]["level"] == "error", operation_rows
+    assert json.loads(operation_rows[0]["message"])["code"] == expected_code, operation_rows
+
+
+def test_malformed_failure_record_carrying_an_outcome_code_is_still_an_error(monkeypatch, tmp_path):
+    """A producer that emitted a half-built record is itself the fault, so it buys no downgrade."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    webapp = app_module.TmuxWebtermApp([])
+    well_formed = webapp.typed_filesystem_operation_failed_result(
+        "r-fixture",
+        {
+            "error": "path not found: /tmp/yo-deleted-worktree",
+            "user_message": {"key": "common.pathNotFound", "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
+            "status": int(HTTPStatus.NOT_FOUND),
+            "path": "/tmp/yo-deleted-worktree",
+        },
+        HTTPStatus.NOT_FOUND,
+        route="GET /api/fs/list",
+        operation_id="op-fixture",
+    )
+    malformed = copy.deepcopy(well_formed)
+    malformed["error"]["stack"] = []
+    truncated = copy.deepcopy(well_formed)
+    truncated["error"]["details"] = {}
+
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        webapp.record_operation_failure("op-fixture", well_formed)
+        webapp.record_operation_failure("op-malformed", malformed)
+        webapp.record_operation_failure("op-truncated", truncated)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+
+    assert [entry["level"] for entry in rows] == ["info", "error", "error"], rows
+    assert {entry["source"] for entry in rows} == {"jobd-operation"}, rows
+
+
 @pytest.mark.parametrize(
     ("case", "expected_status", "message_key"),
     (
@@ -9443,7 +10673,615 @@ def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(m
     assert replay["status"] == result_status
 
 
-def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receipt():
+class _RecordingFilesystemJob:
+    """Record every produce submission and answer with one caller-supplied product script."""
+
+    def __init__(self, product_script):
+        self.produced = []
+        self.product_calls = []
+        self._product_script = list(product_script)
+
+    def produce(self, task, payload, **kwargs):
+        self.produced.append((task, payload, kwargs))
+        return {
+            "ok": True,
+            "state": "queued",
+            "job": {"job_id": f"job-{len(self.produced)}", "status": "running", "generation": kwargs["generation"]},
+            "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+        }, b""
+
+    def product(self, product_key):
+        self.product_calls.append(product_key)
+        return self._product_script.pop(0) if self._product_script else ({"ok": True, "state": "pending", "generation": 0, "inflight": True}, b"")
+
+    def result(self, job_id):
+        return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
+
+
+def _ready_filesystem_product(payload, *, schedule=None):
+    body = json.dumps(payload).encode("utf-8")
+    metadata = {
+        "ok": True,
+        "state": "ready",
+        "generation": 1,
+        "inflight": False,
+        "product": _filesystem_json_product(body),
+    }
+    if schedule is not None:
+        metadata["schedule"] = dict(schedule)
+    return metadata, body
+
+
+def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_do_not():
+    assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status"}
+    assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
+    for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "point"
+    for operation in sorted(app_module.FILESYSTEM_RETAINED_READ_OPERATIONS - app_module.FILESYSTEM_POINT_OPERATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "interactive"
+    assert app_module.filesystem_operation_priority("raw") == "interactive"
+    # Every priority this module can emit must be one jobd accepts and owns with a bounded lane.
+    emitted = {app_module.filesystem_operation_priority(operation) for operation in app_module.FILESYSTEM_RETAINED_READ_OPERATIONS | {"raw"}}
+    assert emitted == {"point", "interactive"}
+    assert emitted <= set(jobd.JOBD_PRIORITIES)
+    assert {jobd.JOBD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive"}
+
+
+def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
+    """The write-side boundary, held as tightly as the read-side one above.
+
+    `point` stays reads-only: it carries the stat-derived coalescing key and `fresh_only`, which a
+    mutation must never get.  `delete` stays unbounded: `delete_path` recurses through a subtree.
+    """
+    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir"}
+    for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "mutation"
+    # A mutation is not a retained read and must never enter the coalescing read lane.
+    assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_POINT_OPERATIONS)
+    assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_RETAINED_READ_OPERATIONS)
+    # Recursive/unbounded writes stay on the shared `interactive` lane no matter how point-shaped
+    # they look at the call site.
+    for operation in ("delete", "unindex", "zip"):
+        assert app_module.filesystem_operation_priority(operation) == "interactive"
+    # The mutation lane is physically separate from the read lane and from every bulk lane.
+    assert jobd.JOBD_PRIORITY_LANES["mutation"] == "mutation"
+    assert jobd.JOBD_LANE_PRIORITIES["mutation"] == ("mutation",)
+    assert jobd.JOBD_LANE_WORKERS["mutation"] == jobd.JOBD_MUTATION_WORKERS
+    assert "mutation" in jobd.JOBD_PRIORITIES
+
+
+@pytest.mark.parametrize("operation", ["write", "rename", "mkdir"])
+def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane(operation, tmp_path, monkeypatch):
+    """A one-syscall mkdir must not wait for someone else's recursive tree walk.
+
+    Cross-class isolation, not a latency average: every non-mutation lane is held at capacity by an
+    unresolved future (a tree walk that has not finished), and the bounded mutation must still reach
+    `running` on this one pump.  Measured before the mutation lane existed, `filesystem_operation_
+    priority` sent `mkdir` to the single-worker `interactive` lane, where one `count` over a
+    457,364-file tree left the `mkdir` queued for 6737 ms and 8167 ms across two runs.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for priority in ("freshness", "maintenance", "interactive"):
+        lane = jobd.PersistentJobBroker._lane_for_priority(priority)
+        for number in range(service._lane_capacity(lane)):
+            holder = service._queue_record(
+                "filesystem_operation",
+                app_module.filesystem_operation_descriptor("count", str(tmp_path), {}),
+                priority, number, f"unbounded-{priority}-{number}",
+            )
+            holder.status = "running"
+            # An unresolved future is a tree walk that has not finished. Nothing bounded may wait on it.
+            holder.future = Future()
+            holders.append(holder)
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    mutation = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor(operation, str(tmp_path / "target"), {}),
+        app_module.filesystem_operation_priority(operation), 1, f"mutation-{operation}",
+    )
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert mutation.status == "running", (
+        f"{operation} terminalized behind unbounded work on a shared lane"
+    )
+
+
+@pytest.mark.parametrize("held_operation, probe_operation", [("mkdir", "read"), ("read", "mkdir")])
+def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operation, probe_operation, tmp_path, monkeypatch):
+    """`point` and `mutation` are separate lanes with separate executors, so filling every slot of
+    one must leave the other's capacity untouched in both directions."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    held_priority = app_module.filesystem_operation_priority(held_operation)
+    probe_priority = app_module.filesystem_operation_priority(probe_operation)
+    assert held_priority != probe_priority
+    held_lane = jobd.PersistentJobBroker._lane_for_priority(held_priority)
+
+    for number in range(service._lane_capacity(held_lane)):
+        holder = service._queue_record(
+            "filesystem_operation",
+            app_module.filesystem_operation_descriptor(held_operation, str(tmp_path / f"held-{number}"), {}),
+            held_priority, number, f"held-{held_operation}-{number}",
+        )
+        holder.status = "running"
+        holder.future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    probe = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor(probe_operation, str(tmp_path / "probe"), {}),
+        probe_priority, 1, f"probe-{probe_operation}",
+    )
+
+    service._pump()
+
+    lanes = service.common_status()["lanes"]
+    assert lanes[held_lane]["active"] == service._lane_capacity(held_lane)
+    assert lanes[held_lane]["queued"] == 0
+    assert probe.status == "running"
+    assert lanes[jobd.PersistentJobBroker._lane_for_priority(probe_priority)]["active"] == 1
+
+
+@pytest.mark.parametrize("operation", ["read", "info", "index_status"])
+def test_stat_derived_point_keys_submit_fresh_only_and_watchd_keys_do_not(monkeypatch, tmp_path, operation):
+    """Every point operation, not just `read`, must refuse a retained product for a stat key.
+
+    A stat identity cannot see a rewrite that lands inside one filesystem timestamp tick without
+    changing size.  A watchd generation can -- its revision advances on any observed change -- so
+    only the stat-derived submissions carry `fresh_only`.
+    """
+    target = tmp_path / "point-target.md"
+    target.write_bytes(b"p" * 12_353)
+    path = str(tmp_path if operation == "index_status" else target)
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        assert webapp.filesystem_operation_product_generation() == ""
+        stat_response = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=path,
+        )
+        monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+        watchd_response = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=path,
+        )
+        missing = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=str(tmp_path / "nope" / "absent.md"),
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert stat_response.status == HTTPStatus.ACCEPTED
+    assert watchd_response.status == HTTPStatus.ACCEPTED
+    assert missing.status == HTTPStatus.ACCEPTED
+    stat_kwargs, watchd_kwargs, missing_kwargs = [kwargs for _task, _payload, kwargs in job.produced]
+    assert stat_kwargs["priority"] == "point" and stat_kwargs["fresh_only"] is True
+    assert watchd_kwargs["priority"] == "point" and watchd_kwargs["fresh_only"] is False
+    assert stat_kwargs["coalesce_key"] != watchd_kwargs["coalesce_key"]
+    # An unstatable path coalesces with nothing, so there is no retained product to refuse.
+    assert missing_kwargs["fresh_only"] is False
+    assert missing_kwargs["coalesce_key"] not in {stat_kwargs["coalesce_key"], watchd_kwargs["coalesce_key"]}
+
+
+def test_identical_point_reads_coalesce_on_content_identity_and_change_with_the_file(monkeypatch, tmp_path):
+    target = tmp_path / "note.md"
+    target.write_bytes(b"a" * 12_353)
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        # No watchd generation is available here, which is exactly the state that used to mint a
+        # fresh uuid coalesce key per request and defeat coalescing entirely.
+        assert webapp.filesystem_operation_product_generation() == ""
+        first = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        second = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert first.status == HTTPStatus.ACCEPTED and second.status == HTTPStatus.ACCEPTED
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+        third = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert third.status == HTTPStatus.ACCEPTED
+        missing = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(tmp_path / "absent.md"),
+        )
+        assert missing.status == HTTPStatus.ACCEPTED
+        listing = webapp.filesystem_operation_http_payload(route="GET /api/fs/list", operation="list", path=str(tmp_path))
+        assert listing.status == HTTPStatus.ACCEPTED
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    keys = [kwargs["coalesce_key"] for _task, _payload, kwargs in job.produced]
+    priorities = [kwargs["priority"] for _task, _payload, kwargs in job.produced]
+    assert priorities == ["point", "point", "point", "point", "interactive"]
+    assert keys[0] == keys[1], "two identical in-flight point reads must share one coalesce key"
+    assert keys[2] != keys[0], "a changed file must never be answered by the retained product"
+    # Fail closed: an unstatable path gets an uncoalescable key rather than a guessed identity.
+    assert keys[3].startswith("filesystem-operation:") and keys[3] not in keys[:3]
+    assert app_module.filesystem_point_content_generation(str(tmp_path / "absent.md")) == ("", "stat_failed:ENOENT")
+    identity, reason = app_module.filesystem_point_content_generation(str(target))
+    assert reason == "" and identity.startswith("stat:")
+
+
+def test_transient_product_metadata_is_retried_inside_the_operation_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "note.md"
+    target.write_bytes(b"b" * 12_353)
+    terminal = threading.Event()
+    published = []
+    job = _RecordingFilesystemJob([
+        ({"ok": False, "error": "peer handler slow", "_transport_error": "timeout"}, b""),
+        ({"ok": False, "error": "service busy", "status": int(HTTPStatus.SERVICE_UNAVAILABLE)}, b""),
+        _ready_filesystem_product(
+            {"path": str(target), "content": "recovered"},
+            schedule={"task": "filesystem_operation", "priority": "point", "lane": "point", "queue_wait_ms": 4.5, "execution_ms": 3.25, "running_started_at": 17.0},
+        ),
+    ])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        response = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert terminal.wait(10.0)
+        terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(job.product_calls) == 3, "both transient product reads must be retried, not terminalized"
+    assert terminal_status == HTTPStatus.OK
+    assert terminal_result["data"] == {"path": str(target), "content": "recovered"}
+    accepted = {row["id"]: row for row in diagnostics["accepted_operations"]}[operation_id]
+    assert accepted["kind"] == "filesystem_operation"
+    assert accepted["subtype"] == "read"
+    assert accepted["uncoalesced"] == ""
+    assert accepted["schedule"] == {
+        "task": "filesystem_operation",
+        "priority": "point",
+        "lane": "point",
+        "queue_wait_ms": 4.5,
+        "execution_ms": 3.25,
+        "running_started_at": 17.0,
+        "transient_polls": 2.0,
+    }
+
+
+def test_real_unix_product_receive_timeout_recovers_then_exhausts_with_one_terminal_diagnostic(
+    monkeypatch, tmp_path,
+):
+    """A receive timeout is transient until the operation's owner deadline, not a lost product."""
+    socket_path = tmp_path / "jobd-timeout.sock"
+    lock_path = tmp_path / "jobd-timeout.lock"
+    stop_event = threading.Event()
+    release_slow = threading.Event()
+    mode = ["recover"]
+    product_calls = [0]
+    ready_body = json.dumps({"path": "/fixture/note.md", "content": "recovered"}).encode("utf-8")
+
+    def handle(request, _request_binary):
+        if request.get("action") == "product":
+            product_calls[0] += 1
+            if mode[0] == "exhaust" or product_calls[0] == 1:
+                release_slow.wait(timeout=2.0)
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+                "product": _filesystem_json_product(ready_body),
+            }, ready_body
+        if request.get("action") == "result":
+            return {"ok": True, "job": {"job_id": "job-timeout", "status": "running"}}, b""
+        return {"ok": True, "version": jobd.JOBD_PROTOCOL_VERSION, "pid": os.getpid()}, b""
+
+    monkeypatch.setattr(local_service_runtime, "peer_uid", lambda _connection: os.getuid())
+    worker = threading.Thread(
+        target=lambda: local_service_runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name="jobd",
+            stop_event=stop_event,
+            handle=handle,
+            on_idle=lambda: False,
+            on_client=lambda: None,
+            concurrent_handlers=8,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while not socket_path.exists() and time.monotonic() < deadline:
+        stop_event.wait(0.01)
+    assert socket_path.exists()
+    real_client = jobd.JobClient(socket_path)
+
+    class ShortReceiveClient:
+        def product(self, key):
+            return real_client.product(key, timeout=0.03)
+
+        def result(self, job_id):
+            return real_client.result(job_id)
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = ShortReceiveClient()
+    producer = app_module.JobdProductOperation(job_id="job-timeout", product_key="timeout-product", generation=1)
+    boundary = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        product, body, schedule = webapp.wait_for_filesystem_operation_product(producer, time.time() + 1.0)
+        assert product["format"] == "json"
+        assert body == ready_body
+        assert schedule == {"transient_polls": 1}
+
+        mode[0] = "exhaust"
+        product_calls[0] = 0
+        with pytest.raises(app_module.JobdOperationUnavailable) as raised:
+            webapp.wait_for_filesystem_operation_product(producer, time.time() + 0.14)
+        assert raised.value.code == "deadline_expired"
+        assert raised.value.failure["status"] == "deadline_expired"
+        errors = [
+            row for row in server_logs.SERVER_LOGS.payload()["logs"]
+            if int(row.get("id") or 0) > boundary
+            and row.get("level") == "error"
+            and row.get("source") == "local-service:jobd"
+            and row.get("category") == "transport"
+        ]
+        assert len(errors) == 1
+        assert errors[0]["delivery"] == "timeout"
+    finally:
+        release_slow.set()
+        stop_event.set()
+        worker.join(timeout=2.0)
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert worker.is_alive() is False
+
+
+@pytest.mark.parametrize("producer_state", ["failed", "cancelled", "superseded", "timed_out"])
+def test_real_producer_terminal_states_still_fail_the_operation_immediately(monkeypatch, tmp_path, producer_state):
+    """The transient retry must not swallow a producer that genuinely ended."""
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "note.md"
+    target.write_bytes(b"c" * 12_353)
+    terminal = threading.Event()
+
+    class TerminalProducerJob(_RecordingFilesystemJob):
+        def product(self, product_key):
+            self.product_calls.append(product_key)
+            return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"job_id": job_id, "status": producer_state, "error": "producer ended"}}
+
+    job = TerminalProducerJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        response = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert terminal.wait(10.0)
+        _terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(job.product_calls) == 1, "a real producer terminal must not be polled again"
+    assert terminal_status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+def test_editor_open_of_a_12353_byte_file_completes_while_bulk_lanes_are_saturated(monkeypatch, tmp_path):
+    """The reported user shape: open one 12,353-byte file while batch/watch fanout holds the
+    bulk lanes.  The read must terminalize ready, with content, while every bulk holder is still
+    occupied -- and inside the browser's own 15s operation deadline, not the backend's 120s budget.
+    """
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "DOIT.release-audit.md"
+    content = "".join(f"line {index:04d} of the release audit\n" for index in range(68))
+    content += "x" * (12_353 - len(content.encode("utf-8")))
+    target.write_text(content, encoding="utf-8")
+    assert len(target.read_bytes()) == 12_353
+
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=30.0, workers=2)
+    real_executor = service._executor
+    held_futures: list[Future] = []
+
+    class HeldExecutor:
+        def submit(self, *_args):
+            future = Future()
+            held_futures.append(future)
+            return future
+
+    def lane_executor(priority="freshness"):
+        if jobd.PersistentJobBroker._lane_for_priority(priority) == "point":
+            return real_executor(priority)
+        return HeldExecutor()
+
+    service._executor = lane_executor  # type: ignore[method-assign]
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    ready = time.monotonic() + 5.0
+    while not client.registry.healthy() and time.monotonic() < ready:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = client
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        # Saturate every bulk and interactive slot the way a Finder batch plus a watch-diff
+        # fanout does. None of these futures ever completes during this test.
+        for index in range(service.general_worker_count + jobd.JOBD_INTERACTIVE_WORKERS):
+            priority = "freshness" if index < service.general_worker_count else "interactive"
+            assert client.submit("json_compact", {"holder": index}, priority=priority, coalesce_key=f"holder-{index}")["ok"] is True
+        saturated = time.monotonic() + 5.0
+        while time.monotonic() < saturated:
+            lanes = client.request({"action": "status"}).get("lanes") or {}
+            if lanes.get("bulk", {}).get("active") == service.general_worker_count and lanes.get("interactive", {}).get("active") == jobd.JOBD_INTERACTIVE_WORKERS:
+                break
+            time.sleep(0.02)
+        lanes_while_held = client.request({"action": "status"})["lanes"]
+        assert lanes_while_held["bulk"]["active"] == service.general_worker_count
+        assert lanes_while_held["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+
+        started = time.monotonic()
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert response.payload["operation"]["kind"] == "filesystem_operation"
+        assert terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        elapsed = time.monotonic() - started
+        operation_id = response.payload["operation"]["id"]
+        terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+        acknowledged = webapp.queued_delivery_ledger.acknowledge_operation_delivery(operation_id, replay["operation"]["cursor"])
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+        lanes_after = client.request({"action": "status"})["lanes"]
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+        client.request({"action": "shutdown"})
+        worker.join(timeout=5.0)
+
+    assert terminal_status == HTTPStatus.OK, terminal_result
+    assert terminal_result["state"] == "ready"
+    assert terminal_result["data"]["content"] == content
+    assert elapsed < BROWSER_OPERATION_DEADLINE_SECONDS, f"editor open took {elapsed:.3f}s, past the browser deadline"
+    # The holders never completed, so the read was served by the reserved point lane, not by
+    # capacity that happened to free up.
+    assert lanes_after["bulk"]["active"] == service.general_worker_count
+    assert lanes_after["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+    assert len(held_futures) == service.general_worker_count + jobd.JOBD_INTERACTIVE_WORKERS
+    assert all(not future.done() for future in held_futures)
+    assert acknowledged is True
+    accepted = {row["id"]: row for row in diagnostics["accepted_operations"]}[operation_id]
+    assert accepted["subtype"] == "read"
+    assert accepted["schedule"]["lane"] == "point"
+    assert accepted["schedule"]["task"] == "filesystem_operation"
+    assert accepted["schedule"]["execution_ms"] > 0.0
+    assert accepted["schedule"]["queue_wait_ms"] >= 0.0
+
+
+def test_editor_open_still_stalls_when_the_point_lane_itself_is_held(monkeypatch, tmp_path):
+    """Negative control for the reserved lane.
+
+    The same 12,353-byte open, but with the point lane's own capacity held instead of the bulk
+    lanes.  It must NOT terminalize, and must recover the moment point capacity is released.  A
+    lane that could never stall would make the positive test above pass for free.
+    """
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "DOIT.release-audit.md"
+    target.write_bytes(b"n" * 12_353)
+
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=30.0, workers=2)
+    real_executor = service._executor
+    held_point_futures: list[Future] = []
+    hold_point = threading.Event()
+    hold_point.set()
+
+    class HeldExecutor:
+        def submit(self, *_args):
+            future = Future()
+            held_point_futures.append(future)
+            return future
+
+    def lane_executor(priority="freshness"):
+        if jobd.PersistentJobBroker._lane_for_priority(priority) == "point" and hold_point.is_set():
+            return HeldExecutor()
+        return real_executor(priority)
+
+    service._executor = lane_executor  # type: ignore[method-assign]
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    ready = time.monotonic() + 5.0
+    while not client.registry.healthy() and time.monotonic() < ready:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = client
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        for index in range(jobd.JOBD_POINT_WORKERS):
+            assert client.submit("json_compact", {"point_holder": index}, priority="point", coalesce_key=f"point-holder-{index}")["ok"] is True
+        held = time.monotonic() + 5.0
+        while time.monotonic() < held:
+            if (client.request({"action": "status"}).get("lanes") or {}).get("point", {}).get("active") == jobd.JOBD_POINT_WORKERS:
+                break
+            time.sleep(0.02)
+        assert client.request({"action": "status"})["lanes"]["point"]["active"] == jobd.JOBD_POINT_WORKERS
+
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        stalled = not terminal.wait(1.5)
+        queued_while_held = client.request({"action": "status"})["lanes"]["point"]["queued"]
+
+        hold_point.clear()
+        for future in held_point_futures:
+            future.set_result(b'{"released":true}')
+        recovered = terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        operation_id = response.payload["operation"]["id"]
+        _terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+        client.request({"action": "shutdown"})
+        worker.join(timeout=5.0)
+
+    assert stalled is True, "a fully held point lane must be able to stall an editor open"
+    assert queued_while_held >= 1
+    assert recovered is True
+    assert terminal_status == HTTPStatus.OK
+
+
+def test_filesystem_operation_relay_forwards_one_opaque_product_via_zero_wait_produce():
+    """The retired blocking `relay` is gone: the byte download uses zero-wait produce.
+
+    A warm product returns immediately from `produce` with no second `product` read and no daemon
+    handler ever blocking on the job.
+    """
     body = b"\x00raw\xff"
     product = {
         "format": "opaque_bytes",
@@ -9456,9 +11294,15 @@ def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receip
     calls = []
 
     class RelayJob:
-        def relay(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             calls.append((task, payload, kwargs))
             return {"ok": True, "state": "ready", "product": product}, body
+
+        def relay(self, *_args, **_kwargs):
+            raise AssertionError("the blocking relay action has been retired")
+
+        def product(self, *_args, **_kwargs):
+            raise AssertionError("a warm produce needs no second product read")
 
     webapp = app_module.TmuxWebtermApp([])
     webapp.job_client = RelayJob()
@@ -9473,11 +11317,20 @@ def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receip
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
-    assert calls == [("filesystem_operation", {
+    assert len(calls) == 1
+    task, payload, kwargs = calls[0]
+    assert task == "filesystem_operation"
+    assert payload == {
         "op": "raw",
         "path": "/repo/payload.bin",
         "args": {"download": False, "max_bytes": 1024},
-    }, {"deadline_ms": int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)})]
+        # A relayed byte product takes the same descriptor owner, so it carries the same policy.
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
+    }
+    # Zero-wait produce, a real coalesce key, and no receipt-only wait in the daemon.
+    assert kwargs["delivery"] == "ready_or_receipt"
+    assert kwargs["deadline_ms"] == int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)
+    assert kwargs["coalesce_key"].startswith("filesystem-operation-relay:")
     assert response.status == HTTPStatus.OK
     assert response.payload is None
     assert response.body == body
@@ -9494,7 +11347,7 @@ def test_filesystem_operation_relay_uses_shared_typed_failure_normalizer():
     }
 
     class RelayFailureJob:
-        def relay(self, *_args, **_kwargs):
+        def produce(self, *_args, **_kwargs):
             return {
                 "ok": False,
                 "job": {"status": "failed", "failure": {"filesystem_error": filesystem_error, "status": int(HTTPStatus.NOT_FOUND)}},
@@ -9547,7 +11400,12 @@ def test_filesystem_operation_submission_is_stable_per_scope_and_watchd_revision
         generation="watchd:epoch-a:8",
     )
 
-    assert first_payload == {"op": "list", "path": "/repo/src", "args": {"limit": "400"}}
+    assert first_payload == {
+        "op": "list",
+        "path": "/repo/src",
+        "args": {"limit": "400"},
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
+    }
     assert second_payload == first_payload
     assert first_key == second_key
     assert other_scope_key != first_key
@@ -9896,11 +11754,11 @@ def test_filesystem_batch_ready_product_reuses_stable_key_and_materializes_curre
         def __init__(self):
             self.reservations = 0
 
-        def reserve(self):
+        def reserve(self, lane="bulk"):
             self.reservations += 1
-            return True
+            return _StubOperationReservation(on_release=self._release)
 
-        def release_reservation(self):
+        def _release(self):
             self.reservations -= 1
 
         def submit_reserved(self, *_args):
@@ -9950,7 +11808,8 @@ def test_filesystem_batch_capacity_refusal_does_not_submit_an_orphan_job(monkeyp
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     webapp = app_module.TmuxWebtermApp([])
     webapp.jobd_operation_service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
-    assert webapp.jobd_operation_service.reserve() is True
+    held_reservation = webapp.jobd_operation_service.reserve("bulk")
+    assert held_reservation is not None
     submissions = []
     webapp.job_client = SimpleNamespace(produce=lambda *args, **kwargs: submissions.append((args, kwargs)))
     try:
@@ -9958,7 +11817,7 @@ def test_filesystem_batch_capacity_refusal_does_not_submit_an_orphan_job(monkeyp
             "requests": [{"id": "list", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 1}}],
         })
     finally:
-        webapp.jobd_operation_service.release_reservation()
+        held_reservation.release()
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
@@ -9977,15 +11836,73 @@ def test_jobd_operation_service_bounds_accepted_completion_capacity():
         started.set()
         assert release.wait(2.0)
 
-    assert service.reserve() is True
-    assert service.submit_reserved(work) is True
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.submit_reserved(reservation, work) is True
     assert started.wait(2.0)
-    assert service.reserve() is False
+    assert service.reserve("bulk") is None
     future = next(iter(service.futures))
     release.set()
     future.result(timeout=2.0)
-    assert service.reserve() is True
-    service.release_reservation()
+    replacement = service.reserve("bulk")
+    assert replacement is not None
+    replacement.release()
+    service.stop()
+
+
+def test_jobd_operation_reservation_release_is_exactly_once():
+    """The handle owns its slot: a double release must not over-admit the lane."""
+    service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.reserve("bulk") is None
+    reservation.release()
+    assert reservation.released is True
+    # A second, racing release (manual cleanup vs. the done-callback) is a no-op, not an
+    # over-release that would let the bounded lane admit a phantom second slot.
+    reservation.release()
+    first = service.reserve("bulk")
+    assert first is not None
+    assert service.reserve("bulk") is None
+    first.release()
+    service.stop()
+
+
+def test_jobd_completion_point_and_mutation_run_while_every_bulk_worker_and_slot_is_held():
+    """A point read and a bounded mutation completion must RUN while the bulk lane is saturated.
+
+    This is the P1-1 defect at the completion boundary: before named completion lanes, every held
+    bulk product-poll occupied the one shared pool, so a point/mutation completion was accepted yet
+    could not run until a bulk worker freed.  Separate lanes give point and mutation their own
+    workers and admission slots, so they run on this same held-bulk state.
+    """
+    service = state_services.JobdOperationService(worker_limit=2, operation_limit=2)
+    release_bulk = threading.Event()
+    bulk_started = [threading.Event() for _ in range(2)]
+
+    def bulk_work(index):
+        bulk_started[index].set()
+        assert release_bulk.wait(3.0)
+
+    bulk_reservations = []
+    for index in range(2):
+        held = service.reserve("bulk")
+        assert held is not None
+        assert service.submit_reserved(held, bulk_work, index) is True
+        bulk_reservations.append(held)
+    for event in bulk_started:
+        assert event.wait(2.0)
+    # Every bulk worker AND both bulk admission slots are now held.
+    assert service.reserve("bulk") is None
+
+    for lane in ("point", "mutation"):
+        ran = threading.Event()
+        reservation = service.reserve(lane)
+        assert reservation is not None, f"{lane} lane refused admission while bulk was held"
+        assert service.submit_reserved(reservation, ran.set) is True
+        assert ran.wait(2.0), f"{lane} completion could not run while bulk held every worker/slot"
+
+    release_bulk.set()
     service.stop()
 
 
@@ -15533,3 +17450,292 @@ def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkey
         assert cached is not None and cached[0]["files"] == populated["files"]
     finally:
         webapp.control_server.stop()
+
+
+# =======================================================================================
+# DOIT.p0.daemon-monitor -- the boot-time statsd flash, and the two classifiers that
+# disagreed about the same row.
+# =======================================================================================
+
+
+def _statsd_pin_status(**supervisor: Any) -> dict[str, Any]:
+    """A `StatsCurrentRuntime.status()` shaped like a process taking the statsd pin."""
+
+    fields = {"alive": True, "phase": "acquiring_lease", "failure_count": 0}
+    fields.update(supervisor)
+    return {
+        "leased": False,
+        "families": {},
+        "supervisor": fields,
+        "service": {"ok": False, "pid": 0, "started_at": 0.0, "migration": {}},
+    }
+
+
+def _classify_service(row: dict[str, Any]) -> dict[str, Any]:
+    """The one server-side owner that renders a service row for the System panel."""
+
+    return app_module.TmuxWebtermApp.system_status_service(app_module.TmuxWebtermApp, dict(row))
+
+
+def _statsd_projection(monkeypatch, runtime_status: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str], dict[str, Any]]:
+    """Build statsd's real row, then read it through BOTH consumers of that row."""
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: runtime_status)
+        row = webapp.statsd_runtime_status()
+    finally:
+        webapp.control_server.stop()
+    return row, observed_health(row), _classify_service(row)
+
+
+def test_statsd_absence_is_excused_only_while_this_process_is_taking_the_pin():
+    """The exact bound on the one excuse statsd may state.
+
+    Every `is False` below is a hole this predicate must not open: each one is a state in which
+    an absent statsd is a real outage, and excusing it would make the indicator permanently
+    silent about the service the whole monitor was built for.
+    """
+    taking = _statsd_pin_status()
+    assert app_module.statsd_pin_pending(taking) is True
+    for phase in sorted(app_module.STATSD_PIN_PENDING_PHASES):
+        assert app_module.statsd_pin_pending(_statsd_pin_status(phase=phase)) is True, phase
+
+    # The pin landed: statsd exists from here on, so absence is an outage.
+    assert app_module.statsd_pin_pending({**taking, "leased": True}) is False
+    # No pin owner in this process at all -- it lost the election, and the winner is supposed to
+    # be keeping statsd up. An absent statsd here is the winner's outage, not routine idleness.
+    assert app_module.statsd_pin_pending(_statsd_pin_status(alive=False, phase="stopped")) is False
+    # The pin owner recorded a failure. This is the boot-time dead-statsd case.
+    assert app_module.statsd_pin_pending(_statsd_pin_status(failure_count=1)) is False
+    # Phases that are not on the way to a lease: stopped, demoted, backing off, already running.
+    for phase in ("stopped", "starting_pin", "waiting_owner", "demoting", "stopping", "backoff", "blocked", "running", ""):
+        assert app_module.statsd_pin_pending(_statsd_pin_status(phase=phase)) is False, phase
+    # A status that cannot state the fact does not get to imply it.
+    assert app_module.statsd_pin_pending({}) is False
+    assert app_module.statsd_pin_pending({"leased": False}) is False
+    assert app_module.statsd_pin_pending({"leased": False, "supervisor": "acquiring_lease"}) is False
+    assert app_module.statsd_pin_pending("acquiring_lease") is False
+
+
+def test_an_absent_statsd_reads_starting_while_this_process_is_still_taking_its_pin(monkeypatch):
+    """The boot flash. Measured before this fix on a real isolated start (port 17781):
+
+        +0.632s  background-owner generation created -- the election is DECIDED
+        +0.635s  observer's first cycle -> statsd published `down` / `service_absent`
+        +1.622s  statsd actually began serving
+        +4.696s  statsd published `ready`
+
+    4.06 seconds of "YO!stats is not running" at every boot, for a statsd that was never down.
+    This is the row-level half: whenever a cycle lands inside the pin window, statsd states why
+    it is absent instead of the observer inventing an outage. See `app.STATSD_ABSENT_WHILE_PIN_
+    PENDING` for the ablation showing what each half of the fix is actually doing.
+    """
+    row, health, panel = _statsd_projection(monkeypatch, _statsd_pin_status())
+
+    assert row["pid"] == 0, row
+    assert row["absence_expected_reason"] == app_module.STATSD_ABSENT_WHILE_PIN_PENDING, row
+    assert health == ("starting", app_module.STATSD_ABSENT_WHILE_PIN_PENDING), health
+    assert health[0] not in BACKEND_HEALTH_DEGRADED_STATES, health
+    assert panel["state"] == "idle", panel
+    assert panel["alerting"] is False, panel
+
+
+def test_a_statsd_that_is_genuinely_dead_at_boot_is_never_excused(monkeypatch):
+    """The safety direction, and the one that matters more than the flash.
+
+    A statsd that fails to come up makes its pin owner record a failure and leave the
+    lease-taking phases. Both are checked, so both spellings of the same outage still alarm.
+    """
+    for runtime_status in (
+        # `acquire_lease` failed and the supervisor is backing off.
+        _statsd_pin_status(phase="backoff", failure_count=1),
+        # The failure is recorded but the phase has not moved yet.
+        _statsd_pin_status(failure_count=1),
+        # The supervisor gave up entirely (terminal, e.g. UpgradeRequired).
+        _statsd_pin_status(alive=False, phase="blocked", failure_count=3),
+    ):
+        row, health, panel = _statsd_projection(monkeypatch, runtime_status)
+        assert row["absence_expected_reason"] == "", (runtime_status, row)
+        assert health == ("down", "service_absent"), (runtime_status, health)
+        assert panel["state"] == "unavailable", (runtime_status, panel)
+        assert panel["alerting"] is True, (runtime_status, panel)
+
+
+def test_a_process_that_does_not_own_the_statsd_pin_still_reports_it_down(monkeypatch):
+    """A losing or demoted process must not go quiet about the statsd the owner should be running."""
+    for runtime_status in (
+        # Never elected: `stats_current_runtime.start()` was never called.
+        _statsd_pin_status(alive=False, phase="stopped"),
+        # Demoted: the supervisor is alive but has no valid owner generation.
+        _statsd_pin_status(phase="waiting_owner"),
+        _statsd_pin_status(phase="demoting"),
+    ):
+        row, health, panel = _statsd_projection(monkeypatch, runtime_status)
+        assert row["absence_expected_reason"] == "", (runtime_status, row)
+        assert health == ("down", "service_absent"), (runtime_status, health)
+        assert panel["alerting"] is True, (runtime_status, panel)
+
+
+def test_a_recorded_statsd_failure_alarms_even_while_the_pin_is_pending(monkeypatch):
+    """Ordering property: the excuse is read LAST, after every recorded failure.
+
+    Without this, a statsd that broke during the boot window would be silenced by the very
+    excuse that exists to describe a healthy boot.
+    """
+    pending_with_failure = _statsd_pin_status()
+    pending_with_failure["service"] = {
+        "ok": False,
+        "pid": 0,
+        "started_at": 0.0,
+        "migration": {"state": "failed", "failure": "stats database migration failed"},
+    }
+    row, health, panel = _statsd_projection(monkeypatch, pending_with_failure)
+
+    assert app_module.statsd_pin_pending(pending_with_failure) is True, "the pin really is pending"
+    assert row["absence_expected_reason"] == app_module.STATSD_ABSENT_WHILE_PIN_PENDING, row
+    assert row["last_failure"] == "stats database migration failed", row
+    assert health == ("down", "exited"), health
+    assert panel["state"] == "unavailable", panel
+    assert panel["alerting"] is True, panel
+    assert panel["reason"] == "stats database migration failed", panel
+
+
+def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys):
+    """The observer arms after the election is DECIDED, whatever it decided.
+
+    A monitor that only runs on the process that won the background-owner election would be a
+    worse defect than the flash it was reordered for, so both outcomes are proven here.
+    """
+    for acquired in (True, False):
+        order: list[str] = []
+
+        class FakeApp:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start_background_owner(self, **_kwargs):
+                order.append("election")
+                return acquired
+
+            def start_yoagent_backend_prewarm(self, **_kwargs):
+                return {"ok": True}, 202
+
+            def restore_auto_approve(self):
+                return []
+
+            def stop_auto_approve_all(self):
+                pass
+
+        class FakeServer:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def serve_forever(self):
+                order.append("serve")
+
+            def server_close(self):
+                pass
+
+        stopped: list[str] = []
+        observer = SimpleNamespace(stop=lambda: stopped.append("stop"))
+
+        def arm(port, app):
+            order.append("observer")
+            return observer
+
+        args = argparse.Namespace(
+            host="127.0.0.1",
+            port=19771,
+            sessions=[],
+            dangerously_yolo=False,
+            self_signed=False,
+            http=True,
+            cert=None,
+            key=None,
+            print_transcripts=False,
+            print_background_owner=False,
+            print_runtime_report=False,
+            dev=False,
+        )
+        monkeypatch.setattr(cli_module, "parse_args", lambda: args)
+        monkeypatch.setattr(cli_module, "tls_context_for_args", lambda _args: (None, ""))
+        monkeypatch.setattr(cli_module, "TmuxWebtermApp", FakeApp)
+        monkeypatch.setattr(cli_module, "TmuxWebtermHTTPServer", FakeServer)
+        monkeypatch.setattr(cli_module, "start_backend_health_observer", arm)
+        monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOLOmux paths: test")
+        monkeypatch.setattr(cli_module, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: None))
+        monkeypatch.setattr(cli_module, "set_local_service_launch_context", lambda _port: None)
+        monkeypatch.setattr(cli_module, "start_startup_overload_watchdog", lambda _port: None)
+        monkeypatch.setattr(cli_module, "auth_setup_required", lambda: False)
+        monkeypatch.setattr(cli_module, "report_worktree_writer_warning", lambda: True)
+
+        assert cli_module.main() == 0
+        capsys.readouterr()
+
+        assert order == ["election", "observer", "serve"], (acquired, order)
+        # Armed on the losing process too, and still stopped before the backend clients close.
+        assert stopped == ["stop"], (acquired, stopped)
+
+
+def test_the_system_panel_and_the_health_indicator_never_disagree_about_one_row():
+    """Defect 2: one row, one derivation.
+
+    `system_status_service` used to decide `running`/`idle`/`issue`/`unavailable` from the row
+    on its own, in parallel with `observed_health` deciding `ready`/`starting`/`degraded`/`down`
+    from the same row -- and only the observer read `absence_expected_reason`. The panel now
+    consumes the observer's typed state, so the two cannot answer differently. The invariant is
+    exact: the panel alarms if and only if the typed state is a degraded one.
+    """
+    rows = [
+        {"service": "statsd", "pid": 4242, "healthy": True},
+        {"service": "statsd", "pid": 4242, "healthy": False},
+        {"service": "statusd", "pid": 4242, "transport_reason": "connection refused"},
+        {"service": "indexd", "pid": 0, "demand_started": True},
+        {"service": "indexd", "pid": 0, "demand_started": True, "last_failure": "indexd exited (1)"},
+        {"service": "indexd", "pid": 0, "demand_started": True, "restart_backoff_seconds": 4.0},
+        {"service": "watchd", "pid": 0, "demand_started": True, "healthy": False},
+        {"service": "approvald", "pid": 0},
+        {"service": "approvald", "pid": 0, "terminal_failure": True},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE},
+        {"service": "jobd", "pid": 4242, "healthy": True, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "jobd exited (1)"},
+        # Both excuses at once, and an unreadable one: contract errors that must fail closed.
+        {"service": "jobd", "pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_not_owned"},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": "NOT A TOKEN"},
+        {"service": "statsd", "pid": 0, "upgrade_required": {"required_protocol_version": 24}},
+        {"service": "statsd", "pid": 0},
+    ]
+    for row in rows:
+        state, _reason = observed_health(row)
+        panel = _classify_service(row)
+        degraded = state in BACKEND_HEALTH_DEGRADED_STATES
+        assert panel["alerting"] is degraded, (row, state, panel)
+        assert (panel["state"] == "running") is (state == "ready"), (row, state, panel)
+        assert (panel["state"] == "idle") is (state == "starting"), (row, state, panel)
+
+
+def test_an_absent_jobd_without_the_scheduler_lease_is_quiet_in_both_owners():
+    """The exact divergence reported: same fact, two answers, two owners.
+
+    Before the fix, this row made the System panel say `unavailable` and alarm while the topbar
+    observer said `starting` and stayed silent, because `absence_expected_reason` landed in the
+    observer only. jobd is not demand-scoped -- it is pinned by the scheduler lease -- so the
+    static `demand_started` excuse would have been the wrong fix and would have silenced a real
+    jobd outage on the owning process.
+    """
+    row = {"service": "jobd", "pid": 0, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE}
+
+    assert observed_health(row) == ("starting", "scheduler_not_owned")
+    panel = _classify_service(row)
+    assert panel["state"] == "idle", panel
+    assert panel["reason_code"] == "not_started", panel
+    assert panel["alerting"] is False, panel
+    assert panel["essential"] is True, panel
+    # And the other side of the same lease still alarms: this process owns scheduling, so an
+    # absent jobd is a verified outage rather than an expected absence.
+    owning = {"service": "jobd", "pid": 0, "absence_expected_reason": ""}
+    assert observed_health(owning) == ("down", "service_absent")
+    owning_panel = _classify_service(owning)
+    assert owning_panel["state"] == "unavailable", owning_panel
+    assert owning_panel["alerting"] is True, owning_panel

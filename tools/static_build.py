@@ -150,7 +150,18 @@ SEMANTIC_CONTRAST_PAIRS: tuple[tuple[str, str], ...] = (
     ("--pane-tab-active-text", "--pane-tab-active-bg"),
 )
 SHARED_UI_OWNERSHIP_REQUIREMENTS = {
-    "static_src/js/yolomux/99_terminal_boot.js": (
+    "static_src/js/yolomux/76_panel_dom_actions.js": (
+        ("panel detail close control", "function panelDetailCloseButtonHtml", "toolbarButtonHtml("),
+    ),
+    "static_src/js/yolomux/78_panel_shell.js": (
+        ("search-history controls", "function searchHistoryResultHtml", "toolbarButtonHtml(", "bindActionDispatcher(panel, {"),
+        ("search-history panel close", "panelDetailCloseButtonHtml(searchHistoryItemId)"),
+    ),
+    "static_src/js/yolomux/85_debug_panel.js": (
+        ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml(", "'debug-subtab':"),
+        ("debug panel close controls", "panelDetailCloseButtonHtml(yocostItemId)", "panelDetailCloseButtonHtml(debugPaneItemId)"),
+    ),
+    "static_src/js/yolomux/98_terminal_runtime_facade.js": (
         ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
     ),
     "static_src/js/yolomux/20_layout_state.js": (
@@ -233,6 +244,34 @@ STANDARD_BORDER_RADIUS_TOKENS = {
     "6px": "--radius-md",
     "8px": "--radius-lg",
     "999px": "--radius-pill",
+}
+# The remaining 5px/7px corners were reviewed as component geometry, not one shared tier.  Keep
+# this exact shrinking inventory so a new occurrence must either join a demonstrated semantic
+# owner or receive an explicit classification instead of silently becoming another magic value.
+CUSTOM_BORDER_RADIUS_CLASSIFICATIONS = {
+    "static_src/css/yolomux/10_topbar_menus.css:.transport-warning::after:7px": "transport tooltip surface",
+    "static_src/css/yolomux/10_topbar_menus.css:.app-menu-area.drag-over:7px": "drag target outline",
+    "static_src/css/yolomux/10_topbar_menus.css:.app-submenu-popover:7px": "submenu overlay surface",
+    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--inline:5px": "inline status indicator",
+    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--text:5px": "text status indicator",
+    "static_src/css/yolomux/20_sessions_popovers.css:.status-indicator--label:5px": "label status indicator",
+    "static_src/css/yolomux/20_sessions_popovers.css:.agent-window-agent-icon--active:5px": "active agent icon glow",
+    "static_src/css/yolomux/20_sessions_popovers.css:.session-agent-window-block > .session-agent-row:5px": "session agent row surface",
+    "static_src/css/yolomux/30_preferences_changes.css:.preferences-search, .search-history-input:5px": "search input shell",
+    "static_src/css/yolomux/30_preferences_changes.css:.preferences-search-button, .preferences-reset-all:5px": "preferences action control",
+    "static_src/css/yolomux/30_preferences_changes.css:.preferences-reset-continue, .preferences-reset-cancel:5px": "reset confirmation control",
+    "static_src/css/yolomux/30_preferences_changes.css:.command-palette-row:5px": "command palette row",
+    "static_src/css/yolomux/40_layout_panes_tabs.css:.tab:5px": "pane tab shell",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.session-rename-dialog:7px": "rename modal surface",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.session-rename-actions button:5px": "rename action control",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.file-image-preview-popover:7px": "image preview overlay",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.transcript-item:5px": "transcript message block",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.conversation-message:5px": "conversation message block",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.share-entry:7px": "share entry card",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.share-create-panel:7px": "share creation card",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.share-url-primary:7px": "primary share URL surface",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.share-protocol-group:7px": "share protocol fieldset",
+    "static_src/css/yolomux/50_terminal_file_tree.css:.file-tree-date:5px": "file-tree date chip",
 }
 STANDARD_COMPONENT_FONT_SIZE_TOKENS = {
     "10px": "--ui-font-size-2xs",
@@ -627,28 +666,11 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "debug.graph.series.defaultProcessCpu",
     "debug.graph.series.processCpu",
     "debug.graph.series.systemMemory",
-    "debug.system.localServices.exitedAgo",
-    "debug.system.localServices.field.activeTask",
-    "debug.system.localServices.field.cache",
-    "debug.system.localServices.field.clients",
-    "debug.system.localServices.field.generation",
     "debug.system.localServices.field.lastFailure",
-    "debug.system.localServices.field.lastRan",
-    "debug.system.localServices.field.lastSuccess",
     "debug.system.localServices.field.memory",
-    "debug.system.localServices.field.pid",
-    "debug.system.localServices.field.products",
-    "debug.system.localServices.field.queues",
-    "debug.system.localServices.field.runtime",
-    "debug.system.localServices.field.started",
     "debug.system.localServices.field.status",
     "debug.system.localServices.field.uptime",
-    "debug.system.localServices.fieldColumn",
-    "debug.system.localServices.prevPrefix",
-    "debug.system.localServices.prevValue",
-    "debug.system.localServices.serviceFallback",
     "debug.system.localServices.state.issue",
-    "debug.system.localServices.state.running",
     "debug.system.localServices.title",
     "finder.label.finder",
     "notify.working.attention.body",
@@ -685,10 +707,8 @@ I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
 I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
-    frozenset({"debug.system.localServices.field.lastSuccess", "debug.system.sampler.header.lastOk.full"}): "daemon diagnostic field and sampler-family table header are different display contexts",
     frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
-    frozenset({"debug.cost.cache", "debug.system.localServices.field.cache"}): "token-cost cache row and local-service record cache are different concepts",
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
     frozenset({"legend.icon.share.label", "share.create"}): "share legend noun and create-share action are different parts of speech",
@@ -744,6 +764,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/00_bootstrap_state.js",
         "static_src/js/yolomux/02_timing.js",
         "static_src/js/yolomux/05_i18n.js",
+        "static_src/js/yolomux/09_transport_lifecycle.js",
         "static_src/js/yolomux/10_core_utils.js",
         "static_src/js/yolomux/15_command_registry.js",
         "static_src/js/yolomux/20_layout_state.js",
@@ -764,6 +785,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/83_preferences_panel.js",
         "static_src/js/yolomux/84_stats_current.js",
+        "static_src/js/yolomux/84_debug_runtime_facade.js",
         "static_src/js/yolomux/85_debug_panel.js",
         "static_src/js/yolomux/86_changes_editor.js",
         "static_src/js/yolomux/87_editor_nav.js",
@@ -775,6 +797,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/93_share_state.js",
         "static_src/js/yolomux/94_share_replay.js",
         "static_src/js/yolomux/95_share_admin.js",
+        "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],
     "yolomux.css": [
@@ -1273,6 +1296,41 @@ def lint_raw_standard_border_radii() -> list[str]:
             for value in raw_values:
                 token = STANDARD_BORDER_RADIUS_TOKENS[value]
                 errors.append(f"{part}:{line_no}: raw standard border radius {value}; use var({token})")
+    return errors
+
+
+def lint_custom_border_radius_classifications() -> list[str]:
+    """Require every reviewed 5px/7px component corner to have an exact semantic classification."""
+    observed: set[str] = set()
+    radius_re = re.compile(r"\bborder(?:-[a-z-]+)?-radius\s*:\s*([^;}]+)")
+    custom_re = re.compile(r"(?<![\w.])(5px|7px)(?![\w-])")
+    for part in ASSETS.get("yolomux.css", []):
+        if part.endswith("00_tokens_base.css"):
+            continue
+        path = repo_path(part)
+        try:
+            css = _css_without_comments(read_text(path))
+        except FileNotFoundError:
+            continue
+        for _context, selector, body, _rule_line in _iter_located_css_rules(css):
+            for declaration in radius_re.finditer(body):
+                for value in custom_re.findall(declaration.group(1)):
+                    observed.add(f"{part}:{selector}:{value}")
+
+    classified = set(CUSTOM_BORDER_RADIUS_CLASSIFICATIONS)
+    errors = [
+        f"unclassified custom border radius {key}; classify its semantic role or move a demonstrated shared tier to a token"
+        for key in sorted(observed - classified)
+    ]
+    errors.extend(
+        f"stale custom border radius classification {key}; remove the retired inventory entry"
+        for key in sorted(classified - observed)
+    )
+    errors.extend(
+        f"custom border radius classification {key} needs a nonblank semantic role"
+        for key, reason in sorted(CUSTOM_BORDER_RADIUS_CLASSIFICATIONS.items())
+        if not str(reason).strip()
+    )
     return errors
 
 
@@ -2030,14 +2088,14 @@ def lint_shared_ui_ownership() -> list[str]:
         for label, needle in SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES:
             if needle in source:
                 errors.append(f"{part}: shared ownership forbids {label} ({needle!r})")
-    terminal_boot = repo_path("static_src/js/yolomux/99_terminal_boot.js")
+    terminal_boot = repo_path("static_src/js/yolomux/98_terminal_runtime_facade.js")
     if terminal_boot.exists():
         source = read_text(terminal_boot)
         frame_start = source.find("function paneFrameControlsHtml")
         frame_end = source.find("\nfunction ", frame_start + 1)
         frame_body = source[frame_start:frame_end if frame_end >= 0 else len(source)]
         if "<button" in frame_body:
-            errors.append("static_src/js/yolomux/99_terminal_boot.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates")
+            errors.append("static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates")
     for path in sorted((REPO_ROOT / "yolomux_lib").rglob("*.py")):
         source = read_text(path)
         if "return self.yoagent_controller." in source:
@@ -2656,6 +2714,7 @@ def _main(argv: list[str] | None = None) -> int:
                 + lint_repeated_semantic_declaration_sets()
                 + lint_code_syntax_color_ownership()
                 + lint_raw_standard_border_radii()
+                + lint_custom_border_radius_classifications()
                 + lint_raw_standard_motion_durations()
                 + lint_raw_standard_font_sizes()
                 + lint_raw_standard_spacing()

@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import types
 
 import pytest
-import yaml
 
+from tests.helpers.prompt_corpus import PromptCorpus
+from tests.helpers.prompt_corpus import PromptCorpusPreset
 
 from tools import auto_approve_tmux
 from yolomux_lib import app as app_module
@@ -21,29 +22,12 @@ from yolomux_lib.common import SessionInfo
 
 
 PROMPT_CORPUS_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus"
-
-
-def load_structured_fixture(path: Path):
-    text = path.read_text(encoding="utf-8")
-    if path.suffix == ".json":
-        return json.loads(text)
-    return yaml.safe_load(text)
-
-
-def fixture_visible_text(path: Path) -> str:
-    if path.suffix in {".json", ".yaml", ".yml"}:
-        data = load_structured_fixture(path)
-        return str(data.get("raw_capture") or data.get("visible_text") or "")
-    return path.read_text(encoding="utf-8")
+PROMPT_CORPUS = PromptCorpus(PROMPT_CORPUS_DIR, PromptCorpusPreset.AUTO_APPROVE)
 
 
 def load_prompt_corpus():
-    inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "inventory.yaml")
-    cases = []
-    for fixture in inventory["fixtures"]:
-        case = dict(fixture)
-        case["text"] = fixture_visible_text(PROMPT_CORPUS_DIR / fixture["file"])
-        cases.append(case)
+    inventory = PROMPT_CORPUS.inventory()
+    cases = [{**case["inventory"], "text": case["text"]} for case in PROMPT_CORPUS.cases()]
     return inventory, cases
 
 
@@ -512,14 +496,14 @@ def test_prompt_corpus_parity_groups_reference_existing_fixtures():
         for fixture in fixtures:
             path = PROMPT_CORPUS_DIR / fixture["file"]
             assert path.exists()
-            data = load_structured_fixture(path)
+            data = PROMPT_CORPUS.load(path)
             assert data["agent"] == fixture["agent"]
             assert (data.get("case_name") or data.get("fixture_scenario")) == fixture["case_name"]
             if fixture["file"].startswith("captures/"):
                 assert "expected_promoted" in data
                 grouped_capture_files.add(fixture["file"].removeprefix("captures/"))
 
-    capture_inventory = load_structured_fixture(PROMPT_CORPUS_DIR / "captures" / "inventory.yaml")
+    capture_inventory = PROMPT_CORPUS.load(PROMPT_CORPUS_DIR / "captures" / "inventory.yaml")
     promoted_capture_files = {fixture["file"] for fixture in capture_inventory["fixtures"]}
     actual_capture_files = {path.name for path in (PROMPT_CORPUS_DIR / "captures").glob("*.yaml") if path.name != "inventory.yaml"}
     root_capture_files = {Path(fixture["file"]).name for fixture in PROMPT_CORPUS_INVENTORY["fixtures"] if str(fixture["file"]).startswith("captures/")}
@@ -989,7 +973,7 @@ VISIBLE_AGENT_WORKING_CASES = [
         id="claude-counter-tip-and-idle-composer",
     ),
     pytest.param(
-        fixture_visible_text(PROMPT_CORPUS_DIR / "captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml"),
+        PROMPT_CORPUS.visible_text(PROMPT_CORPUS_DIR / "captures/working_labelled_composer__claude-code-2.1.198_20260701.yaml"),
         True,
         "working",
         id="claude-session-1-working-with-labelled-composer-border",
@@ -1248,7 +1232,7 @@ def test_agent_screen_state_prefers_claude_goal_active_elapsed_for_display():
 ])
 def test_real_goal_active_captures_prefer_goal_elapsed_for_display(filename, pane_target):
     path = PROMPT_CORPUS_DIR / "captures" / filename
-    data = load_structured_fixture(path)
+    data = PROMPT_CORPUS.load(path)
 
     state = prompt_detector.agent_screen_state(data["raw_capture"], pane_target=pane_target, now=1000.0)
 
@@ -1733,7 +1717,7 @@ def test_ask_user_question_survives_claude_focus_warning_and_bottom_composer():
 
 
 def test_ask_user_question_accessible_menu_no_selector_is_needs_input():
-    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml")
+    visible_text = PROMPT_CORPUS.visible_text(PROMPT_CORPUS_DIR / "captures/ask_user_question_no_selector_accessible__claude-code-2.1.190_20260624.yaml")
 
     state = prompt_detector.agent_screen_state(visible_text)
 
@@ -1786,7 +1770,7 @@ def test_codex_numbered_question_survives_fixed_bottom_composer_footer():
     ),
 ])
 def test_ask_detection_question_corpus_is_needs_input_not_auto_approval(fixture_path, expected_question, expected_selected):
-    visible_text = fixture_visible_text(PROMPT_CORPUS_DIR / fixture_path)
+    visible_text = PROMPT_CORPUS.visible_text(PROMPT_CORPUS_DIR / fixture_path)
 
     state = prompt_detector.agent_screen_state(visible_text)
     approval = prompt_detector.approval_prompt_state(visible_text)
@@ -1817,7 +1801,7 @@ def test_interrupted_what_should_agent_do_instead_is_needs_input():
 
 def test_real_interrupted_capture_beats_goal_active_working_chrome():
     path = PROMPT_CORPUS_DIR / "captures" / "interrupted_what_should_claude_do_instead__claude-code-2.1.185_20260621.yaml"
-    data = load_structured_fixture(path)
+    data = PROMPT_CORPUS.load(path)
 
     state = prompt_detector.agent_screen_state(data["raw_capture"], pane_target="%real-claude-interrupted-goal-active")
 

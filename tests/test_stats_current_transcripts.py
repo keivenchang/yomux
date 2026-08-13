@@ -21,6 +21,7 @@ from tools.mockers.transcript import codex_meta as _codex_meta
 from tools.mockers.transcript import codex_usage as _codex_usage
 from tools.mockers.transcript import write_records as _write_records
 from tests.cross_layer_matrix import render_cost_model_table
+from tests.helpers.gate_stats import commit_scan as _commit
 from tests.terminal_state_guard import assert_terminal_transition
 
 
@@ -38,11 +39,6 @@ def _isolated_transcript_scan_store(tmp_path, monkeypatch):
 
 def _output_items(result):
     return [item for item in result.items if item.atom.direction == "output"]
-
-
-def _commit(scanner, result):
-    scanner.commit(result.receipt_id)
-    return result
 
 
 def test_usage_atom_backfill_status_varies_with_committed_cursor_progress(tmp_path):

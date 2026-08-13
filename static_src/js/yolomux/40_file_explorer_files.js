@@ -22,8 +22,8 @@ async function openFileExplorerAt(path, options = {}) {
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
-  const openGeneration = ++fileExplorerOpenGeneration;
-  const openStillCurrent = () => openGeneration === fileExplorerOpenGeneration;
+  const openGeneration = fileWorkspaceState.beginOpen();
+  const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
@@ -92,7 +92,19 @@ const fileExplorerFsBatchOperations = new Map();
 // the bounded completion so the queued item can repair immediately on arrival.
 const fileExplorerFsBatchReadyGenerations = new Map();
 const fileExplorerFsBatchDelayMs = 8;
-const fileExplorerFsBatchTriggerCountLimit = 64;
+// The bounds /api/fs/batch refuses above are SERVER facts, and the server states them in the boot
+// payload (`filesystemBatchLimits` in yolomux_lib/web.py) exactly the way it states maxSessionTabs.
+// `filesystem.MAX_BATCH_REQUESTS` stays the one copy: the server refuses a body above it with a 400
+// invalid_request, its own watch-batch producer chunks at it (`submit_filesystem_watch_batches`),
+// and this flush splits at it. A literal here would be a fourth copy free to drift from all three.
+// A payload that does not state a bound is a server this bundle cannot make a bounded promise
+// about, so it falls back to the only size no server can refuse for being too large: one item.
+function fileExplorerServerStatedLimit(value, unstated) {
+  return Number.isSafeInteger(value) && value > 0 ? value : unstated;
+}
+const fileExplorerFsBatchLimits = (typeof bootstrap === 'object' && bootstrap?.filesystemBatchLimits) || {};
+const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);
+const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
@@ -491,10 +503,19 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   });
 }
 
-async function flushFileExplorerFsBatch() {
-  fileExplorerFsBatchTimer = null;
-  const items = fileExplorerFsBatchQueue.splice(0);
-  if (!items.length) return;
+function fileExplorerFsBatchChunks(items) {
+  // Consecutive slices in queue order, like the server's own root partitioner: chunk n owns items
+  // [offset, offset + size), nothing is reordered and nothing is dropped.
+  const size = fileExplorerFsBatchRequestLimit;
+  const chunks = [];
+  for (let offset = 0; offset < items.length; offset += size) chunks.push(items.slice(offset, offset + size));
+  return chunks;
+}
+
+async function postFileExplorerFsBatchChunk(items) {
+  // One chunk settles its own items and NEVER throws: a chunk that fails must not decide anything
+  // for the chunks around it, and every item it owns must end resolved, rejected, or admitted as a
+  // queued operation. A promise left unsettled here hangs whatever awaited that directory listing.
   const requests = items.map(item => {
     item.sent = true;
     return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
@@ -509,11 +530,35 @@ async function flushFileExplorerFsBatch() {
     for (const item of items) {
       settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
+    return {ok: true};
   } catch (error) {
     if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
-    const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
-    return {ok: results.every(result => result.ok === true)};
+    try {
+      const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
+      return {ok: results.every(result => result.ok === true)};
+    } catch (fallbackError) {
+      for (const item of items) rejectFileExplorerFsBatchItem(item, fallbackError);
+      return {ok: false};
+    }
   }
+}
+
+async function flushFileExplorerFsBatch() {
+  fileExplorerFsBatchTimer = null;
+  const items = fileExplorerFsBatchQueue.splice(0);
+  if (!items.length) return {ok: true, chunks: 0};
+  // The whole queue used to go into ONE body. A Differ pointed at a worktree that was deleted
+  // re-lists every open directory at once, which is routinely more than the server accepts, and the
+  // server refused the entire body with a 400 invalid_request — so an operation touching more than
+  // the bound failed outright rather than being split. Chunks are posted in order, one at a time,
+  // so a mass re-list does not turn into a simultaneous fan-out of requests either.
+  const results = [];
+  for (const chunk of fileExplorerFsBatchChunks(items)) results.push(await postFileExplorerFsBatchChunk(chunk));
+  return {
+    ok: results.every(result => result.ok === true),
+    chunks: results.length,
+    ...(results.some(result => result.pending === true) ? {pending: true} : {}),
+  };
 }
 
 async function fetchDirectory(path, options = {}) {
@@ -1388,7 +1433,7 @@ function fileExplorerSyncPlanForFile(path) {
     root = normalizedHome;
   }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
-  const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
+  const expandPaths = root && targetDir !== root && pathIsInsideDirectory(targetDir, root) ? [targetDir] : [];
   return {
     session,
     root,
@@ -1934,9 +1979,9 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
-    const interactionGeneration = fileExplorerInteractionGeneration;
+    const interactionGeneration = fileWorkspaceState.interactionGeneration();
     requestAnimationFrame(() => {
-      if (interactionGeneration !== fileExplorerInteractionGeneration) return;
+      if (!fileWorkspaceState.interactionIsCurrent(interactionGeneration)) return;
       const syncPromise = fileSyncPath
         ? syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})
         : syncFileExplorerRootToActiveTmux(syncItem, {force: explicit});
@@ -1958,8 +2003,7 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
 }
 
 function cancelPendingFileExplorerActiveSync(options = {}) {
-  fileExplorerInteractionGeneration += 1;
-  if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
+  fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
   fileExplorerSyncState.generation += 1;
   fileExplorerSyncState.inFlightSignature = '';
   resetFileExplorerAppliedSyncPlan();
@@ -1977,7 +2021,7 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
-  forgetFileExplorerSyncManualCollapse(path);
+  forgetFileExplorerSyncManualCollapse(dirnameOf(path));
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
@@ -2655,7 +2699,16 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   }
   const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
   const direction = mode === 'za' ? -1 : 1;
+  // Differ only. A deleted file is a real diff result and stays a visible child, but a run of them
+  // interleaved with live edits is what a reader has to skip past to find the file they can still
+  // open. Ranking deletion ahead of every other key groups deleted children at the bottom of each
+  // directory. Directories are not ranked: they carry no `deleted` flag and keep their existing
+  // dirs-before-files order. Finder listings carry no `deleted` either, so passing this option
+  // there is a no-op rather than a second ordering rule.
+  const deletedRank = entry => options.deletedLast === true && entry?.deleted === true ? 1 : 0;
   return visible.sort((left, right) => {
+    const deletedResult = deletedRank(left) - deletedRank(right);
+    if (deletedResult !== 0) return deletedResult;
     const leftKind = left.kind === 'dir' ? 0 : 1;
     const rightKind = right.kind === 'dir' ? 0 : 1;
     if (leftKind !== rightKind) return leftKind - rightKind;
@@ -3037,42 +3090,6 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   };
 }
 
-function applyFileTreeRowDataset(row, state) {
-  const {entry, fullPath} = state;
-  syncFileTreeRowKindClass(row, entry.kind);
-  row.classList.toggle('compact', state.compact);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
-  setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
-  setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
-  setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
-  setRowDataset(row, 'indexExcluded', state.indexExcludedEntry ? 'true' : 'false');
-  setRowDataset(row, 'tabberType', '');
-  setRowDataset(row, 'tabberSession', '');
-  setRowDataset(row, 'tabberWindow', '');
-  setRowDataset(row, 'tabberRepoRoot', '');
-  setRowDataset(row, 'tabberItem', '');
-  setRowDataset(row, 'tabberBranch', '');
-  if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
-  setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
-  row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle(CLS.selected, state.selected);
-  row.classList.toggle('expanded', state.expanded);
-  row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
-  row.classList.toggle('loading-children', state.pendingExpansion);
-  row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('indexed-directory', state.indexedDirectory);
-  row.classList.toggle('index-excluded-entry', state.indexExcludedEntry);
-  row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
-  applySessionHighlightRowClass(row, state.sessionHighlightClass);
-  // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
-  // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
-  row.classList.toggle('is-symlink', entry.is_symlink === true);
-  row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-}
-
 function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && (entry.is_repo === true || Boolean(row.dataset.syncTargetTitle))) {
@@ -3180,23 +3197,111 @@ function bindFinderRowHandlers(row, state) {
   };
 }
 
-function bindDifferRowData(row, state) {
-  const {entry, fullPath, differMode, changedFile, changedFileStatus} = state;
-  // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
-  setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
-  setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
-  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? changedFileStatus : '');
-  setRowDataset(row, 'changeRel', changedFile?.abs_path ? (changedFile.path || '') : '');
-  setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
-  setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
-  if (differMode && entry.kind === 'dir') {
-    setRowDataset(row, 'changesFolderToggle', fullPath);
-    setRowDataset(row, 'openChangeDirectory', fullPath);
-    setRowDataset(row, 'changeRel', state.relDir);
-  } else if (!differMode) {
-    setRowDataset(row, 'changesFolderToggle', '');
-    setRowDataset(row, 'openChangeDirectory', '');
-  }
+function TreeRowViewModel(options = {}) {
+  return Object.freeze({
+    path: String(options.path || ''),
+    kind: String(options.kind || ''),
+    name: String(options.name || ''),
+    paddingLeft: String(options.paddingLeft || ''),
+    dataset: Object.freeze({...options.dataset}),
+    classes: Object.freeze({...options.classes}),
+    selected: options.selected === true,
+    expandable: options.expandable === true,
+    expanded: options.expanded === true,
+    current: options.current === true,
+    draggable: options.draggable === true,
+    icon: String(options.icon || ''),
+    label: String(options.label || ''),
+    content: Object.freeze({...options.content}),
+    gitClass: String(options.gitClass || ''),
+    sessionHighlightClass: String(options.sessionHighlightClass || ''),
+    recencyEntry: options.recencyEntry || null,
+    recencyOptions: Object.freeze({...options.recencyOptions}),
+  });
+}
+
+const TREE_ROW_MANAGED_CLASSES = Object.freeze([
+  'compact', CLS.selected, 'expanded', CLS.collapsed, 'loading-children', 'is-repo',
+  'indexed-directory', 'index-excluded-entry', 'indexed-descendant-directory', 'is-symlink',
+  'symlink-broken', 'new-entry', 'current-file', 'current-directory', 'repo-non-main',
+  'file-tree-row--changed-ancestor', 'tabber-row', 'tabber-active-window',
+  'tabber-active-session', 'tabber-status-long',
+]);
+
+function patchTreeRow(row, model) {
+  syncFileTreeRowKindClass(row, model.kind);
+  for (const [key, value] of Object.entries(model.dataset)) setRowDataset(row, key, value);
+  if (row.style.paddingLeft !== model.paddingLeft) row.style.paddingLeft = model.paddingLeft;
+  setTreeItemAria(row, {selected: model.selected, expandable: model.expandable, expanded: model.expanded});
+  row.draggable = model.draggable;
+  for (const className of TREE_ROW_MANAGED_CLASSES) row.classList.toggle(className, model.classes[className] === true);
+  if (model.current) row.setAttribute('aria-current', 'true');
+  else row.removeAttribute('aria-current');
+  applyGitStatusRowClass(row, model.gitClass);
+  applySessionHighlightRowClass(row, model.sessionHighlightClass);
+  updateFileTreeRowContents(row, model.icon, model.label, model.content);
+  if (model.recencyEntry) applyFileTreeRowRecency(row, model.recencyEntry, model.recencyOptions);
+  return row;
+}
+
+function fileTreeRowViewModel(state) {
+  const {entry, fullPath, derivedState} = state;
+  const differData = state.differMode && entry.kind === 'dir'
+    ? {changesFolderToggle: fullPath, openChangeDirectory: fullPath, changeRel: state.relDir}
+    : {changesFolderToggle: '', openChangeDirectory: '', changeRel: derivedState.changedFile?.abs_path ? (derivedState.changedFile.path || '') : ''};
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: state.paddingLeft,
+    selected: state.selected,
+    expandable: entry.kind === 'dir',
+    expanded: state.expanded,
+    current: state.currentFile || state.currentDirectoryRow,
+    draggable: entry.kind === 'file' || entry.kind === 'dir',
+    icon: derivedState.icon,
+    label: derivedState.displayName.text,
+    content: derivedState.contentOptions,
+    gitClass: derivedState.gitClass,
+    sessionHighlightClass: state.sessionHighlightClass,
+    recencyEntry: entry,
+    recencyOptions: {...state.options, differMode: state.differMode},
+    dataset: {
+      path: fullPath,
+      kind: entry.kind,
+      name: entry.name,
+      isRepo: entry.is_repo === true ? 'true' : 'false',
+      isSymlink: entry.is_symlink === true ? 'true' : 'false',
+      symlinkTarget: entry.symlink_target || '',
+      indexed: state.indexedDirectory ? 'true' : 'false',
+      indexExcluded: state.indexExcludedEntry ? 'true' : 'false',
+      tabberType: '', tabberSession: '', tabberWindow: '', tabberRepoRoot: '', tabberItem: '', tabberBranch: '',
+      openChangeFile: derivedState.changedFile?.abs_path || '',
+      openChangeSession: derivedState.changedFile?.abs_path ? (derivedState.changedFile.session || '') : '',
+      openChangeStatus: derivedState.changedFile?.abs_path ? derivedState.changedFileStatus : '',
+      openChangeRepo: derivedState.changedFile?.abs_path ? (derivedState.changedFile.repo || '') : '',
+      changeSize: derivedState.changedFile?.abs_path && derivedState.changedFile.size !== null && derivedState.changedFile.size !== undefined ? derivedState.changedFile.size : '',
+      ...differData,
+    },
+    classes: {
+      compact: state.compact,
+      [CLS.selected]: state.selected,
+      expanded: state.expanded,
+      [CLS.collapsed]: entry.kind === 'dir' && !state.expanded,
+      'loading-children': state.pendingExpansion,
+      'is-repo': entry.kind === 'dir' && entry.is_repo === true,
+      'indexed-directory': state.indexedDirectory,
+      'index-excluded-entry': state.indexExcludedEntry,
+      'indexed-descendant-directory': state.indexedDescendantDirectory,
+      'is-symlink': entry.is_symlink === true,
+      'symlink-broken': entry.kind === 'symlink-broken',
+      'new-entry': state.newEntry,
+      'current-file': state.currentFile,
+      'current-directory': state.currentDirectoryRow,
+      'repo-non-main': derivedState.repoNonMain === true,
+      'file-tree-row--changed-ancestor': Boolean(derivedState.changedAncestor?.count),
+    },
+  });
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -3206,11 +3311,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
   if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
-  applyFileTreeRowDataset(row, rowState);
-  applyFileTreeRowDerivedState(row, rowState.derivedState);
+  patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
-  bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
@@ -3229,7 +3331,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   };
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
-  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder});
+  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {
@@ -3866,7 +3968,7 @@ function fileExplorerIndexBadgeText(path) {
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
-  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed')));
+  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : (status === 'stale' ? t('finder.index.staleBadge') : t('finder.index.indexed'))));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
@@ -3879,7 +3981,72 @@ function fileExplorerIndexBadgeTitle(path) {
   const status = fileExplorerIndexStatus.get(normalized);
   if (status === 'too_large') return t('finder.index.partial');
   if (status === 'error') return t('common.errorDetail', {error: ''});
+  if (status === 'stale') return t('finder.index.staleTitle');
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
+}
+
+// The ONE file-index freshness derivation for every surface. `/api/fs/search` and
+// `/api/fs/index-status` both spread `SnapshotFreshness.payload_fields()`
+// (yolomux_lib/search/file_index.py), so the Finder index badge and Quick Open read this record and
+// nothing else. A second copy of this judgement is exactly how the live incident shipped: a snapshot
+// whose producer was dead degraded to "building" and the user was told nothing at all.
+const FILE_INDEX_STALE_FRESHNESS_STATES = ['stale', 'orphaned'];
+
+function fileIndexFreshnessFromPayload(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const state = String(source.freshness || '');
+  const rawAge = Number(source.snapshot_age_seconds);
+  return {
+    state,
+    reason: String(source.freshness_reason || ''),
+    producerState: String(source.producer_state || ''),
+    ageSeconds: Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null,
+    // `stale`, `freshness`, `index_state` and `index_coverage` are four projections of ONE backend
+    // verdict. Read them together here so no caller can re-derive a friendlier answer from one of
+    // them; `missing` is deliberately not stale, because nothing was served to mislabel.
+    stale: source.stale === true
+      || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
+      || String(source.index_state || '') === 'follower-stale'
+      || String(source.index_coverage || '') === 'unverified',
+    refreshingElsewhere: source.refreshing_elsewhere === true,
+  };
+}
+
+// Words a non-engineer can act on, never a raw field dump. Rendered (not derived) so a locale change
+// re-renders the same record in the new language.
+function fileIndexFreshnessMessage(freshness) {
+  if (!freshness || freshness.stale !== true) return '';
+  const lines = [freshness.ageSeconds === null
+    ? t('finder.index.staleResultsUnknownAge')
+    : t('finder.index.staleResults', {age: relativeTimeFormat(freshness.ageSeconds)})];
+  if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
+  else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
+  else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
+  if (freshness.refreshingElsewhere) lines.push(t('finder.index.staleRefreshRunning'));
+  return lines.join(' ');
+}
+
+// A live progressive BFS crawl publishes usable rows while it keeps walking. Its authoritative live
+// state is `progressive_coverage`, not the top-level `coverage`/`too_large` fields, which can still
+// carry a superseded generation's terminal verdict. While the crawl is actively walking and has
+// neither been truncated nor reached full coverage, the root is BUILDING (partial-but-growing), not
+// the terminal "file limit reached" state — so results keep flowing and no capped-index warning fires.
+function fileIndexProgressiveCoverage(payload) {
+  const coverage = payload && typeof payload.progressive_coverage === 'object' ? payload.progressive_coverage : null;
+  return coverage;
+}
+
+function fileIndexProgressiveStillBuilding(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  return Boolean(coverage && coverage.truncated === false && coverage.full_coverage === false);
+}
+
+function fileIndexPublishedGeneration(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  const published = coverage ? Number(coverage.published_generation) : NaN;
+  if (Number.isFinite(published) && published > 0) return published;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  return Number.isFinite(generation) && generation > 0 ? generation : 0;
 }
 
 // Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
@@ -3887,8 +4054,16 @@ function fileExplorerIndexBadgeTitle(path) {
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
+  const freshness = fileIndexFreshnessFromPayload(payload);
+  // A live progressive crawl that has not been truncated and has not reached full coverage is still
+  // building: it is not the terminal capped state, even if an older persisted snapshot for this root
+  // was truncated. This must be read before the too_large/partial derivation below so an in-progress
+  // BFS is never mislabelled "file limit reached".
+  if (fileIndexProgressiveStillBuilding(payload)) return 'building';
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (state === 'error' || payload.error) return 'error';
+  // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
+  if (freshness.stale) return 'stale';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
 }
@@ -3910,7 +4085,10 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
   fileIndexPartialWarningRoots.add(normalized);
-  const count = Math.max(0, Number(payload.count) || 0);
+  // Report the live indexed count, not a stale 0 from a superseded snapshot: prefer the progressive
+  // crawl's entry_count when present, then the top-level count.
+  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
+  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
   const limit = Math.max(0, Number(payload.max_files) || count);
   emitNotification('indexCoverage', {
     key: normalized,
@@ -3933,11 +4111,24 @@ function applyFileIndexStatusPayload(root, payload) {
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
-  else if (status === 'ready') fileIndexPartialWarningRoots.delete(normalized);
+  // Any non-capped status clears a prior "file limit reached" warning: a superseded truncated
+  // generation must not keep a stale banner (with its stale count) on screen once the live crawl is
+  // partial-but-growing, ready, or stale again.
+  else fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
+  // Track the progressive published generation so newly-published BFS rows re-surface in an open
+  // Quick Open palette without a retype (below), independently of the top-level lifecycle generation.
+  const publishedGeneration = fileIndexPublishedGeneration(payload);
+  const previousPublished = Number(fileExplorerIndexPublishedGeneration.get(normalized) || 0);
+  if (publishedGeneration > previousPublished) fileExplorerIndexPublishedGeneration.set(normalized, publishedGeneration);
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  // An open Quick Open palette no longer re-issues the WHOLE query on every index-status poll or
+  // published-generation tick: the server-pushed search_progress signal now streams the newly-committed
+  // matches by cursor (steps 6-8), so the redundant full re-query per tick is retired here. The one
+  // explicit full-snapshot repair remains for the cases a cursor cannot bridge (rebase_required, a root
+  // with no committed baseline yet, or an authoritative background-refresh completion).
   return true;
 }
 
@@ -3979,7 +4170,9 @@ function syncFileIndexStatusPollInterval() {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (['ready', 'too_large'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
+  // `stale` is a settled answer, not progress: polling it per rendered row cannot revive a dead
+  // producer, it only spams the endpoint.
+  if (['ready', 'too_large', 'stale'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 
@@ -4892,49 +5085,14 @@ function bindTabberRowDragSource(row) {
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
-function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
   const expandable = entry.kind === 'dir';
   const collapsedSet = options.collapsedSet instanceof Set ? options.collapsedSet : fileExplorerTabberCollapsed;
   const expanded = expandable && !collapsedSet.has(fullPath);
-  syncFileTreeRowKindClass(row, entry.kind);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'tabberType', data.type || '');
-  setRowDataset(row, 'tabberSession', data.session || '');
-  setRowDataset(row, 'tabberWindow', data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '');
-  setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
-  setRowDataset(row, 'tabberItem', data.item || '');
-  setRowDataset(row, 'tabberBranch', data.branchText || '');
-  setRowDataset(row, 'paneTab', tabberRowDragItem(row));
-  setRowDataset(row, 'openChangeFile', '');
-  setRowDataset(row, 'openChangeSession', '');
-  setRowDataset(row, 'openChangeStatus', '');
-  setRowDataset(row, 'openChangeRepo', '');
-  setRowDataset(row, 'openChangeDirectory', '');
-  setRowDataset(row, 'changesFolderToggle', '');
-  setRowDataset(row, 'changeRel', '');
-  setRowDataset(row, 'changeSize', '');
-  const paddingLeft = fileTreeRowPadding(depth);
-  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
-  setTreeItemAria(row, {selected, expandable, expanded});
-  row.draggable = tabberRowIsTabDragSource(row);
-  row.classList.toggle(CLS.selected, selected);
-  row.classList.toggle('expanded', expanded);
-  row.classList.toggle(CLS.collapsed, expandable && !expanded);
-  row.classList.add('tabber-row');
-  row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
-  row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
   const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
-  row.classList.toggle('tabber-status-long', data.type === 'window'
-    && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)));
-  row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
-  row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
-  if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
-  else row.removeAttribute('aria-current');
   const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
@@ -4959,16 +5117,57 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
-  updateFileTreeRowContents(row, icon, label, {
-    iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
-    disclosureExpanded: expandable ? expanded : undefined,
-    nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
-    dateHtml: data.dateHtml || '',
+  const paneTab = data.type === 'session' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: fileTreeRowPadding(depth),
+    selected,
+    expandable,
+    expanded,
+    current: current || (data.type === 'session' && data.active === true),
+    draggable: Boolean(paneTab && isLayoutItem(paneTab) && !isFileExplorerItem(paneTab)),
+    icon,
+    label,
+    content: {
+      iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
+      disclosureExpanded: expandable ? expanded : undefined,
+      nameHtml,
+      dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
+      dateHtml: data.dateHtml || '',
+    },
+    recencyEntry: entry,
+    recencyOptions: options,
+    dataset: {
+      path: fullPath, kind: entry.kind, name: entry.name,
+      isRepo: '', isSymlink: '', symlinkTarget: '', indexed: '', indexExcluded: '',
+      tabberType: data.type || '', tabberSession: data.session || '',
+      tabberWindow: data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '',
+      tabberRepoRoot: data.repoRoot || '', tabberItem: data.item || '', tabberBranch: data.branchText || '', paneTab,
+      openChangeFile: '', openChangeSession: '', openChangeStatus: '', openChangeRepo: '',
+      openChangeDirectory: '', changesFolderToggle: '', changeRel: '', changeSize: '',
+    },
+    classes: {
+      [CLS.selected]: selected,
+      expanded,
+      [CLS.collapsed]: expandable && !expanded,
+      'tabber-row': true,
+      'tabber-active-window': data.type === 'window' && data.active === true,
+      'tabber-active-session': data.type === 'session' && data.active === true,
+      'tabber-status-long': data.type === 'window' && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)),
+      'current-file': current && entry.kind !== 'dir',
+      'current-directory': current && entry.kind === 'dir',
+    },
   });
+}
+
+function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+  const data = entry.tabber || {};
+  const model = tabberTreeRowViewModel(row, fullPath, entry, depth, options);
+  patchTreeRow(row, model);
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
-  applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;

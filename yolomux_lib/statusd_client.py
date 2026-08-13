@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .infra import common
+from .local_service_projection import registry_runtime_row
 from .local_services.client import LocalServiceClient
 from .local_services.rpc import safe_socket_path
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
@@ -106,16 +107,31 @@ class StatusClient(LocalServiceClient):
         return self.request(stamped_request("invalidate", reason=str(reason)[:80]), timeout=0.25)
 
     def runtime_status(self) -> dict[str, Any]:
+        """Build statusd's whole System/health row.
+
+        statusd is genuinely demand-scoped and declares it. Nothing keeps it hot: the only
+        thing that pins it up is the generation lease the SSE watcher takes while a browser
+        subscribes to `status`/`attention` demand (`app.py:7413-7417` -> `:7098` -> `:7108`),
+        and that lease is released the moment the last subscriber leaves (`app.py:7146-7156`),
+        after which statusd retires itself on STATUSD_DEFAULT_IDLE_SECONDS.
+
+        The one background caller is not a keep-alive and must not be mistaken for one. The
+        `agent_status`/`agent_tokens` collectors reach statusd through
+        `status_snapshot_payload()` (`app.py:2366-2371`), which returns before issuing any RPC
+        when there are no sessions, and whose idle cadence (60s, `families.py:135-139`) is the
+        same 60s as statusd's own idle timeout -- it cannot hold the service up between ticks.
+        So a browser-less machine legitimately runs without statusd for as long as it likes.
+
+        This is safe in the other direction because `demand_started` is read LAST by the health
+        reducer: a statusd that fails a demand still records a failure through the registry
+        (`local_service_failure_text`), and a row carrying `last_failure` is `down` regardless.
+        """
         runtime = self.registry.status()
         payload = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
         pid = int(payload.get("pid") or 0)
-        return {
-            "service": STATUSD_SERVICE_NAME,
-            "pid": pid,
-            "started_at": float(payload.get("started_at") or 0.0),
-            "version": int(payload.get("version") or 0),
+        return registry_runtime_row(STATUSD_SERVICE_NAME, self.registry, runtime, payload, fields_before_failure={
+            "demand_started": True,
             "socket": str(payload.get("socket") or self.socket_path),
-            "healthy": bool(runtime.get("healthy")),
             "clients": int(payload.get("clients") or 0),
             "queues": {"depth": int(payload.get("queue_depth") or 0)},
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
@@ -123,6 +139,4 @@ class StatusClient(LocalServiceClient):
             "build_count": int(payload.get("build_count") or 0),
             "encode_count": int(payload.get("encode_count") or 0),
             "invalidation_reason": str(payload.get("invalidation_reason") or ""),
-            "last_failure": str(payload.get("last_error") or runtime.get("failure_reason") or ""),
-            "resources": self.registry.resources(pid),
-        }
+        })

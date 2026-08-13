@@ -13,7 +13,7 @@ import sqlite3
 import threading
 
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from tests.test_gate_stats_range import NOW
+from tests.helpers.gate_stats import NOW
 from yolomux_lib.stats_current import materializer
 from yolomux_lib.stats_current import migration
 from yolomux_lib.stats_current import service as stats_service
@@ -307,4 +307,3 @@ def test_g10_orphaned_sidecars_are_never_replayed_into_a_new_database(gate_runti
     assert "scratch" not in tables, sorted(tables)
     with storage.Store.open_reader(target) as store:
         assert store.read_snapshot().observations == ()
-

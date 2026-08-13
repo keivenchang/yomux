@@ -12,7 +12,7 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
-  deferredFetch,
+  deferredFetch, apiTransportRetirementScenario,
   settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
@@ -77,7 +77,7 @@ function summarizedHangingShard(closeOnSignal) {
   return {child, signals};
 }
 
-async function runLayoutAsyncSuite() {
+async function runLayoutAsyncSuite() { await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
   await testAsync('share viewers retain local diagnostics without scheduling unscoped host requests', async () => {
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-diagnostic-capability', mode: 'ro', session: '1', sessions: ['1']},
@@ -108,6 +108,53 @@ async function runLayoutAsyncSuite() {
       {queue: 0, receipts: 0, timerPending: false, livenessTimerPending: false},
       'an ineligible share viewer creates no upload queue, pending receipt, or cadence timer',
     );
+  });
+
+  await testAsync('a share-scoped terminal close issues no host-only /api/event or /api/tmux-session-exists', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
+      share: {view: true, id: 'share-host-poller-guard', mode: 'ro', session: '1', sessions: ['1']},
+    });
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({exists: false}));
+    });
+    api.setShowToastForTest(() => {});
+    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), false, 'a read-only share viewer is not eligible for host-only requests');
+    const term = {write() {}, dispose() {}};
+    const item = api.registerTerminalForTest('1', term, {readyState: WebSocket.CLOSED, close() {}});
+    api.connectTerminalSocketForTest('1', item);
+    const socket = item.socket;
+    // A transient abnormal close (1006, not clean) is not "final": it drives the reconnect/confirm path,
+    // which for a host-scoped viewer would POST /api/event (terminal_disconnected) and GET
+    // /api/tmux-session-exists. A share viewer must issue NEITHER -- both are host-only (share_access=none)
+    // and the server returns 403 for a share token; a real 403 during teardown fails the strict browser
+    // server-log-ring gate. Both producers are gated on the shared clientCanUseUnscopedHostRequests() owner.
+    socket.onclose?.({target: socket, code: 1006, wasClean: false});
+    await flushAsyncWork();
+    assert.equal(requests.some(request => request.url.includes('/api/event')), false, 'a share viewer never posts terminal_disconnected to the host-only /api/event route');
+    assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), false, 'a share viewer never checks the host-only tmux roster');
+  });
+
+  await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({exists: true}));
+    });
+    api.setShowToastForTest(() => {});
+    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), true, 'a host viewer is eligible for host-only requests');
+    const term = {write() {}, dispose() {}};
+    const item = api.registerTerminalForTest('1', term, {readyState: WebSocket.CLOSED, close() {}});
+    api.connectTerminalSocketForTest('1', item);
+    const socket = item.socket;
+    // Positive control: the same abnormal close under host scope DOES post terminal_disconnected and DOES
+    // consult the tmux roster -- proving the fix gates on scope, not disables the feature.
+    socket.onclose?.({target: socket, code: 1006, wasClean: false});
+    await flushAsyncWork();
+    assert.equal(requests.some(request => request.url.includes('/api/event') && request.method === 'POST'), true, 'a host viewer posts terminal_disconnected to /api/event');
+    assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), true, 'a host viewer consults the tmux roster to decide reconnect vs prune');
   });
 
   await testAsync('background 401s retain the document while interactive commands still redirect to login', async () => {
@@ -265,6 +312,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(new URL(replacementSource.url, 'https://yolomux.test').searchParams.get('operations'), 'op-shared-operation');
     replacementSource.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
     assert.equal(initialSource.readyState, 2, 'the old stream closes only after the replacement subscriber is serving');
+    assert.equal(initialSource.closeCount, 1, 'candidate promotion disposes the prior active stream exactly once');
     assert.equal(api.clientEventTransportStateForTest().source, replacementSource);
     assert.equal(api.apiOperationStateForTest().pending, 1);
 
@@ -283,6 +331,22 @@ async function runLayoutAsyncSuite() {
 
     assert.equal(api.apiOperationStateForTest().pending, 0, 'the shared operation event settles the registered receipt');
     assert.equal(api.clientEventTransportStateForTest().source, replacementSource, 'settling a receipt does not reconnect the shared stream solely to remove a replay fence');
+  });
+
+  test('client-event pagehide disposes active and candidate streams exactly once and bfcache resumes demand', () => {
+    const api = loadYolomux('', ['1']);
+    api.installClientEventStreamForTest();
+    const active = api.clientEventTransportStateForTest().source;
+    api.setEventLogTabActiveForTest('1', true);
+    api.syncClientEventDemandForTest({immediate: true});
+    const candidate = api.clientEventTransportStateForTest().replacementSource;
+    for (const listener of api.windowListenersForTest('pagehide')) listener({type: 'pagehide', persisted: true});
+    assert.equal(active.closeCount, 1, 'pagehide closes the active stream once');
+    assert.equal(candidate.closeCount, 1, 'pagehide closes the candidate stream once');
+    assert.equal(api.clientEventTransportStateForTest().source, null);
+    for (const listener of api.windowListenersForTest('pageshow')) listener({type: 'pageshow', persisted: true});
+    const resumed = api.clientEventTransportStateForTest().source;
+    assert.ok(resumed && resumed !== active && resumed !== candidate, 'bfcache pageshow opens one fresh demanded stream');
   });
 
   await testAsync('operation terminals acknowledge browser consumption only after completion and in one batch', async () => {
@@ -564,6 +628,64 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0, 'the consumer owns its rejection before the terminal arrives');
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
+  });
+
+  await testAsync('a pre-ready candidate failure does not strand demand and recovers on a fresh candidate', async () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const handle = {callback, delay};
+        timers.push(handle);
+        return handle;
+      },
+      clearTimeout() {},
+    });
+    api.installClientEventStreamForTest();
+    const activeSource = api.clientEventTransportStateForTest().source;
+    assert.ok(activeSource, 'the active serving stream is open');
+
+    // A changed demand opens a CANDIDATE that has not yet fired ready.
+    api.registerApiOperationReceiptForTest({
+      request: {id: 'r-candidate'},
+      operation: {
+        id: 'op-candidate',
+        kind: 'fs_watch_diff',
+        status_url: '/api/operations/op-candidate',
+        events_url: '/api/client-events?operation_id=op-candidate',
+        cursor: {epoch: 'candidate-epoch', seq: 0},
+      },
+    });
+    const candidate = api.clientEventTransportStateForTest().replacementSource;
+    assert.ok(candidate && candidate !== activeSource, 'a candidate stream opens for the changed demand');
+    assert.equal(new URL(candidate.url, 'https://yolomux.test').searchParams.get('operations'), 'op-candidate');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode.source, candidate, 'the candidate owns one bounded retry episode');
+
+    // Transient pre-ready errors are tolerated within the bounded episode: the candidate is kept and
+    // the active stream is never promoted-away or torn down.
+    candidate.onerror();
+    candidate.onerror();
+    assert.equal(api.clientEventTransportStateForTest().replacementSource, candidate, 'the candidate survives errors within the bounded episode');
+    assert.equal(api.clientEventTransportStateForTest().source, activeSource, 'the active stream is untouched while the candidate retries');
+    assert.equal(candidate.readyState, 1, 'the candidate is not closed within the bounded episode');
+
+    // Exhausting the episode must abandon the candidate, demote the active stream (it does not serve
+    // the new demand), and re-drive demand into ONE corrected candidate rather than stranding it.
+    candidate.onerror();
+    assert.equal(candidate.readyState, 2, 'the exhausted candidate is closed');
+    assert.equal(api.clientEventTransportStateForTest().connected, false, 'the active stream is demoted, not claimed to serve the new demand');
+    const freshCandidate = api.clientEventTransportStateForTest().replacementSource;
+    assert.ok(freshCandidate && freshCandidate !== candidate, 'demand is re-driven into a fresh candidate');
+    assert.equal(new URL(freshCandidate.url, 'https://yolomux.test').searchParams.get('operations'), 'op-candidate', 'the fresh candidate still carries the demanded operation');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode.source, freshCandidate, 'a new bounded episode governs the fresh candidate');
+    assert.ok(timers.some(timer => timer.delay === api.reconnectResyncDebounceMsForTest?.() || timer.delay === 751), 'an HTTP resync is scheduled so no channel is stranded');
+
+    // The fresh candidate becoming ready promotes it to active and restores serving.
+    freshCandidate.listeners.get('ready')[0]({data: JSON.stringify({epoch: 'candidate-epoch', resource_revisions: {}}), type: 'ready', lastEventId: ''});
+    assert.equal(api.clientEventTransportStateForTest().source, freshCandidate, 'the recovered candidate becomes the active stream');
+    assert.equal(api.clientEventTransportStateForTest().replacementSource, null, 'no candidate remains after recovery');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode, null, 'the retry episode is cleared once the candidate is serving');
+    assert.equal(api.clientEventTransportStateForTest().connected, true, 'serving is restored after recovery');
+    assert.equal(activeSource.readyState, 2, 'the old active stream closes only after the corrected demand is ready');
   });
 
   await testAsync('filesystem operation waiters preserve the caller deadline with one request', async () => {
@@ -895,6 +1017,8 @@ async function runLayoutAsyncSuite() {
     api.startTranscriptStreamForTest('1');
     const newSummary = api.summaryStreamForTest('1');
     const newTranscript = api.transcriptStreamForTest('1');
+    assert.equal(oldSummary.closeCount, 1, 'replacing a retired summary closes its source exactly once');
+    assert.equal(oldTranscript.closeCount, 1, 'the transcript error releases its source exactly once');
     oldSummary.listeners.get('delta')[0]({data: JSON.stringify({text: 'stale summary bytes'})});
     oldSummary.onerror?.();
     oldTranscript.listeners.get('items')[0]({data: JSON.stringify({items: [{role: 'user', content: 'stale transcript bytes'}]})});
@@ -905,6 +1029,90 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.testElementForId('summary-1').innerHTML.includes('stale summary bytes'), false);
     assert.equal(api.testElementForId('transcript-1').innerHTML.includes('stale transcript bytes'), false);
     assert.equal(api.tmuxSessionLifecycleRecordForTest('1').sources, 2, 'the replacement generation owns exactly its summary and transcript streams');
+    api.stopSummaryStreamForTest('1', oldSummary);
+    api.stopTranscriptStreamForTest('1', oldTranscript);
+    assert.equal(api.summaryStreamForTest('1'), newSummary, 'expected-source stop cannot dispose a replacement summary scope');
+    assert.equal(api.transcriptStreamForTest('1'), newTranscript, 'expected-source stop cannot dispose a replacement transcript scope');
+    api.stopSummaryStreamForTest('1', newSummary);
+    api.stopSummaryStreamForTest('1', newSummary);
+    api.stopTranscriptStreamForTest('1', newTranscript);
+    api.stopTranscriptStreamForTest('1', newTranscript);
+    assert.equal(newSummary.closeCount, 1, 'summary scope disposal is idempotent');
+    assert.equal(newTranscript.closeCount, 1, 'transcript scope disposal is idempotent');
+  });
+
+  await testAsync('chat lifecycle disposal aborts requests and suppresses owned timers', async () => {
+    let nextTimer = 1;
+    const timers = new Map();
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback) {
+        const timer = nextTimer;
+        nextTimer += 1;
+        timers.set(timer, callback);
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); },
+    });
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true})));
+    api.chatRequestOptionsForTest();
+    api.replaceChatTypingForTest([{username: 'alice', expires_at_utc: (Date.now() / 1000) + 60}]);
+    const before = api.chatLifecycleStateForTest();
+    assert.equal(before.active, true);
+    assert.equal(before.requestController.signal.aborted, false);
+    assert.notEqual(before.typingExpiryTimer, null);
+    const lateTypingExpiry = timers.get(before.typingExpiryTimer);
+    api.clearChatLifecycleForTest({destroy: true});
+    assert.equal(before.requestController.signal.aborted, true, 'chat destroy aborts the shared request controller');
+    assert.equal(api.chatLifecycleStateForTest().active, false, 'chat destroy retires the whole resource scope');
+    assert.equal(timers.has(before.typingExpiryTimer), false, 'chat destroy clears the owned typing expiry');
+    lateTypingExpiry();
+    assert.equal(api.chatLifecycleStateForTest().active, false, 'a late retired timer cannot recreate chat lifecycle work');
+  });
+
+  test('lifecycle scope disposes replacement and late resources exactly once', () => {
+    const api = loadYolomux('', ['1']);
+    const disposed = [];
+    const scope = api.createLifecycleScopeForTest();
+    const first = {name: 'first'};
+    const replacement = {name: 'replacement'};
+    scope.replace('resource', first, value => disposed.push(value.name));
+    scope.replace('resource', replacement, value => disposed.push(value.name));
+    assert.deepStrictEqual(disposed, ['first'], 'replacement disposes the previous owner immediately');
+    assert.equal(scope.dispose('test'), true);
+    assert.equal(scope.dispose('again'), false, 'scope disposal is idempotent');
+    assert.deepStrictEqual(disposed, ['first', 'replacement']);
+    scope.replace('resource', {name: 'late'}, value => disposed.push(value.name));
+    assert.deepStrictEqual(disposed, ['first', 'replacement', 'late'], 'registration after disposal cannot leak a resource');
+  });
+
+  await testAsync('latest resource owns dedupe, latest-wins, last-good failure, and state order', async () => {
+    const api = loadYolomux('', ['1']);
+    const pending = [];
+    const phases = [];
+    const resource = api.createLatestResourceForTest({
+      initial: {marker: 'initial'},
+      load(target) {
+        const request = deferredFetch();
+        pending.push({...request, target});
+        return request.promise;
+      },
+      apply(payload) { return payload; },
+      onState(_state, event) { phases.push(event.phase); },
+    });
+    const old = resource.read('old');
+    assert.strictEqual(resource.read('old'), old, 'the same target shares one in-flight request');
+    const newer = resource.read('new');
+    pending[1].resolve({marker: 'new'});
+    await newer;
+    pending[0].resolve({marker: 'old'});
+    await old;
+    assert.equal(resource.snapshot().value.marker, 'new', 'a delayed old response cannot replace the newer target');
+    const failed = resource.read('failed');
+    pending[2].reject(new Error('offline'));
+    await failed;
+    assert.equal(resource.snapshot().value.marker, 'new', 'a current failure preserves the last good value');
+    assert.equal(resource.snapshot().error.message, 'offline', 'the current failure remains typed for the consumer');
+    assert.deepStrictEqual(phases, ['loading', 'loading', 'applied', 'settled', 'loading', 'failed', 'settled'], 'render-facing state order is deterministic and stale work is silent');
   });
 
   await testAsync('retired terminal generation owns delayed resize scroll and blank refresh side effects', async () => {
@@ -1356,6 +1564,44 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
   });
 
+  await testAsync('background-owner refresh keeps one Promise return contract on fresh fast paths', async () => {
+    const api = loadYolomux();
+    api.setBackgroundOwnerStatusPayloadForTest({marker: 'fresh'});
+    const refresh = api.refreshBackgroundOwnerStatusForTest({preferFresh: true, render: false});
+    assert.equal(typeof refresh?.then, 'function', 'ready-channel repair may always attach catch to a background-owner refresh');
+    assert.equal(await refresh, true, 'the fresh fast path preserves its fulfilled result');
+  });
+
+  test('panel-body reconciliation restores named anchors before one afterReplace hook', () => {
+    const api = loadYolomux();
+    const order = [];
+    const oldScroller = {scrollTop: 31, scrollLeft: 7};
+    const newScroller = {scrollTop: 0, scrollLeft: 0};
+    const body = {
+      innerHTML: '',
+      querySelector(selector) {
+        if (selector !== '.scroll') return null;
+        return this.innerHTML ? newScroller : oldScroller;
+      },
+    };
+    const anchor = api.elementScrollAnchor('.scroll');
+    const restored = anchor.restore;
+    anchor.restore = (root, value) => {
+      order.push('restore');
+      restored(root, value);
+    };
+    assert.equal(api.reconcilePanelBody({
+      body,
+      html: '<div class="scroll"></div>',
+      anchors: [anchor],
+      afterReplace() { order.push('after'); },
+    }), true);
+    assert.deepEqual(order, ['restore', 'after']);
+    assert.equal(body.innerHTML, '<div class="scroll"></div>');
+    assert.equal(newScroller.scrollTop, 31);
+    assert.equal(newScroller.scrollLeft, 7);
+  });
+
   test('search-index lifecycle generations reject a delayed older status response', () => {
     const api = loadYolomux();
     api.setFileExplorerIndexedDirsForTest(['/repo']);
@@ -1363,6 +1609,175 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'ready', generation: 3}), false, 'an older HTTP status cannot overwrite the newer lifecycle transition');
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'error', generation: 4, error: 'walk failed'}), true, 'the matching lifecycle generation exposes its terminal error');
     assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'error', error: 'walk failed'}), 'error');
+  });
+
+  // M11: the live 7771 incident. A follower served a persisted snapshot whose `indexd` producer was
+  // dead; `ready_elsewhere` correctly went false, and the badge silently degraded to "building" -
+  // honest about readiness, silent about staleness. One derivation now answers both questions.
+  test('a snapshot whose producer is dead reads as stale, never as building or ready', () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const orphaned = {
+      state: 'follower',
+      ready: false,
+      ready_elsewhere: false,
+      freshness: 'orphaned',
+      freshness_reason: 'producer_not_running',
+      producer_state: 'not_running',
+      snapshot_age_seconds: 10800,
+      stale: true,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(orphaned), 'stale', 'a dead producer is stale, not building');
+    const derived = api.fileIndexFreshnessFromPayloadForTest(orphaned);
+    assert.equal(derived.stale, true, 'the one derivation reads the backend stale verdict');
+    assert.equal(derived.ageSeconds, 10800, 'the snapshot age survives the derivation for the age sentence');
+    assert.equal(
+      api.fileIndexFreshnessMessageForTest(derived),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the message states the age in words and names the dead producer',
+    );
+
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {...orphaned, generation: 11}), true);
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'stale', 'the one status map records stale for the Finder badge');
+    assert.equal(api.fileExplorerIndexBadgeText('/repo'), 'stale', 'the existing badge renderer says stale in words, not by colour');
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'), 'Index snapshot is out of date — newer files may be missing', 'the badge title explains the consequence');
+
+    const vouched = {
+      state: 'follower',
+      ready: false,
+      ready_elsewhere: true,
+      freshness: 'fresh',
+      freshness_reason: '',
+      producer_state: 'running',
+      snapshot_age_seconds: 12,
+      stale: false,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(vouched), 'ready', 'a vouched snapshot is still plainly ready');
+    assert.equal(api.fileIndexFreshnessMessageForTest(api.fileIndexFreshnessFromPayloadForTest(vouched)), '', 'a vouched snapshot says nothing at all');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'building'}), 'building', 'a genuinely warming index keeps its building state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({...orphaned, too_large: true}),
+      'too_large',
+      'partial coverage still wins, so the file-limit warning is not lost behind staleness',
+    );
+  });
+
+  // The user-visible half of the same incident: Quick Open kept answering from that snapshot and said
+  // nothing. Rows stay - stale beats nothing - but the palette now says how old they are and why.
+  test('quick open labels a stale snapshot inline, with its age, and keeps the rows usable', () => {
+    const staleApi = loadYolomux('', ['1']);
+    staleApi.setFileExplorerIndexedDirsForTest(['/home/test/vortex']);
+    staleApi.installCommandPaletteFixtureForTest();
+    staleApi.setCommandPaletteQueryForTest('2026.md');
+    const stale = staleApi.fileQuickOpenSearchPayloadResultForTest({
+      root: '/home/test/vortex',
+      files: [{
+        name: '2026.md',
+        path: '/home/test/vortex/notes/w5k/2026.md',
+        relative_path: 'notes/w5k/2026.md',
+        kind: 'file',
+      }],
+      index_state: 'follower-stale',
+      index_coverage: 'unverified',
+      freshness: 'orphaned',
+      freshness_reason: 'producer_not_running',
+      producer_state: 'not_running',
+      snapshot_age_seconds: 10800,
+      stale: true,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    }, '/home/test/vortex');
+    assert.equal(stale.indexWarming, false, 'a stale snapshot is a completed answer, not a warming one');
+    assert.equal(stale.freshness.stale, true, 'quick open reads the same derivation as the Finder index badge');
+    staleApi.setFileQuickOpenCandidatesForTest(stale.root, stale.files);
+    staleApi.setFileQuickOpenFreshnessForTest(staleApi.fileQuickOpenWorstFreshnessForTest([stale.freshness]));
+    const staleText = staleApi.commandPaletteFreshnessTextForTest();
+    assert.equal(
+      staleText,
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the palette states the age in plain words and names the reason',
+    );
+    assert.ok(/3 hours ago/.test(staleText), 'the age is words a non-engineer reads, never a raw snapshot_age_seconds');
+    const staleHtml = staleApi.commandPaletteStatusHtmlForTest();
+    assert.ok(staleHtml.includes('command-palette-freshness'), 'the sentence renders inline in the palette status row');
+    assert.ok(staleHtml.includes('3 hours ago'), 'the rendered row carries the age, not a bare colour change');
+    assert.ok(staleApi.commandPaletteStatusTextForTest().includes('3 hours ago'), 'the aria-label carries the same sentence for a screen reader');
+    assert.ok(
+      staleApi.fileQuickOpenItems().some(item => item.path === '/home/test/vortex/notes/w5k/2026.md'),
+      'stale rows stay visible and openable - stale beats nothing',
+    );
+
+    // Reachable by a screen reader, and never by colour alone: the aria-live status row is visible,
+    // labelled with the same sentence, and marked by a class rather than a bare colour swap.
+    staleApi.renderCommandPaletteResultsForTest();
+    const staleStatus = staleApi.commandPaletteStateForTest().node.querySelector('.command-palette-status');
+    assert.equal(staleStatus.hidden, false, 'the stale sentence is actually shown, not computed and dropped');
+    assert.equal(
+      staleStatus.getAttribute('aria-label'),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the live region announces the whole sentence',
+    );
+    assert.ok(staleStatus.classList.names.has('stale'), 'the stale marker is a class, so the warning is not colour-only');
+    assert.ok(staleApi.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.includes('2026.md'), 'the stale rows are still rendered beneath the warning');
+
+    const freshApi = loadYolomux('', ['1']);
+    freshApi.setFileExplorerIndexedDirsForTest(['/home/test/vortex']);
+    freshApi.installCommandPaletteFixtureForTest();
+    freshApi.setCommandPaletteQueryForTest('2026.md');
+    const fresh = freshApi.fileQuickOpenSearchPayloadResultForTest({
+      root: '/home/test/vortex',
+      files: [{name: '2026.md', path: '/home/test/vortex/notes/w5k/2026.md', relative_path: 'notes/w5k/2026.md', kind: 'file'}],
+      index_state: 'follower-ready',
+      index_coverage: 'full',
+      freshness: 'fresh',
+      freshness_reason: '',
+      producer_state: 'running',
+      snapshot_age_seconds: 9,
+      stale: false,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    }, '/home/test/vortex');
+    freshApi.setFileQuickOpenCandidatesForTest(fresh.root, fresh.files);
+    freshApi.setFileQuickOpenFreshnessForTest(freshApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]));
+    assert.equal(freshApi.commandPaletteFreshnessTextForTest(), '', 'a vouched snapshot adds no warning at all');
+    assert.equal(freshApi.commandPaletteStatusHtmlForTest(), '', 'a vouched snapshot leaves the palette status row hidden');
+
+    // Empty AND stale is a false negative, not a completed "No matches".
+    const emptyApi = loadYolomux('', ['1']);
+    emptyApi.installCommandPaletteFixtureForTest();
+    emptyApi.setCommandPaletteQueryForTest('2026.md');
+    emptyApi.setFileQuickOpenCandidatesForTest('/home/test/vortex', []);
+    emptyApi.setFileQuickOpenFreshnessForTest(stale.freshness);
+    assert.equal(
+      emptyApi.commandPaletteEmptyTextForTest(),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'an empty stale search explains itself instead of claiming No matches',
+    );
+
+    // Several roots answer one blended list, so the worst freshness owns the sentence.
+    const unrecorded = {state: 'orphaned', reason: 'producer_epoch_unrecorded', producerState: 'unrecorded', ageSeconds: 90000, stale: true, refreshingElsewhere: false};
+    const behind = {state: 'stale', reason: 'producer_vouch_expired', producerState: 'running', ageSeconds: 600, stale: true, refreshingElsewhere: true};
+    assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness, behind, unrecorded]), unrecorded, 'an orphaned root outranks a merely lagging one');
+    assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]), null, 'all-vouched roots report no freshness problem');
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest(unrecorded),
+      'These results are from 1 day ago and may be out of date. No file indexer has claimed this folder, so newer files are missing.',
+      'an unrecorded producer is named as its own reason',
+    );
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest(behind),
+      'These results are from 10 minutes ago and may be out of date. The file indexer has not checked in recently, so newer files may be missing. A refresh is running now.',
+      'a lagging producer with an accepted refresh says both',
+    );
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest({...unrecorded, ageSeconds: null}),
+      'These results come from an older snapshot and may be out of date. No file indexer has claimed this folder, so newer files are missing.',
+      'an unknown age degrades to words, never to a blank or a raw number',
+    );
   });
 
   test('search-index completion pushes its lifecycle snapshot without rereading the root', () => {
@@ -1377,6 +1792,201 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.handleClientPushEventForTest('background_refresh_done', {role: 'search-index', root: '/repo', state: 'ready', generation: 7}, {epoch: 'index-owner-b', resource: 'background:search-index:repo', resource_revision: 7}), true);
     assert.deepStrictEqual(requests, [], 'a complete index lifecycle payload is readable state, not a reason to re-poll its root');
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 6}), false, 'the event-owned generation fences a stale later HTTP response');
+  });
+
+  // Live 7771: /home/keivenc/dev held 22k+ rows while a progressive BFS kept crawling. The index-status
+  // payload still carried a SUPERSEDED generation's `too_large`/`coverage:partial` verdict, so the badge
+  // read "file limit reached" and the Finder banner claimed "Indexed 0 files" — both false. The live
+  // truth is `progressive_coverage`: a crawl that is not truncated and not yet full is still BUILDING.
+  test('a progressive BFS crawl reads as building, not the terminal file-limit state, and clears a superseded warning', () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.clearFileIndexPartialWarningsForTest();
+
+    const building = {
+      ready: true,
+      too_large: true,            // a superseded persisted snapshot was capped ...
+      state: 'too_large',
+      coverage: 'partial',
+      count: 100000,
+      max_files: 100000,
+      generation: 6,
+      progressive_coverage: {truncated: false, full_coverage: false, published_generation: 6, entry_count: 54945},
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(building), 'building',
+      'the live crawl is not truncated, so the root is building rather than the terminal file-limit state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({...building, progressive_coverage: {truncated: true, full_coverage: false, published_generation: 7, entry_count: 100000}}),
+      'too_large',
+      'a genuinely truncated crawl still maps to the file-limit state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready', progressive_coverage: {truncated: false, full_coverage: true, published_generation: 8, entry_count: 100000}}),
+      'ready',
+      'a completed full-coverage crawl reads ready');
+
+    // A superseded "file limit reached" warning must clear the moment the live crawl is building again,
+    // so its stale count cannot linger on screen.
+    api.seedFileIndexPartialWarningRootForTest('/repo');
+    assert.equal(api.fileIndexPartialWarningRootWarnedForTest('/repo'), true, 'the root starts with a prior capped-index warning');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {...building, generation: 11}), true);
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'building', 'the live crawl re-derives as building');
+    assert.equal(api.fileIndexPartialWarningRootWarnedForTest('/repo'), false,
+      'a superseded capped-index warning is cleared once the crawl is building again');
+  });
+
+  // Live 7771: a fully-qualified name typed while /home/keivenc/dev was still warming settled on the
+  // empty snapshot and never refreshed, even though the file was later indexed. The palette must
+  // re-issue the CURRENT typed query when the index advances, with no retype.
+  await testAsync('a search_progress signal streams the crawl\'s newly-published matches by cursor, not a repeated full query', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target.includes('/api/fs/search')) {
+        searches.push(target);
+        if (target.includes('cursor=')) {
+          // The delta read: one committed match published since the baseline cursor.
+          return Promise.resolve(jsonResponse({
+            root: '/repo', root_realpath: '/repo', query: 'w5k.md', limit: 500, more: false,
+            cursor: 'CUR1',
+            changes: [{operation: 'upsert', path: '/repo/notes/w5k/w5k.md', name: 'w5k.md', relative_path: 'notes/w5k/w5k.md', realpath: '/repo/notes/w5k/w5k.md'}],
+            coverage: {published_depth: 2, frontier_depth: 3, frontier_size: 4, entry_count: 12000, full_coverage: false, truncated: false},
+          }));
+        }
+        // The warming snapshot returns nothing yet, but hands back a baseline cursor to stream from.
+        return Promise.resolve(jsonResponse({
+          root: '/repo', root_realpath: '/repo', query: 'w5k.md', index_state: 'warming', index_coverage: 'pending',
+          files: [], initial_cursor: 'CUR0',
+        }));
+      }
+      return Promise.resolve(jsonResponse({state: 'building'}));
+    });
+
+    // Palette open in files mode; the warming snapshot seeds one baseline cursor for /repo.
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 'w5k.md');
+    api.setCommandPaletteQueryForTest('w5k.md');
+    await api.refreshFileQuickOpenCandidatesForTest('w5k.md');
+    const seeded = api.fileQuickOpenDeltaRootsForTest();
+    assert.equal(seeded.length, 1, 'the warming snapshot seeds exactly one delta cursor');
+    assert.equal(seeded[0].cursor, 'CUR0', 'the baseline cursor from initial_cursor is stored per root');
+    const snapshotSearches = searches.filter(target => !target.includes('cursor=')).length;
+
+    // The crawl publishes a directory: a path-free search_progress signal names this root's scope.
+    api.handleClientPushEventNowForTest('search_progress', {
+      scope_id: api.fileSearchScopeIdForTest('/repo'),
+      generation: 5, revision: 7,
+      coverage: {published_depth: 2, frontier_depth: 3, frontier_size: 4, entry_count: 12000, full_coverage: false, truncated: false},
+    });
+    await flushAsyncWork();
+
+    const deltaSearches = searches.filter(target => target.includes('cursor=CUR0'));
+    assert.equal(deltaSearches.length, 1, 'the signal issues exactly one bounded delta read against the baseline cursor');
+    assert.equal(searches.filter(target => !target.includes('cursor=')).length, snapshotSearches,
+      'the signal issues a delta, NOT a repeated full snapshot search');
+    assert.ok(api.fileQuickOpenStateForTest().candidates.some(candidate => candidate.path === '/repo/notes/w5k/w5k.md'),
+      'the freshly-published file streams into the palette candidates without a retype');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, 'CUR1', 'the root advances to the returned cursor');
+  });
+
+  // Seed one delta cursor for /repo through a real snapshot fetch, returning the recorded requests and
+  // a fetch-response controller so each streaming test drives its own delta/rebase/pagination replies.
+  async function seedQuickOpenDeltaCursor(api, {snapshotFiles = [], initialCursor = 'CUR0', deltaReply} = {}) {
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target.includes('/api/fs/search')) {
+        searches.push(target);
+        if (target.includes('cursor=')) return Promise.resolve(jsonResponse(deltaReply(target)));
+        return Promise.resolve(jsonResponse({
+          root: '/repo', root_realpath: '/repo', query: 'w5k', index_state: 'warming',
+          files: snapshotFiles, initial_cursor: initialCursor,
+        }));
+      }
+      return Promise.resolve(jsonResponse({state: 'building'}));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 'w5k');
+    api.setCommandPaletteQueryForTest('w5k');
+    await api.refreshFileQuickOpenCandidatesForTest('w5k');
+    return {searches, scopeId: api.fileSearchScopeIdForTest('/repo')};
+  }
+
+  await testAsync('an out-of-order delta for a superseded request cannot mutate a newer palette', async () => {
+    const api = loadYolomux();
+    const {searches} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    const staleRequestId = api.fileQuickOpenDeltaRootsForTest()[0].requestId;
+    // A newer search supersedes the cursor set (a query change bumps requestId + reseeds).
+    await api.refreshFileQuickOpenCandidatesForTest('w5k');
+    searches.length = 0;
+    const status = api.ingestFileQuickOpenDeltaForTest('/repo', staleRequestId, {
+      changes: [{operation: 'upsert', path: '/repo/stale.md', name: 'stale.md', relative_path: 'stale.md', realpath: '/repo/stale.md'}],
+      more: false, cursor: 'STALE',
+    });
+    assert.equal(status.stale, true, 'a delta for the retired requestId is rejected as stale');
+    assert.equal(api.fileQuickOpenStateForTest().candidates.some(file => file.path === '/repo/stale.md'), false,
+      'the stale response never mutates the current candidate set');
+  });
+
+  await testAsync('a rebase_required verdict performs one full-snapshot repair, not a mixed merge', async () => {
+    const api = loadYolomux();
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {
+      deltaReply: () => ({root: '/repo', root_realpath: '/repo', rebase_required: true, reason: 'generation_superseded'}),
+    });
+    const snapshotsBefore = searches.filter(target => !target.includes('cursor=')).length;
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 6, revision: 9, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 1, 'the stale cursor is read exactly once before rebasing');
+    assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore,
+      'rebase_required repairs by re-issuing one full snapshot search');
+  });
+
+  await testAsync('a signal drains a paginated backlog bounded, advancing the cursor once settled', async () => {
+    const api = loadYolomux();
+    const pages = [
+      {changes: [{operation: 'upsert', path: '/repo/one.md', name: 'one.md', relative_path: 'one.md', realpath: '/repo/one.md'}], more: true, cursor: 'CUR1'},
+      {changes: [{operation: 'upsert', path: '/repo/two.md', name: 'two.md', relative_path: 'two.md', realpath: '/repo/two.md'}], more: false, cursor: 'CUR2'},
+    ];
+    let page = 0;
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => pages[Math.min(page++, pages.length - 1)]});
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 2, 'more=true continues paging until the server says done');
+    assert.deepStrictEqual(
+      canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path).sort()),
+      ['/repo/one.md', '/repo/two.md'], 'both paged deltas merge into the candidate set');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, 'CUR2', 'the cursor advances to the final page');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].fetching, false, 'the in-flight guard is released once the backlog drains');
+  });
+
+  await testAsync('a search_progress signal after close or for another root pumps nothing', async () => {
+    const api = loadYolomux();
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    searches.length = 0;
+    // A non-matching scope digest correlates to no open root.
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: api.fileSearchScopeIdForTest('/somewhere/else'), generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.length, 0, 'a signal for another root issues no delta read');
+    // After close, the matching scope must not stream against a dead palette.
+    api.closeCommandPaletteForTest();
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.length, 0, 'a signal after the palette closes pumps nothing');
+  });
+
+  await testAsync('a root with no committed baseline repairs from a full snapshot on its first signal', async () => {
+    const api = loadYolomux();
+    // initial_cursor null: nothing committed yet, so a signal cannot delta-read and must repair.
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {initialCursor: null, deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, null, 'a warming root with nothing committed stores a null baseline');
+    const snapshotsBefore = searches.filter(target => !target.includes('cursor=')).length;
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 0, 'a null-cursor root never issues a delta read');
+    assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore, 'it repairs from one full snapshot to pick up pre-cursor rows');
   });
 
   await testAsync('background-owner takeover revalidates visible indexed roots once', async () => {
@@ -1872,6 +2482,78 @@ async function runLayoutAsyncSuite() {
     }
   });
 
+  await testAsync('keyed patches at revisions 401/402/403 apply in one frame strictly in order', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
+    api.setDocumentVisibilityForTest('hidden');
+    const base = {
+      agent_window_snapshot_revision: 400,
+      session_order: ['1'],
+      sessions: {'1': {target: '1', enabled: false, agent_windows: [{window_index: 0, state: 'idle'}]}},
+      rules: {mode: 'safe'},
+    };
+    // Seed the single applied revision at 400 with a full snapshot.
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', {data: base}, {epoch: 'server-a', resource: 'auto_approve_changed', resource_revision: 400}), true);
+    const patch = revision => ({
+      patch: true,
+      collection: 'sessions',
+      changes: {'1': {target: '1', enabled: revision % 2 === 1, agent_windows: [{window_index: 0, state: `rev-${revision}`}]}},
+      removed_keys: [],
+      fields: {agent_window_snapshot_revision: revision},
+      removed_fields: [],
+    });
+    // 401, 402, 403 each carry the immediately preceding base and apply in order.
+    for (const revision of [401, 402, 403]) {
+      assert.equal(
+        api.handleClientPushEventForTest('auto_approve_changed', patch(revision), {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: revision - 1, resource_revision: revision}),
+        true,
+        `revision ${revision} applies on its immediate predecessor`,
+      );
+      assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, revision, 'the single applied revision advances only at validated apply');
+    }
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'rev-403', 'the last in-order patch is the applied state');
+    // A re-delivered 402 (<= the applied 403) is superseded and cannot walk the applied revision back.
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', patch(402), {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: 401, resource_revision: 402}), false, 'a superseded revision cannot walk the applied revision backward');
+    assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, 403, 'a rejected out-of-order frame never advances the applied revision');
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests.filter(url => url === '/api/auto-approve'), [], 'in-order patches repair nothing over ordinary HTTP');
+  });
+
+  await testAsync('a revision-only agent-window patch advances the revision without HTTP or a row rebuild', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
+    api.setDocumentVisibilityForTest('hidden');
+    const base = {
+      agent_window_snapshot_revision: 7,
+      session_order: ['1'],
+      sessions: {'1': {target: '1', enabled: true, agent_windows: [{window_index: 0, state: 'working'}]}},
+      rules: {mode: 'safe'},
+    };
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', {data: base}, {epoch: 'server-a', resource: 'auto_approve_changed', resource_revision: 1}), true);
+    assert.equal(api.autoApproveStateForTest('1').agent_window_snapshot_revision, 7);
+    // The server re-measured the same rows under a new snapshot revision: a MINIMAL patch (empty
+    // changes, one field) advances the revision on every row without changing row content.
+    const revisionOnly = {
+      patch: true,
+      collection: 'sessions',
+      changes: {},
+      removed_keys: [],
+      fields: {agent_window_snapshot_revision: 8},
+      removed_fields: [],
+    };
+    const before = api.autoApproveStateForTest('1');
+    const httpBefore = requests.filter(url => url === '/api/auto-approve').length;
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', revisionOnly, {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: 1, resource_revision: 2}), true);
+    const after = api.autoApproveStateForTest('1');
+    assert.equal(after.agent_window_snapshot_revision, 8, 'the revision-only patch advances the snapshot revision');
+    assert.deepStrictEqual(after.agent_windows, before.agent_windows, 'the row content is unchanged by a revision-only patch');
+    assert.equal(after.state, before.state, 'no row field beyond the revision changes');
+    await flushAsyncWork();
+    assert.equal(requests.filter(url => url === '/api/auto-approve').length - httpBefore, 0, 'a revision-only patch performs no HTTP refetch');
+  });
+
   test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     assert.ok(/function clientEventRepairChannels\(resources = \[\]\)[\s\S]*fs_changed[\s\S]*channels\.add\('files'\)[\s\S]*event_log_changed[\s\S]*channels\.add\('events'\)[\s\S]*return channels/.test(source), 'overflow maps files/event logs to their own repair channels');
@@ -2196,6 +2878,47 @@ async function runLayoutAsyncSuite() {
     assert.equal(afterUnidentified.payload.sessions['1'].marker, 'legacy-server');
     assert.equal(afterUnidentified.epoch, 'epoch-a', 'an identity-less payload cannot change which server the client is tracking');
     assert.equal(afterUnidentified.generation, 7, 'a bare generation scalar cannot advance the applied identity');
+  });
+
+  await testAsync('a superseded response still records the build the server promised', async () => {
+    // Regression: the pending identity is a fact about the SERVER's build queue, not about whether
+    // this client's request is still current, but it was read AFTER the supersede check and so was
+    // discarded with the payload. A forced read whose apply lost the race against any concurrent
+    // refresh or `transcripts_changed` push therefore left `pendingGeneration` at zero -- a target
+    // every payload already satisfies -- while the forced settle, which reads the target from its
+    // own response, still converged. The reload gate saw exactly that: the server named build 7 and
+    // the browser reported awaiting build 0.
+    const api = loadYolomux('', ['1']);
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 7},
+      cache: {pending_identity: {epoch: 'epoch-a', generation: 9}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(api.transcriptMetadataStateForTest().pendingGeneration, 9);
+
+    const superseded = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 10},
+      cache: {pending_identity: {epoch: 'epoch-a', generation: 11}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false, requestIsCurrent: () => false});
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(superseded, false, 'a superseded payload is still not rendered');
+    assert.equal(state.lastApply.reason, 'superseded_request');
+    assert.equal(state.generation, 7, 'a superseded payload cannot advance the RENDERED generation');
+    assert.equal(state.pendingGeneration, 11, 'the build the server promised survives the supersede');
+
+    // The epoch fence still holds: a promise from another server process is not comparable here.
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-b', generation: 20},
+      cache: {pending_identity: {epoch: 'epoch-b', generation: 21}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false, requestIsCurrent: () => false});
+    const afterForeign = api.transcriptMetadataStateForTest();
+    assert.equal(afterForeign.epoch, 'epoch-a', 'a superseded reply cannot adopt another epoch');
+    assert.equal(afterForeign.pendingGeneration, 11, 'a promise from another server process is not adopted here');
   });
 
   // ---------------------------------------------------------------------------------------------
@@ -2704,6 +3427,37 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.yoagentConversationStateForTest().loading, false, 'conversation loading settles after stale cleanup');
   });
 
+  await testAsync('YO!agent read resources dedupe same targets and preserve consumer error policy', async () => {
+    const pendingJobs = [];
+    const pendingConversation = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      const request = deferredFetch();
+      if (String(url) === '/api/yoagent/jobs') pendingJobs.push(request);
+      else if (String(url) === '/api/yoagent/conversation') pendingConversation.push(request);
+      else throw new Error(`unexpected URL ${url}`);
+      return request.promise;
+    });
+
+    const jobs = api.loadYoagentJobsForTest({silent: true});
+    assert.strictEqual(api.loadYoagentJobsForTest({silent: true}), jobs, 'same-target jobs reads share one request');
+    pendingJobs[0].resolve(jsonResponse({jobs: [{id: 'last-good-job'}]}));
+    assert.equal(await jobs, true, 'jobs retain their boolean success result');
+    const failedJobs = api.loadYoagentJobsForTest({force: true, silent: true});
+    pendingJobs[1].reject(new Error('jobs offline'));
+    assert.equal(await failedJobs, false, 'silent jobs errors remain swallowed as false');
+    assert.equal(api.yoagentJobsStateForTest().items[0].id, 'last-good-job', 'jobs failure preserves last good data');
+
+    const conversation = api.loadYoagentConversationForTest({silent: true, render: false});
+    assert.strictEqual(api.loadYoagentConversationForTest({silent: true, render: false}), conversation, 'same-target conversation reads share one request');
+    pendingConversation[0].resolve(jsonResponse({messages: [{content: 'last-good-conversation'}], pending_waits: []}));
+    assert.equal(await conversation, true, 'conversation retains its boolean apply result');
+    const failedConversation = api.loadYoagentConversationForTest({force: true, silent: true, render: false});
+    pendingConversation[1].reject(new Error('conversation offline'));
+    assert.equal(await failedConversation, false, 'silent conversation errors remain swallowed as false');
+    assert.equal(api.yoagentConversationStateForTest().messages[0].content, 'last-good-conversation', 'conversation failure preserves last good data');
+  });
+
   test('data request records keep retired parallel globals absent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     assert.equal(/\btranscriptMeta\b/.test(source), false, 'transcriptMeta remains retired');
@@ -2719,6 +3473,8 @@ async function runLayoutAsyncSuite() {
     for (const owner of ['transcriptMetadataState', 'searchHistoryState', 'runHistoryState', 'yoagentConversationState', 'yoagentJobsState']) {
       assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
     }
+    assert.equal(source.includes('yoagentConversationState.guard'), false, 'conversation has no parallel generation guard');
+    assert.equal(source.includes('yoagentJobsState.guard'), false, 'jobs has no parallel generation guard');
   });
 
   await testAsync('Finder Sync record cancels stale root work and resets manual ownership atomically', async () => {
@@ -3007,6 +3763,27 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]'), row, 'an unchanged signature skips reconciliation and preserves DOM identity');
   });
 
+  test('tree-row patch preserves normalized Finder file and Differ directory contracts in place', () => {
+    const api = loadYolomux('', ['1']);
+    const finder = api.testElementForId('tree-row-finder-contract');
+    const file = {name: 'file.md', kind: 'file', size: 12, mtime: 100};
+    api.renderTreeChildrenForTest(finder, '/repo', [file]);
+    const finderRow = finder.querySelector('.file-tree-row[data-path="/repo/file.md"]');
+    const finderContract = api.treeRowContractForTest(finderRow);
+    api.renderTreeChildrenForTest(finder, '/repo', [{...file}]);
+    assert.strictEqual(finder.querySelector('.file-tree-row[data-path="/repo/file.md"]'), finderRow, 'Finder patches the existing file row');
+    assert.deepStrictEqual(canonical(api.treeRowContractForTest(finderRow)), canonical(finderContract), 'Finder file DOM/dataset/classes/ARIA/column order are stable');
+
+    const differ = api.testElementForId('tree-row-differ-contract');
+    const directory = {name: 'src', kind: 'dir', mtime: 200};
+    api.renderTreeChildrenForTest(differ, '/repo', [directory], 0, [['/repo/src', []]], {differMode: true, repoForDiffer: '/repo'});
+    const differRow = differ.querySelector('.file-tree-row[data-path="/repo/src"]');
+    const differContract = api.treeRowContractForTest(differRow);
+    api.renderTreeChildrenForTest(differ, '/repo', [{...directory}], 0, [['/repo/src', []]], {differMode: true, repoForDiffer: '/repo'});
+    assert.strictEqual(differ.querySelector('.file-tree-row[data-path="/repo/src"]'), differRow, 'Differ patches the existing directory row');
+    assert.deepStrictEqual(canonical(api.treeRowContractForTest(differRow)), canonical(differContract), 'Differ directory DOM/dataset/classes/ARIA/column order are stable');
+  });
+
   await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {
     const api = loadYolomux('', ['1']);
     const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);
@@ -3050,10 +3827,126 @@ async function runLayoutAsyncSuite() {
     assert.ok(source.includes('function fileExplorerFsBatchClientMetadata()'), 'batch requests carry an opaque client revision and scope');
     assert.ok(source.includes('watch_token: watchToken.slice(0, 128)'), 'batch product identity follows the existing filesystem watch token so ready bytes retire after invalidation');
     assert.ok(source.includes('trigger_counts: item.triggerCounts') && source.includes('...fileExplorerFsBatchClientMetadata()'), 'each batch item carries bounded trigger counts while the request carries browser scope');
-    assert.ok(source.includes('fileExplorerFsBatchTriggerCountLimit = 64'), 'coalesced trigger counts have a fixed bounded ceiling');
+    // Both /api/fs/batch bounds are the server's, and it states them in the boot payload. A literal
+    // here would be a copy free to drift from filesystem.MAX_BATCH_REQUESTS, which is what let the
+    // flush post a body the server refuses.
+    assert.ok(source.includes("const fileExplorerFsBatchLimits = (typeof bootstrap === 'object' && bootstrap?.filesystemBatchLimits) || {};"), 'the batch bounds are read from the boot payload the server writes');
+    assert.ok(source.includes('const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);'), 'the flush splits at the request bound the server states');
+    assert.ok(source.includes('const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);'), 'coalesced trigger counts are capped at the ceiling the server states');
+    assert.equal(/(?:fileExplorerFsBatchRequestLimit|fileExplorerFsBatchTriggerCountLimit)\s*=\s*\d/.test(source), false, 'neither batch bound may be a literal in the bundle');
     assert.ok(/catch \(error\)[\s\S]{0,260}trigger: 'watch-diff-fallback'/.test(source), 'watch-diff failure repairs remain attributable');
     assert.ok(source.includes("trigger: 'deferred-interaction'"), 'the deferred interaction repair is distinguishable from the watch fallback');
     assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
+  });
+
+  await testAsync('a mass re-list is split at the bound the server states instead of posted whole and refused', async () => {
+    // Keiven's Differ pointed at a worktree deleted the day before, which re-lists every open
+    // directory at once. The flush drained the whole queue into ONE body, and the server refuses a
+    // body above filesystem.MAX_BATCH_REQUESTS with a 400 invalid_request, so the entire operation
+    // failed rather than being split. The stub refuses exactly the way the server does.
+    const api = loadYolomux();
+    const bodies = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      bodies.push(requests);
+      if (requests.length > 64) {
+        return Promise.resolve(jsonResponse({
+          state: 'failed',
+          request: {id: 'r-too-many'},
+          error: {code: 'invalid_request', message: {key: 'request.error.tooManyItems', fallback: 'too many items', params: {field: 'requests', max: 64}}},
+        }, 400));
+      }
+      return Promise.resolve(jsonResponse({
+        responses: requests.map(request => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, entries: [{name: `${request.id}.txt`, kind: 'file'}]},
+        })),
+      }));
+    });
+
+    const paths = Array.from({length: 130}, (_, index) => `/home/test/mass/${index}`);
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const flush = await api.flushFileExplorerFsBatchForTest();
+    assert.equal(flush.ok, true, 'a 130-path re-list succeeds instead of being refused');
+    assert.deepStrictEqual(bodies.map(requests => requests.length), [64, 64, 2], 'the queue is split into consecutive slices no larger than the stated bound');
+    assert.equal(bodies.some(requests => requests.length > 64), false, 'no body reaches the server above the bound it refuses');
+    assert.deepStrictEqual(bodies.flat().map(request => request.path), paths, 'chunking preserves queue order across chunk boundaries');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(
+      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
+      bodies.flat().map(request => [`${request.id}.txt`]),
+      'every queued path still gets its own per-item result',
+    );
+  });
+
+  await testAsync('a failing filesystem batch chunk settles only its own items and never discards its siblings', async () => {
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {filesystemBatchLimits: {maxRequests: 2, triggerCountLimit: 64}},
+    });
+    const posts = [];
+    const singles = [];
+    api.setFetchForTest((url, options = {}) => {
+      const text = String(url);
+      if (text.startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        posts.push(requests.map(request => request.path));
+        // Only the FIRST chunk fails, at the transport, which is the case that used to be able to
+        // take a whole flush with it.
+        if (posts.length === 1) return Promise.reject(new Error('chunk transport failed'));
+        return Promise.resolve(jsonResponse({
+          responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+        }));
+      }
+      // The failed chunk falls back to one request per item; fail those too, so the two items it
+      // owns end in their error state and the assertion below is about the siblings only.
+      singles.push(text);
+      return Promise.reject(new Error('single-item fallback failed'));
+    });
+
+    const paths = ['/home/test/chunk/a', '/home/test/chunk/b', '/home/test/chunk/c', '/home/test/chunk/d', '/home/test/chunk/e'];
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const flush = await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(posts, [
+      ['/home/test/chunk/a', '/home/test/chunk/b'],
+      ['/home/test/chunk/c', '/home/test/chunk/d'],
+      ['/home/test/chunk/e'],
+    ], 'the chunks after the failed one are still posted, in queue order');
+    assert.equal(flush.chunks, 3, 'the stated bound of 2 splits five queued paths into three chunks');
+    assert.equal(flush.ok, false, 'the flush reports the failed chunk rather than hiding it');
+    assert.equal(singles.length, 2, 'only the failed chunk falls back to per-item requests');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(
+      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
+      [null, null, ['ok.txt'], ['ok.txt'], ['ok.txt']],
+      'the failed chunk surfaces its own error while every sibling item still gets its result',
+    );
+  });
+
+  await testAsync('a boot payload that states no filesystem batch bound posts one item per request', async () => {
+    // Fail closed: a server that did not state a bound is one this bundle cannot promise a bounded
+    // body to, so it sends the only size no server can refuse for being too large.
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {filesystemBatchLimits: null},
+    });
+    const bodies = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      bodies.push(requests.map(request => request.path));
+      return Promise.resolve(jsonResponse({
+        responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+      }));
+    });
+
+    const paths = ['/home/test/unstated/a', '/home/test/unstated/b', '/home/test/unstated/c'];
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(bodies, [[paths[0]], [paths[1]], [paths[2]]], 'an unstated bound sends one item per request rather than a remembered 64');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(entries.map(entry => entry.map(row => row.name)), [['ok.txt'], ['ok.txt'], ['ok.txt']], 'every item still settles');
   });
 
   test('compact watchd push revisions cannot overwrite the watch-diff cursor', () => {

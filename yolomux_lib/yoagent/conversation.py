@@ -19,10 +19,18 @@ from ..common import STATE_DIR
 from ..common import tail_file_lines
 from ..common import truncate_text
 from ..filesystem.io_ops import read_json_file
+from ..infra.host_partition import host_partitioned_state_dir
 from ..locales import message_descriptor
 
 
-YOAGENT_STATE_DIR = STATE_DIR / "yoagent"
+def default_yoagent_state_dir(state_dir: Path | None = None) -> Path:
+    """Keep one host's YO!agent conversations out of a shared home mount."""
+
+    root = STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "yoagent"
+
+
+YOAGENT_STATE_DIR = default_yoagent_state_dir()
 YOAGENT_CONVERSATION_PATH = YOAGENT_STATE_DIR / "conversation.jsonl"
 YOAGENT_CLI_STATE_PATH = YOAGENT_STATE_DIR / "cli-sessions.json"
 YOAGENT_CONVERSATION_MAX_MESSAGES = 500

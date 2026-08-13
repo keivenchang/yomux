@@ -199,10 +199,14 @@ def test_background_owner_uses_the_injected_host_identity_process_fields(two_hos
     assert payload["process_start_ticks"] == identity.process_start_ticks
 
 
-def test_local_service_registry_uses_the_injected_host_identity_process_fields(
+def test_local_service_registry_records_the_carried_wire_process_start_identity(
     two_hosts: TwoHostFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The status is the daemon's own identity-bearing probe response: `_record_from_status` records
+    # the process_start_identity CARRIED on the wire (the final-probe identity), never a local pid
+    # lookup fallback, and combines it with the injected host's stable_host_id/boot_id. A status that
+    # omits the carried identity therefore yields an empty process_start_identity by design.
     identity = simulated_identity(two_hosts.host_a)
     monkeypatch.setattr(registry_module, "process_group_id", lambda _pid: FIXTURE_PGID)
     registry = LocalServiceRegistry(
@@ -211,7 +215,9 @@ def test_local_service_registry_uses_the_injected_host_identity_process_fields(
         host_identity=identity,
     )
 
-    payload = registry._record_from_status({"pid": identity.pid, "version": 1})
+    payload = registry._record_from_status(
+        {"pid": identity.pid, "version": 1, "process_start_identity": identity.process_start_identity}
+    )
 
     assert payload["stable_host_id"] == identity.stable_host_id
     assert payload["boot_id"] == identity.boot_id

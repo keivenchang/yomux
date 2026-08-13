@@ -1419,8 +1419,24 @@ function loadFileEditorState(path, panel, item) {
       const fetched = await fetchFileEntryStatus(path);
       const entry = fetched.entry;
       if (!entry) {
-        if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error));
+        if (fetched.missing) {
+          // A directory-listing omission is not proof a media file is gone. Confirm through the shared
+          // authoritative /api/fs/info guard (fenced against newer per-path state) before marking missing;
+          // a stale/racing omission must never clobber an open, valid media view.
+          const verdict = await resolveOpenMediaMissingVerdict(path);
+          if (verdict?.missing) {
+            markOpenFileMissing(path);
+          } else if (verdict?.state) {
+            setFileState(path, verdict.state);
+            bumpOpenFileContentGeneration(path);
+            if (panel) renderFileEditorPanel(panel, item);
+          } else if (verdict?.error) {
+            setFileState(path, fileErrorState(verdict.error));
+          }
+          // verdict null (superseded by a newer render): keep the newer content.
+        } else {
+          setFileState(path, fileErrorState(fetched.error));
+        }
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -1434,6 +1450,7 @@ function loadFileEditorState(path, panel, item) {
       } else {
         setFileState(path, rawPreviewFileState(path, entry));
       }
+      bumpOpenFileContentGeneration(path);
       if (panel) renderFileEditorPanel(panel, item);
       renderSessionButtons();
       renderPaneTabStrips();
@@ -1449,6 +1466,7 @@ function loadFileEditorState(path, panel, item) {
         content: payload.content,
         dirty: false,
       }, payload));
+      bumpOpenFileContentGeneration(path);
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {

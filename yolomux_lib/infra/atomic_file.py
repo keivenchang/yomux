@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .filesystem_preflight import preflight_mutable_roots
+
 # One in-process RLock per file path, so threads serialize before contending on the OS flock. A registry
 # (rather than a per-caller module global) means two modules locking the same path share one lock.
 _PATH_LOCKS: dict[str, threading.RLock] = {}
@@ -106,6 +108,7 @@ def open_wal_database(path: Path, busy_timeout_ms: int, *, row_factory: Any = No
     PRAGMAs like foreign_keys). `isolation_level=None` keeps autocommit so callers drive
     explicit BEGIN IMMEDIATE transactions.
     """
+    preflight_mutable_roots(wal_databases=[path])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     connection = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
@@ -176,3 +179,29 @@ def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
             tmp.unlink()
         except FileNotFoundError:
             pass
+
+
+def append_fsync_text(path: Path, text: str, mode: int | None = None) -> None:
+    """Append ``text`` to ``path`` durably while serializing sibling writers.
+
+    This is deliberately not an atomic replacement: callers that keep a journal need the
+    accepted record to survive before they expose a receipt, without rewriting prior records.
+    """
+    if not text:
+        return
+    effective_mode = 0o600 if mode is None else mode
+    encoded = text.encode("utf-8")
+    with file_lock(path, dir_mode=0o700):
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, effective_mode)
+        try:
+            offset = 0
+            while offset < len(encoded):
+                written = os.write(descriptor, encoded[offset:])
+                if written <= 0:
+                    raise OSError("failed to append durable text")
+                offset += written
+            os.fsync(descriptor)
+            if mode is not None:
+                os.chmod(path, mode)
+        finally:
+            os.close(descriptor)

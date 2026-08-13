@@ -14,12 +14,12 @@ from threading import Thread
 
 import pytest
 
-from test_mock_agents import case_command_name
-from test_mock_agents import root_inventory_cases
-from test_mock_agents import short_tmux_socket_path
-from test_mock_agents import tmux_cmd
-from test_mock_agents import wait_for_mockcase_render
-from test_mock_agents import REPO_ROOT
+from tests.helpers.mock_agents import case_command_name
+from tests.helpers.mock_agents import root_inventory_cases
+from tests.helpers.mock_agents import short_tmux_socket_path
+from tests.helpers.mock_agents import tmux_cmd
+from tests.helpers.mock_agents import wait_for_mockcase_render
+from tests.helpers.mock_agents import REPO_ROOT
 from yolomux_lib import control as control_module
 from yolomux_lib import sessions as sessions_mod
 from yolomux_lib import statusd
@@ -495,13 +495,24 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
                 body,
             )
 
-        service.handle(request)
-        deadline = time.monotonic() + 2.0
+        refresh_completed = Event()
+        real_build = service._build
+
+        def observed_build(sessions):
+            try:
+                return real_build(sessions)
+            finally:
+                refresh_completed.set()
+
+        monkeypatch.setattr(service, "_build", observed_build)
+        stale_response, stale_body = service.handle(request)
+        assert stale_response["ok"] is True
+        assert stale_response["stale"] is True
+        assert stale_response["generation"] == metadata.generation
+        assert stale_body == body
+        assert refresh_completed.wait(timeout=10)
         with service.lock:
-            while service.snapshot[0].generation <= metadata.generation:
-                remaining = deadline - time.monotonic()
-                assert remaining > 0
-                service.lock.wait(remaining)
+            assert service.snapshot[0].generation > metadata.generation
         assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "idle"
     finally:
         if "service" in locals():

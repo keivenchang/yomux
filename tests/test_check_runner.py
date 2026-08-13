@@ -13,13 +13,19 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from tests import latency_calibration
+from tests.browser_helpers import webdriver_lease
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
+from tools import static_build
+from tools import test_catalog
+from tools import test_plan
+from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
@@ -130,6 +136,8 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert static_lane.steps == (
         check.Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
         check.Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
+        check.Step("architecture budgets", ["python3", "tools/architecture_budgets.py"]),
+        check.Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
     )
     pytest_lane = next(lane for lane in lanes if lane.name == "pytest")
     # The default pytest lane runs the full suite EXCEPT node_bridge and e2e: test_node_suite.py shells
@@ -142,8 +150,13 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
     node_lane = next(lane for lane in lanes if lane.name == "node-layout")
     assert node_lane.steps[0].args == ["node", "tests/layout_url.test.js", *check.NODE_LAYOUT_FILES]
-    assert "tests/share_theme.test.js" not in check.NODE_LAYOUT_FILES
-    assert "tests/share_file_surface_replay.test.js" not in check.NODE_LAYOUT_FILES
+    # The lane passes these as argv, which OVERRIDES the launcher's own default list, so a shard
+    # missing here runs in no gate lane at all: test_node_suite.py runs the bare launcher but carries
+    # the node_bridge marker the default pytest lane excludes. share_theme owns quick-open, Finder,
+    # Differ, editor, terminal, and layout in addition to share, and was dropped from the gate for a
+    # share quarantine; share_file_surface_replay pins live 93_share_state.js/94_share_replay.js source.
+    assert "tests/share_theme.test.js" in check.NODE_LAYOUT_FILES
+    assert "tests/share_file_surface_replay.test.js" in check.NODE_LAYOUT_FILES
     assert "tests/gate_panels.test.js" not in check.NODE_LAYOUT_FILES
     assert "tests/test_browser_share.py" in check.pytest_files("browser")
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
@@ -159,6 +172,28 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
+
+
+def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
+    """A shard may leave the gate only through NODE_LAYOUT_EXCLUDED_FILES, in both list owners.
+
+    The gate lane passes NODE_LAYOUT_FILES as argv and the launcher applies
+    defaultGateExcludedSuiteFiles only when run bare, so these were two hand-maintained copies of one
+    list. They drifted: share_theme.test.js and share_file_surface_replay.test.js ran in neither
+    default lane while the gate still reported green.
+    """
+
+    shards = {path.name for path in (REPO_ROOT / "tests").glob("*.test.js")}
+    shards.discard(Path(test_catalog.NODE_SHARD_LAUNCHER).name)
+    excluded = set(test_catalog.NODE_LAYOUT_EXCLUDED_FILES)
+
+    assert set(test_catalog.NODE_LAYOUT_FILES) == {f"tests/{name}" for name in shards} - excluded
+    assert excluded <= {f"tests/{name}" for name in shards}, "excluding a shard that does not exist"
+
+    launcher = (REPO_ROOT / "tests" / "layout_url.test.js").read_text(encoding="utf-8")
+    _all_suite_files, excluded_block = launcher.split("const defaultGateExcludedSuiteFiles", 1)
+    launcher_excluded = set(re.findall(r"'(tests/[^']+\.test\.js)'", excluded_block.split("]);", 1)[0]))
+    assert launcher_excluded == excluded, "the launcher and the check catalog exclude different shards"
 
 
 def test_focused_pytest_lanes_keep_expected_filters():
@@ -227,6 +262,261 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
+
+    assert test_catalog.focused_phase_target_args("nonbrowser") == [
+        "tests",
+        "--ignore=tests/test_browser_layout.py",
+    ]
+
+
+def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
+    check = load_check_module()
+    built = check.lanes()
+    assert [(lane.name, lane.label, lane.default) for lane in built] == [
+        (spec.name, spec.label, spec.default) for spec in test_plan.LANE_SPECS
+    ]
+    browser_spec = test_plan.lane_spec("pytest-browser")
+    assert browser_spec.prerequisites == ("pytest-boot",)
+    assert browser_spec.phases == ("boot", "browser", "golden")
+    assert browser_spec.worker_class == "pytest-mixed"
+    assert test_plan.lane_spec("pytest-browser-behavior").focused_alias_of == "pytest-browser"
+    assert test_plan.resolved_lane_step_ids(browser_spec) == (
+        "pytest-boot",
+        "pytest-browser",
+        "pytest-browser-golden",
+    )
+    browser = next(lane for lane in built if lane.name == "pytest-browser")
+    boot = next(lane for lane in built if lane.name == "pytest-boot")
+    behavior = next(lane for lane in built if lane.name == "pytest-browser-behavior")
+    assert browser.steps[0] is boot.steps[0]
+    assert behavior.steps[0] is browser.steps[1]
+
+    default_step_owners = {}
+    for spec in test_plan.LANE_SPECS:
+        if not spec.default:
+            continue
+        for step_id in test_plan.resolved_lane_step_ids(spec):
+            assert step_id not in default_step_owners, (
+                step_id,
+                default_step_owners.get(step_id),
+                spec.name,
+            )
+            default_step_owners[step_id] = spec.name
+
+
+def test_lane_spec_prerequisite_cycle_fails_closed(monkeypatch):
+    cyclic = (
+        test_plan.LaneSpec("first", "first", (), prerequisites=("second",)),
+        test_plan.LaneSpec("second", "second", (), prerequisites=("first",)),
+    )
+    monkeypatch.setattr(test_plan, "LANE_SPECS", cyclic)
+    with pytest.raises(ValueError, match="prerequisite cycle"):
+        test_plan.resolved_lane_step_ids(cyclic[0])
+
+
+def test_lane_registry_references_are_typed_total_and_fail_closed(monkeypatch):
+    check = load_check_module()
+    catalog = check.step_catalog()
+    original_specs = test_plan.LANE_SPECS
+    assert set(catalog) == set(test_plan.StepId)
+    test_plan.validate_lane_specs(catalog)
+
+    missing = dict(catalog)
+    missing.pop(test_plan.StepId.WHITESPACE)
+    with pytest.raises(ValueError, match="missing executable step IDs: whitespace"):
+        test_plan.validate_lane_specs(missing)
+
+    with pytest.raises(ValueError, match="duplicate step ID in executable catalog"):
+        test_plan.validate_lane_specs([*catalog, test_plan.StepId.WHITESPACE])
+
+    with pytest.raises(ValueError, match="extra executable step IDs: invented"):
+        test_plan.validate_lane_specs([*catalog, "invented"])
+
+    duplicated = (*test_plan.LANE_SPECS, test_plan.LaneSpec("second-whitespace", "second", (test_plan.StepId.WHITESPACE,)))
+    monkeypatch.setattr(test_plan, "LANE_SPECS", duplicated)
+    with pytest.raises(ValueError, match="duplicate step ID whitespace"):
+        test_plan.validate_lane_specs(catalog)
+
+    unknown_step = (test_plan.LaneSpec("unknown", "unknown", ("invented",)),)
+    monkeypatch.setattr(test_plan, "LANE_SPECS", unknown_step)
+    with pytest.raises(ValueError, match="unknown step ID in lane unknown"):
+        test_plan.validate_lane_specs(catalog)
+
+    drifted = tuple(
+        replace(spec, phases=("browser",)) if spec.name == "pytest" else spec
+        for spec in original_specs
+    )
+    monkeypatch.setattr(test_plan, "LANE_SPECS", drifted)
+    with pytest.raises(ValueError, match="test phase drift in lane pytest"):
+        test_plan.validate_lane_specs(catalog)
+
+
+@pytest.mark.parametrize(
+    "name, marker_expression",
+    (
+        ("unit", "not socket and not browser and not node_bridge"),
+        ("socket", "socket and not browser"),
+    ),
+)
+def test_focused_alias_collection_matches_phase_catalog_in_exact_order_and_markers(tmp_path, name, marker_expression):
+    check = load_check_module()
+    lane_args = next(lane for lane in check.lanes() if lane.name == f"pytest-{name}").steps[0].args
+    historical_args = [
+        "python3",
+        "-m",
+        "pytest",
+        "tests",
+        "--ignore=tests/test_browser_layout.py",
+        "-m",
+        marker_expression,
+        "-q",
+    ]
+    assert lane_args == historical_args
+    catalog_files = check.pytest_files("nonbrowser")
+    assert test_catalog.focused_phase_target_args("nonbrowser") == [
+        "tests",
+        "--ignore=tests/test_browser_layout.py",
+    ]
+    focused_owner_order = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in sorted((REPO_ROOT / "tests").rglob("test_*.py"))
+        if path != REPO_ROOT / "tests/test_browser_layout.py"
+        and "nonbrowser" in test_catalog.file_phases(path)
+    ]
+    assert focused_owner_order == catalog_files
+
+    test_root = tmp_path / "tests"
+    nested = test_root / "nested"
+    nested.mkdir(parents=True)
+    (nested / "test_owner.py").write_text(
+        "import pytest\n\n"
+        "pytestmark = pytest.mark.owner\n\n"
+        "def test_first(): pass\n\n"
+        "@pytest.mark.socket\n"
+        "def test_socket(): pass\n",
+        encoding="utf-8",
+    )
+    (test_root / "test_peer.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.slow\n"
+        "def test_last(): pass\n",
+        encoding="utf-8",
+    )
+    (test_root / "test_browser_layout.py").write_text(
+        "import pytest\n\n"
+        "pytestmark = pytest.mark.browser\n\n"
+        "def test_browser_only(): pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nmarkers =\n    browser: browser\n    node_bridge: node bridge\n    owner: owner\n    slow: slow\n    socket: socket\n",
+        encoding="utf-8",
+    )
+    phase_files = discover_pytest_phase_files(test_root, repo_root=tmp_path)["nonbrowser"]
+
+    def collect(label, targets):
+        destination = tmp_path / f"{name}-{label}.json"
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.pathsep.join(
+            value for value in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if value
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--collect-only",
+                "-q",
+                "-p",
+                "tools.pytest_catalog_plugin",
+                f"--yolomux-catalog-output={destination}",
+                *targets,
+                "-m",
+                marker_expression,
+            ],
+            cwd=tmp_path,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return json.loads(destination.read_text(encoding="utf-8"))
+
+    focused_rows = collect("focused", ("tests", "--ignore=tests/test_browser_layout.py"))
+    phase_rows = collect("phase", phase_files)
+    assert focused_rows == phase_rows
+
+
+def test_browser_capability_preflight_names_missing_dependency_browser_and_driver(monkeypatch, tmp_path):
+    check = load_check_module()
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, "host-only test"))
+    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: None)
+    assert check.browser_capability_preflight().component == "dependency"
+
+    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(check.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(check.Path, "is_file", lambda _path: False)
+    assert check.browser_capability_preflight().component == "browser"
+
+    browser = tmp_path / "chrome"
+    browser.write_text("", encoding="utf-8")
+    monkeypatch.undo()
+    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(
+        check.shutil,
+        "which",
+        lambda name: str(browser) if name == "google-chrome" else None,
+    )
+    assert check.browser_capability_preflight().component == "driver"
+
+
+def test_browser_capability_preflight_runs_in_the_container_execution_environment(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=check.BrowserCapabilityDiagnostic(True, "ready", "container capabilities").json_text() + "\n",
+        stderr="",
+    )
+    monkeypatch.setattr(check.subprocess, "run", lambda *args, **kwargs: completed)
+
+    diagnostic = check.browser_capability_preflight()
+
+    assert diagnostic == check.BrowserCapabilityDiagnostic(True, "ready", "container capabilities")
+
+
+def test_browser_capability_preflight_reports_container_probe_failure(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
+    completed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="docker probe failed\n")
+    monkeypatch.setattr(check.subprocess, "run", lambda *args, **kwargs: completed)
+
+    diagnostic = check.browser_capability_preflight()
+
+    assert diagnostic.component == "environment"
+    assert diagnostic.detail == "isolated test environment probe failed: docker probe failed"
+
+
+def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, capsys):
+    check = load_check_module()
+    monkeypatch.setattr(
+        check,
+        "browser_capability_preflight",
+        lambda: check.BrowserCapabilityDiagnostic(False, "driver", "missing exact driver"),
+    )
+    monkeypatch.setattr(check, "run_parallel", lambda _lanes: pytest.fail("lane must not start"))
+    assert check.main(["--lane", "pytest-browser", "--no-tool-guard"]) == check.EXIT_LANE_FAILED
+    assert "BROWSER PREFLIGHT FAILED [driver]: missing exact driver" in capsys.readouterr().err
+
+
+def test_catalog_and_collection_share_filename_marker_owner():
+    assert test_catalog.automatic_test_markers is test_plan.automatic_test_markers
+    assert test_catalog.PHASE_MARKER_PRECEDENCE is test_plan.PHASE_MARKER_PRECEDENCE
+    assert test_plan.automatic_test_markers("test_browser_new.py") == ("browser", "socket")
+    assert test_plan.automatic_test_markers("test_new.py") == ()
 
 
 def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
@@ -366,25 +656,19 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
-        check=True,
+        check=False,
     )
+    assert result.returncode == 0, result.stdout + result.stderr
     collection_rows = json.loads(output_path.read_text(encoding="utf-8"))
     collected = {row["nodeid"] for row in collection_rows}
     collected_base = {nodeid.split("[", 1)[0] for nodeid in collected}
     missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected_base]
     assert missing == []
     check = load_check_module()
-    expected_phase_by_marker = (
-        ("node_bridge", "node_bridge"),
-        ("e2e", "e2e"),
-        ("visual_golden", "golden"),
-        ("boot", "boot"),
-        ("browser", "browser"),
-    )
     catalog_files = {phase: set(paths) for phase, paths in check.PYTEST_PHASE_FILES.items()}
     phase_rows = {phase: [] for phase in catalog_files}
     for row in collection_rows:
-        phase = next((candidate for marker, candidate in expected_phase_by_marker if marker in row["markers"]), "nonbrowser")
+        phase = test_plan.phase_for_markers(set(row["markers"]))
         phase_rows[phase].append(row["nodeid"])
     ownership_errors = []
     for phase, nodeids in phase_rows.items():
@@ -394,6 +678,9 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
                 ownership_errors.append(f"{nodeid} belongs to {phase}, but {path} is absent from its catalog")
     assert ownership_errors == []
     assert set().union(*map(set, phase_rows.values())) == collected
+    for phase, rows in phase_rows.items():
+        owner_order = list(dict.fromkeys(nodeid.split("::", 1)[0] for nodeid in rows))
+        assert owner_order == check.pytest_files(phase)
 
 
 def test_pytest_catalog_discovers_new_files_and_mixed_phases(tmp_path):
@@ -421,6 +708,42 @@ def test_pytest_catalog_discovers_new_files_and_mixed_phases(tmp_path):
     assert "tests/test_new_contract.py" in catalog["e2e"]
     assert "tests/test_browser_new_surface.py" in catalog["browser"]
     assert "tests/test_browser_new_surface.py" not in catalog["nonbrowser"]
+
+
+def test_pytest_catalog_ignores_marker_values_inside_parametrize_arguments(tmp_path):
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    path = test_root / "test_marker_values.py"
+    path.write_text(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('marker', [pytest.mark.browser.mark, pytest.mark.no_browser.mark])\n"
+        "def test_marker_value(marker): pass\n",
+        encoding="utf-8",
+    )
+
+    assert test_catalog.test_definitions(path, repo_root=tmp_path) == (
+        ("tests/test_marker_values.py::test_marker_value", "nonbrowser"),
+    )
+    assert discover_pytest_phase_files(test_root, repo_root=tmp_path)["browser"] == ()
+
+
+def test_phase_catalog_and_runtime_share_slowest_first_owner_order(tmp_path):
+    test_root = tmp_path / "tests"
+    test_root.mkdir()
+    for name, body in {
+        "test_browser_share.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_generated_share_link_mirrors_interactive_ui_surface_matrix(): pass\ndef test_after(): pass\n",
+        "test_browser_dockview.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(): pass\ndef test_differ_reopen_keeps_dragged_file_tab_home(): pass\n",
+        "test_plain.py": "def test_plain(): pass\n",
+    }.items():
+        (test_root / name).write_text(body, encoding="utf-8")
+
+    catalog = discover_pytest_phase_files(test_root, repo_root=tmp_path)
+
+    assert catalog["browser"] == (
+        "tests/test_browser_share.py",
+        "tests/test_browser_dockview.py",
+    )
+    assert catalog["nonbrowser"] == ("tests/test_plain.py",)
 
 
 def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
@@ -464,7 +787,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         events.append(("run", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
-    def fake_certification_phase(*, evidence_dir):
+    def fake_certification_phase(*, evidence_dir, expected_containers=False):
         events.append(("certify", str(evidence_dir)))
         return {
             "result": "certified",
@@ -503,7 +826,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     monkeypatch.setattr(
         check,
         "run_certification_phase",
-        lambda *, evidence_dir: (
+        lambda *, evidence_dir, expected_containers=False: (
             {
                 "result": "not-certifiable",
                 "reason": "host_unqualified_preflight",
@@ -519,6 +842,33 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     output = capsys.readouterr().out
     assert latency_calibration.NOT_CERTIFIABLE in output
     assert "host_unqualified_preflight" in output
+    assert "CHECK PASSED" not in output
+
+
+@pytest.mark.parametrize("reason", ["dirty_start_checkout", "start_state_unobservable"])
+def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeypatch, capsys, reason):
+    check = load_check_module()
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
+    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(
+        check,
+        "run_certification_phase",
+        lambda *, evidence_dir, expected_containers=False: (
+            {
+                "result": "certified",
+                "reason": "all_units_certified_on_a_qualified_host",
+                "evidence": {},
+                "wall_seconds": 1.0,
+                "evidence_dir": str(evidence_dir),
+                "release": {"exact_sha_certification": {"admitted": False, "reason": reason}},
+            },
+            None,
+        ),
+    )
+
+    assert check.main(["--no-tool-guard"]) == check.EXIT_NOT_CERTIFIABLE
+    output = capsys.readouterr().out
+    assert "exact_sha_certification_rejected" in output
     assert "CHECK PASSED" not in output
 
 
@@ -782,6 +1132,126 @@ def _junit_document(cases: list[tuple[str, str, str]]) -> str:
         for file, name, outcome in cases
     )
     return f'<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" tests="{len(cases)}">{body}</testsuite></testsuites>'
+
+
+_ADMISSION_EXPECTED = ("tests/test_a.py::test_one", "tests/test_b.py::test_two")
+
+
+def _write_junit(tmp_path, xml: str) -> Path:
+    junit = tmp_path / "certification-junit.xml"
+    junit.write_text(xml, encoding="utf-8")
+    return junit
+
+
+def test_certification_junit_admission_accepts_a_well_formed_document(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/test_b.py", "test_two", "skipped")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is True, admission
+    assert admission["outcomes"]["tests/test_a.py::test_one"]["outcome"] == "passed"
+    assert admission["outcomes"]["tests/test_b.py::test_two"]["outcome"] == "skipped"
+
+
+def test_certification_junit_admission_defers_an_absent_document_to_did_not_run(tmp_path):
+    """Absent is the ordinary did-not-run the not-collected path owns, not a structural rejection."""
+
+    check = load_check_module()
+    admission = check.certification_junit_admission(tmp_path / "absent.xml", _ADMISSION_EXPECTED)
+    assert admission["admitted"] is True, admission
+    assert all(row["outcome"] == "not-collected" for row in admission["outcomes"].values()), admission
+
+
+def test_certification_junit_admission_rejects_a_malformed_document(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, "<testsuite><testcase file='tests/test_a.py' name='test_one' time='1.0'>")
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_malformed", admission
+
+
+def test_certification_junit_admission_rejects_a_row_without_identity(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" name="test_one" time="1.0"/></testsuite>')
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_missing_identity", admission
+
+
+def test_certification_junit_admission_rejects_an_unexpected_row(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/other.py", "test_strange", "passed")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_unexpected_row", admission
+    assert admission["detail"] == "tests/other.py::test_strange", admission
+
+
+def test_certification_junit_admission_rejects_duplicate_rows(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/test_a.py", "test_one", "failure")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_duplicate_row", admission
+
+
+def test_certification_junit_admission_rejects_missing_or_nonfinite_timing(tmp_path):
+    check = load_check_module()
+    missing = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one"/></testsuite>')
+    assert check.certification_junit_admission(missing, _ADMISSION_EXPECTED)["reason"] == "junit_timing_missing"
+
+    invalid = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="fast"/></testsuite>')
+    assert check.certification_junit_admission(invalid, _ADMISSION_EXPECTED)["reason"] == "junit_timing_invalid"
+
+    for spelling in ("inf", "nan", "-1.0"):
+        nonfinite = _write_junit(tmp_path, f'<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="{spelling}"/></testsuite>')
+        assert check.certification_junit_admission(nonfinite, _ADMISSION_EXPECTED)["reason"] == "junit_timing_non_finite", spelling
+
+
+def test_certification_junit_admission_rejects_contradictory_or_unknown_outcome_children(tmp_path):
+    check = load_check_module()
+    contradictory = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<failure message="breach"/><skipped message="also"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(contradictory, _ADMISSION_EXPECTED)["reason"] == "junit_contradictory_outcome"
+
+    duplicate_failure = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<failure message="first"/><failure message="second"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(duplicate_failure, _ADMISSION_EXPECTED)["reason"] == "junit_contradictory_outcome"
+
+    unknown = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<rerun message="what"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(unknown, _ADMISSION_EXPECTED)["reason"] == "junit_unknown_outcome_child"
+
+    # system-out/system-err are captured stdio, never an outcome, and must not trip the guard.
+    with_stdio = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<system-out>logs</system-out></testcase></testsuite>',
+    )
+    admitted = check.certification_junit_admission(with_stdio, _ADMISSION_EXPECTED)
+    assert admitted["admitted"] is True and admitted["outcomes"]["tests/test_a.py::test_one"]["outcome"] == "passed", admitted
+
+
+def test_certification_verdict_refuses_an_inadmissible_junit_before_reading_outcomes(tmp_path):
+    """A rejected document outranks the outcomes; the phase never certifies from a file it distrusts."""
+
+    check = load_check_module()
+    qualified = {"qualified": True, "reasons": []}
+    retired = {"retired": True, "survivors": []}
+    passed = {"tests/test_a.py::test_one": {"outcome": "passed", "detail": "", "seconds": 1.0}}
+    rejected = {"admitted": False, "reason": "junit_duplicate_row", "detail": "tests/test_a.py::test_one", "outcomes": {}}
+    verdict = check.certification_verdict(retirement=retired, preflight=qualified, postflight=qualified, outcomes=passed, returncode=0, junit_admission=rejected)
+    assert (verdict["result"], verdict["reason"]) == ("not-certifiable", "certification_junit_rejected"), verdict
+    assert verdict["evidence"]["junit_reason"] == "junit_duplicate_row", verdict
+
+    # An admitted document leaves every existing outcome precedence exactly as it was.
+    admitted = {"admitted": True, "reason": "", "detail": "", "outcomes": passed}
+    green = check.certification_verdict(retirement=retired, preflight=qualified, postflight=qualified, outcomes=passed, returncode=0, junit_admission=admitted)
+    assert green["result"] == "certified", green
 
 
 def test_certification_outcomes_report_a_skipped_node_as_skipped_not_as_green(tmp_path):
@@ -1671,6 +2141,262 @@ def test_running_test_containers_reports_why_it_could_not_observe_docker(monkeyp
     retirement = check.retire_owned_processes(deadline_seconds=0.3)
     assert retirement["retired"] is True, retirement
     assert retirement["container_probe"]["available"] is False
+
+
+def test_running_test_containers_tracks_exact_run_owned_ids_by_token_label(monkeypatch):
+    """A run that minted a token filters on its exact owner label, never the shared image ancestor.
+
+    A foreign agent's container built from the identical test image carries no owner label, so it
+    can neither block this run's certification nor falsely clear it.
+    """
+
+    check = load_check_module()
+    image = check.docker_image.image_name(check.REPO_ROOT)
+    observed = []
+
+    class Completed:
+        returncode = 0
+        stdout = "owned123\tUp 4 seconds\n"
+
+    monkeypatch.setattr(check.subprocess, "run", lambda command, **_kwargs: observed.append(command) or Completed())
+
+    # With a token, ownership is proven by the exact label; the ancestor filter never appears.
+    monkeypatch.setenv(check.CHECK_RUN_TOKEN_ENV, "tok-abc")
+    owned = check.running_test_containers()
+    assert observed[-1] == ["docker", "ps", "--filter", f"label={check.CONTAINER_OWNER_LABEL}=tok-abc", "--format", "{{.ID}}\t{{.Status}}"], observed[-1]
+    assert [entry["container"] for entry in owned["containers"]] == ["owned123"]
+
+    # An explicit token argument overrides the environment.
+    check.running_test_containers(run_token="tok-explicit")
+    assert observed[-1][3] == f"label={check.CONTAINER_OWNER_LABEL}=tok-explicit", observed[-1]
+
+    # No token anywhere: image-ancestor discovery remains the fallback for a bare invocation.
+    monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
+    check.running_test_containers()
+    assert observed[-1] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"], observed[-1]
+
+
+def test_retirement_refuses_when_docker_is_unobservable_after_the_gate_used_containers(monkeypatch):
+    """An unobservable client cannot prove an owned container is gone; only a host-only run clears."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [])
+    unobservable = {"available": False, "reason": "docker daemon is not reachable", "image": "probe", "containers": []}
+    monkeypatch.setattr(check, "running_test_containers", lambda: unobservable)
+
+    # The gate routed into Docker: absence is not proved, so retirement refuses and names the cause.
+    refused = check.retire_owned_processes(deadline_seconds=0.3, expected_containers=True)
+    assert refused["retired"] is False, refused
+    assert refused["docker_unobservable"] is True, refused
+    verdict = check.certification_verdict(retirement=refused, preflight=None, postflight=None, outcomes=None, returncode=None)
+    assert verdict["reason"] == "owned_processes_not_retired", verdict
+    assert verdict["evidence"]["docker_unobservable"] is True, verdict
+
+    # The gate never used Docker (host run, or units running inside the image where there is no
+    # client at all): there is no owned container to prove absent, and the process walk covered
+    # what ran, so an unobservable client does not block.
+    cleared = check.retire_owned_processes(deadline_seconds=0.3, expected_containers=False)
+    assert cleared["retired"] is True and cleared["docker_unobservable"] is False, cleared
+
+
+def test_retirement_shares_the_lease_start_key_owner_for_its_member_proof():
+    """One owner of the reuse-proof identity: the barrier reads the WebDriver lease's start key.
+
+    A second copy of process-start-key logic is exactly the divergence that lets one path guard a
+    signal while another does not; this pins that the barrier imports the lease's owner, not a fork.
+    """
+
+    check = load_check_module()
+    assert check.process_start_key is webdriver_lease.process_start_key
+
+
+def test_retirement_authorizes_a_survivor_only_by_its_immutable_start_key(monkeypatch):
+    """A PID whose start key changed was reused; the barrier proves the owned process gone, not alive.
+
+    A bare descendant walk sees PID 5000 present on every poll and never retires. The proof-guarded
+    barrier captures the key it first observed and, when `identity_fn` later reads a different key,
+    knows the process it owned exited and the number belongs to someone else - so it retires and
+    never treats the new occupant as its survivor.
+    """
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "running_test_containers", lambda: {"available": True, "reason": "", "image": "probe", "containers": []})
+    # The descendant walk keeps reporting PID 5000 as present with the key we first captured.
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [{"pid": 5000, "ppid": 1, "command": "chrome", "start_key": "gen-A"}])
+
+    # While the key still holds, the member is a proven survivor and retirement refuses by deadline.
+    held = check.retire_owned_processes(pid=999, deadline_seconds=0.3, identity_fn=lambda _pid: "gen-A")
+    assert held["retired"] is False, held
+    assert [member["pid"] for member in held["survivors"]] == [5000], held
+
+    # The PID is now reused (its key changed): the process we owned is gone. We must not keep waiting
+    # on, nor ever signal, the new occupant under the stale proof - the barrier retires.
+    reused = check.retire_owned_processes(pid=999, deadline_seconds=2.0, identity_fn=lambda _pid: "someone-elses-key")
+    assert reused["retired"] is True, reused
+    assert reused["survivors"] == [], reused
+    assert reused["seconds"] < 2.0, reused
+
+
+def test_retirement_proves_a_reparented_or_exited_member_gone_without_a_bare_pid_match(monkeypatch):
+    """A reparented-away or exited PID reads no key at all: proven gone, never a lingering survivor."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "running_test_containers", lambda: {"available": True, "reason": "", "image": "probe", "containers": []})
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [{"pid": 5000, "ppid": 1, "command": "chrome", "start_key": "gen-A"}])
+    retirement = check.retire_owned_processes(pid=999, deadline_seconds=2.0, identity_fn=lambda _pid: None)
+    assert retirement["retired"] is True, retirement
+    assert retirement["survivors"] == [], retirement
+
+
+def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
+    """One owner of which signals a platform certifies. Linux keeps them; Darwin omits and refuses."""
+
+    linux = latency_calibration.platform_profile("Linux")
+    assert linux["certifiable"] is True
+    assert linux["limits"] == dict(latency_calibration.HOST_QUALIFICATION_LIMITS)
+    assert linux["uses_inotify_capacity"] is True and linux["omitted_signals"] == []
+
+    darwin = latency_calibration.platform_profile("Darwin")
+    assert darwin["certifiable"] is False
+    assert darwin["reason_code"] == "no_recorded_platform_reference_population"
+    assert darwin["limits"] == {}
+    # Every Linux-only kernel signal is explicitly omitted, never asserted against an absent surface.
+    assert set(darwin["omitted_signals"]) == set(latency_calibration.LINUX_ONLY_SIGNALS)
+    assert darwin["uses_inotify_capacity"] is False
+
+    # PSI stalls, procs_running and the disk signals are all Linux /proc surfaces.
+    assert {"cpu_stall_some_fraction", "procs_running_p75", "disk_busy_fraction_max"} <= set(latency_calibration.LINUX_ONLY_SIGNALS)
+
+
+def test_darwin_profile_is_admitted_only_by_retained_discriminating_populations(monkeypatch):
+    populations = {
+        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
+        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
+        "saturated": {"probes": 20, "cpu_work_median_ms": [20.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+    }
+    monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
+
+    profile = latency_calibration.platform_profile("Darwin")
+    assert profile["certifiable"] is True, profile
+    assert profile["limits"] == {"cpu_work_median_ms": 12.0, "storage_work_median_ms": 8.0}
+    assert profile["reference_populations"] == ["quiet", "post_lane", "saturated"]
+    assert profile["uses_inotify_capacity"] is False
+
+
+def test_darwin_profile_rejects_present_but_non_discriminating_populations(monkeypatch):
+    populations = {
+        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
+        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
+        "saturated": {"probes": 20, "cpu_work_median_ms": [10.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+    }
+    monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
+    profile = latency_calibration.platform_profile("Darwin")
+    assert profile["certifiable"] is False, profile
+    assert profile["reason_code"] == "darwin_reference_population_not_discriminating"
+
+
+def test_host_qualification_fails_closed_on_an_unprofiled_platform(monkeypatch):
+    """An unprofiled platform (no recorded reference population) is NOT CERTIFIABLE, never a silent pass."""
+
+    monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Darwin")
+    # Even handed a measurement that would satisfy every Linux limit, an unprofiled platform refuses.
+    inside = {signal: limit / 2 for signal, limit in latency_calibration.HOST_QUALIFICATION_LIMITS.items()}
+    qualification = latency_calibration.host_qualification(inside)
+    assert qualification["qualified"] is False, qualification
+    assert qualification["reasons"] == [{"signal": "platform", "measured": "Darwin", "limit": None, "reason": "no_recorded_platform_reference_population"}], qualification
+    assert qualification["platform_profile"]["system"] == "Darwin"
+
+    # An explicit limit set is a deliberate override and still qualifies - the owner only governs the
+    # default profile, so a caller measuring a known signal set is never blocked by the platform gate.
+    explicit = latency_calibration.host_qualification(inside, limits=dict(latency_calibration.HOST_QUALIFICATION_LIMITS))
+    assert explicit["qualified"] is True, explicit
+
+
+def test_certification_release_context_reports_sha_platform_and_generated_bundle_hashes():
+    check = load_check_module()
+    context = check.certification_release_context(REPO_ROOT)
+    sha = context["full_sha"]
+    assert sha is None or (len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)), sha
+    assert context["platform"]["system"] and context["platform"]["machine"], context
+    assert set(context["generated_bundle_hashes"]) == set(static_build.ASSETS), context["generated_bundle_hashes"]
+    for asset, digest in context["generated_bundle_hashes"].items():
+        assert digest is None or (len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)), (asset, digest)
+
+
+def test_working_tree_clean_state_names_every_tracked_and_untracked_path(tmp_path):
+    check = load_check_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    clean = check.working_tree_clean_state(repo)
+    assert clean == {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}, clean
+
+    (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+    (repo / "new.txt").write_text("x\n", encoding="utf-8")
+    dirty = check.working_tree_clean_state(repo)
+    assert dirty["clean"] is False and dirty["observable"] is True, dirty
+    assert dirty["tracked"] == ["tracked.txt"] and dirty["untracked"] == ["new.txt"], dirty
+
+
+def test_exact_sha_certification_requires_a_fresh_checkout_at_both_ends():
+    check = load_check_module()
+    clean = {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}
+    dirty = {"observable": True, "clean": False, "reason": "", "tracked": ["a.py"], "untracked": ["b.py"]}
+    unobservable = {"observable": False, "clean": False, "reason": "no git", "tracked": [], "untracked": []}
+
+    assert check.exact_sha_certification_admission(start_state=clean, end_state=clean)["admitted"] is True
+    assert check.exact_sha_certification_admission(start_state=dirty, end_state=clean)["reason"] == "dirty_start_checkout"
+    # A tree the run itself dirtied no longer certifies the exact SHA either.
+    assert check.exact_sha_certification_admission(start_state=clean, end_state=dirty)["reason"] == "dirty_end_checkout"
+    refused = check.exact_sha_certification_admission(start_state=dirty, end_state=clean)
+    assert set(refused["detail"]) == {"tracked", "untracked"}, refused
+    # Fail closed: an unobservable git state is never a clean one.
+    assert check.exact_sha_certification_admission(start_state=unobservable, end_state=clean)["reason"] == "start_state_unobservable"
+
+
+def test_run_certification_phase_records_the_release_context(monkeypatch, tmp_path):
+    """Every certification payload carries SHA, platform, start/end clean state and bundle hashes."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": False, "survivors": [{"pid": 1, "ppid": 0, "command": "x"}], "container_probe": {}, "docker_unobservable": False})
+    payload, _lane = check.run_certification_phase(evidence_dir=tmp_path / "cert")
+    release = payload["release"]
+    assert set(release) >= {"full_sha", "platform", "generated_bundle_hashes", "start_clean_state", "end_clean_state", "exact_sha_certification"}, release
+    assert release["start_clean_state"]["observable"] in (True, False)
+    assert "admitted" in release["exact_sha_certification"], release
+
+
+def test_run_certification_phase_refuses_a_certified_result_when_exact_sha_is_dirty(monkeypatch, tmp_path):
+    check = load_check_module()
+    clean = {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}
+    dirty = {"observable": True, "clean": False, "reason": "", "tracked": ["x.py"], "untracked": []}
+    states = iter((dirty, clean))
+    monkeypatch.setattr(check, "working_tree_clean_state", lambda: next(states))
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": True, "survivors": []})
+    monkeypatch.setattr(check.latency_calibration, "host_qualification", lambda **_kwargs: {"qualified": True, "reasons": []})
+    monkeypatch.setattr(check, "run_lane", lambda _lane: check.LaneResult("certification", "latency certification", True, 0.0, "", (check.StepResult("s", "c", 0.0, 0),)))
+    monkeypatch.setattr(check, "certification_junit_admission", lambda _path: {"admitted": True, "reason": "", "detail": "", "outcomes": {nodeid: {"outcome": "passed", "detail": "", "seconds": 0.1} for nodeid in check.CERTIFICATION_NODE_IDS}})
+
+    payload, _lane = check.run_certification_phase(evidence_dir=tmp_path / "cert")
+    assert (payload["result"], payload["reason"]) == ("not-certifiable", "exact_sha_certification_rejected"), payload
+    assert payload["evidence"]["reason"] == "dirty_start_checkout"
+
+
+def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
+    """docker/run-tests.sh must label the container it launches with this run's ownership token."""
+
+    check = load_check_module()
+    text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    assert "YOLOMUX_CHECK_RUN_TOKEN" in text, text
+    assert f'--label "{check.CONTAINER_OWNER_LABEL}=$YOLOMUX_CHECK_RUN_TOKEN"' in text, text
+    # The label array is threaded into the real docker run, not built and dropped.
+    assert '"${owner_label[@]+"${owner_label[@]}"}"' in text, text
 
 
 def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypatch, capsys):

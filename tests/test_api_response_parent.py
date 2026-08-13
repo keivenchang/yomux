@@ -87,6 +87,15 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
         for node in handler_class.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    adapter_methods = {
+        class_node.name: {
+            node.name: node
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for class_node in server_tree.body
+        if isinstance(class_node, ast.ClassDef) and class_node.name.endswith("Adapter")
+    }
     parent_writers = {
         "write_app_result",
         "write_int_query_app_result",
@@ -113,7 +122,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
         key = (kind, name)
         if key in seen:
             return set(), set()
-        functions = route_functions if kind == "route" else handler_methods
+        functions = route_functions if kind == "route" else handler_methods if kind == "handler" else adapter_methods[kind]
         function = functions.get(name)
         if function is None:
             return set(), set()
@@ -136,6 +145,16 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
                     nested_parents, nested_bypasses = response_paths("handler", called, next_seen)
                     parents.update(nested_parents)
                     bypasses.update(nested_bypasses)
+            elif (
+                kind != "route"
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in adapter_methods
+                and call.func.attr in adapter_methods[call.func.value.id]
+            ):
+                nested_parents, nested_bypasses = response_paths(call.func.value.id, call.func.attr, next_seen)
+                parents.update(nested_parents)
+                bypasses.update(nested_bypasses)
             elif kind == "route" and isinstance(call.func, ast.Name) and call.func.id in route_functions:
                 nested_parents, nested_bypasses = response_paths("route", call.func.id, next_seen)
                 parents.update(nested_parents)
@@ -197,7 +216,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_write_json_representation"
             for node in ast.walk(function)
-        ):
+        ) and function.name != "_write_json_representation":
             representation_callers.append(function.name)
     assert representation_callers == ["write_api_response"], (
         "JSON representation bypasses write_api_response: "
@@ -215,7 +234,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_write_bodyless_api_response"
             for node in ast.walk(function)
-        ):
+        ) and function.name != "_write_bodyless_api_response":
             bodyless_callers.append(function.name)
     assert bodyless_callers == ["write_api_response"], (
         "Bodyless API representation bypasses write_api_response: "
@@ -299,7 +318,10 @@ def _capturing_handler(route: http_routes.Route) -> tuple[server.Handler, list[t
     handler._route_response_written = False
     handler._api_request_id = ""
     handler.headers = {}
-    handler.server = SimpleNamespace(app=SimpleNamespace(observe_http_delivery=lambda *_args: None))
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        observe_http_commit=lambda *_args: None,
+        observe_http_receipt=lambda *_args: None,
+    ))
     writes: list[tuple[dict, HTTPStatus]] = []
 
     def capture(
@@ -599,6 +621,77 @@ def test_queued_delivery_ledger_registers_explicit_ready_product_terminal_once()
     ]
     with pytest.raises(ValueError, match="was not registered as outstanding"):
         ledger.observe_ready_product("activity-summary", 7)
+
+
+def _accepted_delivery_app(ledger: QueuedDeliveryLedger) -> SimpleNamespace:
+    """Wire whichever delivery hooks this build exposes to the real ledger.
+
+    The committed/receipt split routes the server's pre-flush and post-flush hooks separately;
+    the earlier combined build reached the ledger through observe_http_delivery before the flush.
+    Binding whichever this build offers lets one regression reproduce the dishonest receipt claim
+    before the split and the honest committed-but-undelivered state after it.
+    """
+
+    app = SimpleNamespace()
+    if hasattr(ledger, "observe_http_commit"):
+        app.observe_http_commit = ledger.observe_http_commit
+        app.observe_http_receipt = ledger.observe_http_receipt
+    else:
+        app.observe_http_delivery = ledger.observe_http_response
+    return app
+
+
+def test_accepted_receipt_is_not_claimed_exposed_when_the_flush_fails() -> None:
+    """A failed flush must not persist that the accepted receipt reached the client.
+
+    Invariant under test: the committed/outstanding registration is honest before the flush (the
+    causal-visibility race fix), but receipt_exposed reflects the actual client write. When
+    _write_json_representation raises BrokenPipe/OSError after the commit, the ticket must stay
+    visible as outstanding_queued while receipt_exposed stays False, and the write error must
+    propagate rather than be swallowed.
+    """
+
+    ledger = QueuedDeliveryLedger()
+    receipt = ledger.accept_operation(
+        request_id="r-broken-pipe",
+        route="GET /api/fs/read",
+        deadline_at=0.0,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-broken-pipe"},
+    )
+    operation_id = receipt["operation"]["id"]
+
+    handler = server.Handler.__new__(server.Handler)
+    handler._route_response = None
+    handler._route_response_written = False
+    handler._api_request_id = ""
+    handler.headers = {}
+    handler.server = SimpleNamespace(app=_accepted_delivery_app(ledger))
+
+    def broken_flush(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None) -> None:
+        del data, status, json_encode_ms, product_metadata
+        raise BrokenPipeError(errno.EPIPE, "client hung up before the receipt landed")
+
+    handler._write_json_representation = MethodType(broken_flush, handler)
+
+    accepted_response = {
+        "status": "queued",
+        "key": "fs-read-stream",
+        "epoch": 3,
+        "operation": {"id": operation_id},
+    }
+
+    with pytest.raises(BrokenPipeError):
+        handler.write_api_response(accepted_response, HTTPStatus.ACCEPTED)
+
+    # The race fix holds: the ticket is committed and visible as outstanding server-side state.
+    outstanding = ledger.diagnostics()["outstanding_queued"]
+    assert len(outstanding) == 1, outstanding
+    assert outstanding[0]["key"] == "fs-read-stream"
+    assert outstanding[0]["epoch"] == 3
+
+    # But the failed write must not claim the accepted receipt reached the client.
+    assert ledger._operations[operation_id]["receipt_exposed"] is False
 
 
 def test_response_parent_preserves_an_existing_canonical_result() -> None:

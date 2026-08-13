@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yolomux_lib import app as app_module
 from yolomux_lib import cli
 from yolomux_lib.local_services import registry as cli_registry
 from yolomux_lib.server import TmuxWebtermHTTPServer
@@ -292,6 +293,32 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         def restore_auto_approve(self):
             return []
 
+        def attach_backend_health_store(self, store):
+            captured["backend_health_store"] = store
+
+        # The app also receives the observer's liveness reader, beside its history store: the
+        # store answers "what was retained", the observer answers "is the monitor still looking".
+        def attach_backend_health_observer(self, observer):
+            captured["backend_health_observer"] = observer
+
+        def local_services_row_producers(self):
+            return {}
+
+        def local_services_recovery_control(self):
+            # M9: the observer is constructed with the app's recovery control, so a double that
+            # does not offer one no longer resolves. It is never used here -- nothing in this
+            # test drives an observation -- but it has to exist for `cli.main()` to get past
+            # `start_backend_health_observer`.
+            captured["recovery_control"] = app_module.LocalServiceRecoveryControl(dict)
+            return captured["recovery_control"]
+
+        class _Events:
+            @staticmethod
+            def publish(*_args, **_kwargs):
+                return None
+
+        client_events = _Events()
+
         def start_background_owner(self, port=None, priority=0, managed_instance=False):
             captured["background_owner_port"] = port
             captured["background_owner_priority"] = priority
@@ -379,6 +406,26 @@ def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
     class FakeApp:
         def __init__(self, *_args, **_kwargs):
             pass
+
+        def attach_backend_health_store(self, _store):
+            return None
+
+        def attach_backend_health_observer(self, _observer):
+            return None
+
+        def local_services_row_producers(self):
+            return {}
+
+        def local_services_recovery_control(self):
+            # M9, same reason as the double above.
+            return app_module.LocalServiceRecoveryControl(dict)
+
+        class _Events:
+            @staticmethod
+            def publish(*_args, **_kwargs):
+                return None
+
+        client_events = _Events()
 
         def start_background_owner(self, **_kwargs):
             return True

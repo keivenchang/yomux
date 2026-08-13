@@ -7,16 +7,22 @@ const fs = require('fs');
 const vm = require('vm');
 
 const source = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
+const transportLifecycleSource = fs.readFileSync('static_src/js/yolomux/09_transport_lifecycle.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const lifecycleScopeSource = coreSource.slice(
+  coreSource.indexOf('function createLifecycleScope('),
+  coreSource.indexOf('\nfunction delegate(', coreSource.indexOf('function createLifecycleScope(')),
+).replace('function createLifecycleScope(', 'const createLifecycleScope = function (') + ';';
 
 function loadNamespace() {
   const context = vm.createContext({console});
+  vm.runInContext(lifecycleScopeSource, context, {filename: '10_core_utils.js:createLifecycleScope'});
+  vm.runInContext(transportLifecycleSource, context, {filename: '09_transport_lifecycle.js'});
   vm.runInContext(source, context, {filename: '84_stats_current.js'});
   return context.YOLOmuxStatsCurrent;
 }
 
-function loadController(options) {
-  return loadNamespace().createController(options);
-}
+function loadController(options) { return loadNamespace().createController(options); }
 
 function capabilities() {
   const matrix = [
@@ -204,6 +210,11 @@ class FakeEventSource {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, callback) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter(listener => listener !== callback));
+  }
+
   close() {
     this.closeCount += 1;
   }
@@ -224,8 +235,13 @@ class FakePageLifecycle {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, callback) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter(listener => listener !== callback));
+  }
+
   registered() {
-    return [...this.listeners.keys()];
+    return [...this.listeners.entries()].filter(([_name, listeners]) => listeners.length).map(([name]) => name);
   }
 
   emit(name) {
@@ -718,6 +734,40 @@ test('an exact tail delta rolls one dense window without a full download', () =>
     after_revision: 8,
   });
   assert.equal(fullFetches, 0, 'the 1s exact tail stays on SSE');
+});
+
+test('a new source generation adopts its earlier authoritative open-bucket window', () => {
+  const clock = new FakeClock();
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'restart-window', clock,
+  });
+  const initial = snapshot({requested: 1});
+  initial.window_start = 1;
+  initial.window_end = 301;
+  initial.generated_at = 301;
+  initial.buckets = buckets(1, 300, 1);
+  controller.acceptSnapshot(initial);
+
+  const newHead = {
+    start: 0,
+    duration: 1,
+    series: {cpu: seriesValue(77, 0)},
+    source: {first_timestamp: 0, last_timestamp: 0, count: 1},
+    open: false,
+  };
+  const newOpen = {...initial.buckets.at(-2), open: true};
+  assert.equal(controller.acceptDelta(delta({
+    sourceGeneration: 2,
+    base: 1,
+    cache: 2,
+    revision: 1,
+    bucketReplacements: [newHead, newOpen],
+    tombstones: [{kind: 'bucket', start: 300, duration: 1}],
+  })), true);
+  assert.equal(controller.generation().window_start, 0);
+  assert.equal(controller.generation().window_end, 300);
+  assert.equal(controller.generation().buckets.at(-1).start, 299);
+  assert.equal(controller.generation().buckets.at(-1).open, true);
 });
 
 test('full no-data replacements and typed tombstones update only their exact identities', () => {
@@ -1762,6 +1812,49 @@ test('browser transport uses one authenticated current stream and exact snapshot
   assert.ok(fetches.every(item => !item.url.includes('/api/stats-delta')));
 });
 
+test('a snapshot from a newer server that grew a top-level field is reported, not silently blanked', async () => {
+  // The v0.6.10 -> v0.7.1 upgrade of port 7770: the running server grew the
+  // `usage_atom_backfill` snapshot field while an already-open tab kept running the
+  // pre-upgrade bundle. Every repair snapshot then failed the exact-field contract, the
+  // rejection was discarded by the repair `catch`, and Agent tokens, Model tokens, and the
+  // Cost Summary stayed blank for two hours with nothing said anywhere.
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  let serverGrewAField = false;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      const payload = snapshot({requested: 1, cache: 2, sourceGeneration: 2});
+      return response(200, serverGrewAField
+        ? {...payload, field_this_client_predates: {state: 'ready'}}
+        : payload);
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-forward-incompatible-snapshot',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock, repairBaseMs: 100, repairMaxMs: 400,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+  await client.start();
+  await clock.advance(0);
+  const painted = client.controller().generation();
+  assert.equal(painted.cache_generation, 2, 'the pre-upgrade client paints the old server\'s snapshot');
+
+  serverGrewAField = true;
+  FakeEventSource.instances[0].emit('repair');
+  await clock.advance(100);
+  await clock.advance(0);
+
+  assert.equal(client.controller().generation(), painted, 'an unreadable snapshot never replaces the painted generation');
+  assert.equal(failures.length, 1, 'the unreadable snapshot is reported once instead of leaving a blank panel');
+  assert.match(failures[0].message, /snapshot fields are not exact/, 'the reported reason names the contract that rejected the payload');
+  client.stop();
+});
+
 test('server-requested stream repair reconnects without reporting a native transport failure', async () => {
   FakeEventSource.instances = [];
   const clock = new FakeClock();
@@ -1846,6 +1939,10 @@ test('an unload-initiated stream close reports one machine-readable retirement i
   assert.equal(laterRetirements[0].reason, 'page_pagehide');
   client.stop();
   later.client.stop();
+  assert.deepEqual(lifecycle.registered(), [], 'client stop removes every page lifecycle listener');
+  await client.start();
+  assert.deepEqual(lifecycle.registered(), ['beforeunload', 'pagehide', 'pageshow'], 'client restart installs one fresh lifecycle listener set');
+  client.stop();
 });
 
 test('a genuine mid-session stream failure stays a warning-level transport failure through every retirement path', async () => {

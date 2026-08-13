@@ -40,6 +40,35 @@ def _linux_process_ticks(pid: int) -> tuple[float, int] | None:
     return ticks, max(0, rss)
 
 
+# The ONE cadence/staleness policy for the web process's own CPU/memory sample.
+#
+# `CpuSampler` below produces that sample on HOST_CPU_CADENCE_SECONDS and statsd pushes it to the
+# web process, which is its only writer. A reader may treat a pushed sample as describing NOW for
+# HOST_CPU_SAMPLE_STALE_CADENCES cadences; past that the number is no longer a measurement of the
+# present and must be published as absent rather than frozen at its last value.
+#
+# This lives beside the sampler because the sampler sets the cadence. It used to be two
+# independent literals -- `HOST_CPU_CADENCE_SECONDS = 1.0` in stats_current/service.py and a bare
+# `3.0` in app.py's CPU-budget staleness test -- so the reader's idea of "recent" and the
+# producer's idea of "how often" could drift apart with nothing to catch it.
+HOST_CPU_CADENCE_SECONDS = 1.0
+HOST_CPU_SAMPLE_STALE_CADENCES = 3
+HOST_CPU_SAMPLE_STALE_AFTER_SECONDS = HOST_CPU_CADENCE_SECONDS * HOST_CPU_SAMPLE_STALE_CADENCES
+
+
+def host_cpu_sample_age_seconds(sample: dict[str, Any] | None, now: float) -> float | None:
+    """Age of a pushed sample, or None when no sample has ever been pushed."""
+
+    pushed_at = float((sample or {}).get("time") or 0.0)
+    return max(0.0, now - pushed_at) if pushed_at > 0 else None
+
+
+def host_cpu_sample_is_stale(age_seconds: float | None) -> bool:
+    """Whether a sample is too old to describe the present. Never pushed counts as stale."""
+
+    return age_seconds is None or age_seconds > HOST_CPU_SAMPLE_STALE_AFTER_SECONDS
+
+
 class CpuSampler:
     """Stateful CPU baseline for one web PID, held exclusively by statsd."""
 
@@ -47,13 +76,35 @@ class CpuSampler:
         self._previous_system: tuple[float, float] | None = None
         self._previous_process: tuple[float, float] | None = None
 
-    def sample(self, pid: int) -> dict[str, float | int]:
+    def sample(self, pid: int) -> dict[str, float | int | None]:
+        """Sample this process and the host, reporting absence rather than a fabricated 0.0.
+
+        Both percentages are DERIVED from a difference between two readings. On the first call
+        after every statsd start there is no previous reading to difference against, and there is
+        also nothing to measure when the elapsed window or the host tick total did not advance.
+        Those cases used to fall through to the `0.0` these two locals were initialized to, which
+        left an unmeasured value beside a real `time`, a real `pid` and a real `rss_bytes` --
+        indistinguishable from a measured idle process, and `system_cpu_percent: 0.0` is a
+        whole-host claim that is physically impossible. That row reached `observations`, which is
+        retained for 48 hours, and owned the whole 1s bucket at the default five-minute view: a
+        full-depth dip to the axis on the CPU graph and `CPU 0%` stamped `measured` on the Daemons
+        web row at every statsd start.
+
+        `None` is the value's own statement that nobody measured it; the caller
+        (`StatsCurrentService._collect_host_facts_if_due`) is what decides to publish nothing that
+        cycle. A genuinely measured `0.0` -- a real difference that came out at zero -- is still a
+        float and still published.
+
+        `rss_bytes` is an ABSOLUTE read needing no baseline, so it stays a measurement on the very
+        first sample; blanking it would trade a fabricated number for a lost one.
+        """
+
         now = time.time()
         monotonic = time.monotonic()
         process = _linux_process_ticks(pid)
         system = _linux_system_times()
-        process_percent = 0.0
-        system_percent = 0.0
+        process_percent: float | None = None
+        system_percent: float | None = None
         rss = 0
         if process is not None:
             ticks, rss = process
@@ -71,7 +122,13 @@ class CpuSampler:
                 if total_delta > 0 and busy_delta >= 0:
                     system_percent = _clamp(busy_delta / total_delta * 100.0)
             self._previous_system = system
-        return {"time": now, "pid": pid, "cpu_percent": round(process_percent, 3), "system_cpu_percent": round(system_percent, 3), "rss_bytes": rss}
+        return {
+            "time": now,
+            "pid": pid,
+            "cpu_percent": None if process_percent is None else round(process_percent, 3),
+            "system_cpu_percent": None if system_percent is None else round(system_percent, 3),
+            "rss_bytes": rss,
+        }
 
 
 def generic_gpu_devices() -> dict[str, dict[str, float | int | str]]:

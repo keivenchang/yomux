@@ -17,6 +17,7 @@ import uuid
 from http import HTTPStatus
 from typing import Any
 from typing import Callable
+from typing import Mapping
 
 from ..infra.atomic_file import append_fsync_text
 from ..infra.atomic_file import atomic_write_text
@@ -348,6 +349,32 @@ class QueuedDeliveryLedger:
             self._append_operation_locked(record)
             return copy.deepcopy(event)
 
+    # Exactly the scheduling facts needed to attribute a slow operation, and nothing else. A
+    # completed operation's total wall time cannot distinguish "the task was slow" from "the task
+    # waited behind a lane holder"; queue_wait_ms versus execution_ms can, and lane/task name which
+    # holder to look at. Values are numbers and short identifiers only -- no paths.
+    OPERATION_SCHEDULE_FIELDS: tuple[str, ...] = (
+        "task", "priority", "lane",
+        "submitted_at", "running_started_at", "completed_at",
+        "queue_wait_ms", "execution_ms", "transient_polls",
+    )
+
+    def record_operation_schedule(self, operation_id: str, schedule: Mapping[str, object]) -> bool:
+        """Retain one operation's bounded lane/wait/execution facts for later attribution."""
+        bounded = {
+            key: (round(float(value), 3) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)[:64])
+            for key, value in schedule.items()
+            if key in self.OPERATION_SCHEDULE_FIELDS
+        }
+        if not bounded:
+            return False
+        with self._lock:
+            record = self._operations.get(str(operation_id))
+            if record is None:
+                return False
+            record["schedule"] = bounded
+            return True
+
     def acknowledge_operation_deliveries(self, acknowledgments: list[dict[str, Any]]) -> list[str]:
         """Retire exact replay bytes only after the browser processed each terminal."""
 
@@ -456,17 +483,19 @@ class QueuedDeliveryLedger:
             if not self._terminalize_qualified_promise_locked(identity, "done"):
                 raise ValueError("ready product promise was not registered as outstanding")
 
-    def observe_http_response(self, payload: object, status: HTTPStatus | int) -> None:
+    def observe_http_commit(self, payload: object, status: HTTPStatus | int) -> None:
+        """Register accepted/committed OUTSTANDING queued state and terminal transitions.
+
+        Invariant: outstanding registration reflects server-side queued state and is honest
+        BEFORE the response flush -- the operation is queued server-side regardless of whether the
+        accepted-response bytes reach the client. The server calls this before the flush so a
+        causally-later client read cannot out-race this writer thread's ledger update. It records
+        no client-delivery outcome; that is observe_http_receipt's job, run only after the write.
+        """
+
         status_code = int(status)
         with self._lock:
             for candidate in self._candidate_payloads(payload):
-                operation = candidate.get("operation") if isinstance(candidate.get("operation"), dict) else {}
-                operation_id = str(operation.get("id") or "")
-                if status_code == int(HTTPStatus.ACCEPTED) and operation_id:
-                    record = self._operations.get(operation_id)
-                    if isinstance(record, dict) and not bool(record.get("receipt_exposed")):
-                        record["receipt_exposed"] = True
-                        self._append_operation_locked(record)
                 identity = self._identity(candidate)
                 if identity is None:
                     continue
@@ -498,6 +527,40 @@ class QueuedDeliveryLedger:
                 reason = str(candidate.get("reason") or candidate.get("error") or "").strip()
                 self._terminalize_qualified_promise_locked(identity, terminal_state, reason=reason)
 
+    def observe_http_receipt(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record that an ACCEPTED operation receipt actually reached the client.
+
+        Invariant: receipt_exposed reflects the ACTUAL client write and must run only AFTER a
+        successful flush -- it must never claim exposure on a failed write. The server calls this
+        after the write returns, so a BrokenPipe/OSError on the flush leaves receipt_exposed unset
+        and the operation honestly recorded as committed-but-undelivered.
+        """
+
+        status_code = int(status)
+        if status_code != int(HTTPStatus.ACCEPTED):
+            return
+        with self._lock:
+            for candidate in self._candidate_payloads(payload):
+                operation = candidate.get("operation") if isinstance(candidate.get("operation"), dict) else {}
+                operation_id = str(operation.get("id") or "")
+                if not operation_id:
+                    continue
+                record = self._operations.get(operation_id)
+                if isinstance(record, dict) and not bool(record.get("receipt_exposed")):
+                    record["receipt_exposed"] = True
+                    self._append_operation_locked(record)
+
+    def observe_http_response(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record a fully delivered response: server-side commit then client receipt exposure.
+
+        The single-call composition for callers that model a completed delivery (the bytes reached
+        the client). The server does not call this; it splits the two halves around the flush so a
+        failed write never claims receipt exposure. See observe_http_commit / observe_http_receipt.
+        """
+
+        self.observe_http_commit(payload, status)
+        self.observe_http_receipt(payload, status)
+
     def diagnostics(self) -> dict[str, Any]:
         with self._lock:
             outstanding = sorted(
@@ -518,6 +581,13 @@ class QueuedDeliveryLedger:
                         "route": str(record.get("route") or ""),
                         "created_at": float(record.get("created_at") or 0.0),
                         "terminal_at": float(record.get("terminal_at") or 0.0),
+                        "kind": str(record.get("kind") or ""),
+                        # Subtype and the uncoalesced reason come from the accept-time context, so
+                        # they are present for an operation that is still stuck -- which is the one
+                        # whose holder somebody actually needs to name.
+                        "subtype": str((record.get("context") or {}).get("operation") or ""),
+                        "uncoalesced": str((record.get("context") or {}).get("uncoalesced") or ""),
+                        "schedule": dict(record.get("schedule") or {}),
                     }
                     for record in sorted(
                         self._operations.values(),

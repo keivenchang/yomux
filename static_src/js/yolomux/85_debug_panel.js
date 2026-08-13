@@ -57,8 +57,18 @@ const jsDebugHistoryReadiness = {
   overlayVisible: false,
   overlayTimer: null,
 };
-let jsDebugSubTab = 'graph';
 const jsDebugSystemPollMs = 5000;
+// The retry cadence used while `/api/system-status` answers with a TYPED REFUSAL (no snapshot has
+// been published yet, or the newest one is past its freshness deadline and its aged body is
+// withheld). The producer rebuilds on demand, so the body a reader is waiting for usually exists
+// far sooner than the next 5s poll; waiting a whole poll interval would leave the panel blank on
+// first open for the entire cold-start window.
+const jsDebugSystemRefusalPollMs = 500;
+// The Advanced body's own cadence. It matches `ADVANCED_CADENCE_SECONDS` in
+// yolomux_lib/system_status_snapshot.py: asking faster than the producer republishes only re-reads
+// the same bytes. It is a MINIMUM AGE, not a second interval -- the one `debug-system` interval
+// drives both reads (see `pollDebugSystemStatus`).
+const jsDebugSystemAdvancedPollMs = 10000;
 const jsDebugLogsPollMs = 5000;
 const jsDebugSystemState = {
   payload: null,
@@ -66,27 +76,51 @@ const jsDebugSystemState = {
   inFlight: false,
   updatedAt: 0,
 };
+// The Advanced disclosure's body, from `GET /api/system-status/advanced`. It is a SEPARATE ROUTE,
+// not a second copy: since the snapshot split, the core body no longer carries `refresh`,
+// `top_endpoints`, `top_background_work`, `top_event_types`, `login_throttle`,
+// `largest_active_transcripts`, `transcripts_cache` or `owner.debug`/`owner.control`, so this is
+// the ONE place those facts live in the client. There is no second poller and no second cache.
+const jsDebugSystemAdvancedState = {
+  payload: null,
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+};
+// Which Daemons roster rows the reader opened, and whether Advanced diagnostics is open. This is
+// deliberately NOT read back out of the DOM: the 5s poll re-renders the roster, and DOM-held
+// disclosure state would snap every open row shut twice per poll.
+const jsDebugSystemRosterState = {
+  expanded: new Set(),
+  advancedOpen: false,
+};
 const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
 // Fresh state hides the chatty info/debug levels; warnings and errors are the
 // signal a first-time viewer needs. Info/Debug remain one toggle away and their
 // selection persists (see save/load of jsDebugStatsUiPreferences).
 const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
+// Logs Clear identity is a per-producer (epoch, sequence) cursor, never wall time:
+// `serverEpoch`/`serverSequence` track the last validated server envelope, and
+// `clearedCursors` holds the {epoch, sequence} captured by the most recent Clear for
+// each producer. A record is hidden only while its producer epoch still matches the
+// cursor and its sequence is at or below it, so a clock rollback cannot resurface a
+// hidden record and a producer epoch reset resurfaces everything.
+const jsDebugClientLogEpoch = reloadClientJourneyId;
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
-  clearedAt: 0,
+  serverEpoch: '',
+  serverSequence: 0,
+  clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
-let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
-let jsDebugGraphResolutionOverrideSeconds = 0;
 // When a Resolution change needs a history fetch, this holds the value to restore and the
 // history generation to match so a stale response cannot revert a newer request. Cleared
 // on the matching ready (success) or error (revert + toast). Null when the last change was
 // served from cache (instant, no overlay).
 let jsDebugGraphPendingResolutionChange = null;
-let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
   pending: false,
@@ -137,6 +171,11 @@ const jsDebugCurrentObservationState = {
   instrumentationCostMs: 0,
   receipts: new Map(),
 };
+let jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+function currentObservationLifecycleScope() {
+  if (jsDebugCurrentObservationLifecycleScope.disposed()) jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+  return jsDebugCurrentObservationLifecycleScope;
+}
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
@@ -161,12 +200,19 @@ const jsDebugGraphZoomMinBuckets = 3;
 let jsDebugGraphLastPointerType = 'mouse';
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveTimer = 0;
+let jsDebugGraphLifecycleScope = createLifecycleScope();
+function debugGraphLifecycleScope() {
+  if (jsDebugGraphLifecycleScope.disposed()) jsDebugGraphLifecycleScope = createLifecycleScope();
+  return jsDebugGraphLifecycleScope;
+}
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
-let jsDebugGraphHiddenCharts = null;
-let jsDebugGraphVisibleCharts = null;
-let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
+let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+function debugPricingRefreshLifecycleScope() {
+  if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+  return jsDebugPricingRefreshLifecycleScope;
+}
 const jsDebugUsageAtomBackfill = {state: 'unknown', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -210,7 +256,6 @@ const jsDebugGraphMiddleWindowMs = jsDebugGraphTiers[1].maxAgeMs;
 const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
-const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
@@ -226,7 +271,9 @@ const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
 // non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
 // left between the coarser (60s) data fetches — the chart stays visibly live even where
-// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+// data no longer streams. Ranges over 1h and fixed historical zooms are static by design.
+// A hidden document or a hidden panel is different: neither is inherently static, they simply
+// do not repaint, so the axis holds where it was until the tab/document is shown again.
 const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
@@ -384,7 +431,6 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 // jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
 // former raw/rollup Map split was only bookkeeping over the same keyspace.
 const jsDebugGraphBuckets = new Map();
-const jsDebugGraphEventRecords = new Map();
 // NOT display cache: short-lived staging retained for the established renderer's
 // bucket bookkeeping. Current browser observations are uploaded separately.
 const jsDebugGraphPendingServerBuckets = new Map();
@@ -445,130 +491,6 @@ const jsDebugGraphChartGroups = Object.freeze([
 const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
   ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
-
-function debugGraphLocalizedLabel(item = {}) {
-  if (!item.labelKey) return String(item.label || '');
-  const params = {...(item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(item.labelKey, params);
-}
-
-function debugGraphLocalizedDescription(item = {}) {
-  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
-  if (!descKey) return '';
-  const params = {...(item.descParams || item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(descKey, params);
-}
-
-function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
-  if (!descKey) return '';
-  const text = desc || t(descKey, params);
-  if (!text || text === descKey) return '';
-  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
-}
-
-function normalizedJsDebugSubTab(value) {
-  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
-}
-
-function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
-  const seconds = Number(value);
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  if (options.some(option => option.seconds === seconds)) return seconds;
-  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
-  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-}
-
-function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
-  syncDebugGraphResolutionOverride(nowMs, {persist: true});
-  return jsDebugGraphRangeSeconds;
-}
-
-function loadJsDebugStatsUiPreferences() {
-  if (jsDebugStatsUiPreferencesLoaded) return;
-  jsDebugStatsUiPreferencesLoaded = true;
-  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-  jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
-  jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
-  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
-  for (const key of visible) hidden.delete(key);
-  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
-  jsDebugGraphHiddenCharts = hidden;
-  jsDebugGraphVisibleCharts = visible;
-  // Respect a previously-persisted level selection (including an intentionally
-  // empty one); only fresh state falls back to the warning+error default.
-  const storedLogLevels = Array.isArray(saved.logLevels)
-    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
-    : null;
-  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
-  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
-}
-
-function saveJsDebugStatsUiPreferences() {
-  if (!jsDebugStatsUiPreferencesLoaded) return;
-  try {
-    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
-      subTab: jsDebugSubTab,
-      rangeSeconds: jsDebugGraphRangeSeconds,
-      resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
-      chartLayout: jsDebugGraphChartLayout,
-      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
-      visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
-      logLevels: [...jsDebugLogsState.levels].sort(),
-    }));
-  } catch (_) {
-  }
-}
-
-function debugGraphHiddenChartKeys() {
-  loadJsDebugStatsUiPreferences();
-  if (!(jsDebugGraphHiddenCharts instanceof Set)) jsDebugGraphHiddenCharts = new Set();
-  if (!(jsDebugGraphVisibleCharts instanceof Set)) jsDebugGraphVisibleCharts = new Set();
-  return jsDebugGraphHiddenCharts;
-}
-
-function debugGraphChartVisible(key) {
-  const chartKey = String(key || '');
-  if (chartKey === 'modelTokens' && !jsDebugGraphVisibleCharts.has(chartKey)) return false;
-  return !debugGraphHiddenChartKeys().has(chartKey);
-}
-
-function setDebugGraphChartVisible(key, visible) {
-  const chartKey = String(key || '');
-  if (!chartKey) return;
-  const hidden = debugGraphHiddenChartKeys();
-  if (visible) {
-    hidden.delete(chartKey);
-    jsDebugGraphVisibleCharts.add(chartKey);
-  } else {
-    hidden.add(chartKey);
-    jsDebugGraphVisibleCharts.delete(chartKey);
-  }
-  saveJsDebugStatsUiPreferences();
-  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
-  // while a graph control is focused, but deferring the user's own activation
-  // leaves aria-pressed and the chart body visibly stale until focus moves.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
-}
-
-function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
-  return Math.max(0, options.findIndex(option => option.seconds === normalized));
-}
-
-function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
-  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
-}
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
@@ -701,13 +623,13 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const previousRangeSeconds = Number(state.requestedRangeSeconds) || 0;
-  const nextRangeSeconds = Number(jsDebugGraphRangeSeconds) || 0;
+  const nextRangeSeconds = Number(debugRuntimeState.graphRangeSeconds) || 0;
   const loadingOlder = Number(state.loadedStartSeconds) > 0
     && previousRangeSeconds > 0
     && nextRangeSeconds > previousRangeSeconds;
   const snapshot = setJsDebugHistoryReadiness('loading', {
     reason: retry ? 'retry' : (loadingOlder ? 'older' : 'initial'),
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
     requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
@@ -1018,7 +940,7 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
   // (finest supported exact cell) when the picker is on AUTO.
-  const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
+  const override = Math.max(0, Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
   const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
   return choices.length ? Number(choices[0]) : 1;
@@ -1058,7 +980,7 @@ function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resol
 
 function resetJsDebugHistoryReadiness() {
   return setJsDebugHistoryReadiness('idle', {
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: 0,
     targetEndSeconds: 0,
     requestedStartSeconds: 0,
@@ -1114,8 +1036,35 @@ function debugStatHtml(label, value, key = '') {
 }
 
 function debugSubTabButtonHtml(tab, label) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
-  return `<button type="button" class="js-debug-subtab${active ? ' active' : ''}" role="tab" data-js-debug-subtab="${esc(tab)}" aria-selected="${active ? 'true' : 'false'}"><span class="session-button-dir">${esc(label)}</span></button>`;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
+  return toolbarButtonHtml({
+    className: `js-debug-subtab${active ? ' active' : ''}`,
+    role: 'tab',
+    action: 'debug-subtab',
+    dataset: {jsDebugSubtab: tab},
+    attributes: {'aria-selected': active ? 'true' : 'false'},
+    html: `<span class="session-button-dir">${esc(label)}</span>`,
+  });
+}
+
+function debugEventsSubviewHtml() {
+  const counts = debugEventCounts();
+  const apiCopyLabel = debugApiCopyButtonLabel();
+  return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
+      <div class="js-debug-toolbar">
+        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+        </div>
+        <div class="js-debug-actions">
+          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
+        </div>
+      </div>
+      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
+    </div>`;
 }
 
 function debugSubTabsHtml() {
@@ -1129,7 +1078,7 @@ function debugSubTabsHtml() {
 }
 
 function debugSubViewAttrs(tab) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
   return `data-js-debug-subview="${esc(tab)}"${active ? '' : ' hidden'}`;
 }
 
@@ -1192,6 +1141,7 @@ function debugClientLogRecord(event, index = 0) {
   return {
     id: `client:${redacted?.id ?? index}`,
     owner: 'client',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(timestampMs)),
     level: debugClientLogLevel(redacted),
@@ -1212,6 +1162,7 @@ function debugServerLogRecord(entry, index = 0) {
   return {
     id: `server:${redacted?.id ?? index}`,
     owner: 'server',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestamp) ? timestamp : (Number.isFinite(timestampMs) ? timestampMs / 1000 : 0),
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(
       Number.isFinite(timestamp) ? timestamp * 1000 : timestampMs,
@@ -1233,15 +1184,79 @@ function debugMergedLogRecords() {
     .map(debugServerLogRecord);
   const client = jsDebugEvents.map(debugClientLogRecord);
   const seen = new Set();
+  const cursors = jsDebugLogsState.clearedCursors || {};
+  const producerEpoch = owner => owner === 'server' ? jsDebugLogsState.serverEpoch : jsDebugClientLogEpoch;
   return [...server, ...client]
     .filter(entry => {
       if (seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
     })
-    .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
+    // Clear hides only records at or below the per-producer cleared sequence, and only while
+    // the producer's epoch still matches — a ring/epoch reset resurfaces everything. Wall time
+    // is never consulted, so a clock rollback cannot resurface a record hidden by a later Clear.
+    .filter(entry => {
+      const cursor = cursors[entry.owner];
+      if (!cursor) return true;
+      return !(cursor.epoch === producerEpoch(entry.owner) && Number(entry.sequence) <= Number(cursor.sequence));
+    })
     .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
     .slice(0, 500);
+}
+
+// Clear captures the current per-producer high-water sequence under its live epoch, so
+// only records visible at Clear time are hidden. A later record above the cursor, a clock
+// rollback, or a producer epoch reset all correctly resurface. This is the ONE owner of the
+// cleared-cursor identity; nothing consults wall time.
+function jsDebugLogRecordCleared() {
+  const highWaterSequence = ids => ids.reduce((max, id) => (Number.isSafeInteger(id) && id > max ? id : max), 0);
+  jsDebugLogsState.clearedCursors = {
+    server: {
+      epoch: jsDebugLogsState.serverEpoch,
+      sequence: highWaterSequence(jsDebugLogsState.payload.map(entry => Number(entry?.id))),
+    },
+    client: {
+      epoch: jsDebugClientLogEpoch,
+      sequence: highWaterSequence(jsDebugEvents.map(event => Number(event?.id))),
+    },
+  };
+}
+
+// Validate a raw /api/logs envelope before it is adopted. A malformed, missing-epoch, or
+// sequence-inconsistent envelope is rejected with a bounded reason so the poll can keep the
+// last good snapshot and surface the failure visibly. Duplicate or repeated ids are NOT an
+// envelope error: the server may legitimately re-emit a record, so the poll stores the raw
+// logs and de-duplication happens at render time in debugMergedLogRecords (dedup by id).
+function jsDebugValidateServerLogEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.ok !== true) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (typeof payload.epoch !== 'string' || payload.epoch === '') {
+    return {ok: false, reason: 'missing epoch'};
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (!Array.isArray(payload.logs)) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  for (const entry of payload.logs) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    const id = Number(entry.id);
+    if (!Number.isSafeInteger(id) || id < 0) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    // Duplicate or nonmonotonic ids are accepted and stored raw; the render owner
+    // (debugMergedLogRecords) de-duplicates by id. Only an id beyond the envelope's own
+    // declared sequence is envelope-inconsistent and rejected.
+    if (id > sequence) {
+      return {ok: false, reason: 'log id exceeds envelope sequence'};
+    }
+  }
+  return {ok: true, epoch: payload.epoch, sequence, logs: payload.logs};
 }
 
 function debugVisibleLogRecords() {
@@ -1931,11 +1946,6 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     debugGraphMergeBucket(target, bucket);
     jsDebugGraphBuckets.delete(key);
   }
-  const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
-    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
-    jsDebugGraphEventRecords.delete(id);
-  }
 }
 
 function recordJsDebugEventForGraph(event) {
@@ -1964,6 +1974,18 @@ function jsDebugCurrentObservationEventSnapshot(event) {
   return snapshot;
 }
 
+// Finalize a reserved observation EXACTLY ONCE: snapshot its current live content into the
+// immutable upload event, then release the live-event reference so no later measurement can
+// rewrite it. A failure's content is already complete, and a restored (pre-finalized) entry
+// is never re-snapshotted.
+function finalizeJsDebugCurrentObservation(entry) {
+  if (!entry || entry.finalized) return entry;
+  entry.event = jsDebugCurrentObservationEventSnapshot(entry.liveEvent || entry.event);
+  entry.finalized = true;
+  entry.liveEvent = null;
+  return entry;
+}
+
 function queueJsDebugCurrentObservation(key, event) {
   if (!clientCanUseUnscopedHostRequests()) return;
   if (jsDebugCurrentObservationState.keys.has(key)) return;
@@ -1973,9 +1995,15 @@ function queueJsDebugCurrentObservation(key, event) {
     jsDebugCurrentObservationState.drops += 1;
     return;
   }
-  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, releaseBlocking};
+  // Reserve identity immediately, keeping a reference to the live event. A failure reserves
+  // its already-complete identity and finalizes at once; a non-failure API observation stays
+  // open until its bounded byte/timing enrichment arrives (finalizeJsDebugCurrentObservationBytes)
+  // or the flush finalizes whatever it measured. Every other event has no post-queue enrichment,
+  // so it finalizes immediately.
+  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, liveEvent: event, releaseBlocking, finalized: false};
   jsDebugCurrentObservationState.keys.add(entry.key);
   jsDebugCurrentObservationState.queue.push(entry);
+  if (releaseBlocking || observationEvent.type !== 'api') finalizeJsDebugCurrentObservation(entry);
   if (releaseBlocking) {
     jsDebugCurrentObservationState.receipts.set(entry.key, {
       key: entry.key,
@@ -2389,7 +2417,9 @@ function restoreJsDebugCurrentObservationReceipts() {
       }
       restoredEntries.set(entry.key, entry);
       state.keys.add(entry.key);
-      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true});
+      // A restored receipt journal carries already-finalized, immutable content; it is never
+      // re-snapshotted, so it has no live event and is marked finalized on adoption.
+      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, liveEvent: null, releaseBlocking: true, finalized: true});
     }
   }
   if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
@@ -2435,6 +2465,14 @@ function installJsDebugCurrentObservationLiveness() {
   state.livenessTimer = setInterval(() => {
     recordJsDebugClientHealthObservation(0, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
+  currentObservationLifecycleScope().ownTimer('liveness', state.livenessTimer, clearInterval);
+}
+
+function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
+  const state = jsDebugCurrentObservationState;
+  jsDebugCurrentObservationLifecycleScope.dispose(reason);
+  state.timer = null;
+  state.livenessTimer = null;
 }
 
 installJsDebugCurrentObservationLiveness();
@@ -2627,12 +2665,15 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
   if (state.timer !== null) {
     if (delay !== 0) return;
     clearTimeout(state.timer);
+    currentObservationLifecycleScope().release('flush', state.timer);
     state.timer = null;
   }
   state.timer = setTimeout(() => {
+    currentObservationLifecycleScope().relinquish('flush', state.timer);
     state.timer = null;
     void flushJsDebugCurrentObservations();
   }, delay);
+  currentObservationLifecycleScope().ownTimer('flush', state.timer);
 }
 
 async function flushJsDebugCurrentObservations() {
@@ -2647,6 +2688,9 @@ async function flushJsDebugCurrentObservations() {
   }
   if (state.inFlight) return state.inFlight;
   if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  // Any observation still open at flush time (e.g. an API response that never reported bytes)
+  // finalizes with whatever it measured, so its content is immutable before it is uploaded.
+  for (const entry of state.queue) finalizeJsDebugCurrentObservation(entry);
   const entries = [...state.queue.filter(entry => entry.releaseBlocking), ...state.queue.filter(entry => !entry.releaseBlocking)]
     .slice(0, jsDebugObservationUploadMaxItems);
   const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
@@ -2733,19 +2777,16 @@ async function flushJsDebugCurrentObservations() {
   return inFlight;
 }
 
-function recordApiDebugResponseBytesForGraph(event, responseBytes) {
-  if (!event || !Number.isFinite(event.id)) return;
-  const record = jsDebugGraphEventRecords.get(event.id);
-  if (!record?.bucket) return;
-  const nextBytes = Number(responseBytes);
-  if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(record.responseBytes || 0);
-  const delta = nextBytes - previousBytes;
-  record.responseBytes = nextBytes;
-  record.lastSeenAt = Date.now();
-  if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
+// The bytes finalizer for a still-open API observation. The live event already carries the
+// measured, bounded byte count (Content-Length or a response clone; rejected, hung, or
+// unconsumed bodies simply leave it absent), so this locates the reserved queue entry by live
+// identity and finalizes it exactly once. A late measurement for an already-finalized (or
+// immediate-failure) observation finds no open entry and cannot rewrite its immutable content.
+function finalizeJsDebugCurrentObservationBytes(liveEvent) {
+  if (!liveEvent || typeof liveEvent !== 'object') return;
+  const entry = jsDebugCurrentObservationState.queue.find(item => item && item.liveEvent === liveEvent && !item.finalized);
+  if (!entry) return;
+  finalizeJsDebugCurrentObservation(entry);
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -2882,7 +2923,6 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 
 function clearJsDebugGraphData() {
   jsDebugGraphBuckets.clear();
-  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
   // the cache we just cleared (kept the reload-idempotency of the rendered history).
@@ -3307,9 +3347,9 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
-  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
-  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === debugRuntimeState.graphResolutionOverrideSeconds) return false;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   if (persist) saveJsDebugStatsUiPreferences();
   return true;
 }
@@ -3342,7 +3382,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) {
     let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
     // Point-cap: an explicit override that would render more than the budget of buckets
@@ -3430,7 +3470,7 @@ function debugGraphContributingSourceSlices(domain) {
   return slices;
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = debugRuntimeState.graphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
@@ -3450,10 +3490,10 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
 // debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
   const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
-  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
 }
 
-function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
+function debugGraphDomain(nowMs = Date.now(), rangeSeconds = debugRuntimeState.graphRangeSeconds) {
   const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   if (debugGraphZoomDomainValid()) {
     const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
@@ -4062,29 +4102,24 @@ function debugGraphClientMetricSeriesDefs(buckets) {
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
-  for (const [bucketIndex, bucket] of buckets.entries()) {
+  for (const bucket of buckets) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      processes.set(processId, {label: String(process?.label || processId), bucketIndex});
+      if (!processes.has(processId)) processes.set(processId, {label: String(process?.label || processId)});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {
-    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
-    value: bucket => bucket.cpuCount ? bucket.cpuTotalPercent / bucket.cpuCount : 0,
-    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
-  };
-  if (!processes.size) return [fallbackSelf];
-  const activeProcessId = processes.has(currentProcessId)
-    ? currentProcessId
-    : [...processes.entries()].sort((left, right) => right[1].bucketIndex - left[1].bucketIndex || left[0].localeCompare(right[0]))[0][0];
+  // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
+  // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
+  // promoted in its place, and there is no aggregate `cpu` fallback series.
+  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([processId, process]) => {
-      const current = processId === activeProcessId;
+      const current = processId === currentProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
       const displayLabel = legacyWebPort && process.label === processId
         ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
@@ -4268,7 +4303,7 @@ function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
-  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -4318,7 +4353,7 @@ function debugGraphChartToggleControlsHtml() {
 }
 
 function debugGraphLayoutControlsHtml() {
-  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
+  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${debugRuntimeState.graphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
 }
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
@@ -5267,7 +5302,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
   }
   return defaultBuckets;
 }
@@ -5437,17 +5472,19 @@ function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   // A stale revision means these rows may be old, not that the known roster is empty.
   // Keep the count and breakdown honest while the per-session stale text explains freshness.
   const sessions = new Set(rows.map(row => row.session));
-  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  // ONE compact summary carries the stale count; the per-session stale specifics move under the
+  // Live breakdown rather than being repeated as header prose.
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions${staleSessions.length ? ` (${staleSessions.length} stale)` : ''}`;
   const details = rows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
     const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
   }).join('');
-  const staleText = staleSessions.length
-    ? ` ${staleSessions.map(item => `${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`).join('; ')}`
+  const stalePerSession = staleSessions.length
+    ? `<ul class="js-debug-agent-window-detail-stale">${staleSessions.map(item => `<li>${esc(`${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`)}</li>`).join('')}</ul>`
     : '';
   const state = staleSessions.length ? 'stale' : 'current';
-  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span>${staleText ? `<span class="js-debug-agent-window-detail-stale">${esc(staleText.trim())}</span>` : ''}<details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul>${stalePerSession}</details></div>`;
 }
 
 function refreshDebugAgentWindowLiveDetails() {
@@ -5593,7 +5630,7 @@ function debugGraphChartLabel(group, buckets = []) {
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(jsDebugGraphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
     ${debugGraphHistoryOverlayHtml()}
   </div>`;
 }
@@ -6539,11 +6576,18 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
-  if (jsDebugPricingRefreshState.timer !== null) clearTimeout(jsDebugPricingRefreshState.timer);
+  if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
   jsDebugPricingRefreshState.timer = setTimeout(() => {
+    debugPricingRefreshLifecycleScope().relinquish('status', jsDebugPricingRefreshState.timer);
     jsDebugPricingRefreshState.timer = null;
     void refreshDebugCostPricingStatus();
   }, 750);
+  debugPricingRefreshLifecycleScope().ownTimer('status', jsDebugPricingRefreshState.timer);
+}
+
+function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
+  jsDebugPricingRefreshLifecycleScope.dispose(reason);
+  jsDebugPricingRefreshState.timer = null;
 }
 
 async function refreshDebugCostPricingStatus() {
@@ -6619,8 +6663,8 @@ function debugGraphHtml() {
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
-  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
-  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
+  const domain = debugGraphDomain(nowMs, debugRuntimeState.graphRangeSeconds);
+  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: debugRuntimeState.graphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
   // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
   // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
@@ -6634,9 +6678,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
-    rangeSeconds: jsDebugGraphRangeSeconds,
+    rangeSeconds: debugRuntimeState.graphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
     zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
@@ -6711,8 +6754,8 @@ function jsDebugStatsLayoutItemsVisible(items) {
 
 function jsDebugCurrentStatsSelection() {
   return {
-    rangeSeconds: normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds),
-    resolution: normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO',
+    rangeSeconds: normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds),
+    resolution: normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds) || 'AUTO',
   };
 }
 
@@ -6851,7 +6894,7 @@ function jsDebugStatsLivePushEnabled() {
   // A drag zoom is a fixed historical domain. The shared range slider is the
   // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
   // every durable one-second push.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
 }
 
 function jsDebugStatsPollIntervalMs() {
@@ -6888,8 +6931,11 @@ function pollJsDebugStatsOnInterval() {
 }
 
 // Fire the full-retention prefetch once shortly after the current range lands, then on a
-// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
-// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+// slow cadence. The poll loop stops when the panel is hidden and the prefetch itself is
+// retired (see below), so neither does any work while the panel is hidden. This is only the
+// poll/prefetch path: the live SSE stream is separate and tracks DOCUMENT visibility, not the
+// active tab, so a hidden panel on a still-visible page keeps applying deltas (it just does
+// not repaint); only a hidden document tears the stream down.
 function maybePrefetchJsDebugHistory() {
   if (!jsDebugStatsPollState.firstSampleReceived) return;
   if (jsDebugHistoryPrefetchState.inFlight) return;
@@ -7116,7 +7162,9 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
       record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
-      if (!record.cpu_count || source.includes(':8881')) {
+      // No serving-port preference: the exact serving port owns the solid CPU series in
+      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      if (!record.cpu_count) {
         record.cpu_total_percent = value;
         record.cpu_count = 1;
       }
@@ -7444,10 +7492,25 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSystemPolling({pollNow: visible});
-    syncDebugLogsPolling({pollNow: visible});
+    syncDebugSubviewActivation({pollNow: visible});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
+  });
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', event => {
+    void event;
+    stopDebugGraphLiveTicker();
+    disposeDebugPricingRefreshLifecycle('pagehide');
+    disposeJsDebugCurrentObservationLifecycle('pagehide');
+  });
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted !== true) return;
+    installJsDebugCurrentObservationLiveness();
+    scheduleJsDebugCurrentObservationFlush();
+    if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+    syncDebugGraphLiveTicker();
   });
 }
 
@@ -7488,9 +7551,15 @@ function debugSystemNumber(value, digits = 0) {
   return Number.isFinite(number) ? number.toLocaleString(undefined, {maximumFractionDigits: digits}) : t('common.notAvailable');
 }
 
+// The ONE label/value list renderer. A third tuple element is the reason the value is an em dash;
+// it rides along as a title and a machine-readable attribute so an unmeasured row in a disclosure
+// carries its reason exactly the way an unmeasured roster cell already does.
 function debugSystemRowsHtml(rows = []) {
-  return `<dl class="js-debug-system-kv">${rows.map(([label, value]) => `
-    <div><dt>${esc(label)}</dt><dd>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`).join('')}</dl>`;
+  return `<dl class="js-debug-system-kv">${rows.map(([label, value, reason]) => {
+    const explain = reason ? ` title="${esc(reason)}" data-value-reason="${esc(reason)}"` : '';
+    return `
+    <div><dt>${esc(label)}</dt><dd${explain}>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`;
+  }).join('')}</dl>`;
 }
 
 function debugSystemCardHtml(title, body, options = {}) {
@@ -7499,326 +7568,908 @@ function debugSystemCardHtml(title, body, options = {}) {
   </section>`;
 }
 
-function debugSystemTmuxSignalWatcherCardHtml(watcher = {}) {
-  const knownStates = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
-  const state = knownStates.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
-  const demandKnown = typeof watcher.demanded === 'boolean';
-  const demanded = watcher.demanded === true;
-  const labels = {
-    'never-started': 'Never started',
-    attaching: 'Attaching',
-    'no-sessions': 'No sessions',
-    attached: 'Attached',
-    exited: 'Exited',
-  };
-  const defaultReasons = {
-    'never-started': 'Tmux signal watcher has not been started',
-    attaching: 'Tmux control client is attaching',
-    'no-sessions': 'No tmux sessions are configured to watch',
-    attached: 'Control client is attached',
-    exited: 'Tmux control client exited',
-  };
-  const sessions = Array.isArray(watcher.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
-  const issue = state === 'exited' || (state === 'never-started' && watcher.demanded !== false);
-  const stateLabel = state === 'never-started' && demandKnown && !demanded ? 'Idle' : labels[state];
-  return `<section class="js-debug-system-card" data-js-debug-tmux-signal-watcher data-tmux-signal-watcher-state="${esc(state)}" data-tmux-signal-watcher-demanded="${demandKnown ? String(demanded) : 'unknown'}" role="${issue ? 'alert' : 'status'}">
-    <h3>Tmux signal watcher</h3>${debugSystemRowsHtml([
-      ['State', stateLabel],
-      ['Demand', demandKnown ? (demanded ? 'Yes' : 'No') : t('common.notAvailable')],
-      ['Control client PID', Number(watcher.process_pid) > 0 ? watcher.process_pid : '—'],
-      ['Sessions', sessions || '—'],
-      ['Detail', watcher.reason || defaultReasons[state]],
-    ])}
-  </section>`;
+// The sentence each tmux control-client state means when the payload published no reason of its
+// own. One owner, read by the child row and by its disclosure.
+const DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS = Object.freeze({
+  'never-started': 'Tmux signal watcher has not been started',
+  attaching: 'Tmux control client is attaching',
+  'no-sessions': 'No tmux sessions are configured to watch',
+  attached: 'Control client is attached',
+  exited: 'Tmux control client exited',
+});
+
+// The ONE predicate for "this watcher is an actionable problem". An exited control client is one;
+// so is a watcher that was demanded and never started. An undemanded watcher never is.
+function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  return state === 'exited' || (state === 'never-started' && watcher?.demanded !== false);
 }
 
-function debugSystemServiceState(service = {}) {
-  const pid = Number(service.pid || 0);
-  if (pid <= 0) {
-    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
-    return {label: t('state.idle'), tone: 'muted'};
-  }
-  const transportReason = String(service.transport_reason || '').trim();
-  if (transportReason) {
-    const failure = String(service.last_failure || '').trim();
-    return {label: `Transport: ${failure || transportReason}`, tone: 'bad', reason: transportReason};
-  }
-  if (service.healthy === false) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
-  return {label: t('debug.system.localServices.state.running'), tone: 'good'};
-}
-
-const DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000;
-const debugSystemLocalServicesState = {records: new Map(), signature: ''};
-const debugSystemLocalServiceFields = Object.freeze([
-  {key: 'status', labelKey: 'debug.system.localServices.field.status'},
-  {key: 'pid', labelKey: 'debug.system.localServices.field.pid'},
-  {key: 'started', labelKey: 'debug.system.localServices.field.started'},
-  {key: 'lastRan', labelKey: 'debug.system.localServices.field.lastRan'},
-  {key: 'uptime', labelKey: 'debug.system.localServices.field.uptime'},
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu'},
-  {key: 'memory', labelKey: 'debug.system.localServices.field.memory'},
-  {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
-  {key: 'generation', labelKey: 'debug.system.localServices.field.generation'},
-  {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
-  {key: 'lastSuccess', labelKey: 'debug.system.localServices.field.lastSuccess'},
-  {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
-  {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
-  {key: 'cache', labelKey: 'debug.system.localServices.field.cache'},
-  {key: 'products', labelKey: 'debug.system.localServices.field.products'},
-  {key: 'runtime', labelKey: 'debug.system.localServices.field.runtime'},
+// NO staleness threshold lives here any more, deliberately. It used to be 30 seconds applied to
+// the age of the last PUBLISHED document -- but the observer publishes only when a service-state
+// signature changes, so on a healthy quiet system that age grows without bound and the panel
+// declared its own monitor dead after 30 seconds of everything being fine. The liveness decision
+// now belongs to `yolomux_lib/backend_health/observer.py:BackendHealthObserver.liveness`, which is
+// the only party that owns the probe thread and the monotonic cadence its deadline is derived
+// from, and this panel renders `observer_alive` rather than re-deriving it from a number it cannot
+// interpret. The STORE owns history and persistence and no longer decides liveness at all: it
+// could not see the cadence, and it aged the fact on the wall clock, so a clock step backwards
+// held "alive" forever and a step forwards produced a false red.
+// Health metrics that are whole counts. They share the one metric-envelope cell renderer with the
+// three process metrics; only the number formatting differs.
+const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set(['restart_count', 'observations', 'request_count', 'error_count', 'completed_count']);
+// The three measurements the local-service projection publishes per process, versus the retained
+// health measurements. They carry different DOM attributes because they have different producers
+// and different coverage, and `tests/test_gate_panels.py` pins the process set exactly.
+const DEBUG_SYSTEM_PROCESS_METRIC_KEYS = new Set(['cpu_now_percent', 'rss_bytes', 'uptime_seconds']);
+// The roster's metric columns, in render order, and for each one which of the two published
+// aggregates it is counted by. `retained` totals come from the observer's per-epoch store;
+// `counters` come from this web process's own RPC ledger. The two have different denominators and
+// independent coverage, so a column is only ever flagged partial by the aggregate it actually came
+// from. `parts` means one cell shows two envelopes (average and maximum response time) -- it is
+// still two typed metrics, rendered through the same one cell renderer, in one column.
+// `priority: secondary` is what the responsive layout drops first; every dropped value is repeated
+// in the row's own disclosure, so narrowing the window never hides a number.
+const DEBUG_SYSTEM_ROSTER_COLUMNS = Object.freeze([
+  {key: 'latency', labelKey: 'debug.system.roster.column.latency', parts: ['latency_average_ms', 'latency_max_ms'], coverage: 'counters', priority: 'primary'},
+  {key: 'uptime_seconds', labelKey: 'debug.system.localServices.field.uptime', priority: 'primary'},
+  {key: 'rss_bytes', labelKey: 'debug.system.localServices.field.memory', priority: 'secondary'},
+  {key: 'cpu_now_percent', labelKey: 'debug.graph.chart.cpu', priority: 'secondary'},
+  {key: 'restart_count', labelKey: 'debug.system.roster.column.restarts', coverage: 'retained', priority: 'secondary'},
+  {key: 'request_count', labelKey: 'debug.system.roster.column.requests', coverage: 'counters', priority: 'secondary'},
+  {key: 'error_count', labelKey: 'debug.system.roster.column.errors', coverage: 'counters', priority: 'secondary'},
 ]);
+// The denominator, spelled out. `web_process` counts what THIS web process issued -- not everything
+// the service ever served -- and a reader who is not told that reads the number as the latter.
+const DEBUG_SYSTEM_HEALTH_SCOPE_LABELS = Object.freeze({web_process: 'this web process'});
+// Machine-readable reason codes rendered as the sentence a reader can act on. An unmapped code is
+// printed verbatim rather than dropped, because an unexplained code still names the fact.
+const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
+  observer_unattached: 'the backend-health observer is not attached to this web process',
+  resource_unobserved: 'the observer has never recorded this service',
+  counters_not_observed: 'the observer never read a counter sample, so every retained total would be a structural zero',
+  web_process_scope: 'the retained history starts before this web process, so these counts cover less time than the restarts beside them',
+  missed_final_sample: 'a restart happened before the final counter sample could be read',
+  history_corrupt: 'the retained history file was unreadable and was reset',
+  history_unreadable: 'the retained history file could not be read and was reset',
+  history_schema_unsupported: 'the retained history was written by a newer schema and was reset',
+  history_port_mismatch: 'the retained history belonged to another port and was reset',
+  // The roster's two STRUCTURAL absences. Neither is a failure and neither is a zero: the
+  // observer watches the six local services from this web process, so it has no restart,
+  // request, error or latency series for the web process itself, and the tmux signal watcher
+  // is an in-process subsystem with no separate process to measure.
+  web_process_not_observed: 'the backend-health observer watches the local services from this web process, so it has never observed this web process itself',
+  subsystem_not_observed: 'this is an in-process subsystem, not a separate process, so it has no independent process or traffic measurement',
+  schema_unsupported: 'the backend published a local-services schema this panel does not render',
+  // Diagnostics the sampler and the watcher publish only once they have run. Before that the field
+  // is ABSENT, which is why it renders as the unmeasured em dash and not as `0` or `0ms`.
+  sampler_cycles_not_published: 'the stats sampler has not published a cycle count yet',
+  sampler_cycle_not_timed: 'the stats sampler has not completed a timed cycle yet',
+  history_not_assembled: 'no history query has been assembled since this process started',
+  history_never_requested: 'no history request has been served since this process started, so there is no ratio to take',
+  watcher_demand_unpublished: 'the watcher has not published whether it is demanded',
+  state_reason_unpublished: 'the service published no explanation for its current state',
+  process_not_running: 'no process is running for this service, so it has no pid',
+  // The CPU-budget block's two absences. The reason for an unpushed PROCESS sample is not spelled
+  // here: `system_status_server_block` publishes that sentence inside the envelope, and a second
+  // copy in this map would be one more divergent copy of the same fact.
+  cpu_budget_stale: 'no CPU sample has arrived recently, so the current CPU reading below is not current',
+  cpu_budget_never_sampled: 'statsd has never pushed a CPU sample, so no CPU percentage has been measured against the budget',
+  usage_no_accepted_atom: 'no usage atom has been accepted since this process started',
+  usage_conflicts_not_published: 'the usage store has not published a quarantined-conflict count',
+  // Liveness, from `backend_health/observer.py:BACKEND_HEALTH_NO_CYCLE_OBSERVED`. Attached but not
+  // yet probing is a different fact from probing and stopped.
+  no_observer_cycle_recorded: 'the observer is attached but has not completed a probe cycle yet',
+  observer_cycles_failing: 'the observer is still attempting cycles but they are failing, so nothing new is being recorded',
+  observer_cycles_stalled: 'the observer stopped attempting probe cycles',
+});
 
-function debugSystemServiceName(service = {}) {
-  return String(service.service || t('debug.system.localServices.serviceFallback')).trim() || t('debug.system.localServices.serviceFallback');
+// The ONE status-to-semantics owner for the roster. Every caller that needs a colour, a dot or a
+// non-colour state word goes through it, so "green means ready" cannot drift between the roster
+// row, the summary strip and the child row. Colour is never the only carrier: the tone picks the
+// paint, `debugSystemRosterStateLabel` picks the word, and both are rendered together.
+//   good  -- ready and serving
+//   muted -- legitimately idle / not demanded (gray, NOT an alert)
+//   warn  -- starting, recovering, backing off, stale or partial (amber, transient)
+//   bad   -- actionable: degraded, down, transport failed, unavailable (red)
+const DEBUG_SYSTEM_STATE_TONES = Object.freeze({
+  running: 'good',
+  ready: 'good',
+  attached: 'good',
+  ok: 'good',
+  idle: 'muted',
+  'no-sessions': 'muted',
+  'never-started': 'muted',
+  not_running: 'muted',
+  not_demanded: 'muted',
+  starting: 'warn',
+  attaching: 'warn',
+  recovering: 'warn',
+  backoff: 'warn',
+  stale: 'warn',
+  partial: 'warn',
+  // The panel cannot read this payload's rows, which is not the same as the service being down.
+  // `warn`, because the fact being reported is about THIS panel's ability to render, not about
+  // the daemon: painting it `bad` would report an outage nobody observed.
+  schema_unsupported: 'warn',
+});
+
+function debugSystemStateTone(state) {
+  const token = String(state || '').trim();
+  if (!token) return 'bad';
+  return DEBUG_SYSTEM_STATE_TONES[token] || 'bad';
 }
 
-function debugSystemPrevText(value) {
-  const text = String(value == null || value === '' ? t('common.notAvailable') : value);
-  const prefix = t('debug.system.localServices.prevPrefix');
-  return text.startsWith(`${prefix} `) ? text : t('debug.system.localServices.prevValue', {value: text});
+// `debugSystemMeasuredMetric` used to live here: an adapter that wrapped a raw number because
+// `payload.server` was published as plain floats, outside the typed-metric contract every other
+// row obeys. It could not do its job -- `Number(null)` is `0`, and `0` is finite -- so an
+// unsampled value arrived stamped `measured`. `yolomux_lib/app.py:system_status_server_block` now
+// publishes the web process through the same `local_service_projection.measurement` envelope as
+// the six services beside it, so there is no raw-float dialect left to adapt and the roster reads
+// ONE shape everywhere.
+
+// A metric that is absent by STRUCTURE, not by failure. It renders as the panel's unavailable
+// text with its reason code, exactly like an unmeasured typed envelope, so a column nobody
+// observes can never read as `0`.
+function debugSystemAbsentMetric(reasonCode) {
+  return {state: 'unavailable', value: null, reason_code: String(reasonCode || ''), reason: debugSystemHealthReasonText(reasonCode)};
 }
 
-function debugSystemStripPrevText(value) {
-  const prefix = t('debug.system.localServices.prevPrefix').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return String(value || '').replace(new RegExp(`^${prefix}\\s*`), '');
+function debugSystemHealthReasonText(code) {
+  const token = String(code || '').trim();
+  if (!token) return '';
+  return DEBUG_SYSTEM_HEALTH_REASON_TEXT[token] || token.replace(/_/g, ' ');
 }
 
-function debugSystemDictSummaryText(dict) {
-  const entries = dict && typeof dict === 'object' ? Object.entries(dict) : [];
-  return entries.map(([key, value]) => `${key} ${value}`).join('\n');
+// The panel has ONE spelling for a value nobody measured: an em dash carrying its reason. The
+// roster cells already obeyed it; the diagnostics inside a row's disclosure did not, and printed
+// either `t('common.notAvailable')` ("not available / not available") or a `|| 0` fallback that
+// renders an unpublished counter as a confident `0ms`. Both are the same defect wearing different
+// clothes, so every unmeasured scalar in a disclosure now comes from here.
+//   `format` turns a FINITE value into its text; it is never called for an absent one, so no
+//   formatter can invent a zero on the way through.
+function debugSystemScalar(value, reasonCode, format = current => debugSystemNumber(current)) {
+  const number = Number(value);
+  if (value == null || !Number.isFinite(number)) return {text: '—', reason: debugSystemHealthReasonText(reasonCode)};
+  return {text: String(format(number)), reason: ''};
 }
 
-function debugSystemQueueText(service = {}) {
-  return debugSystemDictSummaryText(service.queues);
+function debugSystemHealthReasonListText(reasons) {
+  const codes = (Array.isArray(reasons) ? reasons : []).map(String).filter(Boolean);
+  return codes.map(code => `${code} (${debugSystemHealthReasonText(code)})`).join('; ');
 }
 
-function debugSystemCacheText(service = {}) {
-  return debugSystemDictSummaryText(service.cache);
-}
-
-function debugSystemProductCountersText(service = {}) {
-  const counters = service.product_counters && typeof service.product_counters === 'object' ? service.product_counters : {};
-  return Object.entries(counters)
-    .map(([task, byOutcome]) => `${task}: ${debugSystemDictSummaryText(byOutcome).split('\n').join(', ')}`)
-    .join('\n');
-}
-
-function debugSystemProductRuntimeText(service = {}) {
-  const runtime = service.product_runtime_ms && typeof service.product_runtime_ms === 'object' ? service.product_runtime_ms : {};
-  const work = service.product_work_totals && typeof service.product_work_totals === 'object' ? service.product_work_totals : {};
-  return [...new Set([...Object.keys(runtime), ...Object.keys(work)])]
-    .map(task => {
-      const stats = runtime[task];
-      const workText = debugSystemDictSummaryText(work[task]).split('\n').join(', ');
-      const runtimeText = stats ? `avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})` : '';
-      return `${task}: ${[runtimeText, workText].filter(Boolean).join(' · ')}`;
-    })
-    .join('\n');
-}
-
-function debugSystemLocalServiceRecord(name) {
-  let record = debugSystemLocalServicesState.records.get(name);
-  if (!record) {
-    record = {name, fields: new Map(), startedAt: 0, exitedAt: 0, lastPid: 0, running: false};
-    debugSystemLocalServicesState.records.set(name, record);
-  }
-  return record;
-}
-
-function debugSystemLocalServiceUpdateLifecycle(record, service = {}, nowSeconds) {
-  const pid = Number(service.pid || 0);
-  const running = pid > 0;
-  const serverStartedAt = Number(service.started_at || 0);
-  const uptimeSeconds = Number(service.uptime_seconds);
-  if (running) {
-    record.lastPid = pid;
-    record.exitedAt = 0;
-    record.startedAt = serverStartedAt > 0
-      ? serverStartedAt
-      : (Number.isFinite(uptimeSeconds) ? Math.max(0, nowSeconds - uptimeSeconds) : (record.running ? record.startedAt : nowSeconds));
-  } else if (record.running) {
-    record.exitedAt = nowSeconds;
-  }
-  record.running = running;
-}
-
-function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSeconds) {
-  const state = debugSystemServiceState(service);
-  const pid = Number(service.pid || 0);
-  const running = pid > 0;
-  const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
-  const previous = record.fields.get(fieldKey);
-  const previousDisplay = debugSystemStripPrevText(previous?.display || '');
-  const previousAvailable = previousDisplay && previousDisplay !== '—' && previousDisplay !== t('common.notAvailable');
-  const previousValue = () => previousAvailable ? {display: debugSystemPrevText(previousDisplay), identity: `prev:${previous?.identity || previousDisplay}`, previous: true} : null;
-  const valueOrPrevious = value => {
-    if (running) return value;
-    if (value.display && value.display !== '—' && value.display !== t('common.notAvailable')) return {display: debugSystemPrevText(value.display), identity: `prev:${value.identity}`, previous: true};
-    return previousValue() || value;
-  };
-  if (fieldKey === 'status') return {display: state.label, identity: state.label, tone: state.tone};
-  if (fieldKey === 'pid') {
-    if (running) return {display: String(pid), identity: String(pid)};
-    return record.lastPid > 0 ? {display: debugSystemPrevText(record.lastPid), identity: `prev:${record.lastPid}`, previous: true} : {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'started') {
-    return record.startedAt > 0
-      ? {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `started:${record.startedAt}`, dynamic: true}
-      : {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'lastRan') {
-    if (running && record.startedAt > 0) return {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `running:${record.startedAt}`, dynamic: true};
-    if (record.exitedAt > 0) return {display: t('debug.system.localServices.exitedAgo', {time: relativeTimeFormat(Math.max(0, nowSeconds - record.exitedAt))}), identity: `exited:${record.exitedAt}`, dynamic: true, previous: true};
-    return {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'uptime') return valueOrPrevious({display: service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds), identity: String(service.uptime_seconds ?? '')});
-  if (fieldKey === 'cpu') return valueOrPrevious({display: resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`, identity: String(resources.cpu_percent ?? '')});
-  if (fieldKey === 'memory') return valueOrPrevious({display: resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes), identity: String(resources.rss_bytes ?? '')});
-  if (fieldKey === 'clients') return valueOrPrevious({display: service.clients == null ? '—' : debugSystemNumber(service.clients), identity: String(service.clients ?? '')});
-  if (fieldKey === 'generation') return valueOrPrevious({display: service.generation == null ? '—' : debugSystemNumber(service.generation), identity: String(service.generation ?? '')});
-  if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
-  if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
-  if (fieldKey === 'lastSuccess') {
-    const lastSuccess = Number(service.last_success || 0);
-    return valueOrPrevious(lastSuccess > 0 ? {display: relativeTimeFormat(Math.max(0, nowSeconds - lastSuccess)), identity: String(lastSuccess), dynamic: true} : {display: '—', identity: 'empty'});
-  }
-  if (fieldKey === 'queues') {
-    const queueText = debugSystemQueueText(service);
-    return valueOrPrevious({display: queueText || '—', identity: queueText});
-  }
-  if (fieldKey === 'cache') {
-    const cacheText = debugSystemCacheText(service);
-    return valueOrPrevious({display: cacheText || '—', identity: cacheText});
-  }
-  if (fieldKey === 'products') {
-    const productsText = debugSystemProductCountersText(service);
-    return valueOrPrevious({display: productsText || '—', identity: productsText});
-  }
-  if (fieldKey === 'runtime') {
-    const runtimeText = debugSystemProductRuntimeText(service);
-    return valueOrPrevious({display: runtimeText || '—', identity: runtimeText});
-  }
-  return {display: '—', identity: 'empty'};
-}
-
-function debugSystemLocalServicesCardHtml() {
-  return `<section class="js-debug-system-card js-debug-system-card--wide" data-js-debug-local-services-card>
-    <h3>${esc(t('debug.system.localServices.title'))}</h3><div data-js-debug-local-services></div>
-  </section>`;
-}
-
-function debugSystemLocalServiceCellLayoutAttrs(fieldKey) {
-  return fieldKey === 'runtime' ? ' style="white-space:pre-wrap;overflow-wrap:anywhere"' : '';
-}
-
-function debugSystemLocalServicesTableHtml(serviceNames = []) {
-  const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
-    <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
-    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}"${debugSystemLocalServiceCellLayoutAttrs(field.key)}>—</td>`).join('')}</tr>`).join('')}</tbody>
-  </table></div>`;
-}
-
+// The ONE metric-envelope cell renderer: the three process metrics and every M8 health metric go
+// through it. A value that is not `measured` renders its typed reason, never `0` -- a confident
+// zero with no measurement behind it is the failure this panel exists to prevent.
 function debugSystemMetricText(metric = {}, key = '') {
   if (metric.state !== 'measured') return String(metric.reason || t('common.notAvailable'));
   if (key === 'cpu_now_percent') return `${debugSystemNumber(metric.value, 1)}%`;
   if (key === 'rss_bytes') return debugGraphTerseBytesText(metric.value);
   if (key === 'uptime_seconds') return debugGraphUptimeText(metric.value);
+  if (key === 'latency_average_ms' || key === 'latency_max_ms') return debugGraphTerseTimeText(metric.value);
+  if (DEBUG_SYSTEM_HEALTH_COUNT_KEYS.has(key)) return debugSystemNumber(metric.value, 0);
   return debugSystemNumber(metric.value, 1);
 }
 
-function debugSystemNormalizedLocalServicesTableHtml(localServices = {}) {
+// Is the monitor still LOOKING? That is the question this answers, and it is not the same
+// question as "when did a service last change state".
+//
+// The old model asked the second question and printed the first one's answer. The observer
+// persists only when the service-state signature CHANGES, so on a healthy quiet system the
+// document's age grows without bound while the observer probes every 2 seconds -- and any age
+// over 30 seconds was rendered as "STOPPED UPDATING". A silent system reported its own monitor
+// as dead, and the quieter the machine the louder the lie.
+//
+// The backend now publishes liveness as its own bounded fact, decided by the OBSERVER -- the only
+// party that owns the thread whose survival is the question and the monotonic cadence the deadline
+// is derived from. There is deliberately NO threshold constant here: a panel cannot see the
+// observer's interval, and a second copy of the number is how the two drift apart.
+//   unavailable    -- no observer is attached to this web process
+//   never-observed -- attached, but no probe cycle has completed yet AND none has failed
+//   stopped        -- it was probing and is not completing cycles: the case that earns the banner
+//   current        -- it is still probing
+function debugSystemHealthStaleness(health = {}) {
+  if (health.available !== true) return {state: 'unavailable', ageSeconds: null, cycleAgeSeconds: null};
+  const ageSeconds = Number(health.age_seconds);
+  const publishedAge = Number.isFinite(ageSeconds) && health.age_seconds != null ? ageSeconds : null;
+  const rawCycleAge = Number(health.observer_cycle_age_seconds);
+  const cycleAgeSeconds = Number.isFinite(rawCycleAge) && health.observer_cycle_age_seconds != null ? rawCycleAge : null;
+  // The TYPED reason first, then the generic absence. An observer that throws on its first cycle
+  // and every one after it publishes `observer_cycles_failing` with a NULL cycle age -- there is no
+  // completed cycle to age. Reading only the null age classified that as "attached, hasn't looked
+  // yet", which is a quiet non-alerting line, so a continuously failing monitor with an empty
+  // history raised nothing anywhere on the screen. Only `no_observer_cycle_recorded` means the
+  // observer has genuinely not started; any other published reason is a stated failure.
+  const livenessReason = String(health.observer_liveness_reason_code || '');
+  const typedFailure = health.observer_alive !== true && livenessReason !== '' && livenessReason !== 'no_observer_cycle_recorded';
+  if (cycleAgeSeconds === null && !typedFailure) return {state: 'never-observed', ageSeconds: publishedAge, cycleAgeSeconds: null};
+  if (health.observer_alive !== true) return {state: 'stopped', ageSeconds: publishedAge, cycleAgeSeconds};
+  return {state: 'current', ageSeconds: publishedAge, cycleAgeSeconds};
+}
+
+// The one sentence that says what the retained snapshot IS right now. ONE call site:
+// `debugSystemHealthExplanations`, which is the only thing that decides where a sentence is
+// printed. The headline states the FACT and carries no elapsed time, deliberately, because the
+// compact alert slot is a `role="alert"` live region: any elapsed time in it changes on every
+// 5-second poll, so a screen reader would re-announce the whole banner every five seconds for as
+// long as the condition lasted. The numbers live in the provenance rows below, which are not a
+// live region.
+function debugSystemHealthSnapshotHeadline(health = {}) {
+  const {state, cycleAgeSeconds} = debugSystemHealthStaleness(health);
+  // A monitor that has failed every cycle since it started has no last cycle, so the numbers below
+  // do not describe one. Saying they do would be the same fabricated measurement this panel spends
+  // the rest of its length refusing to print.
+  const stoppedTail = cycleAgeSeconds === null
+    ? 'Nothing below has been measured by this process.'
+    : 'Every retained number below describes its last cycle, not now.';
+  // After a restart the RETAINED history is real while THIS observer process has completed no
+  // cycle. "This process has not looked yet" and "there is nothing to look at" are different
+  // facts with different fixes, and saying the second when the first is true tells a reader their
+  // history is gone when it is sitting right underneath.
+  const retained = Number(health.resources) > 0 || Number(health.revision) > 0;
+  const notYet = retained
+    ? `The backend-health observer is attached but this process has not completed its first probe cycle yet — ${debugSystemHealthReasonText(health.observer_liveness_reason_code || 'no_observer_cycle_recorded')}. The numbers below are the retained history from before the restart.`
+    : 'The backend-health observer is attached but has not completed a probe cycle yet, and nothing has been retained, so nothing below has been measured.';
+  return {
+    unavailable: `Backend health is unavailable — ${debugSystemHealthReasonText(health.reason_code || 'observer_unattached')}. Restarts, requests, errors and response times below are not measured; they are not zero.`,
+    'never-observed': notYet,
+    // The typed reason, not a generic sentence: an observer that is throwing on every cycle is a
+    // bug to fix, one that stopped being scheduled is a thread to restart. Static text, so this
+    // stays safe inside the `role="alert"` slot -- no elapsed time, no re-announcement.
+    stopped: `Backend health STOPPED UPDATING — ${debugSystemHealthReasonText(health.observer_liveness_reason_code || 'observer_cycles_stalled')}. ${stoppedTail}`,
+    current: 'Backend health is current: the observer is still completing probe cycles, and a long-unchanged state below means a quiet system, not a stalled one.',
+  }[state];
+}
+
+// The ONE owner of every stale/error EXPLANATION this panel prints, and of where each one is
+// printed. It used to have two producers -- the compact alert slot wrote its own history-reset and
+// persistence sentences while the provenance block wrote near-identical ones a screen further down,
+// and the stopped/unavailable headline was rendered by BOTH -- so a reader who opened Advanced read
+// the same fact twice in two different wordings, which is exactly the divergent-copies defect.
+//
+// It returns the two disjoint halves of one set:
+//   `alerts` -- the explanations that interrupt a reader. Rendered ONCE, only by the compact alert
+//               slot above the roster.
+//   `quiet`  -- the non-alerting status sentence, or `null` whenever an alert already says it.
+//               Rendered ONCE, only by the provenance block inside Advanced.
+// Exactly one surface prints any given sentence, and neither surface composes its own; the
+// provenance ROWS keep the machine-readable reason code, which is a measured field, not prose.
+function debugSystemHealthExplanations(health = {}) {
+  const {state} = debugSystemHealthStaleness(health);
+  const headline = debugSystemHealthSnapshotHeadline(health);
+  const alerting = state === 'stopped' || state === 'unavailable';
+  const alerts = alerting ? [['backend-health', headline]] : [];
+  const resetReason = String(health.history_reset_reason || '');
+  if (resetReason) {
+    alerts.push(['history-reset', `${resetReason} — ${debugSystemHealthReasonText(resetReason)}; counts from before the reset are gone.`]);
+  }
+  const persistenceState = String(health.persistence_state || '');
+  if (persistenceState && persistenceState !== 'ok') {
+    const why = String(health.persistence_reason_code || '');
+    alerts.push(['persistence', `Retained history persistence is ${persistenceState}${why ? ` — ${debugSystemHealthReasonText(why)}` : ''}; the retained history may not survive a restart.`]);
+  }
+  return {alerts, quiet: alerting ? null : headline};
+}
+
+function debugSystemHealthSnapshotHtml(health = {}) {
+  const {state, ageSeconds, cycleAgeSeconds} = debugSystemHealthStaleness(health);
+  const resetReason = String(health.history_reset_reason || '');
+  const persistenceState = String(health.persistence_state || '');
+  const persistenceDegraded = persistenceState !== '' && persistenceState !== 'ok';
+  const {quiet} = debugSystemHealthExplanations(health);
+  // The two facts, adjacent and separately labelled, so a reader can see that a long "Last state
+  // change" beside a short "Last checked" is a QUIET system and not a broken one.
+  const checked = debugSystemScalar(cycleAgeSeconds, 'no_observer_cycle_recorded', value => `${relativeTimeFormat(value)} (${debugSystemNumber(value, 1)}s ago)`);
+  const cycles = debugSystemScalar(health.observer_cycles, health.observer_liveness_reason_code || 'observer_unattached');
+  const rawEpochStartedAt = Number(health.observer_epoch_started_at);
+  const epochStartedAt = Number.isFinite(rawEpochStartedAt) ? rawEpochStartedAt : 0;
+  const rows = [
+    ['Snapshot revision', Number(health.revision) > 0 ? `#${String(health.revision)}` : t('common.notAvailable')],
+    ['Observer last checked', checked.text, checked.reason],
+    // NOT `debugSystemNumber` directly: `Number(null)` is 0, so an absent cycle count would have
+    // been rendered as a measured zero -- the fabricated zero this whole block exists to refuse.
+    ['Observer cycles', cycles.text, cycles.reason],
+    ['Last state change', ageSeconds == null ? 'never' : `${relativeTimeFormat(ageSeconds)} (${debugSystemNumber(ageSeconds, 1)}s old)`],
+    ['Observer epoch', String(health.observer_epoch || '') || t('common.notAvailable')],
+    // The wall-clock instant this observer epoch began collecting -- i.e. how far back the
+    // retained history actually reaches. The backend already publishes it as
+    // `observer_epoch_started_at`; this is the reader-facing label for it. Absent (never
+    // available) reads as not-available rather than the epoch-zero date a bare `new Date(0)`
+    // would print.
+    ['History retained since', epochStartedAt > 0 ? debugGraphTimeLabel(epochStartedAt * 1000, {includeDate: true, includeSeconds: true}) : t('common.notAvailable')],
+    ['Services retained', Number.isFinite(Number(health.resources)) ? debugSystemNumber(health.resources) : t('common.notAvailable')],
+  ];
+  // The reason CODE, not its sentence. The sentence is an explanation and the alert slot above the
+  // roster owns every one of those; this row's job is to name the machine-readable field the
+  // backend published, which is a measured value like every other row here.
+  if (resetReason) rows.push(['History reset', resetReason]);
+  else if (String(health.history_coverage || '')) rows.push(['History coverage', String(health.history_coverage)]);
+  if (persistenceDegraded) {
+    const why = String(health.persistence_reason_code || '');
+    rows.push(['Persistence', `${persistenceState}${why ? ` — ${why}` : ''}`]);
+  }
+  const alerting = state === 'stopped' || state === 'unavailable' || persistenceDegraded || Boolean(resetReason);
+  // NOT a live region. Every row below carries an age that advances on each 5-second poll, so a
+  // `role="status"` here re-announced the whole provenance block every five seconds. Anything
+  // here worth interrupting a reader for is already raised, once, by the compact alert slot --
+  // which is why `quiet` is null in exactly those states and no headline is printed here.
+  return `<div class="js-debug-system-health-snapshot${alerting ? ' js-debug-system-health-snapshot--alert' : ''}" data-system-health-snapshot data-health-available="${health.available === true}" data-health-staleness="${esc(state)}" data-health-alerting="${alerting}">
+    ${quiet ? `<p data-system-health-headline>${esc(quiet)}</p>` : ''}${debugSystemRowsHtml(rows)}
+  </div>`;
+}
+
+function debugSystemHealthCoverage(health = {}) {
+  return health.coverage && typeof health.coverage === 'object' ? health.coverage : {};
+}
+
+// The coverage state that governs one column, so a `partial` flag always points at the aggregate
+// the number in that cell actually came from.
+function debugSystemHealthColumnCoverage(health, column) {
+  const coverage = debugSystemHealthCoverage(health);
+  const value = column.coverage === 'retained' ? coverage.retained_counters : coverage.counters;
+  return String(value || 'unavailable');
+}
+
+function debugSystemHealthScopeLabel(health = {}) {
+  const scope = String(debugSystemHealthCoverage(health).counter_scope || '');
+  if (!scope) return '';
+  return DEBUG_SYSTEM_HEALTH_SCOPE_LABELS[scope] || scope;
+}
+
+// The denominator sentence, and its ONE owner. It is a property of the AGGREGATE, not of any one
+// service: every row shares the same `web_process` scope, so rendering it per row printed the same
+// paragraph six times and rendering it per column printed "this web process" in three headers --
+// where, being `white-space: nowrap`, it also pinned three numeric columns to 121-127px that could
+// not shrink. It is now stated once, beneath the table, by this function.
+function debugSystemHealthScopeSentence(health = {}) {
+  const scope = String(debugSystemHealthCoverage(health).counter_scope || '');
+  if (!scope) return '';
+  return `Requests, errors and response times count only what ${debugSystemHealthScopeLabel(health)} issued (scope: ${scope}) — not everything this service has ever served.`;
+}
+
+// Every sentence that qualifies the numbers in THIS row, so a partial count can never be read as a
+// complete one. The scope sentence is deliberately absent: it is identical for every row and is
+// stated once by `debugSystemHealthScopeSentence` in the table caption.
+function debugSystemHealthCoverageNotes(health = {}) {
+  const coverage = debugSystemHealthCoverage(health);
+  const notes = [];
+  if (String(coverage.counters || '') === 'partial') {
+    notes.push(`Requests, errors and response times are PARTIAL: ${debugSystemHealthReasonListText(coverage.counter_reasons) || 'no reason was published'}.`);
+  }
+  const retained = String(coverage.retained_counters || '');
+  if (retained === 'partial') {
+    notes.push(`Retained totals (restarts, observations) are PARTIAL: ${debugSystemHealthReasonListText(coverage.retained_counter_reasons) || 'no reason was published'}.`);
+  } else if (retained === 'unavailable') {
+    notes.push(`Retained totals are unavailable: ${debugSystemHealthReasonText(health.unavailable_reason_code || 'observer_unattached')}.`);
+  }
+  return notes;
+}
+
+function debugSystemHealthObservedText(health = {}) {
+  if (health.observed !== true) {
+    return `Not observed — ${debugSystemHealthReasonText(health.unavailable_reason_code || 'observer_unattached')}.`;
+  }
+  const state = String(health.state || '') || t('common.notAvailable');
+  const ageSeconds = Number(health.state_age_seconds);
+  const held = Number.isFinite(ageSeconds) && health.state_age_seconds != null
+    ? ` for ${debugGraphUptimeText(ageSeconds)}`
+    : ' (the observer has not published how long)';
+  const reason = String(health.reason_code || '');
+  const recovery = String(health.recovery_outcome || '');
+  const since = Number(health.since_revision) > 0 ? ` since revision #${String(health.since_revision)}` : '';
+  const detail = [reason && reason !== 'none' ? `reason ${reason}` : '', recovery && recovery !== 'none' ? `recovery ${recovery}` : '']
+    .filter(Boolean)
+    .join(', ');
+  return `Observed state: ${state}${held}${since}${detail ? ` — ${detail}` : ''}.`;
+}
+
+// The published health fields the five columns have no room for. They go through the SAME metric
+// envelope, so an unobserved sample count still reads as its reason and never as 0.
+function debugSystemHealthDetailText(health = {}) {
+  const metrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
+  const parts = [
+    `observer samples: ${debugSystemMetricText(metrics.observations, 'observations')}`,
+    `completed requests: ${debugSystemMetricText(metrics.completed_count, 'completed_count')}`,
+  ];
+  // A pid and a revision are identifiers, not quantities: `4,242` is not a pid anyone can grep for.
+  if (health.observed === true && Number(health.pid) > 0) {
+    parts.push(`peer pid ${String(health.pid)} (epoch ${String(health.process_epoch || '') || t('common.notAvailable')})`);
+  }
+  return `${parts.join(' · ')}.`;
+}
+
+// Errors are only actionable with their reasons. This is the web process's own ledger breakdown,
+// under the same `web_process` denominator as the Errors column beside it.
+function debugSystemHealthErrorsByReasonText(health = {}) {
+  const errors = health.errors_by_reason && typeof health.errors_by_reason === 'object' ? health.errors_by_reason : {};
+  const entries = Object.entries(errors).filter(([, count]) => Number(count) > 0);
+  if (!entries.length) return '';
+  return `Errors by reason: ${entries.map(([reason, count]) => `${reason} ${debugSystemNumber(count)}`).join(', ')}.`;
+}
+
+// `transitions_truncated` means older rows EXIST. Saying "16 changes" when 42 happened is the same
+// lie as a partial count rendered as complete, so the count and the window are always stated apart.
+function debugSystemHealthTransitionsHtml(health = {}, nowSeconds) {
+  const transitions = Array.isArray(health.transitions) ? health.transitions : [];
+  const total = Number(health.transitions_total);
+  const totalText = Number.isFinite(total) ? debugSystemNumber(total) : String(transitions.length);
+  if (!transitions.length) {
+    if (health.observed !== true) return '';
+    return `<p data-subsystem-transitions data-transitions-truncated="false">No state change has been recorded for this service yet.</p>`;
+  }
+  const truncated = health.transitions_truncated === true;
+  // "at least N" when the count is a floor. A history retained before the lifetime counter existed
+  // can only yield a lower bound, and printing it as an exact total would restate the defect the
+  // counter was added to remove.
+  const countText = health.transitions_total_exact === false ? `at least ${totalText}` : totalText;
+  const header = truncated
+    ? `${countText} state changes recorded — showing the latest ${debugSystemNumber(transitions.length)}; older rows exist and are not shown here.`
+    : `${countText} state changes recorded — all of them are shown.`;
+  const rows = transitions
+    .slice()
+    .reverse()
+    .map(row => {
+      const wallTime = Number(row?.wall_time);
+      const when = Number.isFinite(wallTime) && wallTime > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - wallTime)) : 'time not retained';
+      const reason = String(row?.reason_code || '');
+      const recovery = String(row?.recovery_outcome || '');
+      const detail = [reason && reason !== 'none' ? reason : '', recovery && recovery !== 'none' ? `recovery ${recovery}` : ''].filter(Boolean).join(', ');
+      return `<li>rev #${esc(String(row?.revision ?? '?'))} · ${esc(when)} · ${esc(String(row?.previous_state || '?'))} → ${esc(String(row?.new_state || '?'))}${detail ? ` (${esc(detail)})` : ''}</li>`;
+    })
+    .join('');
+  return `<p data-subsystem-transitions data-transitions-truncated="${truncated}">${esc(header)}</p><ol class="js-debug-system-health-transitions">${rows}</ol>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE DAEMONS ROSTER
+//
+// One adapter (`debugSystemRosterRows`) turns the ONE `/api/system-status` payload into stable
+// top-level and child rows, and one renderer (`debugSystemRosterHtml`) draws them. Deliberately
+// absent, because each would be a second copy of something that already has an owner:
+//   * no service inventory -- the ids and their order come from `local_services.inventory`, owned
+//     by `yolomux_lib/local_service_projection.py:LOCAL_SERVICE_INVENTORY`;
+//   * no label map -- the display names come from the backend row's `label`
+//     (`yolomux_lib/app.py:system_status_service`);
+//   * no status classifier -- the paint comes from `debugSystemStateTone` and the word from
+//     `debugSystemRosterStateLabel`;
+//   * no metric formatter -- every cell goes through `debugSystemMetricText`.
+// Row order never depends on health, so repeated scanning always finds a service in the same place.
+// ---------------------------------------------------------------------------------------------
+
+const DEBUG_SYSTEM_ROSTER_WEB_ID = 'web';
+const DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID = 'tmux-signal-watcher';
+// The row that stands for the whole local-services block when the panel cannot read the payload
+// well enough to know which services exist, and the count of rows that are always present.
+const DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID = 'local-services';
+// Every metric column a row can carry, in one list, so a row whose metrics are absent by
+// STRUCTURE spells that absence once instead of repeating the column names per row.
+const DEBUG_SYSTEM_ROSTER_METRIC_KEYS = Object.freeze([
+  'cpu_now_percent', 'rss_bytes', 'uptime_seconds', 'restart_count',
+  'request_count', 'error_count', 'latency_average_ms', 'latency_max_ms',
+]);
+const debugSystemRosterAbsentMetrics = reasonCode =>
+  Object.fromEntries(DEBUG_SYSTEM_ROSTER_METRIC_KEYS.map(key => [key, debugSystemAbsentMetric(reasonCode)]));
+// The tmux control-client states this panel knows, and how each one reads as a roster state.
+// `never-started` is only an issue when something actually demanded the watcher; undemanded is
+// idle-by-design and must stay gray and non-alerting.
+const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
+const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
+  running: 'debug.system.roster.state.ready',
+  idle: 'state.idle',
+  issue: 'debug.system.localServices.state.issue',
+  unavailable: 'debug.system.roster.state.unavailable',
+  attached: 'debug.system.roster.state.attached',
+  attaching: 'debug.system.roster.state.attaching',
+  'no-sessions': 'debug.system.roster.state.noSessions',
+  'never-started': 'debug.system.roster.state.neverStarted',
+  exited: 'debug.system.roster.state.exited',
+  schema_unsupported: 'debug.system.roster.state.unsupported',
+});
+
+function debugSystemRosterStateLabel(state) {
+  const key = DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS[String(state || '')];
+  if (key) return t(key);
+  return String(state || '') || t('common.notAvailable');
+}
+
+// Status is never carried by colour alone: the dot glyph differs by tone, the state WORD is always
+// rendered beside it, and `data-subsystem-state` carries the machine-readable state. A row may
+// override the tone when the STATE alone does not decide it (an undemanded watcher that never
+// started is idle; a demanded one in the same state is an outage) -- the state word and the
+// attribute still report the published state either way.
+function debugSystemRosterStatusHtml(state, toneOverride = '') {
+  const tone = toneOverride || debugSystemStateTone(state);
+  const glyph = tone === 'muted' ? '○' : '●';
+  return `<span class="js-debug-roster-status js-debug-system-state js-debug-system-state--${esc(tone)}" data-subsystem-tone="${esc(tone)}">`
+    + `<span class="js-debug-roster-dot" aria-hidden="true">${glyph}</span>`
+    + `<span data-subsystem-state-label>${esc(debugSystemRosterStateLabel(state))}</span></span>`;
+}
+
+// Every value on a roster row, in one shape, whatever produced it. `metrics` is always a full set
+// of typed envelopes -- a producer that has no series for a column supplies a STRUCTURAL absence
+// with its reason code rather than letting the cell fall back to a bare zero.
+function debugSystemRosterWebRow(payload = {}, port = '') {
+  const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
+  const absent = debugSystemAbsentMetric('web_process_not_observed');
+  return {
+    id: DEBUG_SYSTEM_ROSTER_WEB_ID,
+    kind: 'web',
+    parentId: '',
+    label: t('debug.system.roster.web'),
+    qualifier: port ? `:${port}` : '',
+    state: payload.ok === false ? 'issue' : 'running',
+    reason: payload.ok === false ? String(jsDebugSystemState.error || '') : '',
+    metrics: {
+      // Typed envelopes straight from the backend, exactly like a service row. They were built
+      // here from raw floats until the producer started publishing the envelope, which is what
+      // let an unsampled `0` render as `measured 0.0B` / `measured 0%` and be summed into the
+      // strip's Memory and CPU totals while ~160MB of real RSS went uncounted.
+      cpu_now_percent: server.cpu_percent,
+      rss_bytes: server.rss_bytes,
+      uptime_seconds: server.uptime_seconds,
+      // The backend-health observer runs IN this web process and observes the six local services;
+      // it has never observed this process, so these four have no series at all. Rendering them as
+      // 0 restarts / 0 requests / 0 errors / 0 ms would be four fabricated measurements.
+      restart_count: absent,
+      request_count: absent,
+      error_count: absent,
+      latency_average_ms: absent,
+      latency_max_ms: absent,
+    },
+    health: {},
+  };
+}
+
+function debugSystemRosterTmuxWatcherRow(payload = {}) {
+  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : {};
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+  return {
+    id: DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID,
+    kind: 'child',
+    parentId: DEBUG_SYSTEM_ROSTER_WEB_ID,
+    label: t('debug.system.roster.tmuxSignalWatcher'),
+    qualifier: '',
+    state,
+    // Undemanded and never started is idle by design, not an outage; demanded and never started is
+    // the outage. The one issue predicate decides the paint here and the compact alert above, and
+    // `data-subsystem-state` keeps saying which of the five typed states was actually published.
+    tone: debugSystemTmuxSignalWatcherIsIssue(watcher) ? 'bad' : (state === 'attaching' ? 'warn' : (state === 'attached' ? 'good' : 'muted')),
+    reason: String(watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
+    metrics: debugSystemRosterAbsentMetrics('subsystem_not_observed'),
+    health: {},
+  };
+}
+
+// The ONE row a payload this panel cannot render produces. Not a per-service row and not a
+// variant of one: a schema mismatch means the panel does not know which services exist, so
+// iterating `inventory`, reading `services`, or interpreting any field out of that payload would
+// all be the same unearned confidence in different clothes. One row, one typed state, no payload.
+function debugSystemRosterUnsupportedSchemaRow() {
+  return {
+    id: DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID,
+    kind: 'service',
+    parentId: '',
+    label: t('debug.system.localServices.title'),
+    // No daemon id to put beside the name: this row stands for the whole block.
+    qualifier: '',
+    state: 'schema_unsupported',
+    reason: debugSystemHealthReasonText('schema_unsupported'),
+    pid: 0,
+    metrics: debugSystemRosterAbsentMetrics('schema_unsupported'),
+    health: {},
+    service: {},
+  };
+}
+
+function debugSystemRosterServiceRow(service = {}) {
+  const id = String(service?.id || service?.service || '');
+  const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
+  const health = service?.health && typeof service.health === 'object' ? service.health : {};
+  const healthMetrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
+  // No schema guard here. This adapter is reached only for a schema this panel renders, because
+  // an unsupported one never gets as far as a per-service row -- see `debugSystemRosterRows`.
+  // Guarding field by field made the rule graded rather than absolute: it left the row trusting
+  // the unknown payload's `id`, `label` and shape while refusing its numbers, which is a
+  // half-trust that has to be re-decided every time a field is added.
+  return {
+    id,
+    kind: 'service',
+    parentId: '',
+    label: String(service?.label || id),
+    qualifier: id,
+    state: String(service?.state || 'unavailable'),
+    reason: String(service?.reason || ''),
+    pid: Number(service?.pid || 0),
+    metrics: {
+      cpu_now_percent: metrics.cpu_now_percent,
+      rss_bytes: metrics.rss_bytes,
+      uptime_seconds: metrics.uptime_seconds,
+      restart_count: healthMetrics.restart_count,
+      request_count: healthMetrics.request_count,
+      error_count: healthMetrics.error_count,
+      latency_average_ms: healthMetrics.latency_average_ms,
+      latency_max_ms: healthMetrics.latency_max_ms,
+    },
+    health,
+    service,
+  };
+}
+
+// The ONE adapter. Top-level rows in the inventory's declared order, with the web process first and
+// its owned in-process subsystem nested beneath it.
+function debugSystemRosterRows(payload = {}) {
+  // Empty for a schema this panel cannot render, so `inventory`, `services` and the web row's port
+  // qualifier are all absent by construction rather than by a branch further down.
+  const localServices = debugSystemRenderableLocalServices(payload);
   const inventory = Array.isArray(localServices.inventory) ? localServices.inventory.map(String) : [];
   const services = Array.isArray(localServices.services) ? localServices.services : [];
   const servicesById = new Map(services.map(service => [String(service?.id || service?.service || ''), service]));
-  const rows = inventory.map(id => servicesById.get(id) || {
-    id,
-    label: id,
-    state: 'unavailable',
-    reason: 'Service status is missing',
-    metrics: {},
-  });
-  const metricKeys = ['cpu_now_percent', 'rss_bytes', 'uptime_seconds'];
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table js-debug-system-local-services-table--rows">
-    <thead><tr><th>Service</th><th>Status</th><th>PID</th><th>CPU</th><th>Memory</th><th>Uptime</th><th>Reason</th></tr></thead>
-    <tbody>${rows.map(service => {
-      const id = String(service?.id || service?.service || '');
-      const state = String(service?.state || 'unavailable');
-      const reason = String(service?.reason || '');
-      const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
-      return `<tr data-subsystem-row data-subsystem-id="${esc(id)}" data-subsystem-state="${esc(state)}">
-        <th scope="row"><span class="js-debug-system-service-name">${esc(service?.label || id)}</span><span>${esc(id)}</span></th>
-        <td data-subsystem-value><span class="js-debug-system-state js-debug-system-state--${state === 'running' ? 'good' : (state === 'idle' ? 'muted' : 'bad')}">${esc(state)}</span></td>
-        <td>${Number(service?.pid || 0) > 0 ? esc(String(service.pid)) : '—'}</td>
-        ${metricKeys.map(key => `<td data-subsystem-metric="${esc(key)}" data-metric-state="${esc(metrics[key]?.state || 'unavailable')}">${esc(debugSystemMetricText(metrics[key], key))}</td>`).join('')}
-        <td><span data-subsystem-reason${reason ? '' : ' hidden'}>${esc(reason)}</span></td>
-      </tr>`;
-    }).join('')}</tbody>
-  </table></div>`;
-}
-
-function debugSystemLocalServiceCellMap(root) {
-  const cells = new Map();
-  root.querySelectorAll?.('[data-js-debug-service-cell]').forEach(cell => {
-    cells.set(`${cell.dataset.service || ''}\x1f${cell.dataset.field || ''}`, cell);
-  });
-  return cells;
-}
-
-function ensureDebugSystemLocalServicesTable(root, serviceNames) {
-  if (!root) return;
-  const signature = serviceNames.join('\x1f');
-  const table = root.querySelector('.js-debug-system-local-services-table');
-  if (table && root.dataset.signature === signature) return;
-  root.innerHTML = serviceNames.length ? debugSystemLocalServicesTableHtml(serviceNames) : `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
-  root.dataset.signature = signature;
-}
-
-function updateDebugSystemLocalServiceCell(cell, record, fieldKey, value, nowMs) {
-  const field = record.fields.get(fieldKey) || {display: '', identity: '', lastChangedAt: nowMs};
-  if (field.identity !== value.identity) field.lastChangedAt = nowMs;
-  field.display = value.display;
-  field.identity = value.identity;
-  record.fields.set(fieldKey, field);
-  if (cell.textContent !== value.display) cell.textContent = value.display;
-  cell.classList.toggle('js-debug-system-service-cell--prev', value.previous === true);
-  cell.classList.toggle('js-debug-system-service-cell--fresh', value.previous !== true && nowMs - field.lastChangedAt <= DEBUG_SYSTEM_SERVICE_FRESH_MS);
-  cell.classList.toggle('js-debug-system-service-cell--stale', value.previous === true || nowMs - field.lastChangedAt > DEBUG_SYSTEM_SERVICE_FRESH_MS);
-}
-
-function updateDebugSystemLocalServicesCard(card, payload = {}) {
-  const root = card?.querySelector?.('[data-js-debug-local-services]');
-  if (!root) return;
-  if (Number(payload.local_services?.schema_version) === 1) {
-    root.innerHTML = debugSystemNormalizedLocalServicesTableHtml(payload.local_services);
-    root.dataset.signature = `schema-1:${(payload.local_services?.inventory || []).join('\x1f')}`;
-    return;
+  const port = String(localServices.health?.port || '');
+  const rows = [debugSystemRosterWebRow(payload, port), debugSystemRosterTmuxWatcherRow(payload)];
+  // A version this panel does not render means it does not know which services exist, so it lists
+  // none of them and says so once. The web process and its in-process subsystem stay, because
+  // neither is described by `local_services` at all.
+  if (!debugSystemLocalServicesSchemaSupported(payload)) {
+    rows.push(debugSystemRosterUnsupportedSchemaRow());
+    return rows;
   }
-  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  const incomingNames = services.map(debugSystemServiceName);
-  const retainedNames = [...debugSystemLocalServicesState.records.keys()].filter(name => !incomingNames.includes(name));
-  const serviceNames = [...incomingNames, ...retainedNames];
-  ensureDebugSystemLocalServicesTable(root, serviceNames);
-  const cells = debugSystemLocalServiceCellMap(root);
-  const nowMs = Date.now();
-  const nowSeconds = nowMs / 1000;
-  const servicesByName = new Map(services.map(service => [debugSystemServiceName(service), service]));
-  for (const name of serviceNames) {
-    const service = servicesByName.get(name) || {service: name, pid: 0};
-    const record = debugSystemLocalServiceRecord(name);
-    debugSystemLocalServiceUpdateLifecycle(record, service, nowSeconds);
-    const state = debugSystemServiceState(service);
-    const headState = root.querySelector(`[data-js-debug-service-state="${cssEscape(name)}"]`);
-    if (headState) {
-      headState.textContent = state.label;
-      headState.className = `js-debug-system-state js-debug-system-state--${state.tone}`;
+  for (const id of inventory) {
+    // A service in the inventory with no row is a MISSING row, not an absent service: it renders
+    // unavailable with a reason rather than silently disappearing from the roster.
+    rows.push(debugSystemRosterServiceRow(servicesById.get(id) || {
+      id,
+      label: id,
+      state: 'unavailable',
+      reason: 'Service status is missing',
+      metrics: {},
+    }));
+  }
+  return rows;
+}
+
+// What the whole roster adds up to -- EVERY number in the strip, over ONE population, from the one
+// array of rows the table itself renders.
+//
+// The counts used to come from these rows while CPU and memory came from `local_services.totals`,
+// which the backend computes over the six local services only: `LocalServicesCollector.collect`
+// raises if anything outside `LOCAL_SERVICE_INVENTORY` appears, so the web process cannot be in it
+// and that total is child-only by contract. The strip therefore put "8 ready" next to a CPU figure
+// that excluded one of the eight. Summing here, over the rendered rows, makes the two structurally
+// incapable of disagreeing -- there is no second population to keep in step.
+//
+// `cpuMeasured`/`rssMeasured` count how many rows actually published a value, because a sum over
+// zero measurements is an ABSENCE, not `0%`.
+//
+// The state counts run over EVERY row the table draws, including the nested child. They used to
+// skip `kind === 'child'`, so the strip said "7" while eight rows rendered and a red tmux-watcher
+// row was absent from the `issues` count that is supposed to be why a reader opens this view. The
+// filter is gone: `population` is `rows.length`, the same array `debugSystemRosterHtml` renders,
+// so the count and the render cannot answer "how many rows are there" differently.
+//
+// `resourcePopulation` answers a DIFFERENT question -- how many of those rows own a process whose
+// CPU and memory can be summed at all. A row with a `parentId` runs INSIDE its parent, so its
+// resources are already inside the parent's figure; counting it as an unmeasured row would flag
+// every complete total as partial forever. It is counted in this same pass, off the same array,
+// off the `parentId` the renderer already uses to nest the row.
+function debugSystemRosterSummary(rows = []) {
+  const counts = {
+    ready: 0, idle: 0, issues: 0,
+    population: rows.length, resourcePopulation: 0,
+    cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0,
+  };
+  for (const row of rows) {
+    if (!row.parentId) counts.resourcePopulation += 1;
+    const tone = row.tone || debugSystemStateTone(row.state);
+    if (tone === 'good') counts.ready += 1;
+    else if (tone === 'muted') counts.idle += 1;
+    else counts.issues += 1;
+    const cpu = row.metrics?.cpu_now_percent;
+    if (cpu?.state === 'measured') {
+      counts.cpuPercent += Number(cpu.value) || 0;
+      counts.cpuMeasured += 1;
     }
-    for (const field of debugSystemLocalServiceFields) {
-      const cell = cells.get(`${name}\x1f${field.key}`);
-      if (!cell) continue;
-      updateDebugSystemLocalServiceCell(cell, record, field.key, debugSystemLocalServiceFieldValue(service, record, field.key, nowSeconds), nowMs);
+    const rss = row.metrics?.rss_bytes;
+    if (rss?.state === 'measured') {
+      counts.rssBytes += Number(rss.value) || 0;
+      counts.rssMeasured += 1;
     }
   }
+  return counts;
+}
+
+// ONE owner for "this number covers less than it looks like", rendered by both the roster's metric
+// cells and the summary strip. It used to be the literal word `partial` written out twice, verbatim,
+// in two renderers.
+//
+// It is a FOOTNOTE to the number, so it renders as one: a real `<sup>` marker directly after the
+// value (`826MB*`), not a word beside it that reads as a second value in a dense row. The panel had
+// no footnote-marker convention before this, so `*` becomes it -- every partial-coverage mark in
+// this panel uses this function, not a second glyph.
+//
+// A bare `*` is meaningless to a screen reader, so the glyph is hidden from the accessibility tree
+// and the word rides in the panel's existing `a11y-only` span: a sighted reader gets the marker, a
+// screen reader still hears "partial". The full sentence stays where it already was -- the cell's
+// own `title` and the row's disclosure -- and every machine-readable attribute stays on the caller's
+// element, not on this marker.
+const DEBUG_SYSTEM_COVERAGE_FLAG_MARKER = '*';
+function debugSystemCoverageFlagHtml() {
+  return `<sup class="js-debug-system-coverage-flag" data-coverage-flag><span aria-hidden="true">${DEBUG_SYSTEM_COVERAGE_FLAG_MARKER}</span><span class="a11y-only">${esc(t('debug.system.roster.coverage.partial'))}</span></sup>`;
+}
+
+// One cell. `parts` renders two typed envelopes side by side; both still go through the one metric
+// text renderer and both still carry their own state and coverage, so an untimed average and a
+// measured maximum cannot be collapsed into one number.
+function debugSystemRosterMetricCellHtml(row, column) {
+  const health = row.health && typeof row.health === 'object' ? row.health : {};
+  const keys = column.parts || [column.key];
+  const coverageState = column.coverage ? debugSystemHealthColumnCoverage(health, column) : '';
+  const rendered = keys.map(key => {
+    const metric = row.metrics?.[key];
+    const attribute = DEBUG_SYSTEM_PROCESS_METRIC_KEYS.has(key) ? 'data-subsystem-metric' : 'data-subsystem-health-metric';
+    const measured = metric?.state === 'measured';
+    // A partial count is flagged in the cell itself; the reason sits in the row's own disclosure.
+    const flag = measured && coverageState === 'partial' ? debugSystemCoverageFlagHtml() : '';
+    const coverageAttr = column.coverage ? ` data-metric-coverage="${esc(coverageState)}"` : '';
+    // An unmeasured value is an em dash in the ROW and its full sentence in the row's disclosure.
+    // Printing the whole reason in the cell is what made the old table wider than its scroller; the
+    // rule that matters is unchanged -- it is never `0`, never blank and never green -- and the
+    // reason is carried in three readable places: the cell's title, the cell's reason code, and
+    // the metric list inside the disclosure.
+    const reason = measured ? '' : debugSystemMetricText(metric, key);
+    const explain = measured ? '' : ` title="${esc(reason)}" data-metric-reason="${esc(metric?.reason_code || '')}"`;
+    return `<span ${attribute}="${esc(key)}" data-metric-state="${esc(metric?.state || 'unavailable')}"${coverageAttr}${explain}>${measured ? esc(debugSystemMetricText(metric, key)) : '—'}${flag}</span>`;
+  });
+  const body = rendered.join('<span class="js-debug-roster-sep" aria-hidden="true"> / </span>');
+  // The column's own name, inside the cell, from the SAME `column.labelKey` the header uses -- one
+  // label string, two positions. It is shown if and only if the header row is hidden, which is the
+  // contract `.js-debug-roster-dropped` already has with the columns it copies. Below 36rem the row
+  // stacks into two lines and a header can no longer label anything above it, and `12.5ms / 340ms`
+  // with no name beside it is not a readable row.
+  const label = `<span class="js-debug-roster-celllabel">${esc(t(column.labelKey))}</span>`;
+  return `<td role="cell" class="js-debug-roster-cell js-debug-roster-cell--${esc(column.priority)}" data-subsystem-column="${esc(column.key)}">${label}${body}</td>`;
+}
+
+// The explicit ARIA roles below are load-bearing, not decoration: below 36rem the roster's boxes
+// become `display: block` so the row can lay out as two readable lines, and a `display: block`
+// table loses its implicit table/row/cell semantics in every engine. The roles restate exactly what
+// the native elements already mean at every other width, so the structure a screen reader hears is
+// the same one at 390px as at 1920px.
+function debugSystemRosterHeaderHtml() {
+  const columns = DEBUG_SYSTEM_ROSTER_COLUMNS.map(column => {
+    const healthColumn = column.coverage ? ` data-subsystem-health-column="${esc(column.parts ? column.parts[0] : column.key)}"` : '';
+    return `<th role="columnheader" scope="col" class="js-debug-roster-cell js-debug-roster-cell--${esc(column.priority)}" data-subsystem-column="${esc(column.key)}"${healthColumn}>${esc(t(column.labelKey))}</th>`;
+  }).join('');
+  return `<thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col" class="js-debug-roster-service">${esc(t('debug.system.roster.column.service'))}</th>`
+    + `<th role="columnheader" scope="col" class="js-debug-roster-statushead">${esc(t('debug.system.localServices.field.status'))}</th>${columns}</tr></thead>`;
+}
+
+function debugSystemRosterRowHtml(row, {expanded, columnCount, payload, nowSeconds}) {
+  const detailId = `js-debug-roster-detail-${row.id}`;
+  const rowClass = `js-debug-roster-row js-debug-roster-row--${row.kind}`;
+  const name = row.qualifier ? `${row.label} · ${row.qualifier}` : row.label;
+  const toggleLabel = t(expanded ? 'debug.system.roster.collapse' : 'debug.system.roster.expand', {service: name});
+  const cells = DEBUG_SYSTEM_ROSTER_COLUMNS.map(column => debugSystemRosterMetricCellHtml(row, column)).join('');
+  const head = `<tr role="row" class="${rowClass}" data-subsystem-row data-subsystem-id="${esc(row.id)}" data-subsystem-kind="${esc(row.kind)}" data-subsystem-state="${esc(row.state)}"${row.parentId ? ` data-subsystem-parent="${esc(row.parentId)}"` : ''}>
+    <th role="rowheader" scope="row" class="js-debug-roster-service">
+      <button type="button" class="js-debug-roster-toggle" data-js-debug-roster-toggle="${esc(row.id)}" data-js-debug-system-focus-key="roster-toggle:${esc(row.id)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${esc(detailId)}" aria-label="${esc(toggleLabel)}">
+        <span class="js-debug-roster-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+        <span class="js-debug-system-service-name">${esc(row.label)}</span>${row.qualifier ? `<span class="js-debug-roster-qualifier">${esc(row.qualifier)}</span>` : ''}
+      </button>
+    </th>
+    <td role="cell" class="js-debug-roster-statuscell" data-subsystem-value>${debugSystemRosterStatusHtml(row.state, row.tone)}<span class="js-debug-roster-reason" data-subsystem-reason${row.reason ? '' : ' hidden'}>${esc(row.reason)}</span></td>
+    ${cells}
+  </tr>`;
+  // Lazy CONTENT, stable TARGET. The transition list, the coverage notes, the sampler families and
+  // the cache dictionaries are BUILT only for an expanded row -- rendering them for eight rows and
+  // hiding them with CSS is the default-DOM weight this redesign exists to remove. The empty
+  // container still exists, because `aria-controls` must resolve to a real element for the state
+  // the button reports to mean anything.
+  return `${head}<tr role="row" class="js-debug-roster-detailrow" data-subsystem-detail-row data-subsystem-id="${esc(row.id)}" data-subsystem-detail-built="${expanded ? 'true' : 'false'}"${expanded ? '' : ' hidden'}>
+    <td role="cell" colspan="${columnCount}" id="${esc(detailId)}">${expanded ? debugSystemRosterDetailHtml(row, payload, nowSeconds) : ''}</td>
+  </tr>`;
+}
+
+// The roster. `expanded` is passed in rather than read from module state so the render is a pure
+// function of the payload plus the disclosure set, which is what makes it testable off-browser.
+function debugSystemRosterHtml(payload = {}, {nowSeconds = Date.now() / 1000, expanded = new Set()} = {}) {
+  const rows = debugSystemRosterRows(payload);
+  const columnCount = 2 + DEBUG_SYSTEM_ROSTER_COLUMNS.length;
+  // The denominator, once. Every row publishes the same counter scope, so this is a fact about the
+  // table and it is stated beneath it -- not repeated in three column headers and in every expanded
+  // row, which is how the same sentence used to appear nine times in one view.
+  const sentences = [...new Set(rows.map(row => debugSystemHealthScopeSentence(row.health)).filter(Boolean))];
+  // A sibling paragraph rather than a `<caption>`: a caption participates in the table's own
+  // min-content width, so a 120-character sentence would become the new reason the roster cannot
+  // narrow -- trading three over-wide columns for one over-wide table.
+  const caption = sentences.length === 1
+    ? `<p class="js-debug-system-column-scope" data-subsystem-scope-caption>${esc(sentences[0])}</p>`
+    : '';
+  const body = rows.map(row => debugSystemRosterRowHtml(row, {
+    expanded: expanded.has(row.id),
+    columnCount,
+    payload,
+    nowSeconds,
+  })).join('');
+  return `<div class="js-debug-system-table-wrap js-debug-roster-wrap"><table role="table" class="js-debug-system-table js-debug-roster-table" data-js-debug-roster>
+    ${debugSystemRosterHeaderHtml()}
+    <tbody role="rowgroup">${body}</tbody>
+  </table></div>${caption}`;
+}
+
+// The values the responsive layout may have DROPPED -- and only those. Service, Status, Latency and
+// Uptime are `priority: primary` and survive every width, so listing them here restated, directly
+// underneath, seven columns the reader could already see: that was ~40 lines of disclosure of which
+// the top third was duplication.
+//
+// The secondary columns stay in the markup because "a narrow window must never be the reason a
+// number is unreachable" is the load-bearing rule -- but they are only DISPLAYED by the same
+// container query that hides them from the row (`.js-debug-roster-dropped`), so at a width where
+// the column is visible its copy is not. One source of truth for which columns can drop:
+// DEBUG_SYSTEM_ROSTER_COLUMNS' own `priority`, the same field the CSS class comes from.
+function debugSystemRosterMetricListHtml(row) {
+  const entries = [];
+  for (const column of DEBUG_SYSTEM_ROSTER_COLUMNS) {
+    if (column.priority !== 'secondary') continue;
+    const keys = column.parts || [column.key];
+    entries.push([t(column.labelKey), keys.map(key => debugSystemMetricText(row.metrics?.[key], key)).join(' / ')]);
+  }
+  if (!entries.length) return '';
+  return `<div class="js-debug-roster-dropped" data-subsystem-dropped-metrics>${debugSystemRowsHtml(entries)}</div>`;
+}
+
+function debugSystemRosterDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const sections = [debugSystemRosterMetricListHtml(row)];
+  if (row.kind === 'web') sections.push(debugSystemWebProcessDetailHtml(payload));
+  else if (row.kind === 'child') sections.push(debugSystemTmuxSignalWatcherDetailHtml(payload.tmux_signal_watcher));
+  else sections.push(debugSystemServiceDetailHtml(row, payload, nowSeconds));
+  return `<div class="js-debug-roster-detail">${sections.filter(Boolean).join('')}</div>`;
+}
+
+// The retained observation, spelled out, for one service row. This is the block that used to be
+// rendered under EVERY service whether or not anyone asked for it.
+function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now() / 1000) {
+  const notes = debugSystemHealthCoverageNotes(health);
+  const errorsByReason = debugSystemHealthErrorsByReasonText(health);
+  return `<div class="js-debug-system-health-row" data-subsystem-health-row data-subsystem-observed="${health.observed === true}">
+    <p data-subsystem-health-state>${esc(debugSystemHealthObservedText(health))}</p>
+    <p data-subsystem-health-detail>${esc(debugSystemHealthDetailText(health))}</p>
+    ${errorsByReason ? `<p data-subsystem-errors-by-reason>${esc(errorsByReason)}</p>` : ''}
+    ${notes.length ? `<ul class="js-debug-system-health-notes">${notes.map(note => `<li data-subsystem-coverage-note>${esc(note)}</li>`).join('')}</ul>` : ''}
+    ${debugSystemHealthTransitionsHtml(health, nowSeconds)}
+  </div>`;
+}
+
+// The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
+// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed
+// from the payload. The guard is exact, not `>=`: rendering an older payload through the roster
+// would print absent health as though it had been measured, which is the defect the version number
+// exists to prevent.
+//
+// It has ONE reader: `debugSystemRosterServiceRow`, which turns a false answer into the typed
+// `schema_unsupported` row state. There used to be a second -- a whole retained per-cell table,
+// with its own classifier, its own lifecycle state map and its own freshness rules -- rendered as
+// a card inside Advanced for exactly this case. Two renderers and two classifiers for one
+// condition the roster already covers is the divergent-copies defect; the roster says it in one
+// typed state now, and the legacy view is gone.
+function debugSystemLocalServicesSchemaSupported(payload = {}) {
+  return Number(payload.local_services?.schema_version) === 3;
+}
+
+// The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather
+// than aspirational. It hands back an EMPTY block for a schema this panel cannot render, so no
+// field of an unreadable payload can reach any renderer by any path -- including a path added
+// later by someone who never read the version guard.
+//
+// This exists because the guard used to live inside `debugSystemRosterRows`, one branch DOWN from
+// the reads: `inventory`, `services` and `health.port` were all pulled out of the payload above
+// it, and the port was handed to the web row before the branch was ever evaluated. An unsupported
+// payload therefore still changed the rendered HTML while the tests asserted it was interpreted
+// nowhere, and the suite stayed green. A rule written at one call site is not a rule; a rule that
+// owns the only read is.
+function debugSystemRenderableLocalServices(payload = {}) {
+  if (!debugSystemLocalServicesSchemaSupported(payload)) return {};
+  return payload.local_services && typeof payload.local_services === 'object' ? payload.local_services : {};
 }
 
 function debugSystemRolesHtml(roles = {}) {
@@ -7948,153 +8599,544 @@ function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
   </table></div>`;
 }
 
-function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() / 1000) {
+// The YO!stats sampler diagnostics. One owner, rendered in exactly one place: statsd's own row
+// disclosure. It used to be a standalone default card two screens above the service it describes.
+function debugSystemStatsSamplerBodyHtml(services = [], nowSeconds = Date.now() / 1000) {
   const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
   const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
   const requests = Math.max(0, Number(statsd.history_requests) || 0);
   const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
-  const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
+  // A ratio with no denominator and an unassembled query are absences too, so they carry their
+  // reason like every other em dash in this block rather than being three bare dashes beside three
+  // explained ones.
+  const hitRate = requests > 0
+    ? {text: `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})`, reason: ''}
+    : {text: '—', reason: debugSystemHealthReasonText('history_never_requested')};
   const historyQuery = profile.returned_records == null || profile.source_records == null
-    ? '—'
-    : `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`;
+    ? {text: '—', reason: debugSystemHealthReasonText('history_not_assembled')}
+    : {text: `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`, reason: ''};
   const usage = statsd.usage && typeof statsd.usage === 'object' ? statsd.usage : {};
   const usageHealth = usage.health && typeof usage.health === 'object' ? usage.health : {};
   const usageState = ['ok', 'warning', 'idle'].includes(usageHealth.state) ? usageHealth.state : 'idle';
   const usageLabel = usageState === 'warning' ? 'Warning' : (usageState === 'ok' ? 'Healthy' : 'Idle');
   const usageReason = usageHealth.reason || 'no usage health evidence';
-  const acceptedAge = Number(usageHealth.last_accepted_atom_age_seconds);
+  // The last two unmeasured values in this disclosure. They read "—" and "not available" side by
+  // side in the same strip before this; both are absences and both now carry their reason.
+  const accepted = debugSystemScalar(usageHealth.last_accepted_atom_age_seconds, 'usage_no_accepted_atom', value => debugGraphTerseTimeText(value * 1000));
+  const conflicts = debugSystemScalar(usage.quarantined_conflict_count, 'usage_conflicts_not_published');
   const usageHtml = `<div class="js-debug-usage-health js-debug-usage-health--${esc(usageState)}" data-js-debug-usage-health="${esc(usageState)}" ${usageState === 'warning' ? 'role="alert"' : 'role="status"'}>
     <strong>${esc(usageLabel)}:</strong> <span>${esc(usageReason)}</span>
-    <span>Last accepted ${Number.isFinite(acceptedAge) ? esc(debugGraphTerseTimeText(acceptedAge * 1000)) : '—'} · Quarantined conflicts ${esc(debugSystemNumber(usage.quarantined_conflict_count))}</span>
+    <span>Last accepted <span${accepted.reason ? ` title="${esc(accepted.reason)}" data-value-reason="${esc(accepted.reason)}"` : ''}>${esc(accepted.text)}</span> · Quarantined conflicts <span${conflicts.reason ? ` title="${esc(conflicts.reason)}" data-value-reason="${esc(conflicts.reason)}"` : ''}>${esc(conflicts.text)}</span></span>
   </div>`;
+  // Every unpublished sampler field goes through the ONE unmeasured spelling. Before this, three
+  // rows here each lied differently: the deadlines printed "not available / not available" while
+  // the rest of the panel printed an em dash with a reason, and `Last cycle` and `Last history
+  // latency` used `|| 0` -- rendering a sampler that has never run as a measured `0ms`.
+  const lastCycle = debugSystemScalar(statsd.sampler_last_cycle_seconds, 'sampler_cycle_not_timed', value => debugGraphTerseTimeText(value * 1000));
+  const late = debugSystemScalar(statsd.sampler_late_cycles, 'sampler_cycles_not_published');
+  const missed = debugSystemScalar(statsd.sampler_missed_cycles, 'sampler_cycles_not_published');
+  const assemble = debugSystemScalar(profile.assemble_ms, 'history_not_assembled', value => debugGraphTerseTimeText(value));
   const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
-    ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
-    ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
-    ['History cache hit rate', hitRate],
-    ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
-    ['Last history query', historyQuery],
+    ['Last cycle', lastCycle.text, lastCycle.reason],
+    ['Late / missed deadlines', `${late.text} / ${missed.text}`, late.reason || missed.reason],
+    ['History cache hit rate', hitRate.text, hitRate.reason],
+    ['Last history latency', assemble.text, assemble.reason],
+    ['Last history query', historyQuery.text, historyQuery.reason],
   ]);
-  return debugSystemCardHtml(
-    'YO!stats sampler',
-    `${aggregate}${usageHtml}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
-    {wide: true},
-  );
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.sampler'))}</h4>${aggregate}${usageHtml}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`;
+}
+
+// ---- rehomed diagnostics: each block now lives under the row that owns it -------------------
+
+function debugSystemWebProcessDetailHtml(payload = {}) {
+  const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
+  const clientEvents = payload.client_events && typeof payload.client_events === 'object' ? payload.client_events : {};
+  const chat = payload.chat && typeof payload.chat === 'object' ? payload.chat : {};
+  // System CPU is the fourth metric off the same unpushed sample. It printed a confident `0.0%`
+  // beside three cells that had already learned to say why they were empty, so it goes through
+  // the ONE envelope renderer with its reason like every other unmeasured value in a disclosure.
+  const systemCpu = server.system_cpu_percent && typeof server.system_cpu_percent === 'object' ? server.system_cpu_percent : {};
+  const systemCpuText = debugSystemScalar(systemCpu.value, '', value => `${debugSystemNumber(value, 1)}%`);
+  const identity = debugSystemRowsHtml([
+    ['Version', server.version],
+    ['PID', server.pid],
+    ['State directory', payload.state_dir],
+    ['System CPU', systemCpuText.text, systemCpuText.text === '—' ? String(systemCpu.reason || '') : ''],
+  ]);
+  const events = debugSystemRowsHtml([
+    ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
+    ['Published events', clientEvents.published_events],
+    ['Delivered events', clientEvents.delivered_events],
+    ['Chat subscribers', chat.subscribers],
+    ['Chat messages', chat.store?.message_rows],
+    ['Typing leases', chat.store?.typing_leases],
+  ]);
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    <p class="js-debug-roster-note" data-subsystem-unobserved-note>${esc(debugSystemHealthReasonText('web_process_not_observed'))}</p>
+    <h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.eventsChat'))}</h4>${events}`;
+}
+
+function debugSystemTmuxSignalWatcherDetailHtml(watcher = {}) {
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const demandKnown = typeof watcher?.demanded === 'boolean';
+  const demanded = watcher?.demanded === true;
+  const sessions = Array.isArray(watcher?.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
+  const issue = debugSystemTmuxSignalWatcherIsIssue(watcher);
+  const stateLabel = state === 'never-started' && demandKnown && !demanded ? t('state.idle') : debugSystemRosterStateLabel(state);
+  return `<div data-js-debug-tmux-signal-watcher data-tmux-signal-watcher-state="${esc(state)}" data-tmux-signal-watcher-demanded="${demandKnown ? String(demanded) : 'unknown'}" role="${issue ? 'alert' : 'status'}">
+    ${debugSystemRowsHtml([
+      ['State', stateLabel],
+      // One unmeasured spelling in this view too: an unpublished demand flag is the em dash with
+      // its reason, not a fourth wording of "not available" beside three em dashes.
+      ['Demand', demandKnown ? (demanded ? 'Yes' : 'No') : '—', demandKnown ? '' : debugSystemHealthReasonText('watcher_demand_unpublished')],
+      ['Control client PID', Number(watcher?.process_pid) > 0 ? watcher.process_pid : '—'],
+      ['Sessions', sessions || '—'],
+      ['Detail', watcher?.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state]],
+    ])}
+    <p class="js-debug-roster-note" data-subsystem-unobserved-note>${esc(debugSystemHealthReasonText('subsystem_not_observed'))}</p>
+  </div>`;
+}
+
+function debugSystemSearchCachesDetailHtml(payload = {}) {
+  const search = payload.search_index && typeof payload.search_index === 'object' ? payload.search_index : {};
+  const caches = payload.caches && typeof payload.caches === 'object' ? payload.caches : {};
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.searchCaches'))}</h4>${debugSystemRowsHtml([
+    ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
+    ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
+    ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
+    ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
+  ])}`;
+}
+
+// Which rehomed diagnostic block belongs to which service. One table, so a block cannot end up
+// rendered twice or under a service that does not own it.
+const DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL = Object.freeze({
+  statsd: (payload, nowSeconds) => debugSystemStatsSamplerBodyHtml(
+    (services => (Array.isArray(services) ? services : []))(debugSystemRenderableLocalServices(payload).services),
+    nowSeconds,
+  ),
+  indexd: payload => debugSystemSearchCachesDetailHtml(payload),
+});
+
+function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const identity = debugSystemRowsHtml([
+    ['Service id', row.id],
+    ['PID', Number(row.pid) > 0 ? row.pid : '—', Number(row.pid) > 0 ? '' : debugSystemHealthReasonText('process_not_running')],
+    ['Reason', row.reason || '—', row.reason ? '' : debugSystemHealthReasonText('state_reason_unpublished')],
+  ]);
+  const owned = DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL[row.id];
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    ${debugSystemServiceHealthDetailHtml(row.health, nowSeconds)}
+    ${owned ? owned(payload, nowSeconds) : ''}`;
 }
 
 function debugSystemCpuBudgetCardHtml(budget = {}) {
-  const status = ['ok', 'watching', 'warning'].includes(budget.status) ? budget.status : 'ok';
+  // `stale` was missing from this list, so the ONE state the backend publishes to say "no sample
+  // stands behind these numbers" was coerced to `ok` -- the card rendered healthy exactly when the
+  // budget was unknown. `DEBUG_SYSTEM_STATE_TONES` has painted `stale` as `warn` all along; the
+  // vocabulary existed and this whitelist dropped the connection.
+  const status = ['ok', 'watching', 'warning', 'stale'].includes(budget.status) ? budget.status : 'ok';
   const consumers = Array.isArray(budget.top_consumers) ? budget.top_consumers : [];
   const consumerText = consumers.map(row => {
     const owner = [row?.role, row?.surface].filter(Boolean).join(':');
     return `${owner || t('common.notAvailable')} ${debugSystemNumber(row?.compute_ms_total, 1)}ms`;
   }).join(' · ') || 'None';
-  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}">${debugSystemRowsHtml([
-    ['Status', status],
-    ['Current / budget', `${debugSystemNumber(budget.current_percent, 1)}% / ${debugSystemNumber(budget.budget_percent, 1)}%`],
+  // The numerator is a measurement and the denominator is a policy constant. Only the numerator
+  // can be absent, and when it is, the pair reads "— / 30.0%" with its reason rather than a
+  // confident "0.0% / 30.0%" that looks like a measured idle server.
+  const current = debugSystemScalar(budget.current_percent, 'cpu_budget_never_sampled', value => `${debugSystemNumber(value, 1)}%`);
+  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}"${budget.stale === true ? ' data-js-debug-cpu-budget-stale="true"' : ''}>${debugSystemRowsHtml([
+    ['Status', status, status === 'stale' ? debugSystemHealthReasonText('cpu_budget_stale') : ''],
+    ['Current / budget', `${current.text} / ${debugSystemNumber(budget.budget_percent, 1)}%`, current.reason],
     ['Sustained', `${debugSystemNumber(budget.sustained_seconds, 0)}s / ${debugSystemNumber(budget.sustained_budget_seconds, 0)}s`],
     ['Top compute owners', consumerText],
   ])}</div>`);
 }
 
-function debugSystemRecoveryBannersHtml(localServices = {}) {
-  const events = Array.isArray(localServices.recovery_events) ? localServices.recovery_events : [];
-  return events.map(event => `<section class="js-debug-system-recovery-banner" data-system-recovery-banner role="alert">
-    <strong>${esc(event?.subsystem || 'Subsystem')} recovered from ${esc(event?.event || 'a storage failure')}</strong>
-    <span>Quarantined ${esc(event?.quarantined_artifact || t('common.notAvailable'))} at ${esc(event?.quarantined_path || t('common.notAvailable'))}.</span>
-    <span>Fresh storage is active at ${esc(event?.destination_path || t('common.notAvailable'))}.</span>
-    ${event?.reason ? `<span>${esc(event.reason)}</span>` : ''}
-  </section>`).join('');
+// The compact summary strip: what the whole roster adds up to, in one line, above it.
+// Its facts container is deliberately NOT a live region: it carries "Updated N seconds ago",
+// which changes on every 5-second poll, so announcing it meant announcing the clock forever.
+// The meaningful half -- the state counts -- is spoken by debugSystemAnnounceHtml, which is its
+// own render region precisely so a moving timestamp cannot rewrite it.
+function debugSystemSummaryStripHtml(payload = {}) {
+  const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
+  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
+  const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
+  // NO CPU BUDGET DENOMINATOR HERE. The strip used to print `CPU 172.5% / 30%`: a POPULATION sum
+  // over every roster row, divided by `SERVER_CPU_BUDGET_PERCENT`, which is the budget for the WEB
+  // PROCESS ALONE (`yolomux_lib/app.py:SERVER_CPU_BUDGET_PERCENT`, published through
+  // `server_cpu_budget_payload` beside the web process's OWN `current_percent`). Eight processes
+  // measured against one process's budget reads as a 575%-over-budget alarm that nothing is
+  // actually breaching. There is no published population budget to divide by, and inventing one
+  // here (30% x rows) would be this renderer re-deciding a backend policy constant.
+  //   So the number is LABELLED as what it is -- a sum across the roster -- and the budget stays
+  //   with the one figure it applies to, in the CPU budget card (`debugSystemCpuBudgetCardHtml`),
+  //   which renders the web process's own current reading against it. That also removes the strip
+  //   as a second renderer of the budget percentage.
+  // A sum over SOME of the population is not the population's total. Excluding an unmeasured row
+  // stops the strip fabricating a zero, but a bare `48.0MB` still reads as "this is the memory" --
+  // the same silent undercount with a better reason. The panel already has ONE spelling for
+  // "this number covers less than it looks like": `data-metric-coverage="partial"` plus the
+  // footnote marker `debugSystemCoverageFlagHtml` renders for the roster's metric cells. That one
+  // function is called here rather than inventing a second convention such as an inline `1/2`,
+  // which would also mean composing English outside the locale catalog.
+  //   The denominator comes from the SAME `counts` the numbers do -- one array, one pass,
+  //   no second accumulator. It is `resourcePopulation`, not `population`: a nested row runs
+  //   inside its parent's process, so its CPU and memory are already inside the parent's figure
+  //   and it is not a row this total failed to cover.
+  //   The coverage object carries its OWN measured/population numbers, so the renderer below
+  //   never re-derives which count a fact belongs to from its key.
+  const coverageFor = measuredRows => {
+    const population = counts.resourcePopulation;
+    if (measuredRows <= 0 || measuredRows >= population) return {state: '', reason: '', measured: measuredRows, population};
+    return {
+      state: 'partial',
+      measured: measuredRows,
+      population,
+      reason: `this total covers the ${measuredRows} of ${population} rows that own a process and published a measurement; the rest are unmeasured, not zero`,
+    };
+  };
+  const cpuCoverage = coverageFor(counts.cpuMeasured);
+  const memoryCoverage = coverageFor(counts.rssMeasured);
+  const facts = [
+    ['counts', t('debug.system.roster.summary.counts', counts)],
+    // An em dash when NOTHING in the population was measured -- the same one unmeasured spelling
+    // the roster cells and the disclosures use, never a summed `0`.
+    ['cpu', t('debug.system.roster.summary.cpu', {
+      current: counts.cpuMeasured > 0 ? `${debugSystemNumber(counts.cpuPercent, 1)}%` : '—',
+    }), cpuCoverage],
+    ['memory', t('debug.system.roster.summary.memory', {value: counts.rssMeasured > 0 ? debugGraphTerseBytesText(counts.rssBytes) : '—'}),
+      memoryCoverage],
+    ['owner', t('debug.system.roster.summary.owner', {
+      value: owner.owner ? t('backgroundOwner.thisServer') : (Number(owner.current_owner?.port) > 0 ? `:${owner.current_owner.port}` : t('common.notAvailable')),
+    })],
+    ['updated', `${t('debug.system.roster.summary.updated', {time: generatedAgo})}${jsDebugSystemState.error ? ` · ${jsDebugSystemState.error}` : ''}`],
+  ];
+  // The Refresh control is `aria-disabled` while a refresh is in flight, never `disabled`. A
+  // `disabled` attribute makes the browser BLUR the element the moment it lands, so activating
+  // Refresh by mouse or by Enter threw the reader out to `document.body`: by the time
+  // `refreshDebugSystemViews` looked for a focus key, the view no longer contained
+  // `document.activeElement`, so it captured nothing and the next render had nothing to restore.
+  // The same blur hit the plain 5-second poll for anyone whose focus was resting on this button.
+  // `aria-disabled` keeps the control focusable and reachable to a screen reader mid-refresh, and
+  // re-entry stays impossible because `pollDebugSystemStatus` returns early while `inFlight` --
+  // that early return is the ONE owner of the "one refresh at a time" rule, not a second guard here.
+  return `<div class="js-debug-system-toolbar js-debug-roster-summary" data-js-debug-roster-summary>
+    <h3 class="js-debug-roster-summary-title">${esc(t('debug.tab.services'))}</h3>
+    <div class="js-debug-roster-summary-facts">${facts.map(([key, text, coverage = {state: '', reason: ''}]) => {
+      const explain = coverage.reason || '';
+      const flag = coverage.state === 'partial' ? debugSystemCoverageFlagHtml() : '';
+      return `<span data-js-debug-roster-summary-fact="${esc(key)}"`
+        + `${coverage.state ? ` data-metric-coverage="${esc(coverage.state)}" data-metric-measured-rows="${esc(String(coverage.measured))}" data-metric-population-rows="${esc(String(coverage.population))}"` : ''}`
+        + `${explain ? ` title="${esc(explain)}" data-value-reason="${esc(explain)}"` : ''}`
+        + `>${esc(text)}${flag}</span>`;
+    }).join('')}</div>
+    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh data-js-debug-system-focus-key="roster-refresh"${jsDebugSystemState.inFlight ? ' aria-disabled="true"' : ''}>${esc(t('common.refresh'))}</button>
+  </div>`;
+}
+
+// ONE compact alert slot. Every critical recovery/persistence/observer failure lands here, once,
+// above the roster -- not repeated in every row and not restored as a second large alert card.
+function debugSystemAlertsHtml(payload = {}) {
+  const localServices = debugSystemRenderableLocalServices(payload);
+  const health = localServices.health && typeof localServices.health === 'object' ? localServices.health : {};
+  // Every backend-health explanation, from the ONE owner. This slot does not compose a sentence of
+  // its own -- when it did, the same fact reached the reader twice in two wordings. `stopped` means
+  // the observer is no longer probing; a quiet system -- one where nothing has changed for hours --
+  // is `current`, and the owner returns it as `quiet`, so no alert is raised at all.
+  const alerts = [...debugSystemHealthExplanations(health).alerts];
+  if (debugSystemTmuxSignalWatcherIsIssue(payload.tmux_signal_watcher)) {
+    const watcher = payload.tmux_signal_watcher || {};
+    const watcherState = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+    alerts.push(['tmux-signal-watcher', `${t('debug.system.roster.tmuxSignalWatcher')}: ${watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[watcherState]}`]);
+  }
+  for (const event of Array.isArray(localServices.recovery_events) ? localServices.recovery_events : []) {
+    alerts.push(['recovery', `${event?.subsystem || 'Subsystem'} recovered from ${event?.event || 'a storage failure'}: quarantined ${event?.quarantined_artifact || t('common.notAvailable')} at ${event?.quarantined_path || t('common.notAvailable')}; fresh storage is active at ${event?.destination_path || t('common.notAvailable')}.${event?.reason ? ` ${event.reason}` : ''}`]);
+  }
+  if (!alerts.length) return '';
+  return `<div class="js-debug-system-alert" data-js-debug-system-alert role="alert">${alerts.map(([kind, text]) => `<p data-system-alert="${esc(kind)}"${kind === 'recovery' ? ' data-system-recovery-banner' : ''}>${esc(text)}</p>`).join('')}</div>`;
+}
+
+// Everything a reader consults deliberately rather than scans. Collapsed by default and BUILT only
+// when open: a closed section costs nothing but its summary line.
+//
+// `advanced` is the view of the SEPARATE `/api/system-status/advanced` body (see
+// `debugSystemAdvancedView`). Since the snapshot split, `refresh`, the top-N folds and
+// `owner.debug` no longer exist in the core payload at all, so reading them off `payload` would
+// render six permanently empty cards. When the advanced body has not arrived, the cards that need
+// it are NOT drawn as empty shells -- the section says which state it is in and draws only the
+// cards the core body genuinely owns.
+function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
+  const open = jsDebugSystemRosterState.advancedOpen === true;
+  const summary = `<summary data-js-debug-system-advanced-summary data-js-debug-system-focus-key="advanced-summary">${esc(t('debug.system.roster.advanced'))}</summary>`;
+  if (!open) return `<details class="js-debug-system-advanced" data-js-debug-system-advanced>${summary}</details>`;
+  const body = advanced.payload && typeof advanced.payload === 'object' ? advanced.payload : null;
+  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
+  const currentOwner = owner.current_owner || {};
+  const advancedOwner = body && body.owner && typeof body.owner === 'object' ? body.owner : {};
+  const refresh = body && body.refresh && typeof body.refresh === 'object' ? body.refresh : {};
+  const localRefreshing = refresh.local_refreshing || {};
+  const coalescing = refresh.coalescing || {};
+  const totals = debugSystemRenderableLocalServices(payload).totals || {};
+  const cards = [
+    debugSystemCpuBudgetCardHtml(payload.cpu_budget || {}),
+    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
+      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
+      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
+      ['Index mode', owner.search_index?.mode],
+      ...(body ? [['Generations', advancedOwner.debug?.generation_count]] : []),
+    ])),
+    ...(body ? [
+      debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
+        ['Processes', totals.processes],
+        ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
+        ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
+      ])),
+      debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
+      debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+      debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(body.top_endpoints, 'endpoint'), {wide: true}),
+      debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(body.top_background_work, 'worker'), {wide: true}),
+    ] : []),
+    debugSystemCardHtml('Backend-health snapshot', debugSystemHealthSnapshotHtml(debugSystemRenderableLocalServices(payload).health || {}), {wide: true}),
+  ];
+  return `<details class="js-debug-system-advanced" data-js-debug-system-advanced open>${summary}
+    ${debugSystemAdvancedStatusHtml(advanced)}
+    <div class="js-debug-system-grid">${cards.filter(Boolean).join('')}</div>
+  </details>`;
+}
+
+// The four regions of the Daemons view, in the order a reader needs them. `debugSystemInnerHtml`
+// stays the ONE place the shape is declared; `refreshDebugSystemViews` replaces regions one at a
+// time so a poll does not destroy an open disclosure or the focused control inside it.
+// The ONE live region that speaks on its own: what the roster adds up to, and nothing else. It is
+// its own render region deliberately -- the region cache only rewrites a region whose generated
+// HTML changed, so keeping the volatile "Updated N seconds ago" out of this one is what stops a
+// screen reader being re-announced at every 5-second poll. Counts come from the same
+// `debugSystemRosterSummary` owner the visible strip uses, so there is no second state map.
+function debugSystemAnnounceHtml(payload = {}) {
+  const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
+  return `<p class="a11y-only" role="status" aria-live="polite" data-js-debug-system-announce>${esc(t('debug.system.roster.summary.counts', counts))}</p>`;
+}
+
+function debugSystemRegionHtml(region, payload) {
+  if (region === 'announce') return debugSystemAnnounceHtml(payload);
+  if (region === 'summary') return debugSystemSummaryStripHtml(payload);
+  if (region === 'alerts') return debugSystemAlertsHtml(payload);
+  if (region === 'roster') {
+    const generatedAt = Number(payload.generated_at);
+    return debugSystemRosterHtml(payload, {
+      nowSeconds: Number.isFinite(generatedAt) && generatedAt > 0 ? generatedAt : Date.now() / 1000,
+      expanded: jsDebugSystemRosterState.expanded,
+    });
+  }
+  return debugSystemAdvancedHtml(payload, debugSystemAdvancedView());
+}
+
+const DEBUG_SYSTEM_REGIONS = Object.freeze(['announce', 'summary', 'alerts', 'roster', 'advanced']);
+
+// ---------------------------------------------------------------------------------------------
+// THE TYPED SNAPSHOT REFUSAL
+//
+// `/api/system-status` and `/api/system-status/advanced` are served from retained background
+// snapshots. Before the first publish, or past the freshness deadline, the answer is HTTP 200 with
+// `ok:false` and a `snapshot` block -- and WITHOUT the body: the aged report is withheld, never
+// relabelled as current. Both routes share one shape, so this panel parses it once, and every
+// surface renders the state it was told rather than an absence dressed up as a measurement.
+// ---------------------------------------------------------------------------------------------
+const DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT = Object.freeze({
+  unavailable: 'No system-status snapshot has been published yet.',
+  stale: 'The newest system-status snapshot is past its freshness deadline, so its aged numbers are withheld.',
+});
+
+function debugSystemSnapshotRefusal(payload) {
+  if (!payload || typeof payload !== 'object' || payload.ok !== false) return null;
+  const snapshot = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {};
+  // `age_seconds` is published as null for a snapshot that never existed. `Number(null)` is 0, and
+  // printing "age 0.0s" for a snapshot nobody has ever built is the same defect this whole panel is
+  // about, so the absence is carried as an absence.
+  const age = snapshot.age_seconds === null || snapshot.age_seconds === undefined ? NaN : Number(snapshot.age_seconds);
+  return {
+    state: String(snapshot.state || 'unavailable'),
+    reasonCode: String(snapshot.reason_code || ''),
+    reason: String(snapshot.reason || ''),
+    ageSeconds: Number.isFinite(age) && age >= 0 ? age : null,
+  };
+}
+
+// The whole Daemons view when the core body is a refusal. It replaces the roster rather than
+// drawing one: with no payload behind it, every row would be a fabricated `unavailable`, which is
+// exactly the "unmeasured shown as measured" failure this panel exists to avoid.
+function debugSystemSnapshotRefusalHtml(refusal) {
+  const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[refusal.state] || `The system-status snapshot is ${refusal.state}.`;
+  const age = refusal.ageSeconds === null ? '' : ` Newest snapshot age ${debugSystemNumber(refusal.ageSeconds, 1)}s.`;
+  const retry = ` Retrying every ${debugSystemNumber(jsDebugSystemRefusalPollMs / 1000, 1)}s.`;
+  return `<div class="js-debug-system-loading" role="status" data-js-debug-system-snapshot-state="${esc(refusal.state)}" data-js-debug-system-snapshot-reason-code="${esc(refusal.reasonCode)}">${esc(`${headline}${refusal.reason ? ` ${refusal.reason}` : ''}${age}${retry}`)}</div>`;
+}
+
+// The ONE view of the Advanced body handed to the renderer: the payload when it is current, the
+// typed refusal when the producer withheld it, and this client's own fetch error when the request
+// itself failed.
+function debugSystemAdvancedView() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload);
+  return {
+    payload: refusal ? null : (jsDebugSystemAdvancedState.payload || null),
+    refusal,
+    error: jsDebugSystemAdvancedState.error,
+    inFlight: jsDebugSystemAdvancedState.inFlight,
+  };
+}
+
+function debugSystemAdvancedStatusHtml(advanced = {}) {
+  if (advanced.payload) return '';
+  if (advanced.error) {
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="error">${esc(advanced.error)}</p>`;
+  }
+  if (advanced.refusal) {
+    const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[advanced.refusal.state] || `The advanced diagnostics snapshot is ${advanced.refusal.state}.`;
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="${esc(advanced.refusal.state)}" data-js-debug-system-advanced-reason-code="${esc(advanced.refusal.reasonCode)}">${esc(`${headline}${advanced.refusal.reason ? ` ${advanced.refusal.reason}` : ''}`)}</p>`;
+  }
+  return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="loading">${esc(t('common.loading'))}</p>`;
 }
 
 function debugSystemInnerHtml() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemState.payload);
+  if (refusal) return debugSystemSnapshotRefusalHtml(refusal);
   const payload = jsDebugSystemState.payload;
   if (!payload) {
     const message = jsDebugSystemState.error || t('common.loading');
     return `<div class="js-debug-system-loading" role="status">${esc(message)}</div>`;
   }
-  const server = payload.server || {};
-  const owner = payload.owner || {};
-  const currentOwner = owner.current_owner || {};
-  const refresh = payload.refresh || {};
-  const localRefreshing = refresh.local_refreshing || {};
-  const coalescing = refresh.coalescing || {};
-  const search = payload.search_index || {};
-  const caches = payload.caches || {};
-  const clientEvents = payload.client_events || {};
-  const chat = payload.chat || {};
-  const tmuxSignalWatcher = payload.tmux_signal_watcher || {};
-  const recurringWork = Array.isArray(refresh.recurring_work) ? refresh.recurring_work : [];
-  const totals = payload.local_services?.totals || {};
-  const cpuBudget = payload.cpu_budget || {};
-  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
-  const cards = [
-    debugSystemCardHtml('Server', debugSystemRowsHtml([
-      ['Status', payload.ok ? 'Running' : 'Issue'],
-      ['Version', server.version], ['PID', server.pid], ['Uptime', debugGraphUptimeText(server.uptime_seconds)],
-      ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
-      ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
-    ])),
-    debugSystemCpuBudgetCardHtml(cpuBudget),
-    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
-      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
-      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
-      ['Index mode', owner.search_index?.mode], ['Generations', owner.debug?.generation_count],
-    ])),
-    debugSystemCardHtml('Worker totals', debugSystemRowsHtml([
-      ['Processes', totals.processes], ['CPU', `${debugSystemNumber(totals.cpu_percent, 1)}%`],
-      ['Memory', debugGraphTerseBytesText(totals.rss_bytes)],
-      ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
-      ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
-    ])),
-    debugSystemCardHtml('Search & caches', debugSystemRowsHtml([
-      ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
-      ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
-      ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
-      ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
-    ])),
-    debugSystemCardHtml('Events & chat', debugSystemRowsHtml([
-      ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
-      ['Published events', clientEvents.published_events],
-      ['Delivered events', clientEvents.delivered_events],
-      ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
-    ])),
-    debugSystemTmuxSignalWatcherCardHtml(tmuxSignalWatcher),
-    debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(recurringWork), {wide: true}),
-    debugSystemStatsSamplerCardHtml(services),
-    debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
-    debugSystemLocalServicesCardHtml(),
-    debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
-    debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
-  ];
-  return `<div class="js-debug-system-toolbar">
-    <span role="status">Updated ${esc(generatedAgo)}${jsDebugSystemState.error ? ` · ${esc(jsDebugSystemState.error)}` : ''}</span>
-    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh${jsDebugSystemState.inFlight ? ' disabled' : ''}>${esc(t('common.refresh'))}</button>
-  </div>${debugSystemRecoveryBannersHtml(payload.local_services)}<div class="js-debug-system-grid">${cards.join('')}</div>`;
+  return DEBUG_SYSTEM_REGIONS
+    .map(region => `<div class="js-debug-system-region" data-js-debug-system-region="${region}">${debugSystemRegionHtml(region, payload)}</div>`)
+    .join('');
+}
+
+// The last HTML written into each region wrapper. A region whose HTML did not change is not
+// touched at all, which is what lets an expanded row keep its DOM -- and its focus -- while the
+// summary strip's "Updated 2s ago" repaints every five seconds.
+const debugSystemRenderedRegions = new WeakMap();
+
+// The ONE seeder for that cache, called by every site that builds the five regions from
+// `debugSystemInnerHtml`. A site that writes the regions and does not record what it wrote leaves
+// each region's WeakMap value `undefined`, so the very next poll compares `undefined` against the
+// freshly generated HTML, finds them different, and assigns `innerHTML` to all five -- a wholesale
+// DOM replacement on an UNCHANGED payload, which is precisely what this cache exists to prevent,
+// and it discards the focused control and any open disclosure row with it.
+//
+// `refreshDebugSystemViews` seeded its own build inline; `createDebugPanel` and `renderDebugPanels`
+// build the same five regions through `debugPanelHtml` and did not, so the first poll after panel
+// creation and after every full rerender rebuilt everything. This is one owner called from all
+// three, not a second cache: a second cache would be the divergent copy this panel keeps paying for.
+function seedDebugSystemRenderedRegions(root, payload = jsDebugSystemState.payload) {
+  if (!root || !payload) return;
+  for (const region of root.querySelectorAll('[data-js-debug-system-region]')) {
+    debugSystemRenderedRegions.set(region, debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload));
+  }
+}
+
+function debugSystemFocusKey() {
+  const active = document.activeElement;
+  return String(active?.dataset?.jsDebugSystemFocusKey || '');
+}
+
+function debugSystemRestoreFocus(view, focusKey) {
+  if (!focusKey) return;
+  if (debugSystemFocusKey() === focusKey) return;
+  // `preventScroll` matters: the caller restores the panel's own scroll position immediately after,
+  // and a focus() that scrolls first would fight it.
+  view.querySelector(`[data-js-debug-system-focus-key="${cssEscape(focusKey)}"]`)?.focus?.({preventScroll: true});
 }
 
 function refreshDebugSystemViews() {
   for (const view of document.querySelectorAll('[data-js-debug-system]')) {
     const scrollTop = view.scrollTop;
     const scrollLeft = view.scrollLeft;
-    const oldLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
-    view.innerHTML = debugSystemInnerHtml();
-    const newLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
-    let localServicesCard = newLocalServicesCard;
-    if (oldLocalServicesCard && newLocalServicesCard && jsDebugSystemState.payload) {
-      newLocalServicesCard.replaceWith(oldLocalServicesCard);
-      localServicesCard = oldLocalServicesCard;
+    const focusKey = view.contains(document.activeElement) ? debugSystemFocusKey() : '';
+    // A typed refusal is NOT a payload: it has no regions to update, so it takes the shell branch
+    // below and `debugSystemInnerHtml` renders the state it was told.
+    const payload = debugSystemSnapshotRefusal(jsDebugSystemState.payload) ? null : jsDebugSystemState.payload;
+    const regions = view.querySelectorAll('[data-js-debug-system-region]');
+    // First render, or a view whose shell is not the current one: build the whole shell. Every
+    // later render replaces only the regions whose GENERATED html changed -- the cache holds what
+    // was generated, never `region.innerHTML`, because the browser's own serialization of the same
+    // markup differs and would make every region look changed on the next poll.
+    if (!payload || regions.length !== DEBUG_SYSTEM_REGIONS.length) {
+      view.innerHTML = debugSystemInnerHtml();
+      seedDebugSystemRenderedRegions(view, payload);
+    } else {
+      for (const region of regions) {
+        const html = debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload);
+        if (debugSystemRenderedRegions.get(region) === html) continue;
+        region.innerHTML = html;
+        debugSystemRenderedRegions.set(region, html);
+      }
     }
-    if (jsDebugSystemState.payload) updateDebugSystemLocalServicesCard(localServicesCard, jsDebugSystemState.payload);
+    debugSystemRestoreFocus(view, focusKey);
     restoreElementScrollPosition(view, scrollTop, scrollLeft);
     view.setAttribute('aria-busy', jsDebugSystemState.inFlight ? 'true' : 'false');
   }
 }
 
+// Disclosure state lives OUTSIDE the DOM so a re-render cannot close a row the reader opened.
+function toggleDebugSystemRosterRow(id) {
+  const key = String(id || '');
+  if (!key) return;
+  if (jsDebugSystemRosterState.expanded.has(key)) jsDebugSystemRosterState.expanded.delete(key);
+  else jsDebugSystemRosterState.expanded.add(key);
+  refreshDebugSystemViews();
+}
+
+// The Advanced body, fetched ONLY while the reader has the disclosure open.
+//
+// LAZINESS IS THE POINT: the whole reason the backend split this half out is that transcript scans
+// and top-N folds should not run on the five-second poll of a panel whose Advanced section is
+// closed. Reading the route on every poll would move that work back onto the producer and undo the
+// split, so the closed-disclosure early return below is load-bearing, not a nicety
+// (tests/system_health_panel.test.js pins it).
+//
+// It is not a second poller: it has no interval of its own. `pollDebugSystemStatus` -- the one
+// owner of the `debug-system` timer -- drives it, and `jsDebugSystemAdvancedPollMs` is the minimum
+// age at which a re-read can produce different bytes.
+async function pollDebugSystemAdvanced({force = false} = {}) {
+  if (jsDebugSystemAdvancedState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (jsDebugSystemRosterState.advancedOpen !== true) return false;
+  const age = Date.now() - jsDebugSystemAdvancedState.updatedAt;
+  if (!force && jsDebugSystemAdvancedState.updatedAt > 0 && age < jsDebugSystemAdvancedPollMs) return false;
+  jsDebugSystemAdvancedState.inFlight = true;
+  jsDebugSystemAdvancedState.error = '';
+  try {
+    const payload = await apiFetchJsonQuiet('/api/system-status/advanced', {cache: 'no-store'});
+    jsDebugSystemAdvancedState.payload = payload;
+    // A refusal carries no body, so it does not start a cadence window: the next poll asks again.
+    jsDebugSystemAdvancedState.updatedAt = debugSystemSnapshotRefusal(payload) ? 0 : Date.now();
+    return true;
+  } catch (error) {
+    jsDebugSystemAdvancedState.error = userMessageText(error);
+    jsDebugSystemAdvancedState.updatedAt = 0;
+    return false;
+  } finally {
+    jsDebugSystemAdvancedState.inFlight = false;
+    refreshDebugSystemViews();
+  }
+}
+
+// How long until the next poll. A typed refusal is answered in half a second, not in five: the
+// producer builds on demand, so the body the reader is waiting for normally exists well before the
+// next scheduled poll. This is the NORMAL first read of the panel after any quiet period -- the
+// slots are demand-gated -- not a rare cold-start edge case, so the panel would otherwise be blank
+// for a full poll interval every time somebody opens it.
+function debugSystemPollDelayMs() {
+  if (debugSystemSnapshotRefusal(jsDebugSystemState.payload)) return jsDebugSystemRefusalPollMs;
+  if (jsDebugSystemRosterState.advancedOpen === true && debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload)) {
+    return jsDebugSystemRefusalPollMs;
+  }
+  return jsDebugSystemPollMs;
+}
+
 async function pollDebugSystemStatus({force = false} = {}) {
   if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
   jsDebugSystemState.inFlight = true;
   jsDebugSystemState.error = '';
   refreshDebugSystemViews();
@@ -8108,15 +9150,28 @@ async function pollDebugSystemStatus({force = false} = {}) {
   } finally {
     jsDebugSystemState.inFlight = false;
     refreshDebugSystemViews();
+    // Both reads ride the one poll: the Advanced fetch returns immediately unless its disclosure is
+    // open and its retained body is old enough to have been replaced.
+    await pollDebugSystemAdvanced();
+    retimeDebugSystemPolling();
   }
 }
 
+// Re-arm the ONE `debug-system` timer at the delay the current state deserves. `resetRuntimeInterval`
+// keeps the existing timer when the delay is unchanged, so calling this after every poll costs
+// nothing on the steady path.
+function retimeDebugSystemPolling() {
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) return;
+  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, debugSystemPollDelayMs());
+}
+
 function syncDebugSystemPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-system');
     return;
   }
-  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, jsDebugSystemPollMs);
+  // ONE arming site for the ONE timer, so the delay rule cannot drift between the two callers.
+  retimeDebugSystemPolling();
   if (pollNow || !jsDebugSystemState.payload) void pollDebugSystemStatus({force: true});
 }
 
@@ -8148,15 +9203,23 @@ function refreshDebugLogsViews() {
 
 async function pollDebugLogs({force = false} = {}) {
   if (jsDebugLogsState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
   jsDebugLogsState.inFlight = true;
   jsDebugLogsState.error = '';
   refreshDebugLogsViews();
   try {
     const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
-    jsDebugLogsState.payload = Array.isArray(payload?.logs)
-      ? shareRedactDiagnosticValue(payload.logs.slice(-500))
-      : [];
+    const envelope = jsDebugValidateServerLogEnvelope(payload);
+    if (!envelope.ok) {
+      // A malformed, missing-epoch, or envelope-inconsistent poll fails visibly and keeps the
+      // last good snapshot rather than adopting an untrustworthy server response. Duplicate ids
+      // are not a rejectable error: they are stored raw and de-duplicated at render time.
+      jsDebugLogsState.error = envelope.reason;
+      return false;
+    }
+    jsDebugLogsState.payload = shareRedactDiagnosticValue(envelope.logs.slice(-500));
+    jsDebugLogsState.serverEpoch = envelope.epoch;
+    jsDebugLogsState.serverSequence = envelope.sequence;
     jsDebugLogsState.updatedAt = Date.now();
     return true;
   } catch (error) {
@@ -8169,7 +9232,7 @@ async function pollDebugLogs({force = false} = {}) {
 }
 
 function syncDebugLogsPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-logs');
     return;
   }
@@ -8177,33 +9240,101 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
   if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
 }
 
-function debugPanelHtml() {
+function debugSubviewNoop() {}
+
+function renderDebugEventsSubview(panel, options = {}) {
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
   const counts = debugEventCounts();
-  const apiCopyLabel = debugApiCopyButtonLabel();
+  const values = {
+    events: jsDebugEvents.length,
+    api: counts.apiCalls,
+    sse: counts.sseEvents,
+    errors: counts.errors,
+  };
+  for (const [key, value] of Object.entries(values)) {
+    const stat = panel.querySelector(`[data-js-debug-stat="${key}"]`);
+    if (stat) stat.textContent = String(value);
+  }
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const anchor = debugLogScrollAnchor(log);
+  log.value = text;
+  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+}
+
+function debugSubviewDescriptor({id, html, render = debugSubviewNoop, bind = debugSubviewNoop, activate = debugSubviewNoop, deactivate = debugSubviewNoop, relocalize = debugSubviewNoop}) {
+  return Object.freeze({id, html, render, bind, activate, deactivate, relocalize});
+}
+
+const DEBUG_SUBVIEWS = Object.freeze([
+  debugSubviewDescriptor({
+    id: 'logs',
+    html: () => `<div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`,
+    render: () => refreshDebugLogsViews(),
+    activate: ({pollNow = false} = {}) => syncDebugLogsPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-logs'),
+  }),
+  debugSubviewDescriptor({
+    id: 'system',
+    html: () => `<div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>`,
+    activate: ({pollNow = false} = {}) => syncDebugSystemPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-system'),
+  }),
+  debugSubviewDescriptor({
+    id: 'events',
+    html: debugEventsSubviewHtml,
+    render: renderDebugEventsSubview,
+  }),
+  debugSubviewDescriptor({
+    id: 'graph',
+    html: () => `<div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`,
+    render: (panel, options = {}) => refreshDebugGraphElement(panel.querySelector('[data-js-debug-graph]'), options),
+    bind: panel => {
+      bindDebugGraphTouchSelection(panel);
+      bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
+    },
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+  }),
+  debugSubviewDescriptor({
+    id: 'cost',
+    html: yoCostPanelHtml,
+    render: (panel, options = {}) => renderYoCostPanels(options),
+    bind: bindYoCostPanel,
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+    relocalize: relocalizeYoCostPanelChrome,
+  }),
+]);
+
+function debugSubview(id) {
+  return DEBUG_SUBVIEWS.find(view => view.id === id);
+}
+
+function debugPanelSubviewDescriptors() {
+  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
+}
+
+function syncDebugSubviewActivation({pollNow = false} = {}) {
+  for (const view of debugPanelSubviewDescriptors()) {
+    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
+    else view.deactivate();
+  }
+}
+
+function debugPanelHtml() {
   return `
     ${debugSubTabsHtml()}
-    <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
-      <div class="js-debug-toolbar">
-        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
-          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
-          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
-          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
-          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
-        </div>
-        <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
-          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
-        </div>
-      </div>
-      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
-    </div>
-    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
-    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>
-    <div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`;
+    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
-  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  const result = relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  for (const view of debugPanelSubviewDescriptors()) view.relocalize(panel);
+  return result;
 }
 
 function yoCostPanelHtml() {
@@ -8241,52 +9372,54 @@ function openYoCostTranscriptPreview(event) {
 }
 
 function bindYoCostPanel(panel) {
-  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
-  panel.dataset.jsYoCostBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  panel.addEventListener('scroll', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'yo-cost-panel', () => {
+    const scope = createLifecycleScope();
+    const disposeTouchSelection = bindDebugGraphTouchSelection(panel);
+    scope.replace('touch-selection', disposeTouchSelection, dispose => dispose?.());
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
     panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
   }, {capture: true, passive: true});
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => { handleDebugGraphPointerMove(event, panel); });
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('input', panel, 'input', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('change', panel, 'change', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
     openYoCostTranscriptPreview(event);
+    });
+    return () => scope.dispose('yo-cost-panel-unbound');
   });
 }
 
 function createYoCostPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-yocost-panel';
-  panel.id = panelDomId(yocostItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: yocostItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
-    bodyClass: 'preferences-body js-yocost-body',
-    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    className: 'panel js-yocost-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
+      bodyClass: 'preferences-body js-yocost-body',
+      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    },
+    bind: panel => debugSubview('cost').bind(panel),
   });
-  bindPanelShell(panel, yocostItemId);
-  bindYoCostPanel(panel);
-  return panel;
 }
 
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
@@ -8312,15 +9445,14 @@ function renderYoCostPanels({force = false} = {}) {
       continue;
     }
     const body = panel.querySelector('.js-yocost-body');
-    const scroll = body?.querySelector('.js-yocost-scroll');
-    const scrollTop = scroll?.scrollTop || 0;
-    const scrollLeft = scroll?.scrollLeft || 0;
-    const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-    if (body) {
-      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
-      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-    }
+    reconcilePanelBody({
+      body,
+      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+      anchors: [
+        elementScrollAnchor('.js-yocost-scroll'),
+        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+      ],
+    });
     delete panel.dataset.jsDebugGraphRefreshPending;
     bindYoCostPanel(panel);
     rendered = true;
@@ -8346,25 +9478,27 @@ function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(
 
 function createDebugPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-debug-panel';
-  panel.id = panelDomId(debugPaneItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: debugPaneItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel js-debug-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(debugPaneItemId)}
       </div>`,
-    bodyClass: 'preferences-body js-debug-body',
-    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+      bodyClass: 'preferences-body js-debug-body',
+      bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+    },
+    bind: bindDebugPanel,
   });
-  bindPanelShell(panel, debugPaneItemId);
-  bindDebugPanel(panel);
+  // `debugPanelHtml` above just wrote the five Daemons regions. Record what it wrote, or the first
+  // poll after this panel appears replaces every one of them for no change at all.
+  seedDebugSystemRenderedRegions(panel);
   return panel;
 }
 
@@ -8397,20 +9531,25 @@ function renderDebugPanels(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      const outerScroll = body.querySelector('.js-debug-scroll');
-      const outerScrollTop = outerScroll?.scrollTop || 0;
-      const outerScrollLeft = outerScroll?.scrollLeft || 0;
-      const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-      const logAnchor = debugLogScrollAnchor(body.querySelector('[data-js-debug-log]'));
-      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
-      restoreElementScrollPosition(body.querySelector('.js-debug-scroll'), outerScrollTop, outerScrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-      restoreDebugLogScrollAnchor(body.querySelector('[data-js-debug-log]'), logAnchor, {scrollToBottom: options.scrollLogToBottom === true});
+      reconcilePanelBody({
+        body,
+        html: `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+        anchors: [
+          elementScrollAnchor('.js-debug-scroll'),
+          keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+          {
+            capture: root => debugLogScrollAnchor(root.querySelector('[data-js-debug-log]')),
+            restore: (root, value) => restoreDebugLogScrollAnchor(root.querySelector('[data-js-debug-log]'), value, {scrollToBottom: options.scrollLogToBottom === true}),
+          },
+        ],
+        // Same contract as `createDebugPanel`: record the five Daemons regions just written.
+        afterReplace: seedDebugSystemRenderedRegions,
+      });
     }
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -8423,34 +9562,14 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
-  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
-  if (meta) meta.textContent = debugMetaText();
-  const counts = debugEventCounts();
-  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
-  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
-  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
-  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
-  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
-  if (statApi) statApi.textContent = String(counts.apiCalls);
-  if (statSse) statSse.textContent = String(counts.sseEvents);
-  if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
-  if (panel.querySelector('[data-js-debug-subview="logs"]')) refreshDebugLogsViews();
-  const graph = panel.querySelector('[data-js-debug-graph]');
-  refreshDebugGraphElement(graph, options);
-  const log = panel.querySelector('[data-js-debug-log]');
-  if (!log) return;
-  const text = jsDebugTextForClipboard();
-  if (log.value === text) return;
-  const anchor = debugLogScrollAnchor(log);
-  log.value = text;
-  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+  for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
 }
 
 function debugGraphFocusedControl(graph) {
@@ -8476,7 +9595,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
   }
   const rangeLabel = graph.querySelector('[data-js-debug-range-label]');
   if (rangeLabel) {
-    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(jsDebugGraphRangeSeconds, nowMs);
+    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(debugRuntimeState.graphRangeSeconds, nowMs);
     rangeLabel.classList.toggle('js-debug-range-label--zoomed', zoomed);
     rangeLabel.title = zoomed ? debugGraphCostRangeText(domain) : '';
   }
@@ -8503,7 +9622,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     rangeControl.insertBefore(prefix, slider || rangeControl.firstChild);
   }
   graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
-    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
+    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === debugRuntimeState.graphChartLayout ? 'true' : 'false');
   });
   graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(toggle => {
     toggle.checked = debugGraphChartVisible(toggle.dataset.jsDebugChartToggle);
@@ -8573,8 +9692,9 @@ function debugGraphSlideIntervalMs(resolutionMs) {
 function debugGraphSlidingAxisActive() {
   // Live ranges up to 1h advance continuously with the wall clock so the axis
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
-  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
+  // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
+  // hidden panel is not static but simply does not repaint until it is shown again.
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
 function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
@@ -8604,11 +9724,12 @@ function debugGraphSlideLiveViews(nowMs = Date.now()) {
 }
 
 function stopDebugGraphLiveTicker() {
-  if (jsDebugGraphLiveTimer) clearTimeout(jsDebugGraphLiveTimer);
+  if (jsDebugGraphLiveTimer) debugGraphLifecycleScope().release('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
 }
 
 function debugGraphLiveTimerTick() {
+  debugGraphLifecycleScope().relinquish('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const nowMs = Date.now();
@@ -8624,6 +9745,7 @@ function syncDebugGraphLiveTicker() {
   }
   if (jsDebugGraphLiveTimer) return;
   jsDebugGraphLiveTimer = setTimeout(debugGraphLiveTimerTick, Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
+  debugGraphLifecycleScope().ownTimer('live-ticker', jsDebugGraphLiveTimer);
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
@@ -8680,11 +9802,13 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
 function bindDebugCostSummaryTabButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
-    if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
-    anchor.dataset.jsDebugCostDetailsBound = 'true';
-    anchor.addEventListener('click', event => {
+    bindOnce(anchor, 'debug-cost-details', () => {
+      const handleClick = event => {
       event.preventDefault();
       selectSession(yocostItemId, {userInitiated: true});
+      };
+      anchor.addEventListener('click', handleClick);
+      return () => anchor.removeEventListener('click', handleClick);
     });
   });
 }
@@ -8692,23 +9816,22 @@ function bindDebugCostSummaryTabButtons(graph) {
 function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
-    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === debugRuntimeState.subTab;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
-    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === debugRuntimeState.subTab;
     view.hidden = !active;
   });
 }
 
 function setDebugSubTab(tab) {
   loadJsDebugStatsUiPreferences();
-  jsDebugSubTab = normalizedJsDebugSubTab(tab);
+  debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs'});
+  syncDebugSubviewActivation({pollNow: true});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -8743,7 +9866,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const state = jsDebugHistoryReadiness;
   if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+    && Number(state.requestedRangeSeconds) === Number(debugRuntimeState.graphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
     && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
     && Number(state.requestedResolutionSeconds) === Number(coverageResolutionSeconds);
@@ -8764,7 +9887,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
 function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;
@@ -8776,7 +9899,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
   if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
-      requestedRangeSeconds: jsDebugGraphRangeSeconds,
+      requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
       requestedStartSeconds,
       attemptCount: 0,
       error: '',
@@ -8788,10 +9911,10 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
-  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const previousSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
   const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   saveJsDebugStatsUiPreferences();
   // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
   // value now, before any fetch resolves.
@@ -8815,7 +9938,7 @@ function setDebugGraphResolutionOverride(value) {
   const pending = {
     previousSeconds,
     targetSeconds: normalized,
-    rangeSeconds: Number(jsDebugGraphRangeSeconds),
+    rangeSeconds: Number(debugRuntimeState.graphRangeSeconds),
     requestedResolutionSeconds: Number(jsDebugHistoryReadiness.requestedResolutionSeconds),
     targetStartSeconds: Number(jsDebugHistoryReadiness.targetStartSeconds),
     targetEndSeconds: Number(jsDebugHistoryReadiness.targetEndSeconds),
@@ -8848,8 +9971,8 @@ function clearDebugGraphPendingResolutionChange({hideOverlay = false} = {}) {
 function debugGraphResolutionChangeDataSatisfied(pending, state) {
   if (!pending || state?.phase !== 'ready') return false;
   if (Number(state.generation) < Number(pending.armedGeneration)) return false;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
-  if (Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
+  if (Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
   if (Number(state.resolutionSeconds) !== Number(pending.requestedResolutionSeconds)) return false;
   const intervals = [...(state.requestCoverageIntervals || [])]
     .filter(interval => Number(interval.resolutionSeconds) === Number(pending.requestedResolutionSeconds))
@@ -8902,10 +10025,10 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
     return;
   }
   if (state.phase !== 'error') return;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return;
   clearDebugGraphPendingResolutionChange();
   const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
+  debugRuntimeState.graphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
   const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
@@ -8922,7 +10045,7 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
+  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
 }
@@ -9196,11 +10319,12 @@ function handleDebugGraphTouchMove(event, panel) {
 }
 
 function bindDebugGraphTouchSelection(panel) {
-  if (!panel || panel.dataset.jsDebugTouchSelectionBound === 'true') return;
-  panel.dataset.jsDebugTouchSelectionBound = 'true';
-  panel.addEventListener('touchmove', event => {
-    handleDebugGraphTouchMove(event, panel);
-  }, {passive: false});
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-graph-touch-selection', () => {
+    const handleTouchMove = event => { handleDebugGraphTouchMove(event, panel); };
+    panel.addEventListener('touchmove', handleTouchMove, {passive: false});
+    return () => panel.removeEventListener('touchmove', handleTouchMove, {passive: false});
+  });
 }
 
 function startDebugGraphSelection(candidate, event = null) {
@@ -9464,53 +10588,70 @@ function handleDebugGraphControlEvent(event, panel) {
 }
 
 function bindDebugPanel(panel) {
-  if (!panel || panel.dataset.debugBound === 'true') return;
-  panel.dataset.debugBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
-  panel.addEventListener('focusout', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-panel', () => {
+    const scope = createLifecycleScope();
+    for (const view of debugPanelSubviewDescriptors()) view.bind(panel);
+    syncDebugSubviewActivation({pollNow: true});
+    const disposeActions = bindActionDispatcher(panel, {
+    'debug-subtab': (_event, button) => setDebugSubTab(button.dataset.jsDebugSubtab),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    scope.ownEvent('focusout', panel, 'focusout', event => {
     const graph = event.target?.closest?.('[data-js-debug-graph]');
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
   });
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => {
     handleDebugGraphPointerMove(event, panel);
   });
-  panel.addEventListener('pointerleave', () => {
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => {
     debugGraphClearInteractionLinesUnlessPinned(panel);
   });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => {
+    scope.ownEvent('input', panel, 'input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
-    const subtab = event.target.closest('[data-js-debug-subtab]');
-    if (subtab && panel.contains(subtab)) {
-      event.preventDefault();
-      setDebugSubTab(subtab.dataset.jsDebugSubtab);
-      return;
-    }
     const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
     if (systemRefresh && panel.contains(systemRefresh)) {
       event.preventDefault();
       void pollDebugSystemStatus({force: true});
+      return;
+    }
+    // One disclosure control per roster row. It is a real <button>, so mouse click, Enter and Space
+    // all arrive here through the same one path -- there is no key handler duplicating the rule.
+    const rosterToggle = event.target.closest('[data-js-debug-roster-toggle]');
+    if (rosterToggle && panel.contains(rosterToggle)) {
+      event.preventDefault();
+      toggleDebugSystemRosterRow(rosterToggle.dataset.jsDebugRosterToggle);
+      return;
+    }
+    const advancedSummary = event.target.closest('[data-js-debug-system-advanced-summary]');
+    if (advancedSummary && panel.contains(advancedSummary)) {
+      // The <details> would toggle itself, but the next poll re-renders it from state; recording
+      // the intent here is what makes it survive.
+      event.preventDefault();
+      jsDebugSystemRosterState.advancedOpen = !jsDebugSystemRosterState.advancedOpen;
+      refreshDebugSystemViews();
+      // Opening is the demand signal for the Advanced body: fetch it here rather than waiting up to
+      // five seconds for the next poll. Closing fetches nothing.
+      if (jsDebugSystemRosterState.advancedOpen) void pollDebugSystemAdvanced({force: true});
       return;
     }
     const logLevel = event.target.closest('[data-js-debug-log-level]');
@@ -9533,7 +10674,7 @@ function bindDebugPanel(panel) {
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
-      jsDebugLogsState.clearedAt = Date.now();
+      jsDebugLogRecordCleared();
       refreshDebugLogsViews();
       statusEl.textContent = t('debug.logs.cleared');
       return;
@@ -9550,5 +10691,14 @@ function bindDebugPanel(panel) {
       clearJsDebugEvents();
       statusEl.textContent = t('debug.cleared');
     }
+    });
+    return () => scope.dispose('debug-panel-unbound');
   });
 }
+
+registerDebugRuntimeFacade('panel', {
+  createDebugPanel,
+  createYoCostPanel,
+  renderDebugPanels,
+  renderYoCostPanels,
+});

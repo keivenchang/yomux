@@ -837,7 +837,7 @@ def classify_browser_retirement_delta(
     """
     appended_events = [dict(event) for event in retired_events if _event_cursor(event) > prior_cursor]
     appended_failures = [dict(event) for event in retired_failures if _event_cursor(event) > prior_cursor]
-    recorded_failures = browser_failures_from_snapshot(appended_events, appended_failures)
+    recorded_failures = browser_failures_from_snapshot(appended_failures)
     retained_by_id = {event.get("id"): event for event in retired_events}
     evicted_failures = [dict(event) for event in atomic_failures if event.get("id") not in retained_by_id]
     mutated_events = [
@@ -1330,7 +1330,7 @@ def finalize_live_browser_soak(
 
     server_after = boundary["serverAfter"]
     cursor_record = server_after if isinstance(server_after, Mapping) else boundary["serverBefore"]
-    browser_local = browser_failures_from_snapshot(atomic_events, atomic_failures) if atomic_events or atomic_failures else []
+    browser_local = browser_failures_from_snapshot(atomic_failures) if atomic_failures else []
     server_failures = [dict(entry) for entry in [*before_new_logs, *after_new_logs] if str(entry.get("level") or "").lower() in {"warning", "error"}]
     chrome_failures = [
         *list(boundary["chromeBeforeRetirement"] or []),
@@ -1462,30 +1462,7 @@ def sample_evidence(driver: Any) -> dict[str, Any]:
     sequence = payload.get("sequence")
     if not isinstance(epoch, str) or not epoch or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
         raise AssertionError("server log cursor evidence is malformed")
-    local = []
-    seen_local_ids: set[object] = set()
-    for event in [*result["failures"], *result["events"]]:
-        if event not in result["failures"] and str(event.get("level") or "").lower() not in {"warning", "error"}:
-            continue
-        event_id = event.get("id")
-        marker = event_id if event_id is not None else json.dumps(dict(event), sort_keys=True)
-        if marker in seen_local_ids:
-            continue
-        seen_local_ids.add(marker)
-        status = event.get("status") if isinstance(event.get("status"), int) else None
-        failed = bool(event.get("error") or event.get("ok") is False or (status is not None and status >= 400))
-        local.append({
-            "id": event.get("id"),
-            "level": str(event.get("level") or "error"),
-            "message": str(event.get("message") or event.get("error") or ""),
-            "requestId": str(event.get("requestId") or ""),
-            "source": str(event.get("source") or "browser"),
-            "route": str(event.get("route") or event.get("endpoint") or event.get("url") or ""),
-            "event": str(event.get("eventType") or event.get("event") or event.get("type") or ""),
-            "wallTime": str(event.get("wallTime") or event.get("ts") or ""),
-            "deliveryOutcome": str(event.get("deliveryOutcome") or event.get("delivery") or ("failed" if failed else "unknown")),
-            "status": status,
-        })
+    local = browser_failures_from_snapshot(result["failures"])
     server = [dict(entry) for entry in payload["logs"] if str(entry.get("level") or "").lower() in {"warning", "error"}]
     chrome = [entry for entry in console_entries if str(entry.get("level") or "").upper() in {"WARNING", "SEVERE"}]
     js_ids = [entry.get("id") for entry in result["events"]]
@@ -1569,12 +1546,10 @@ def chrome_failure_entries(entries: Any) -> list[dict[str, Any]]:
     return [redact_log_entry(dict(entry)) for entry in entries if str(entry.get("level") or "").upper() in {"WARNING", "SEVERE"}]
 
 
-def browser_failures_from_snapshot(events: list[Mapping[str, Any]], failures: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def browser_failures_from_snapshot(failures: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
     local: list[dict[str, Any]] = []
     seen: set[object] = set()
-    for event in [*failures, *events]:
-        if event not in failures and str(event.get("level") or "").lower() not in {"warning", "error"}:
-            continue
+    for event in failures:
         marker = event.get("id") if event.get("id") is not None else json.dumps(dict(event), sort_keys=True)
         if marker in seen:
             continue

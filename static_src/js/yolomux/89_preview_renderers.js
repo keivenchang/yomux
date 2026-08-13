@@ -114,22 +114,8 @@ function resetPreviewZoomSurfaceClasses(shell) {
 }
 
 function disconnectPreviewZoomSurface(shell, options = {}) {
-  if (typeof shell?._previewZoomControlsCleanup === 'function') {
-    shell._previewZoomControlsCleanup();
-    shell._previewZoomControlsCleanup = null;
-  }
-  if (shell?._previewZoomResizeObserver) {
-    shell._previewZoomResizeObserver.disconnect();
-    shell._previewZoomResizeObserver = null;
-  }
-  if (shell?._previewZoomResizeFrame) {
-    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-    shell._previewZoomResizeFrame = 0;
-  }
-  if (shell?._previewZoomRevealTimer) {
-    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = 0;
-  }
+  shell?._previewZoomLifecycleScope?.dispose('preview-zoom-disconnect');
+  if (shell) shell._previewZoomLifecycleScope = null;
   shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
   if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
 }
@@ -326,14 +312,17 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
   const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
   if (!toolbar || !viewport) return false;
-  const cleanup = [];
+  const lifecycleScope = createLifecycleScope({
+    isCurrent: () => shell._previewZoomLifecycleScope === lifecycleScope,
+    onDispose: () => {
+      if (shell._previewZoomLifecycleScope === lifecycleScope) shell._previewZoomLifecycleScope = null;
+    },
+  });
+  shell._previewZoomLifecycleScope = lifecycleScope;
+  let nextListenerId = 0;
   const bind = (target, type, handler, listenerOptions = false) => {
     if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, listenerOptions);
-    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
-  };
-  shell._previewZoomControlsCleanup = () => {
-    while (cleanup.length) cleanup.pop()();
+    lifecycleScope.ownEvent(`listener-${nextListenerId += 1}`, target, type, handler, listenerOptions);
   };
   bind(toolbar, 'click', event => {
     const button = event.target?.closest?.('[data-preview-zoom-action]');
@@ -351,12 +340,15 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   // debounce after the last apply reveals it once at the settled size.
   shell.classList.add('file-editor-preview-zoom-measuring');
   const scheduleReveal = () => {
-    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
-    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
-      shell._previewZoomRevealTimer = 0;
+    if (!lifecycleScope.current() || !shell.classList.contains('file-editor-preview-zoom-measuring')) return;
+    lifecycleScope.release('reveal-timer');
+    let timer = null;
+    timer = ownerWindow?.setTimeout?.(() => {
+      lifecycleScope.release('reveal-timer', timer);
+      if (!lifecycleScope.current()) return;
       shell.classList.remove('file-editor-preview-zoom-measuring');
     }, 150);
+    lifecycleScope.ownTimer('reveal-timer', timer, value => ownerWindow?.clearTimeout?.(value));
   };
   const applyAndScheduleReveal = applyOptions => {
     applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
@@ -370,17 +362,25 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
       // so applying synchronously here would re-trigger this observer and emit the noisy
       // "ResizeObserver loop completed with undelivered notifications" warning.
       const ownerWin = previewZoomOwnerWindow(shell);
-      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
-        shell._previewZoomResizeFrame = 0;
+      lifecycleScope.release('resize-frame');
+      let frame = 0;
+      frame = schedulePreviewZoomFrame(shell, () => {
+        lifecycleScope.release('resize-frame', frame);
+        if (!lifecycleScope.current()) return;
         applyAndScheduleReveal();
       });
+      lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
     });
-    shell._previewZoomResizeObserver = resizeObserver;
+    lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
   }
   bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
-  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
+  let initialFrame = 0;
+  initialFrame = schedulePreviewZoomFrame(shell, () => {
+    lifecycleScope.release('initial-frame', initialFrame);
+    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true});
+  });
+  lifecycleScope.ownTimer('initial-frame', initialFrame, value => ownerWindow?.cancelAnimationFrame?.(value));
   return true;
 }
 
@@ -674,21 +674,35 @@ function notebookStructuredPreview(source) {
   return {label: t('preview.notebook.title'), text: out.join('\n'), language: 'markdown', error: ''};
 }
 
-function structuredPreviewValue(path, text) {
-  const ext = fileExtensionOf(path);
-  const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
-  if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
-  if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: t('preview.structured.title', {format: t('preview.format.config')}), text: source, language: 'ini', error: ''};
-  return {label: t('preview.structured.title', {format: 'YAML'}), text: source, language: 'yaml', error: ''};
+function parseJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
 }
 
-function renderStructuredPreviewInto(container, path, text) {
-  const value = structuredPreviewValue(path, text);
+function parseGeoJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
+}
+
+function parseExcalidrawStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
+}
+
+function parseNotebookStructuredPreviewStrategy(source) { return notebookStructuredPreview(source); }
+function parseTomlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''}; }
+function parseXmlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'XML'}), text: source, language: 'xml', error: ''}; }
+function parseDrawioStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'Draw.io XML'}), text: source, language: 'xml', error: ''}; }
+
+function parseStructuredPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const source = String(text ?? '');
+  const ext = fileExtensionOf(path);
+  const parse = renderer.parseByExtension?.[ext];
+  if (parse) return parse(source);
+  const language = renderer?.languageByExtension?.[ext] || 'yaml';
+  const format = language === 'ini' ? t('preview.format.config') : 'YAML';
+  return {label: t('preview.structured.title', {format}), text: source, language, error: ''};
+}
+
+function renderStructuredPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const value = renderer.parse(path, text, renderer);
   const bounded = boundedPreviewText(value.text);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-data-preview';
@@ -882,12 +896,8 @@ function renderJsonLinesTablePreviewInto(container, path, text) {
   container.replaceChildren(wrapper);
 }
 
-function renderTablePreviewInto(container, path, text) {
-  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
-    renderJsonLinesTablePreviewInto(container, path, text);
-    return;
-  }
-  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
+function parseDelimitedPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const delimiter = renderer.delimiterByExtension[fileExtensionOf(path)];
   const maxRows = 200;
   const maxCols = 50;
   const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
@@ -897,6 +907,11 @@ function renderTablePreviewInto(container, path, text) {
     if (cells.length > maxCols) truncatedColumns = true;
     return cells.slice(0, maxCols);
   });
+  return {delimiter, lines, maxRows, rows, truncatedColumns};
+}
+
+function renderDelimitedPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const {delimiter, lines, maxRows, rows, truncatedColumns} = renderer.parse(path, text, renderer);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-table-preview';
   const header = document.createElement('div');
@@ -1068,64 +1083,80 @@ function renderHtmlPreviewInto(container, path, text) {
   container.replaceChildren(...children);
 }
 
+const PREVIEW_SURFACE_CLASSES = Object.freeze([
+  'markdown-body', 'html-preview-body', 'image-preview-body', 'pdf-preview-body',
+  'data-preview-body', 'media-preview-body', 'code-preview-body',
+]);
+
+function cleanupStandardPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+  container._mermaidSig = null;
+}
+
+function cleanupMarkdownPreviewStrategy(container) {
+  container._mermaidSig = null;
+}
+
+function cleanupMermaidPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+}
+
+function markdownPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, fileEditorPreviewDisplayMode, context]);
+}
+
+function mermaidPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
+}
+
+function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+  const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
+  if (currentSignature === signature) return;
+  container._previewPath = path;
+  container._previewText = text;
+  container._previewDisplayMode = fileEditorPreviewDisplayMode;
+  container._previewContext = context;
+  renderMarkdownPreviewInto(container, text, path, {context});
+}
+
+function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  container._mermaidSig = signature;
+  container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+}
+
+function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
+function renderImagePreviewStrategy({container, path, state, context}) { renderRawImagePreviewInto(container, path, state, {context}); }
+function renderPdfPreviewStrategy({container, path}) { renderPdfPreviewInto(container, path); }
+function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
+function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
+function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
+function renderNativeMediaPreviewStrategy({container, path, state, renderer}) { renderNativeMediaPreviewInto(container, path, state, renderer.kind); }
+function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }
+function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
+
+function renderPreviewDescriptor(renderer, context) {
+  renderer.cleanup(context.container, context);
+  const signature = typeof renderer.signature === 'function' ? renderer.signature(context) : null;
+  return renderer.render({...context, renderer, signature});
+}
+
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const state = fileState.get(path) || null;
-  const previewKind = previewKindForPath(path, state);
+  const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
-  container.classList.toggle('markdown-body', previewKind === 'markdown');
-  container.classList.toggle('html-preview-body', previewKind === 'html');
-  container.classList.toggle('image-preview-body', previewKind === 'image');
-  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
-  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
-  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
-  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
+  for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  if (previewKind === 'markdown') {
-    container._mermaidSig = null;
-    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
-    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
-    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
-    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
-      container._previewPath = path;
-      container._previewText = text;
-      container._previewDisplayMode = fileEditorPreviewDisplayMode;
-      container._previewContext = previewContext;
-      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
-    }
-  } else if (previewKind === 'mermaid') {
-    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
-    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
-    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
-    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
-    // re-renders with the new palette.
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    const mermaidSig = JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', previewContext]);
-    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
-      container._mermaidSig = mermaidSig;
-      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
-    }
-  } else {
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    container._mermaidSig = null;
-    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
-    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
-    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
-    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
-    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
-    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
-    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
-    else renderEditorCodePreviewInto(container, path, text);
-  }
+  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }

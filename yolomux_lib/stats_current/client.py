@@ -25,6 +25,16 @@ SOCKET_FILENAME = storage.SOCKET_FILENAME
 LEASE_TIMEOUT_SECONDS = 3.0
 STATUS_TIMEOUT_SECONDS = LEASE_TIMEOUT_SECONDS
 BROWSER_PROFILES_TIMEOUT_SECONDS = 0.5
+# statsd runs its full migration audit -- opening the retained on-disk database
+# and reading its whole snapshot -- inside on_start, before it opens its socket
+# to answer a status ping or publish its identity record. That cost scales with
+# the retained database, not with a constant: a 400MB+ stats database measured
+# ~6.5s to first healthy status, well past the shared 5.0s spawn budget that
+# suits lightweight daemons. Under the default the spawn always timed out, so
+# statsd never confirmed startup and crash-looped (empty stderr, unreaped
+# zombie child, "service_absent"). This budget keeps a genuinely hung migration
+# bounded while giving a real large-database open room to finish.
+STATS_START_TIMEOUT_SECONDS = 30.0
 
 
 def _plain_json_value(value: object) -> object:
@@ -296,6 +306,7 @@ class _CurrentTransport(LocalServiceClient):
             SERVICE_MODULE,
             socket_path,
             storage.MIN_WRITER_PROTOCOL,
+            start_timeout_seconds=STATS_START_TIMEOUT_SECONDS,
             extra_args=("--database", str(database_path)),
             code_revision=revision.CURRENT_CODE_REVISION,
             build_revision=storage.MIN_WRITER_BUILD,
@@ -456,8 +467,9 @@ class StatsCurrentClient:
         pid: int,
         port: int,
         owner_generation: int,
+        control_socket: str,
     ) -> dict[str, Any]:
-        """Register only the elected web identity; statsd reads mutable inputs itself."""
+        """Register the elected web identity and where to reach it."""
 
         return self._call(
             "collector_context",
@@ -465,6 +477,7 @@ class StatsCurrentClient:
                 "pid": pid,
                 "port": port,
                 "owner_generation": owner_generation,
+                "control_socket": control_socket,
             },
             timeout=STATUS_TIMEOUT_SECONDS,
         )
@@ -482,7 +495,22 @@ class StatsCurrentClient:
         return self._call("usage_atom_backfill", dict(status), timeout=STATUS_TIMEOUT_SECONDS)
 
     def runtime_status(self, status: Mapping[str, object] | None = None) -> dict[str, Any]:
-        """Project statsd's own status through its existing process sampler."""
+        """Project statsd's own status through its existing process sampler.
+
+        statsd declares NEITHER `demand_started` NOR `absence_expected_reason`, and that is the
+        decision, not an omission. It is lazily created like the other five, but a background
+        loop keeps it hot: `StatsCurrentRuntime._supervise` holds a statsd lease for as long as
+        this process is the elected background owner (`stats_current/runtime.py:365-368`) and
+        the scheduler then appends over RPC at the `cpu` family's 1s cadence
+        (`stats_current/families.py:130-134`), browser or no browser. A service a loop exercises
+        every second is not demand-scoped, and flagging it `demand_started` would turn a real
+        statsd outage into silence.
+
+        There is also no switched-off path to excuse. statsd has no user-facing disable, and its
+        row is truthful from any port: identity comes from a live `status` RPC
+        (`StatsCurrentRuntime._service_status`), not from this process's lease, so a port that is
+        not the background owner still sees the statsd the owner is keeping up.
+        """
         service = dict(status) if isinstance(status, Mapping) else self.status()
         pid = int(service.get("pid") or 0)
         return {

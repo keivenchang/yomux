@@ -10,7 +10,6 @@ import io
 import json
 import os
 import re
-import selectors
 import shlex
 import signal
 import sqlite3
@@ -36,6 +35,12 @@ from tests.gate_harness import FixtureMemberExitBarrier
 from tests.gate_harness import run_fixture_cleanup_phases
 from tests.gate_harness import assert_writable_paths_beneath
 from tests.gate_harness import bootstrap_writable_paths
+from tests.isolated_dev_server import BuildPaths
+from tests.isolated_dev_server import SERVER_STOP_TIMEOUT_SECONDS
+from tests.isolated_dev_server import build_environment
+from tests.isolated_dev_server import build_paths as _build_paths
+from tests.isolated_dev_server import signal_server_exactly
+from tests.isolated_dev_server import wait_until_serving
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yolomux_lib.host_identity import process_start_identity
@@ -51,8 +56,6 @@ pytestmark = pytest.mark.socket
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 V0610_REF = "v0.6.10"
-SERVER_READY_TIMEOUT_SECONDS = 20.0
-SERVER_STOP_TIMEOUT_SECONDS = 10.0
 OLD_SQLITE_ARTIFACTS = (
     "stats-v6.sqlite3",
     "login-throttle.sqlite3",
@@ -63,24 +66,6 @@ OLD_SQLITE_ARTIFACTS = (
 OLD_JSON_ARTIFACTS = ("activity.json", "events.jsonl")
 OLD_ARTIFACTS = (*OLD_SQLITE_ARTIFACTS, *OLD_JSON_ARTIFACTS)
 STATS_ARTIFACT_RE = re.compile(r"^stats-v(?P<schema>[0-9]+)\.sqlite3$")
-
-
-@dataclass(frozen=True)
-class BuildPaths:
-    root: Path
-    runtime_dir: Path
-    home_dir: Path
-    config_dir: Path
-    state_dir: Path
-    cache_dir: Path
-    codex_home: Path
-    tmp_dir: Path
-    start_lock_path: Path
-    tool_lock_path: Path
-    ca_dir: Path
-    share_debug_dir: Path
-    log_dir: Path
-    workspace_dir: Path
 
 
 @dataclass(frozen=True)
@@ -134,35 +119,12 @@ class RunningBuild:
         self.captured_services = _merge_captured_fixture_services(self.captured_services, captured)
 
     def signal_server(self, signal_number: int) -> None:
-        if self.process.poll() is not None:
-            return
-        if not self.server_start_identity:
-            self.process.send_signal(signal_number)
-            return
-        identity = (self.process.pid, self.server_start_identity)
-        with FixtureMemberExitBarrier((identity,)) as barrier:
-            sent = barrier.signal_exact(
-                signal_number,
-                lambda pid, start_identity: (
-                    pid == self.process.pid
-                    and start_identity == self.server_start_identity
-                    and process_start_identity(pid) == start_identity
-                    and os.getpgid(pid) == pid
-                    and os.getsid(pid) == pid
-                ),
-            )
-            unanchored = barrier.unanchored_identities
-        if not sent and unanchored == (identity,) and self.process.poll() is None:
-            if process_start_identity(self.process.pid) != self.server_start_identity:
-                raise AssertionError(f"{self.label} server {self.process.pid} identity changed before child signal")
-            # Popen owns this unreaped direct child, so send_signal's internal
-            # waitpid fence cannot adopt a later process that reuses its PID.
-            self.process.send_signal(signal_number)
-            sent = (self.process.pid,)
-        if not sent and self.process.poll() is None:
-            raise AssertionError(
-                f"{self.label} server {self.process.pid} could not be signaled through its exact process identity"
-            )
+        signal_server_exactly(
+            self.process,
+            self.server_start_identity,
+            signal_number,
+            label=self.label,
+        )
 
     def stop(self) -> None:
         if self.stopped:
@@ -198,41 +160,6 @@ class RunningBuild:
             ),
         )
         self.stopped = True
-
-
-def _build_paths(root: Path, *, state_dir: Path | None = None) -> BuildPaths:
-    paths = BuildPaths(
-        root=root,
-        runtime_dir=root / "runtime",
-        home_dir=root / "home",
-        config_dir=root / "config",
-        state_dir=state_dir or root / "state",
-        cache_dir=root / "cache",
-        codex_home=root / "codex-home",
-        tmp_dir=root / "tmp",
-        start_lock_path=root / "locks" / "start.lock",
-        tool_lock_path=root / "locks" / "expensive-tools.lock",
-        ca_dir=root / "ca",
-        share_debug_dir=root / "share-debug",
-        log_dir=root / "logs",
-        workspace_dir=root / "workspaces",
-    )
-    for directory in (
-        paths.home_dir,
-        paths.runtime_dir,
-        paths.config_dir,
-        paths.state_dir,
-        paths.cache_dir,
-        paths.codex_home,
-        paths.tmp_dir,
-        paths.start_lock_path.parent,
-        paths.ca_dir,
-        paths.share_debug_dir,
-        paths.log_dir,
-        paths.workspace_dir,
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
-    return paths
 
 
 def _process_argv(pid: int, command: str) -> tuple[str, ...]:
@@ -541,44 +468,6 @@ def _stop_fixture_services(
     assert not retained, (paths.root, retained)
 
 
-def _build_environment(
-    source_root: Path,
-    paths: BuildPaths,
-    tmux_runtime: Any,
-    port: int,
-) -> dict[str, str]:
-    env = dict(os.environ)
-    env.update(
-        {
-            "HOME": str(paths.home_dir),
-            "TMPDIR": str(paths.tmp_dir),
-            "XDG_CONFIG_HOME": str(paths.root / "xdg-config"),
-            "XDG_STATE_HOME": str(paths.root / "xdg-state"),
-            "XDG_CACHE_HOME": str(paths.root / "xdg-cache"),
-            "YOLOMUX_CONFIG_DIR": str(paths.config_dir),
-            "YOLOMUX_STATE_DIR": str(paths.state_dir),
-            "YOLOMUX_RUNTIME_DIR": str(paths.runtime_dir),
-            "YOLOMUX_CACHE_DIR": str(paths.cache_dir),
-            "YOLOMUX_CODEX_HOME": str(paths.codex_home),
-            "CODEX_HOME": str(paths.codex_home),
-            "YOLOMUX_START_LOCK_DIR": str(paths.start_lock_path),
-            "YOLOMUX_TOOL_LOCK_PATH": str(paths.tool_lock_path),
-            "YOLOMUX_CA_DIR": str(paths.ca_dir),
-            "YOLOMUX_SHARE_DEBUG_DIR": str(paths.share_debug_dir),
-            "YOLOMUX_LOG_DIR": str(paths.log_dir),
-            "YOLOMUX_WORKSPACE_BASE": str(paths.workspace_dir),
-            "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),
-            "YOLOMUX_TEST_AUTH_BYPASS": "1",
-            "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "0.2",
-            "YOLOMUX_STARTUP_WATCHDOG_SECONDS": "0",
-            "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": str(port),
-            "PYTHONPATH": str(source_root),
-            "PYTHONUNBUFFERED": "1",
-        }
-    )
-    return env
-
-
 def _runtime_relative_paths(root: Path) -> frozenset[Path]:
     return frozenset(path.relative_to(root) for path in root.rglob("*"))
 
@@ -677,37 +566,9 @@ def _assert_survivor_does_not_touch_stopped_peer(stopped: RunningBuild, survivor
 
 
 def _wait_until_serving(build: RunningBuild) -> None:
-    stdout = build.process.stdout
-    assert stdout is not None
-    expected = f"Serving YOLOmux on http://127.0.0.1:{build.port}/"
-    deadline = time.monotonic() + SERVER_READY_TIMEOUT_SECONDS
-    with selectors.DefaultSelector() as selector:
-        selector.register(stdout, selectors.EVENT_READ)
-        while True:
-            exit_code = build.process.poll()
-            if exit_code is not None:
-                remainder = stdout.read()
-                if remainder:
-                    build.output.extend(remainder.splitlines())
-                raise AssertionError(
-                    f"{build.label} exited before serving with {exit_code}: "
-                    + "\n".join(build.output[-20:])
-                )
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise AssertionError(
-                    f"{build.label} did not serve within {SERVER_READY_TIMEOUT_SECONDS}s: "
-                    + "\n".join(build.output[-20:])
-                )
-            events = selector.select(remaining)
-            if not events:
-                continue
-            line = stdout.readline()
-            if not line:
-                continue
-            build.output.append(line.rstrip("\n"))
-            if expected in line:
-                return
+    """Adapter only: the readiness rule itself belongs to `isolated_dev_server`."""
+
+    wait_until_serving(build.process, build.port, build.output, label=build.label)
 
 
 def _spawn_build(
@@ -738,7 +599,7 @@ def _spawn_build(
     process = subprocess.Popen(
         command,
         cwd=source_root,
-        env=_build_environment(source_root, paths, tmux_runtime, port),
+        env=build_environment(source_root, paths, tmux_runtime, port),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -2093,11 +1954,15 @@ def test_o6_running_build_stops_registered_server_before_reporting_missing_servi
         launcher_identity,
         frozenset(),
     )
+
+    def start_identity(pid: int) -> str:
+        return launcher_identity if pid == launcher_pid else "proc:1201"
+
     monkeypatch.setattr(f"{__name__}.bounded_process_table", lambda **_kwargs: table)
-    monkeypatch.setattr(
-        f"{__name__}.process_start_identity",
-        lambda pid: launcher_identity if pid == launcher_pid else "proc:1201",
-    )
+    # One fixture identity, installed at both readers: capture reads this module's
+    # `process_start_identity`, while the signal path reads the owner module's copy.
+    monkeypatch.setattr(f"{__name__}.process_start_identity", start_identity)
+    monkeypatch.setattr("tests.isolated_dev_server.process_start_identity", start_identity)
     monkeypatch.setattr(f"{__name__}.process_spawn_generation", lambda _pid: None)
     monkeypatch.setattr(f"{__name__}._process_argv", lambda _pid, text: tuple(text.split()))
     monkeypatch.setattr(os, "getpgid", lambda pid: table[pid].pgid)
@@ -2155,8 +2020,8 @@ def test_o6_running_build_refuses_server_signal_after_identity_reuse(
         "proc:1200",
         frozenset(),
     )
-    monkeypatch.setattr(f"{__name__}.FixtureMemberExitBarrier", Barrier)
-    monkeypatch.setattr(f"{__name__}.process_start_identity", lambda _pid: "proc:reused")
+    monkeypatch.setattr("tests.isolated_dev_server.FixtureMemberExitBarrier", Barrier)
+    monkeypatch.setattr("tests.isolated_dev_server.process_start_identity", lambda _pid: "proc:reused")
 
     with pytest.raises(AssertionError, match="identity changed before child signal"):
         build.signal_server(signal.SIGTERM)
@@ -2208,8 +2073,8 @@ def test_o6_running_build_uses_owned_popen_child_when_kernel_signal_handle_is_un
         "proc:1200",
         frozenset(),
     )
-    monkeypatch.setattr(f"{__name__}.FixtureMemberExitBarrier", Barrier)
-    monkeypatch.setattr(f"{__name__}.process_start_identity", lambda _pid: "proc:1200")
+    monkeypatch.setattr("tests.isolated_dev_server.FixtureMemberExitBarrier", Barrier)
+    monkeypatch.setattr("tests.isolated_dev_server.process_start_identity", lambda _pid: "proc:1200")
     monkeypatch.setattr(os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(os, "getsid", lambda pid: pid)
     monkeypatch.setattr(

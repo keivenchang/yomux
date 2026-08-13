@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yolomux_lib import app as app_module, http_routes, session_files, settings as settings_module
+from yolomux_lib import app as app_module, http_routes, local_service_projection, session_files, settings as settings_module
 from yolomux_lib.stats_current import materializer as materializer_module
 from yolomux_lib.stats_current import collectors as collectors_module
 from yolomux_lib.stats_current import pricing as pricing_module
@@ -46,28 +46,12 @@ def current_runtime(client, collector_overrides=None):
     )
 
 
-def test_cpu_adapter_forces_a_native_sample_at_the_scheduler_deadline():
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-    calls = []
-    webapp.current_stats_sample = lambda **options: calls.append(options) or ({
-        "cpu_percent": 3,
-        "system_cpu_percent": 4,
-    }, True)
-    webapp.update_server_cpu_budget = lambda sample: calls.append({"budget": sample})
-    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
-
-    facts = webapp.collect_current_stats_cpu(attempt("cpu", 1))
-
-    assert calls == [
-        {"force": True},
-        {"budget": {"cpu_percent": 3, "system_cpu_percent": 4}},
-    ]
-    assert len(facts.observations) == len(facts.coverage_epochs) == 1
-    assert facts.observations[0].observed_at == 110
-    assert facts.observations[0].payload == {
-        "process_percent": 3,
-        "system_percent": 4,
-    }
+# `test_cpu_adapter_forces_a_native_sample_at_the_scheduler_deadline` used to sit here. It was one
+# of only two references anywhere to `TmuxWebtermApp.collect_current_stats_cpu`, which the collector
+# registry in `TmuxWebtermApp.__init__` never registered -- the adapter it asserted had no
+# production call site. The CPU family's real producer is statsd's
+# `StatsCurrentService._collect_host_facts_if_due`, and its contract is owned by
+# `tests/test_stats_current_service.py`.
 
 
 def test_agent_status_adapter_carries_the_authoritative_statusd_snapshot_revision():
@@ -163,16 +147,42 @@ def test_agent_status_adapter_expires_a_finished_window_transition_at_the_config
 
 
 def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
+    """The CPU family owns the web PID, so this family may never carry a "web" row.
+
+    M3 of DOIT.p0.daemon-monitor made that structural instead of a filter. This sampler and
+    /api/system-status now share one owner, `local_services_snapshot()`, and that collector
+    rejects any producer outside the six-service inventory -- so a "web" row cannot reach the
+    sampler rather than being dropped by it once it has. The stub therefore moved from the
+    rendered HTTP payload to the collector, and the second assertion proves the rejection.
+    """
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.runtime_local_services = lambda: {"services": [
-        {"service": "statsd", "pid": 21, "resources": {"cpu_percent": 4, "rss_bytes": 400}},
-        {"service": "web", "pid": 22, "resources": {"cpu_percent": 9, "rss_bytes": 900}},
-    ]}
+    collector = local_service_projection.LocalServicesCollector(
+        lambda: {
+            "indexd": lambda: {"service": "indexd", "pid": 0, "resources": {}},
+            "statsd": lambda: {"service": "statsd", "pid": 21, "resources": {"cpu_percent": 4, "rss_bytes": 400}},
+            "jobd": lambda: {"service": "jobd", "pid": 0, "resources": {}},
+            "statusd": lambda: {"service": "statusd", "pid": 0, "resources": {}},
+            "watchd": lambda: {"service": "watchd", "pid": 0, "resources": {}},
+            "approvald": lambda: {"service": "approvald", "pid": 0, "resources": {}},
+        }
+    )
+    webapp.local_services_snapshot = collector.collect
 
     facts = webapp.collect_current_stats_service_load(attempt("service_load", 10))
+    statsd = next(observation for observation in facts.observations if observation.source_id == "statsd")
 
-    assert [observation.source_id for observation in facts.observations] == ["statsd"]
-    assert facts.observations[0].payload == {"running": True, "cpu_percent": 4.0, "rss_bytes": 400.0}
+    assert [observation.source_id for observation in facts.observations] == list(
+        local_service_projection.LOCAL_SERVICE_INVENTORY
+    )
+    assert "web" not in [observation.source_id for observation in facts.observations]
+    assert statsd.payload == {"running": True, "cpu_percent": 4.0, "rss_bytes": 400.0}
+    with pytest.raises(ValueError, match=r"unexpected=\['web'\]"):
+        local_service_projection.LocalServicesCollector(
+            lambda: {
+                **{name: (lambda: {"pid": 0, "resources": {}}) for name in local_service_projection.LOCAL_SERVICE_INVENTORY},
+                "web": lambda: {"service": "web", "pid": 22, "resources": {"cpu_percent": 9, "rss_bytes": 900}},
+            }
+        ).collect()
 
 
 def test_token_adapter_uses_incremental_structured_atoms_and_keeps_dimensions(tmp_path):
@@ -779,7 +789,12 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
 def test_background_owner_starts_only_the_current_stats_runtime():
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True)
+    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True, is_owner=lambda: True)
+    # Slice B: owner acquisition also leases indexd via refresh_search_indexer_schedule; with no
+    # configured roots the lease is a bounded no-op and must not perturb the private-worker call order.
+    webapp.search_indexer = SimpleNamespace(lease_configured_roots=lambda roots: {"ok": True, "leased": False})
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": []}}}
+    webapp.indexed_repo_discovery_dirs = lambda _fe: []
     webapp.log_event = lambda *args, **kwargs: calls.append("event")
     webapp.job_client = SimpleNamespace(start_for_scheduler=lambda: calls.append("job"))
     webapp.pricing_refresh_coordinator = SimpleNamespace(
@@ -844,6 +859,9 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
     reserved = webapp.session_files_service.reserve_work(("active",), "stable")
     assert reserved is not None
     webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": False})
+    # Slice B: demotion releases the indexd scheduler lease; a bounded no-op here that must not
+    # perturb the asserted stop order.
+    webapp.search_indexer = SimpleNamespace(release_scheduler_lease=lambda: None)
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
     monkeypatch.setattr(app_module.file_index, "clear_memory_indexes", lambda: calls.append("indexes"))
 

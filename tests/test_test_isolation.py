@@ -1,8 +1,12 @@
 from pathlib import Path
 import re
+import ast
+import subprocess
+import sys
 
 import conftest as suite_conftest
 import pytest
+from tools.test_plan import automatic_test_markers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +34,8 @@ def test_automated_tests_do_not_reference_live_yolomux_ports():
 
 
 def test_browser_filename_markers_and_selenium_guard_cover_selective_imports(tmp_path):
-    assert suite_conftest._automatic_test_markers(Path("test_browser_selective.py")) == ("browser", "socket")
-    assert suite_conftest._automatic_test_markers(Path("test_regular.py")) == ()
+    assert automatic_test_markers(Path("test_browser_selective.py")) == ("browser", "socket")
+    assert automatic_test_markers(Path("test_regular.py")) == ()
     selenium_test = tmp_path / "test_selective.py"
     selenium_test.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
     assert suite_conftest._test_path_imports_selenium(selenium_test) is True
@@ -133,13 +137,52 @@ def test_live_port_guard_scans_nested_python_and_top_level_javascript():
 
 
 def test_generated_share_browser_tests_use_isolated_tmux_runtime():
-    source = (REPO_ROOT / "tests" / "test_browser_share.py").read_text(encoding="utf-8")
-    blocks = re.findall(r"def (test_generated_share_link_[\s\S]*?)(?=\ndef test_|\Z)", source)
-    assert blocks, "expected generated-share browser tests to exist"
+    tree = ast.parse((REPO_ROOT / "tests" / "test_browser_share.py").read_text(encoding="utf-8"))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_generated_share_link_")]
+    assert functions
+    for function in functions:
+        calls = {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+        assert "start_isolated_browser_share_app" in calls, function.name
+        constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        assert "ensureTerminalRunning('1')" not in constants and "sessions: ['1']" not in constants, function.name
 
-    for block in blocks:
-        name = block.split("(", 1)[0]
-        assert "start_isolated_browser_share_app(" in block, f"{name} must create a private tmux/runtime fixture"
-        assert 'TmuxWebtermApp(["1"], dangerously_yolo=True)' not in block, f"{name} must not target a live/default tmux session"
-        assert "ensureTerminalRunning('1')" not in block, f"{name} must not open hard-coded tmux session 1"
-        assert "sessions: ['1']" not in block, f"{name} must not create a share scoped to hard-coded tmux session 1"
+
+def _spawn_fixture_page_path(worker: str, filename: str, sentinel: str) -> str:
+    """Return the fixture path a fresh process picks for a fixed worker/seq/filename."""
+
+    code = (
+        "import os;"
+        f"os.environ['PYTEST_XDIST_WORKER'] = {worker!r};"
+        "import tests.browser_helpers.browser_layout as bl;"
+        "bl._FIXTURE_PAGE_SEQ = 0;"
+        f"print(bl.serve_repo_fixture_page({filename!r}, {sentinel!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return result.stdout.strip()
+
+
+@pytest.mark.no_browser
+def test_concurrent_lane_fixture_pages_never_collide_on_shared_worker_and_seq():
+    """Two processes with identical xdist worker, seq, and filename must not share a fixture path.
+
+    The canonical gate runs e2e/browser/non-browser as separate processes that reuse gw* worker
+    names and each restart ``_FIXTURE_PAGE_SEQ`` at 0, so a bare ``<worker>-<seq>-<filename>`` path
+    let one lane overwrite another's fixture at the shared REPO_ROOT -- a foreign page then loaded
+    (e.g. a stats fixture whose expected bucket ``.start`` was absent, crashing the reader). The
+    per-process PID+nonce namespace must keep the paths distinct even under an identical
+    worker/seq/filename triple.
+    """
+
+    first = _spawn_fixture_page_path("gw0", "collision-regression.html", "sentinel-a")
+    second = _spawn_fixture_page_path("gw0", "collision-regression.html", "sentinel-b")
+    assert first != second, (first, second)
+    assert first.endswith("collision-regression.html"), first
+    assert second.endswith("collision-regression.html"), second

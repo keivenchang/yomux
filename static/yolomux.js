@@ -227,15 +227,45 @@ let shareReplayDeltaFramePending = false;
 let shareReplayMutationPublisherPaused = false;
 let shareReplayLastDeltaBatch = null;
 let shareReplayLastReplayError = null;
-let shareReplayCurrentEpoch = 0;
-let shareReplayLastSequence = 0;
-let shareReplayDroppedFrames = 0;
-let shareReplayStaleFrames = 0;
-let shareReplayKeyframeRequestCount = 0;
-let shareReplayKeyframeRequestSuppressedCount = 0;
-let shareReplayKeyframeLastRequestAt = 0;
-let shareReplayKeyframeBackoffMs = 0;
-let shareReplayKeyframeInFlight = false;
+class ShareReplayState {
+  constructor() {
+    this.sequence = {epoch: 0, last: 0, dropped: 0, stale: 0};
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+
+  sequenceSnapshot() { return {...this.sequence}; }
+  keyframeRequestSnapshot() { return {...this.keyframeRequest}; }
+  get currentEpoch() { return this.sequence.epoch; }
+  get lastSequence() { return this.sequence.last; }
+  get droppedFrames() { return this.sequence.dropped; }
+  get staleFrames() { return this.sequence.stale; }
+  get keyframeRequests() { return this.keyframeRequest.count; }
+  get keyframeRequestsSuppressed() { return this.keyframeRequest.suppressed; }
+  acceptSequence(epoch, sequence) {
+    this.sequence.epoch = Math.max(0, Math.round(Number(epoch) || 0));
+    this.sequence.last = Math.max(0, Math.round(Number(sequence) || 0));
+  }
+  recordDroppedFrame() { this.sequence.dropped += 1; }
+  recordStaleFrame() { this.sequence.stale += 1; }
+  resetKeyframeRequest() {
+    this.keyframeRequest.inFlight = false;
+    this.keyframeRequest.backoffMs = 0;
+  }
+  suppressKeyframeRequest() { this.keyframeRequest.suppressed += 1; }
+  beginKeyframeRequest(now, backoffMs) {
+    this.keyframeRequest.count += 1;
+    this.keyframeRequest.lastAt = now;
+    this.keyframeRequest.backoffMs = backoffMs;
+    this.keyframeRequest.inFlight = true;
+  }
+  resetViewerSequence(epoch = 0, sequence = 0) {
+    this.acceptSequence(epoch, sequence);
+    this.sequence.dropped = 0;
+    this.sequence.stale = 0;
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+}
+const shareReplayState = new ShareReplayState();
 let shareReplayHostKeyframeTimer = null;
 let shareReplayHostKeyframePendingReason = '';
 let shareReplayHostLastKeyframeAt = 0;
@@ -437,10 +467,19 @@ const EDITOR_SCHEMES = {
   },
 };
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
+function previewRendererStrategy(specification) {
+  return Object.freeze({
+    surfaceClasses: [],
+    cleanup: cleanupStandardPreviewStrategy,
+    signature: null,
+    parse: null,
+    ...specification,
+  });
+}
 const PREVIEW_RENDERERS = Object.freeze([
-  {id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown'},
-  {id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true},
-  {id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -451,11 +490,20 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ico': 'image/x-icon',
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
-  }},
-  {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
-  {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  }}),
+  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
+  previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
+  previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
+  previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
+    '.json': parseJsonStructuredPreviewStrategy,
+    '.geojson': parseGeoJsonStructuredPreviewStrategy,
+    '.ipynb': parseNotebookStructuredPreviewStrategy,
+    '.toml': parseTomlStructuredPreviewStrategy,
+    '.xml': parseXmlStructuredPreviewStrategy,
+    '.drawio': parseDrawioStructuredPreviewStrategy,
+    '.dio': parseDrawioStructuredPreviewStrategy,
+    '.excalidraw': parseExcalidrawStructuredPreviewStrategy,
+  }, render: renderStructuredPreviewStrategy, languageByExtension: {
     '.json': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
@@ -472,9 +520,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.env': 'ini',
     '.properties': 'ini',
     '.props': 'ini',
-  }},
-  {id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text'},
-  {id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text', surfaceClasses: ['data-preview-body'], parse: parseDelimitedPreviewStrategy, delimiterByExtension: {'.csv': ',', '.tsv': '\t'}, render: renderDelimitedPreviewStrategy}),
+  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp3': 'audio/mpeg',
     '.wav': 'audio/wav',
     '.ogg': 'audio/ogg',
@@ -483,8 +531,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.m4a': 'audio/mp4',
     '.aac': 'audio/aac',
     '.opus': 'audio/opus',
-  }},
-  {id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp4': 'video/mp4',
     '.m4v': 'video/mp4',
     '.webm': 'video/webm',
@@ -492,10 +540,10 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.mkv': 'video/x-matroska',
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
-  }},
+  }}),
   // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
   // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', languageByExtension: {
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -511,30 +559,30 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.plantuml': 'text',
     '.srt': 'text',
     '.vtt': 'text',
-  }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
-  }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
     '.parquet': 'application/vnd.apache.parquet',
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
-  }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -543,8 +591,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xz': 'application/x-xz',
     '.7z': 'application/x-7z-compressed',
     '.rar': 'application/vnd.rar',
-  }},
-  {id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview'},
+  }}),
+  previewRendererStrategy({id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview', render: renderUnsupportedPreviewStrategy}),
 ]);
 const PREVIEW_RENDERER_BY_ID = new Map(PREVIEW_RENDERERS.map(renderer => [renderer.id, renderer]));
 const PREVIEW_RENDERER_BY_EXTENSION = new Map();
@@ -730,8 +778,9 @@ let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead"
 let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large' | 'error'
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
+const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed root -> last-seen progressive published generation (drives Quick Open re-query as BFS publishes rows)
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -767,11 +816,19 @@ const fileQuickOpenState = {
   candidates: [],
   loading: false,
   indexWarming: false,
+  // The worst freshness record any answering search root returned, from the one derivation in
+  // fileIndexFreshnessFromPayload(). Null means every answering root vouched for its snapshot.
+  freshness: null,
   error: '',
   requestId: 0,
   debounce: null,
-  indexRetry: null,
   abortController: null,
+  // The active search text the delta cursors below belong to, and the per-root incremental-read state
+  // for the CURRENT requestId. Each searched root keeps one opaque cursor + `more` flag + its opaque
+  // scope digest (so a path-free search_progress signal correlates back to the root it names) so the
+  // server can stream committed match deltas instead of the client re-issuing the whole query.
+  deltaQuery: '',
+  deltaRoots: new Map(),
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -817,8 +874,8 @@ let tmuxSessionMutationSerial = 0;
 let tmuxSessionMutationCurrent = null;
 const panelNodes = new Map();
 const resizeObservers = new Map();
-const transcriptStreams = new Map();
-const summaryStreams = new Map();
+const transcriptLifecycleScopes = new Map();
+const summaryLifecycleScopes = new Map();
 const autoApproveStates = new Map();
 const attentionAcknowledgementRecords = new Map();
 const attentionAcknowledgementRecordLimit = 1024;
@@ -1784,6 +1841,14 @@ const clientEventTransportState = {
   demand: null,
   demandSignature: '',
   demandTimer: null,
+  // The client-event EventSource is modelled as three explicit roles, not one socket. `demand` is the
+  // REQUESTED state (the channels/operations the page currently wants). `source` is the ACTIVE stream:
+  // the one that has fired `ready` and is serving delivered frames. `replacementSource` is the
+  // CANDIDATE: a newly opened stream for a changed demand that has NOT yet fired `ready`, so it is not
+  // yet allowed to serve. `candidateEpisode` is the ONE bounded retry episode governing that candidate
+  // between open and ready; a pre-ready candidate failure that exhausts it must re-drive demand and
+  // demote the active stream rather than strand demand or let the old stream claim to serve the new one.
+  candidateEpisode: null,
   queue: new Map(),
   resourceEpoch: '',
   resourceRevisions: new Map(),
@@ -1791,6 +1856,11 @@ const clientEventTransportState = {
   frame: 0,
   resyncTimer: null,
 };
+// A candidate stream may error transiently before it is ever ready; the browser EventSource
+// auto-reconnects the same URL, so a small bound tolerates those retries within ONE episode before
+// the candidate is abandoned and demand is re-driven. Keep it small so a persistently rejected demand
+// falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
+const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
 // server: client-event resource revisions AND the session-metadata build generation. They all
 // restart at zero in a replacement process, so they reset together, here, once.
@@ -1851,8 +1921,18 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
     const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
+    // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
+    // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
+    // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
+    // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
+    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
+      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+      .map(([operationId]) => operationId)
+      .sort();
     return {
       pending: Array.from(apiOperationState.pending.keys()).sort(),
+      watchDiffPendingOperationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
@@ -1873,7 +1953,7 @@ const backgroundOwnerStatusState = {
   error: '',
   request: null,
   updatedAt: 0,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentStartupState = {
   activityPayload: null,
@@ -1892,13 +1972,13 @@ const yoagentConversationState = {
   displayPath: '',
   streamingMessages: new Map(),
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentJobsState = {
   items: [],
   loading: false,
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentChatState = {
   busy: false,
@@ -2014,9 +2094,30 @@ let pendingPreferencesRender = false;
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let pendingLayoutRenderFrame = 0;
-let layoutMutationGeneration = 0;
-let layoutMutationCompletedGeneration = 0;
-let pendingLayoutMutationGeneration = 0;
+class RuntimeState {
+  constructor() {
+    this.layoutMutation = {generation: 0, completed: 0, pending: 0};
+  }
+
+  layoutMutationSnapshot() { return {...this.layoutMutation}; }
+  get layoutMutationGeneration() { return this.layoutMutation.generation; }
+  get layoutMutationCompletedGeneration() { return this.layoutMutation.completed; }
+  get pendingLayoutMutationGeneration() { return this.layoutMutation.pending; }
+  beginLayoutMutation() {
+    this.layoutMutation.generation += 1;
+    this.layoutMutation.pending = this.layoutMutation.generation;
+    return this.layoutMutation.generation;
+  }
+  consumePendingLayoutMutation(generation) {
+    if (generation === this.layoutMutation.pending) this.layoutMutation.pending = 0;
+  }
+  completeLayoutMutation(generation) {
+    if (!Number.isSafeInteger(generation) || generation <= this.layoutMutation.completed) return false;
+    this.layoutMutation.completed = generation;
+    return true;
+  }
+}
+const runtimeState = new RuntimeState();
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
@@ -2041,8 +2142,23 @@ let fileExplorerPathError = '';
 let fileExplorerLastListError = null;
 let fileImagePreviewPopover = null;
 let fileImagePreviewController = null;
-let fileExplorerInteractionGeneration = 0;
-let fileExplorerOpenGeneration = 0;
+class FileWorkspaceState {
+  constructor() {
+    this.generations = {interaction: 0, open: 0};
+  }
+
+  beginOpen() { this.generations.open += 1; return this.generations.open; }
+  get fileExplorerOpenGeneration() { return this.generations.open; }
+  get fileExplorerInteractionGeneration() { return this.generations.interaction; }
+  openIsCurrent(generation) { return generation === this.generations.open; }
+  interactionGeneration() { return this.generations.interaction; }
+  interactionIsCurrent(generation) { return generation === this.generations.interaction; }
+  invalidateInteraction({invalidateOpen = true} = {}) {
+    this.generations.interaction += 1;
+    if (invalidateOpen) this.generations.open += 1;
+  }
+}
+const fileWorkspaceState = new FileWorkspaceState();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
@@ -2073,7 +2189,6 @@ const uiDelayMs = Object.freeze({
   tmuxWindowSwitchReveal: 4000,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
-  fileQuickOpenIndexRetry: 500,
   commandPaletteMissingPathRetry: 1001,
   clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
@@ -2108,7 +2223,6 @@ const yolomuxTiming = Object.freeze({
   tmuxWindowSwitchPaintCapMs: 250,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
-  fileQuickOpenIndexRetryMs: uiDelayMs.fileQuickOpenIndexRetry,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
@@ -2139,7 +2253,6 @@ const {
   tmuxWindowSwitchPaintCapMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
-  fileQuickOpenIndexRetryMs,
   commandPaletteMissingPathRetryMs,
   clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
@@ -2466,26 +2579,273 @@ function rerenderDateTimeFormatSurfaces() {
   if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
-const backendHealthState = {consecutiveFailures: 0};
-const backendHealthFailureThreshold = 3;
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-function syncBackendHealthIndicator() {
-  if (!topbar) return;
-  let indicator = topbar.querySelector('[data-backend-health]');
-  const host = topbar.querySelector('.topbar-right-tools') || topbar;
-  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
-  if (!degraded) {
-    indicator?.remove();
-    return;
+function createPageTransportLifecycle(pageLifecycle = null) {
+  let lifecycleScope = null;
+  let retirementReason = '';
+  let transportGeneration = 0;
+  let retirementGeneration = -1;
+  const owner = {
+    start() {
+      if (lifecycleScope?.current()) return owner;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      if (!pageLifecycle || typeof pageLifecycle.addEventListener !== 'function') return owner;
+      for (const eventName of ['beforeunload', 'pagehide']) {
+        scope.ownEvent(`page-${eventName}`, pageLifecycle, eventName, () => {
+          if (retirementReason && transportGeneration <= retirementGeneration) return;
+          retirementReason = `page_${eventName}`;
+          retirementGeneration = transportGeneration;
+        });
+      }
+      scope.ownEvent('page-pageshow', pageLifecycle, 'pageshow', () => { retirementReason = ''; });
+      return owner;
+    },
+    begin() { return transportGeneration; },
+    noteDelivery(startGeneration = null) {
+      if (retirementReason && Number(startGeneration) <= retirementGeneration) {
+        transportGeneration = retirementGeneration + 1;
+      }
+    },
+    reasonSince(startGeneration) {
+      return retirementReason && Number(startGeneration) <= retirementGeneration ? retirementReason : '';
+    },
+    dispose(reason = 'page-transport-lifecycle-stop') {
+      retirementReason = '';
+      return lifecycleScope?.dispose(reason) || false;
+    },
+  };
+  return Object.freeze(owner);
+}
+
+const pageTransportLifecycle = createPageTransportLifecycle(globalThis.window || globalThis).start();
+// The ONE topbar health indicator: one state object, one DOM node, one insertion point
+// (.topbar-right-tools). Two independent signals feed it:
+//   * this browser cannot reach the server at all (consecutive apiFetch transport failures), and
+//   * the server told us, over the pushed `backend_health_changed` event on the existing `core`
+//     client-event channel, that one of its own services is down or degraded.
+// It is push-fed on purpose. Nothing here polls /api/system-status: the whole point is that a dead
+// service becomes visible without the System panel being open.
+const backendHealthFailureThreshold = 3;
+// The observer already debounces its own transitions; this debounces the CLEAR in the browser. One
+// healthy revision after an outage is a sample, not a recovery, so the warning survives it.
+const backendHealthRecoveryRevisions = 2;
+// Bounded twice: we retain at most this many degraded resources, and we NAME at most one of them.
+// Six service names in a topbar chip is a wall nobody reads; "and 2 more" is the readable form.
+const backendHealthResourceLimit = 8;
+const backendHealthNamedResourceLimit = 1;
+// The states the observer publishes (yolomux_lib/backend_health/store.py BACKEND_HEALTH_STATES).
+// `starting` and `ready` are not failures and must never raise the indicator, or every page load
+// during startup shows a warning. Everything else is a failure at one of two severities.
+const backendHealthDownStates = Object.freeze(['down', 'upgrade_required']);
+const backendHealthDegradedStates = Object.freeze(['degraded', 'backoff', 'unknown']);
+// Precedence, highest first. A browser talking to nothing must not be described as "one service is
+// slow", and a service outage must not be hidden because the last request happened to succeed.
+const backendHealthSeverityRank = Object.freeze({'': 0, degraded: 1, down: 2, unresponsive: 3});
+
+const backendHealthState = {
+  consecutiveFailures: 0,
+  epoch: '',
+  revision: -1,
+  serviceSeverity: '',
+  resources: [],
+  resourceCount: 0,
+  healthyRevisions: 0,
+};
+
+function backendHealthStateSeverity(state) {
+  const value = String(state ?? '');
+  if (backendHealthDownStates.includes(value)) return 'down';
+  if (backendHealthDegradedStates.includes(value)) return 'degraded';
+  return '';
+}
+
+function backendHealthResourcesFromPayload(resources) {
+  if (!Array.isArray(resources)) return [];
+  const failing = [];
+  for (const entry of resources) {
+    if (!entry || typeof entry !== 'object') continue;
+    const severity = backendHealthStateSeverity(entry.state);
+    if (!severity) continue;
+    failing.push({
+      id: String(entry.id ?? ''),
+      // The server owns the human name. `id` is a process name (watchd, indexd) and is kept only for
+      // diagnostics — it must never reach the rendered text, which is why the renderer reads `label`
+      // and falls back to a generic translated noun rather than to `id`.
+      label: String(entry.label ?? '').trim(),
+      severity,
+      reasonCode: String(entry.reason_code ?? ''),
+    });
   }
+  // Worst first, so the one resource we name is the one that matters most.
+  failing.sort((left, right) => backendHealthSeverityRank[right.severity] - backendHealthSeverityRank[left.severity]);
+  return failing;
+}
+
+function backendHealthPayloadSeverity(overallState, resources) {
+  let severity = backendHealthStateSeverity(overallState);
+  for (const resource of resources) {
+    if (backendHealthSeverityRank[resource.severity] > backendHealthSeverityRank[severity]) severity = resource.severity;
+  }
+  return severity;
+}
+
+// Apply one `backend_health_changed` payload: {epoch, revision, overall_state, degraded_resources}.
+// Returns false for a stale or replayed revision so a reconnect replay cannot walk the state backwards.
+function applyBackendHealthPayload(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const revision = Number(source.revision);
+  if (!Number.isFinite(revision)) return false;
+  const epoch = String(source.epoch ?? '');
+  if (epoch === backendHealthState.epoch && revision <= backendHealthState.revision) return false;
+  if (epoch !== backendHealthState.epoch) {
+    // A new observer epoch restarts the revision counter, so a partial recovery count from the
+    // previous epoch means nothing here: start counting healthy revisions again.
+    backendHealthState.epoch = epoch;
+    backendHealthState.healthyRevisions = 0;
+  }
+  backendHealthState.revision = revision;
+  const resources = backendHealthResourcesFromPayload(source.degraded_resources);
+  const severity = backendHealthPayloadSeverity(source.overall_state, resources);
+  if (severity) {
+    backendHealthState.serviceSeverity = severity;
+    backendHealthState.resources = resources.slice(0, backendHealthResourceLimit);
+    backendHealthState.resourceCount = resources.length;
+    backendHealthState.healthyRevisions = 0;
+  } else {
+    backendHealthState.healthyRevisions += 1;
+    if (backendHealthState.healthyRevisions >= backendHealthRecoveryRevisions) {
+      backendHealthState.serviceSeverity = '';
+      backendHealthState.resources = [];
+      backendHealthState.resourceCount = 0;
+    }
+  }
+  syncBackendHealthIndicator();
+  return true;
+}
+
+// The rendered model, or null when there is nothing to show. This is where precedence lives:
+// `unresponsive` outranks `down` outranks `degraded`, and it is decided in exactly one place.
+function backendHealthIndicatorModel() {
+  if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
+    return {
+      severity: 'unresponsive',
+      text: `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`,
+      reasonCode: '',
+    };
+  }
+  const severity = backendHealthState.serviceSeverity;
+  if (severity !== 'down' && severity !== 'degraded') return null;
+  const named = backendHealthState.resources.find(resource => resource.label) || null;
+  const label = named ? named.label : t('backendHealth.service');
+  const count = Math.max(0, backendHealthState.resourceCount - backendHealthNamedResourceLimit);
+  let text;
+  if (severity === 'down') {
+    text = count > 0 ? t('backendHealth.down.multiple', {label, count}) : t('backendHealth.down.single', {label});
+  } else {
+    text = count > 0 ? t('backendHealth.degraded.multiple', {label, count}) : t('backendHealth.degraded.single', {label});
+  }
+  return {severity, text, reasonCode: named ? named.reasonCode : ''};
+}
+
+// The System view is the YO!stats/Debug pane's `system` sub-tab. This is the same pair of calls its
+// own tab button makes (85_debug_panel.js bindDebugPanel -> setDebugSubTab), not a second route in.
+async function openBackendHealthDetails() {
+  await selectSession(debugPaneItemId, {userInitiated: true});
+  setDebugSubTab('system');
+  return true;
+}
+
+function backendHealthIndicatorHost() {
+  if (!topbar) return null;
+  return topbar.querySelector('.topbar-right-tools') || topbar;
+}
+
+// One glyph for the fixed icon shell. It is a marker, never the message: the severity is carried by
+// the WORDS in the role=status label, so a monochrome or forced-colours theme still reads correctly.
+function backendHealthIndicatorGlyph(severity) {
+  return severity ? '⚠' : '';
+}
+
+// The permanently mounted, fixed-size backend-health control. It is built once by
+// createTopbarRightTools() and NEVER inserted or removed on a health transition: a change only
+// repaints it and rewrites its accessible sentence, so the topbar, #grid, and every xterm keep the
+// same geometry before, during, and after a warning. The full localized sentence lives in the
+// role=status live region AND on the control's aria-label/title; the whole control is the System
+// Details route, so there is no separate variable-width Details button to grow the row.
+function createBackendHealthIndicator() {
+  const indicator = makeButton({
+    id: 'backendHealthIndicator',
+    className: 'backend-health-indicator',
+    onClick: () => {
+      openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
+    },
+  });
+  const icon = document.createElement('span');
+  icon.className = 'backend-health-indicator-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const message = document.createElement('span');
+  message.className = 'backend-health-indicator-text';
+  message.setAttribute('role', 'status');
+  message.setAttribute('aria-live', 'polite');
+  indicator.append(icon, message);
+  applyBackendHealthIndicatorState(indicator, backendHealthIndicatorModel());
+  return indicator;
+}
+
+// Push one model (or null when healthy) into the existing control. Healthy is a state of the SAME
+// node -- an inert, empty, transparent icon shell that still occupies its fixed slot -- not the
+// node's absence, so recovery does not remove layout content.
+function applyBackendHealthIndicatorState(indicator, model) {
+  const severity = model ? model.severity : '';
+  indicator.dataset.backendHealth = severity;
+  if (model && model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
+  else delete indicator.dataset.backendHealthReason;
+  indicator.querySelector('.backend-health-indicator-icon').textContent = backendHealthIndicatorGlyph(severity);
+  // The severity is carried by the WORDS ("is not running" vs "is degraded"), not by the colour the
+  // data-backend-health token selects, so the warning survives a monochrome or high-contrast theme.
+  indicator.querySelector('.backend-health-indicator-text').textContent = model ? model.text : '';
+  if (model) {
+    indicator.disabled = false;
+    // The accessible NAME describes what activating the control does (open the System details); the
+    // live-region text above announces the STATE sentence, and the tooltip carries the full sentence.
+    indicator.setAttribute('aria-label', t('backendHealth.detailsAria'));
+    indicator.setAttribute('title', model.text);
+    indicator.removeAttribute('aria-hidden');
+  } else {
+    indicator.disabled = true;
+    indicator.removeAttribute('aria-label');
+    indicator.removeAttribute('title');
+    indicator.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
+  const model = backendHealthIndicatorModel();
+  // Look the existing node up across the whole topbar, not just the host: the control is normally
+  // built into .topbar-right-tools, but if that host is torn down and rebuilt -- fallback-mounting a
+  // control in the topbar while a detached one waits to be re-inserted -- there must still be exactly
+  // ONE. Keep the first in document order and collapse any extra so a rebuild cannot leave two owners.
+  const scope = topbar || host || document;
+  const existing = Array.from(scope.querySelectorAll('[data-backend-health]'));
+  let indicator = existing[0] || null;
+  for (let index = 1; index < existing.length; index += 1) existing[index].remove();
   if (!indicator) {
-    indicator = document.createElement('span');
-    indicator.className = 'backend-health-indicator';
-    indicator.dataset.backendHealth = 'unresponsive';
-    indicator.setAttribute('role', 'status');
+    // The control is missing only before the right-tools builder has run, or in the fallback where
+    // .topbar-right-tools was removed at runtime. Mount one and keep updating it in place thereafter.
+    if (!host) return null;
+    indicator = createBackendHealthIndicator();
     host.prepend(indicator);
   }
-  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+  applyBackendHealthIndicatorState(indicator, model);
+  return indicator;
 }
 
 function noteBackendHealthFailure() {
@@ -2601,6 +2961,8 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  const transportLifecycle = pageTransportLifecycle;
+  const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
@@ -2609,6 +2971,9 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
+  const quietStatuses = Array.isArray(internalOptions.quietStatuses)
+    ? new Set(internalOptions.quietStatuses.map(Number))
+    : null;
   const diagnosticProvenance = ['controlled_probe', 'confirmed_real'].includes(internalOptions.provenance)
     ? internalOptions.provenance
     : '';
@@ -2660,12 +3025,14 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
+    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
     if (timeoutError) noteTimeout();
-    else noteBackendHealthFailure();
+    else if (!retirementReason) noteBackendHealthFailure();
     if (recordDebug) {
       notePageLoadApiCompleted();
       recordApiDebugEvent(url, method, startedAt, {
         error,
+        ...(retirementReason ? {deliveryOutcome: 'retired', reason: retirementReason} : {deliveryOutcome: 'failed'}),
         requestBytes,
         requestId,
         provenance: diagnosticProvenance,
@@ -2674,10 +3041,12 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     cleanup();
     throw error;
   }
-  noteBackendHealthSuccess();
+  transportLifecycle.noteDelivery(transportToken); noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
-  if (recordDebug) {
+  // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
+  const suppressExpectedStatus = Boolean(quietStatuses && quietStatuses.has(Number(response.status)));
+  if (recordDebug && !suppressExpectedStatus) {
     debugEvent = recordApiDebugEvent(url, method, startedAt, {
       status: response.status,
       ok: response.ok,
@@ -2937,6 +3306,11 @@ function apiOperationTerminalData(record, payload = {}) {
 function recordApiOperationTerminalFailure(record, error, expected = {}) {
   if (error?.name !== 'ApiOperationTerminalError' || !expected.url) return;
   const status = Number(error.status);
+  // An expected terminal status (a controlled probe's own verdict, e.g. a deletion-confirmation 404) is
+  // not an API failure; suppress it. Any other status, and non-status transport errors, still record.
+  if (Array.isArray(expected.quietStatuses)
+    && Number.isSafeInteger(status)
+    && expected.quietStatuses.map(Number).includes(status)) return;
   recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
     ...(Number.isSafeInteger(status) && status >= 100 && status <= 599 ? {status, ok: false} : {error}),
     requestId: record.request?.id,
@@ -3154,7 +3528,7 @@ async function apiJsonResponse(response) {
   return payload;
 }
 
-async function apiFetchJson(url, options = {}) {
+async function apiFetchJson(url, options = {}, internalOptions = {}) {
   const lifecycle = typeof tmuxSessionLifecycleRequestLease === 'function'
     ? tmuxSessionLifecycleRequestLease(url, options)
     : {session: '', lease: null, blocked: false};
@@ -3167,7 +3541,7 @@ async function apiFetchJson(url, options = {}) {
     lifecycle.lease?.release?.();
   };
   try {
-    const result = await apiJsonResponse(await apiFetch(url, options));
+    const result = await apiJsonResponse(await apiFetch(url, options, internalOptions));
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
     }
@@ -3182,6 +3556,7 @@ async function apiFetchJson(url, options = {}) {
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
+      quietStatuses: internalOptions.quietStatuses,
     });
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
@@ -3654,6 +4029,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
+  for (const field of ['deliveryOutcome', 'reason']) if (result[field]) payload[field] = String(result[field]).slice(0, 64);
   return recordJsDebugEvent('api', payload);
 }
 
@@ -3662,14 +4038,14 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
     return;
   }
   if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -3699,12 +4075,19 @@ function diagnosticPacificWallTime(value) {
 
 function recordJsDebugEvent(type, payload = {}) {
   const timestampMs = Date.now();
+  // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
+  // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
+  // trusted monotonic identity this producer assigns. `wallTime` is NOT one of those fields: a
+  // browser-lifecycle failure records the Pacific wall time it observed the failure at, and the
+  // finalizer reports THAT time, not the later moment this event was retained -- so a caller
+  // wallTime is preserved and the producer only stamps its own when the caller supplied none.
+  const redacted = shareRedactDiagnosticValue(payload);
   const event = {
+    ...redacted,
     id: ++jsDebugEventSeq,
     ts: new Date(timestampMs).toISOString(),
-    wallTime: diagnosticPacificWallTime(timestampMs),
+    wallTime: String(redacted.wallTime || diagnosticPacificWallTime(timestampMs)),
     type: String(type || 'event'),
-    ...shareRedactDiagnosticValue(payload),
   };
   jsDebugEvents.push(event);
   if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
@@ -3718,7 +4101,7 @@ function recordJsDebugEvent(type, payload = {}) {
 function jsDebugFailureClassification(event) {
   const type = String(event?.type || '');
   if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
-  const apiFailure = type === 'api' && (
+  const apiFailure = type === 'api' && event?.deliveryOutcome !== 'retired' && (
     event?.ok === false
     || (Number.isFinite(event?.status) && event.status >= 400)
     || Boolean(event?.error)
@@ -5320,6 +5703,73 @@ function writeStoredFileExplorerIndexedDirs() {
   storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
 }
 
+// A synchronous SHA-256 over a string's UTF-8 bytes, returning the lowercase hex digest. The
+// search-progress bus keys every root by the server's opaque digest sha256(canonical_root_key)[:16]
+// (yolomux_lib/search/file_index.py::_root_scope_id): a filesystem path in a signal's payload would
+// disclose one client's directory to every other client on the globally-fanned-out bus, so the frame
+// carries only the digest. The browser recomputes the SAME digest from a snapshot's root_realpath to
+// correlate a path-free progress signal back to the root it searched. crypto.subtle.digest is async
+// and absent from the node test VM, so this is a self-contained synchronous implementation.
+const SHA256_ROUND_CONSTANTS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexOfString(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ''));
+  const length = bytes.length;
+  // Message padding: 0x80, then zeros to a 56-mod-64 boundary, then the 64-bit big-endian bit length.
+  const withPadding = new Uint8Array((((length + 8) >> 6) + 1) << 6);
+  withPadding.set(bytes);
+  withPadding[length] = 0x80;
+  const bitLength = length * 8;
+  const view = new DataView(withPadding.buffer);
+  view.setUint32(withPadding.length - 4, bitLength >>> 0, false);
+  view.setUint32(withPadding.length - 8, Math.floor(bitLength / 0x100000000), false);
+  const hash = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const words = new Uint32Array(64);
+  const rotr = (value, bits) => (value >>> bits) | (value << (32 - bits));
+  for (let offset = 0; offset < withPadding.length; offset += 64) {
+    for (let i = 0; i < 16; i += 1) words[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(words[i - 15], 7) ^ rotr(words[i - 15], 18) ^ (words[i - 15] >>> 3);
+      const s1 = rotr(words[i - 2], 17) ^ rotr(words[i - 2], 19) ^ (words[i - 2] >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_ROUND_CONSTANTS[i] + words[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0; hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0; hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0; hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0; hash[7] = (hash[7] + h) >>> 0;
+  }
+  return Array.from(hash, value => value.toString(16).padStart(8, '0')).join('');
+}
+
+// The 16-hex-char opaque root digest the search-progress bus uses (the first 16 hex chars of the
+// SHA-256 of the canonical root path). Correlates a path-free progress signal to a searched root.
+function fileSearchScopeId(realpath) {
+  const canonical = String(realpath ?? '').trim();
+  return canonical ? sha256HexOfString(canonical).slice(0, 16) : '';
+}
+
 function nestedSetting(source, path, fallback) {
   let current = source;
   for (const part of String(path || '').split('.')) {
@@ -6168,6 +6618,38 @@ function replaceHtmlPreservingScroll(element, html) {
   const scrollLeft = element.scrollLeft || 0;
   element.innerHTML = html;
   restoreElementScrollPosition(element, scrollTop, scrollLeft);
+}
+
+function reconcilePanelBody({body, html, anchors = [], replace = null, afterReplace = null} = {}) {
+  if (!body) return false;
+  const captured = anchors.map(anchor => ({
+    anchor,
+    value: typeof anchor.capture === 'function' ? anchor.capture(body) : undefined,
+  }));
+  if (typeof replace === 'function') replace(body, html);
+  else body.innerHTML = html;
+  for (const {anchor, value} of captured) anchor.restore?.(body, value);
+  afterReplace?.(body);
+  return true;
+}
+
+function elementScrollAnchor(selector, fallbackToBody = false) {
+  return {
+    capture(body) {
+      const element = body.querySelector?.(selector) || (fallbackToBody ? body : null);
+      return {scrollTop: element?.scrollTop || 0, scrollLeft: element?.scrollLeft || 0};
+    },
+    restore(body, value) {
+      restoreElementScrollPosition(body.querySelector?.(selector) || (fallbackToBody ? body : null), value?.scrollTop || 0, value?.scrollLeft || 0);
+    },
+  };
+}
+
+function keyedScrollAnchor(selector) {
+  return {
+    capture: body => captureKeyedScrollPositions(body, selector),
+    restore: (body, value) => restoreKeyedScrollPositions(body, selector, value),
+  };
 }
 
 function wsUrl(session) {
@@ -7209,7 +7691,8 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  setDomBuilderOptions(button, options);
+  const classNames = new Set(['btn-base', ...String(options.className || '').split(/\s+/).filter(Boolean)]);
+  setDomBuilderOptions(button, {...options, className: [...classNames].join(' ')});
   button.disabled = options.disabled === true;
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
@@ -7221,6 +7704,179 @@ function makeButton(options = {}) {
     if (typeof listener === 'function') button.addEventListener(type, listener);
   }
   return button;
+}
+
+const bindOnceRecords = new WeakMap();
+
+function bindOnce(root, key, installer) {
+  if (!root || key === undefined || key === null || typeof installer !== 'function') return null;
+  let records = bindOnceRecords.get(root);
+  if (!records) {
+    records = new Map();
+    bindOnceRecords.set(root, records);
+  }
+  const existing = records.get(key);
+  if (existing) return existing.dispose;
+  const uninstall = installer(root);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    if (records.get(key)?.dispose === dispose) records.delete(key);
+    if (records.size === 0) bindOnceRecords.delete(root);
+    if (typeof uninstall === 'function') uninstall();
+    else uninstall?.dispose?.();
+    return true;
+  };
+  records.set(key, {dispose});
+  return dispose;
+}
+
+function createLifecycleScope(options = {}) {
+  const resources = new Map();
+  let disposed = false;
+  const disposeResource = record => {
+    if (!record || record.disposed) return false;
+    record.disposed = true;
+    record.dispose?.(record.value);
+    return true;
+  };
+  const scope = {
+    current() {
+      return !disposed && (typeof options.isCurrent !== 'function' || options.isCurrent() === true);
+    },
+    value(key) {
+      return resources.get(key)?.value ?? null;
+    },
+    replace(key, value, dispose) {
+      const existing = resources.get(key);
+      if (existing?.value === value) return value;
+      if (existing) disposeResource(existing);
+      resources.delete(key);
+      if (value === null || value === undefined) return value;
+      if (disposed) {
+        disposeResource({value, dispose, disposed: false});
+        return value;
+      }
+      resources.set(key, {value, dispose, disposed: false});
+      return value;
+    },
+    release(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      return disposeResource(record);
+    },
+    relinquish(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      record.disposed = true;
+      return true;
+    },
+    ownEvent(key, target, type, listener, listenerOptions = undefined) {
+      target?.addEventListener?.(type, listener, listenerOptions);
+      return scope.replace(key, listener, () => target?.removeEventListener?.(type, listener, listenerOptions));
+    },
+    ownTimer(key, timer, clear = clearTimeout) {
+      return scope.replace(key, timer, value => clear(value));
+    },
+    ownObserver(key, observer) {
+      return scope.replace(key, observer, value => value?.disconnect?.());
+    },
+    ownStream(key, stream) {
+      return scope.replace(key, stream, value => value?.close?.());
+    },
+    dispose(reason = 'disposed') {
+      if (disposed) return false;
+      disposed = true;
+      for (const record of [...resources.values()].reverse()) disposeResource(record);
+      resources.clear();
+      options.onDispose?.(reason);
+      return true;
+    },
+    disposed() { return disposed; },
+  };
+  return Object.freeze(scope);
+}
+
+function createLatestResource(options = {}) {
+  let value = options.initial;
+  let target = null;
+  let request = null;
+  let error = null;
+  let lifecycleScope = createLifecycleScope();
+
+  const snapshot = () => Object.freeze({value, target, request, error, loading: request !== null});
+  const notify = (phase, context = null) => options.onState?.(snapshot(), Object.freeze({phase, context}));
+  const renewScope = reason => {
+    lifecycleScope.dispose(reason);
+    lifecycleScope = createLifecycleScope();
+    return lifecycleScope;
+  };
+  const assign = (nextValue, nextTarget = target) => {
+    target = nextTarget;
+    value = nextValue;
+    error = null;
+    return value;
+  };
+  const resource = {
+    snapshot,
+    read(nextTarget, context = null) {
+      if (request && Object.is(target, nextTarget)) return request;
+      const scope = renewScope('latest-resource-superseded');
+      target = nextTarget;
+      error = null;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      if (controller) scope.replace('request-controller', controller, value => value.abort());
+      let loaded;
+      try {
+        loaded = options.load(nextTarget, Object.freeze({context, signal: controller?.signal}));
+      } catch (failure) {
+        loaded = Promise.reject(failure);
+      }
+      const currentRequest = Promise.resolve(loaded)
+        .then(payload => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          const applied = options.apply(payload, Object.freeze({context, target: nextTarget, previous: value}));
+          if (applied !== undefined) assign(applied, nextTarget);
+          error = null;
+          notify('applied', context);
+          return typeof options.result === 'function' ? options.result(payload, applied) : value;
+        })
+        .catch(failure => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          error = failure;
+          notify('failed', context);
+          return typeof options.failureResult === 'function' ? options.failureResult(failure, value) : value;
+        })
+        .finally(() => {
+          if (!scope.current() || request !== currentRequest) return;
+          request = null;
+          scope.release('request-controller', controller);
+          notify('settled', context);
+        });
+      request = currentRequest;
+      notify('loading', context);
+      return currentRequest;
+    },
+    replace(nextValue, nextTarget = target, context = null) {
+      renewScope('latest-resource-replaced');
+      request = null;
+      assign(nextValue, nextTarget);
+      notify('replaced', context);
+      return value;
+    },
+    assign,
+    invalidate(context = null) {
+      renewScope('latest-resource-invalidated');
+      request = null;
+      error = null;
+      notify('invalidated', context);
+      return value;
+    },
+  };
+  return Object.freeze(resource);
 }
 
 function delegate(parent, type, selector, handler, options = {}) {
@@ -10318,6 +10974,7 @@ function newTmuxSessionLifecycleRecord(session, phase = 'stable', topologyEpoch 
     pendingUntil: tmuxSessionLifecyclePendingPhases.has(phase) ? Date.now() + pendingTmuxSessionGraceMs : 0,
     requestLeases: new Set(),
     controllers: new Set(),
+    lifecycleScopes: new Set(),
     sources: new Set(),
     timers: new Set(),
     consumerDetachments: 0,
@@ -10360,6 +11017,15 @@ function tmuxSessionLifecycleOwnSource(session, source) {
   return token;
 }
 
+function tmuxSessionLifecycleOwnScope(token, scope) {
+  if (token?.record && scope) token.record.lifecycleScopes.add(scope);
+  return scope;
+}
+
+function tmuxSessionLifecycleReleaseScope(token, scope) {
+  token?.record?.lifecycleScopes?.delete(scope);
+}
+
 function tmuxSessionLifecycleReleaseSource(token, source) {
   token?.record?.sources?.delete(source);
   if (source?._tmuxSessionLifecycleToken === token) delete source._tmuxSessionLifecycleToken;
@@ -10384,6 +11050,8 @@ function retireTmuxSessionLifecycleRecord(record) {
   record.pendingUntil = 0;
   for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
   record.controllers.clear();
+  for (const scope of record.lifecycleScopes) scope.dispose?.('session-retired');
+  record.lifecycleScopes.clear();
   for (const source of record.sources) source.close?.();
   record.sources.clear();
   for (const timer of record.timers) clearTimeout(timer);
@@ -12561,16 +13229,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
     const normalized = normalizeDirectoryPath(path || '');
     if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
+    // Fence this validation's "missing" outcome against newer per-path state: a stale/late validation
+    // (kind-mismatch or exact-path 404) that completes after a newer valid render landed must not
+    // overwrite it. Same generation fence shared with the reload/poll/media producers.
+    const generation = openFileContentGeneration.get(normalized) || 0;
     fetchFilePathInfo(normalized, {user: true})
       .then(async info => {
         if (info?.kind === 'file') {
           await recoverOpenFileAfterMissing(normalized, info);
         } else if (info?.kind) {
-          markOpenFileMissing(normalized);
+          if (openFileContentGenerationIsCurrent(normalized, generation)) markOpenFileMissing(normalized);
         }
       })
       .catch(error => {
-        if (Number(error?.status) === 404) {
+        if (Number(error?.status) === 404 && openFileContentGenerationIsCurrent(normalized, generation)) {
           markOpenFileMissing(normalized);
           if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
@@ -13381,15 +14053,24 @@ function commandPaletteLabel() {
   return t('palette.quickOpen');
 }
 
+// The one Quick Open freshness sentence, from the one derivation. Empty when every answering root
+// vouched for its snapshot.
+function commandPaletteFreshnessText() {
+  return fileIndexFreshnessMessage(fileQuickOpenState.freshness);
+}
+
 function commandPaletteEmptyText() {
   if (fileQuickOpenState.loading) return t('search.searching');
   if (fileQuickOpenState.indexWarming) return t('finder.index.indexing');
   if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
-  return t('palette.noMatches');
+  // "No matches" from a snapshot nobody is updating is a false negative. Say why instead.
+  return commandPaletteFreshnessText() || t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
+  return [fileQuickOpenState.loading ? t('palette.searchingFiles') : '', commandPaletteFreshnessText()]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -13397,7 +14078,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  const parts = [];
+  if (fileQuickOpenState.loading) parts.push(commandPaletteLoadingTextHtml(t('palette.searchingFiles')));
+  // Stale results stay visible and usable below; this line only tells the user what they are looking at.
+  const freshness = commandPaletteFreshnessText();
+  if (freshness) parts.push(`<span class="command-palette-freshness">${esc(freshness)}</span>`);
+  return parts.join('');
 }
 
 function commandPaletteResultsHtml(items, query) {
@@ -13491,6 +14177,9 @@ function renderCommandPaletteResults() {
     const html = commandPaletteStatusHtml();
     status.hidden = !html;
     status.setAttribute('aria-label', text);
+    // Not colour-only: the aria-live region carries the same sentence a sighted user reads, and the
+    // stale marker is a class, never a bare colour swap.
+    status.classList.toggle('stale', Boolean(commandPaletteFreshnessText()));
     status.innerHTML = html;
   }
   commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
@@ -13519,6 +14208,7 @@ function openCommandPalette(options = {}) {
   fileQuickOpenState.root = fileQuickOpenRootForSearch();
   fileQuickOpenState.candidates = [];
   fileQuickOpenState.loading = false;
+  fileQuickOpenState.freshness = null;
   fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
@@ -13569,31 +14259,18 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
-function clearFileQuickOpenIndexRetry() {
-  if (fileQuickOpenState.indexRetry) clearTimeout(fileQuickOpenState.indexRetry);
-  fileQuickOpenState.indexRetry = null;
-}
-
-function scheduleFileQuickOpenIndexRetry(query, requestId) {
-  clearFileQuickOpenIndexRetry();
-  fileQuickOpenState.indexRetry = setTimeout(() => {
-    fileQuickOpenState.indexRetry = null;
-    if (requestId !== fileQuickOpenState.requestId) return;
-    if (commandPaletteState.node?.hidden) return;
-    if (commandPaletteState.query !== query) return;
-    refreshFileQuickOpenCandidates(query);
-  }, fileQuickOpenIndexRetryMs);
-}
-
 function abortFileQuickOpenSearch() {
   if (fileQuickOpenState.abortController) {
     try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
   fileQuickOpenState.abortController = null;
-  clearFileQuickOpenIndexRetry();
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
+  // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
+  // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
+  resetFileQuickOpenDeltaCursors('');
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -13617,11 +14294,32 @@ function dedupeFileSearchResults(files) {
 function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
   return {
     root: normalizeStoredFileExplorerIndexedDir(payload?.root || payload?.root_realpath || searchRoot) || searchRoot,
+    searchRoot,
     files: Array.isArray(payload?.files) ? payload.files : [],
+    // The opaque baseline cursor the client seeds incremental delta reads with (null when nothing is
+    // committed yet — the client re-baselines from the next snapshot once the crawl publishes layer 1),
+    // and the canonical realpath whose digest correlates a path-free search_progress signal to this root.
+    cursor: payload?.initial_cursor ?? null,
+    realpath: String(payload?.root_realpath || payload?.root || searchRoot),
     // This is deliberately data-driven. The UI must not turn an explicit in-progress
     // backend response into a completed empty search just because it has no rows yet.
     indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    // Same rule for the opposite failure: a snapshot served without a live producer must not read as
+    // a current answer. One derivation, shared with the Finder index badge.
+    freshness: fileIndexFreshnessFromPayload(payload),
   };
+}
+
+// Quick Open blends rows from several roots into one list, so the user cannot tell which row came
+// from which snapshot. Report the worst freshness any answering root returned: orphaned before
+// stale, then the oldest snapshot.
+function fileQuickOpenWorstFreshness(records) {
+  const stale = (Array.isArray(records) ? records : []).filter(record => record?.stale === true);
+  const rank = record => (record.state === 'orphaned' ? 2 : 1);
+  return stale
+    .slice()
+    .sort((left, right) => (rank(right) - rank(left))
+      || ((right.ageSeconds === null ? -1 : right.ageSeconds) - (left.ageSeconds === null ? -1 : left.ageSeconds)))[0] || null;
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
@@ -13633,6 +14331,10 @@ async function refreshFileQuickOpenCandidates(query = '') {
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
+  // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
+  // mutate this palette, and the roots/query it belonged to may have changed entirely.
+  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -13680,7 +14382,11 @@ async function refreshFileQuickOpenCandidates(query = '') {
       // A new or externally indexed root can take a moment to publish its first durable snapshot.
       // The backend explicitly marks that response as warming; it is not a completed empty search.
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
-      if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
+      // Stale rows stay in the list. What changes is that the palette now says they are stale.
+      fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
+      // Seed one delta cursor per answering root so a search_progress signal can stream the crawl's
+      // newly-published matches into this list without re-issuing the whole query (steps 6-7).
+      seedFileQuickOpenDeltaCursors(successful, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -13688,6 +14394,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (error?.name === 'AbortError') return;
     fileQuickOpenState.candidates = [];
     fileQuickOpenState.indexWarming = false;
+    fileQuickOpenState.freshness = null;
     fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},
@@ -13700,6 +14407,223 @@ async function refreshFileQuickOpenCandidates(query = '') {
       renderCommandPaletteResults();
     }
   }
+}
+
+// One bounded delta page reads at most this many committed matches per root, matching the server's
+// per-response cap (yolomux_lib/filesystem/search.py). It also bounds the blended candidate array so a
+// long crawl cannot grow it without limit.
+const fileQuickOpenResultLimit = 500;
+// A single search_progress signal can fan out to at most this many delta pages per root, so a large
+// backlog drains across a few signals instead of one unbounded loop inside a push handler.
+const fileQuickOpenDeltaPagesPerSignal = 8;
+
+// Clear every cursor: a new query/root supersedes them, and delta responses for the retired requestId
+// must no longer mutate the palette. `deltaQuery` records the search text the surviving cursors serve.
+function resetFileQuickOpenDeltaCursors(query = '') {
+  fileQuickOpenState.deltaRoots = new Map();
+  fileQuickOpenState.deltaQuery = String(query || '');
+}
+
+// After a snapshot settles, register one incremental-read cursor per answering root. `cursor` is the
+// opaque baseline (null until the root commits its first rows); `scopeId` is the opaque digest a
+// path-free search_progress signal carries, so a signal correlates to the exact root it names.
+function seedFileQuickOpenDeltaCursors(results, requestId) {
+  const deltaRoots = new Map();
+  for (const result of Array.isArray(results) ? results : []) {
+    const searchRoot = result.searchRoot || result.root;
+    if (!searchRoot) continue;
+    const normalizedRoot = normalizeStoredFileExplorerIndexedDir(result.root) || String(result.root || '');
+    deltaRoots.set(normalizedRoot, {
+      searchRoot,
+      normalizedRoot,
+      cursor: result.cursor ?? null,
+      realpath: String(result.realpath || result.root || searchRoot),
+      scopeId: fileSearchScopeId(result.realpath || result.root || searchRoot),
+      more: false,
+      fetching: false,
+      requestId,
+    });
+  }
+  fileQuickOpenState.deltaRoots = deltaRoots;
+}
+
+// Fold true duplicates the way the snapshot read does, then keep only the best `limit` rows by the ONE
+// shared palette score. Ranked here solely to bound the array a delta stream keeps appending to; the
+// render path re-ranks for display, so a late high-rank upsert can still move above earlier rows.
+function rankAndPruneFileQuickOpenCandidates(candidates, query, limit = fileQuickOpenResultLimit) {
+  const deduped = dedupeFileSearchResults(candidates);
+  if (deduped.length <= limit) return deduped;
+  const scoreOf = file => commandPaletteItemScore(
+    fileQuickOpenItem(file.path || '', {
+      kind: file.kind || 'file',
+      relativePath: file.relative_path || file.name || '',
+      sortBonus: file.uploaded === true ? -500 : 0,
+    }),
+    query,
+    {surface: 'files'},
+  );
+  return deduped
+    .map((file, index) => ({file, index, score: scoreOf(file)}))
+    .sort((left, right) => (right.score - left.score) || (left.index - right.index))
+    .slice(0, limit)
+    .map(entry => entry.file);
+}
+
+// Apply one root's committed delta page to the blended candidate set: an `upsert` replaces (or adds)
+// the row for its path, a `delete` removes it. Cross-root isolation is inherent — every path is
+// absolute and each change is stamped with the root that produced it, so one root's delete can never
+// drop another root's row. Returns the deduped, bounded candidate array.
+function mergeFileQuickOpenChanges(candidates, changes, indexedRoot) {
+  const byPath = new Map();
+  const order = [];
+  for (const file of Array.isArray(candidates) ? candidates : []) {
+    const path = file?.path || '';
+    if (!path) continue;
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, file);
+  }
+  for (const change of Array.isArray(changes) ? changes : []) {
+    const path = String(change?.path || '');
+    if (!path) continue;
+    const operation = String(change?.operation || 'upsert');
+    if (operation === 'delete') {
+      if (byPath.delete(path)) {
+        const at = order.indexOf(path);
+        if (at >= 0) order.splice(at, 1);
+      }
+      continue;
+    }
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, {
+      name: change.name || basenameOf(path),
+      path,
+      relative_path: change.relative_path || change.name || '',
+      kind: change.kind || 'file',
+      size: change.size,
+      mtime: change.mtime,
+      realpath: change.realpath || path,
+      uploaded: change.uploaded === true,
+      indexed_root: indexedRoot,
+    });
+  }
+  return order.map(path => byPath.get(path)).filter(Boolean);
+}
+
+// Ingest one delta HTTP payload for `normalizedRoot`. A response for a superseded requestId is dropped
+// (a stale query can never mutate a newer palette). A rebase_required verdict is reported to the
+// caller for the one explicit snapshot-repair path; otherwise the changes merge in, dedupe, rerank
+// once, prune to the limit, and the root's cursor + `more` advance. Returns the delta status.
+function ingestFileQuickOpenDeltaPayload(normalizedRoot, requestId, payload) {
+  if (requestId !== fileQuickOpenState.requestId) return {applied: false, stale: true};
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.requestId !== requestId) return {applied: false, stale: true};
+  if (payload?.rebase_required) {
+    deltaRoot.more = false;
+    return {applied: false, rebase: true, reason: String(payload.reason || '')};
+  }
+  const changes = Array.isArray(payload?.changes) ? payload.changes : [];
+  deltaRoot.cursor = payload?.cursor ?? deltaRoot.cursor;
+  deltaRoot.more = payload?.more === true;
+  if (changes.length) {
+    fileQuickOpenState.candidates = rankAndPruneFileQuickOpenCandidates(
+      mergeFileQuickOpenChanges(fileQuickOpenState.candidates, changes, deltaRoot.normalizedRoot),
+      fileQuickOpenState.deltaQuery,
+    );
+    // A delta that lands rows clears the transient "Indexing…" state: the palette now has committed
+    // matches, so it must not keep claiming an empty warming index.
+    if (fileQuickOpenState.candidates.length) fileQuickOpenState.indexWarming = false;
+    renderCommandPaletteResults();
+  }
+  return {applied: true, more: deltaRoot.more, changed: changes.length};
+}
+
+// Incremental delta streaming is live only while a files-mode palette is open on a real search query;
+// a signal that arrives after close/reopen or in command mode must pump nothing.
+function fileQuickOpenDeltasActive() {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return false;
+  if (commandPaletteEffectiveMode() !== 'files') return false;
+  return Boolean(commandPaletteSearchQuery(commandPaletteState.query));
+}
+
+// Read ONE bounded committed-delta page for a root through the same authenticated /api/fs/search
+// endpoint, appending `&cursor=`. Deltas deliberately do NOT share the snapshot's AbortController:
+// they outlive the initial fetch and are fenced by requestId inside ingest instead of by abort.
+async function fetchFileQuickOpenDeltaPage(deltaRoot) {
+  const requestId = deltaRoot.requestId;
+  const query = fileQuickOpenState.deltaQuery;
+  const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
+  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
+    + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
+  const payload = await apiFetchJson(url);
+  return ingestFileQuickOpenDeltaPayload(deltaRoot.normalizedRoot, requestId, payload);
+}
+
+// Drain a root's committed backlog after a progress signal: one in-flight request per root
+// (`fetching`), bounded pages per signal, looping while the server says `more`. A root with no
+// baseline cursor yet (its first layer just published) or a `rebase_required` verdict falls back to
+// the ONE explicit full-snapshot repair path rather than a second incremental path.
+async function pumpFileQuickOpenDeltasForRoot(normalizedRoot) {
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.fetching) return;
+  if (!fileQuickOpenDeltasActive()) return;
+  if (deltaRoot.cursor === null || deltaRoot.cursor === undefined) {
+    requeryOpenFileQuickOpenForIndexChange({force: true});
+    return;
+  }
+  deltaRoot.fetching = true;
+  try {
+    for (let page = 0; page < fileQuickOpenDeltaPagesPerSignal; page += 1) {
+      const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+      if (!current || current.requestId !== deltaRoot.requestId) return;
+      if (!fileQuickOpenDeltasActive()) return;
+      let status;
+      try {
+        status = await fetchFileQuickOpenDeltaPage(current);
+      } catch (error) {
+        console.warn('quick-open delta read failed', error);
+        return;
+      }
+      if (status.stale) return;
+      if (status.rebase) {
+        requeryOpenFileQuickOpenForIndexChange({force: true});
+        return;
+      }
+      if (!status.more) return;
+    }
+  } finally {
+    const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+    if (current) current.fetching = false;
+  }
+}
+
+// The search_progress bus handler: a path-free {scope_id, generation, revision, coverage} frame. Pump
+// deltas only for the root whose opaque digest the frame names — a signal for any other root (or a
+// closed palette) does nothing, so one client's crawl never re-queries another root's palette.
+function handleFileSearchProgressSignal(payload) {
+  const scopeId = String(payload?.scope_id || '');
+  if (!scopeId || !fileQuickOpenDeltasActive()) return;
+  for (const deltaRoot of fileQuickOpenState.deltaRoots.values()) {
+    if (deltaRoot.scopeId !== scopeId) continue;
+    pumpFileQuickOpenDeltasForRoot(deltaRoot.normalizedRoot)
+      .catch(error => console.warn('quick-open delta pump failed', error));
+  }
+}
+
+// The ONE explicit repair path for Quick Open: a full snapshot re-query that re-baselines every cursor.
+// The incremental delta stream (steps 6-7) handles the ordinary crawl-advance case; this fires only for
+// the cases a cursor cannot bridge — a `rebase_required` verdict, a root that has no committed baseline
+// yet, or an authoritative background-refresh completion that rebuilt the index underneath the palette.
+// Guarded to the open files-mode palette with a live search query. It yields to an in-flight search
+// unless `force` (an authoritative completion event) is set, so a signal cannot abort a search
+// mid-flight into a stuck spinner.
+function requeryOpenFileQuickOpenForIndexChange({force = false} = {}) {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return;
+  if (commandPaletteEffectiveMode() !== 'files') return;
+  if (!commandPaletteSearchQuery(commandPaletteState.query)) return;
+  if (!force && fileQuickOpenState.loading) return;
+  refreshFileQuickOpenCandidates(commandPaletteState.query)
+    .catch(error => console.warn('quick-open index-change refresh failed', error));
 }
 
 function shouldNotifyTransitionKey(key) {
@@ -14852,8 +15776,8 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  const completionGeneration = Number(options.completionGeneration || pendingLayoutMutationGeneration) || 0;
-  if (completionGeneration === pendingLayoutMutationGeneration) pendingLayoutMutationGeneration = 0;
+  const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
+  runtimeState.consumePendingLayoutMutation(completionGeneration);
   if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
@@ -14884,15 +15808,15 @@ function applyLayoutSlots(nextSlots, options = {}) {
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
   });
-  for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  if (!dockviewLayoutActive()) {
+    for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  }
   scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
-  renderAutoApproveButtons();
-  updatePanelInactiveOverlays();
   const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
@@ -14921,17 +15845,31 @@ function layoutRenderRequest(request = {}) {
 
 function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= layoutMutationCompletedGeneration) return;
-  layoutMutationCompletedGeneration = generation;
+  if (!runtimeState.completeLayoutMutation(generation)) return;
   window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+}
+
+function waitForLayoutMutationCompletion(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0
+      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+    return Promise.resolve(generation);
+  }
+  return new Promise(resolve => {
+    const complete = event => {
+      if (Number(event?.detail?.generation || 0) < generation) return;
+      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      resolve(generation);
+    };
+    window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
 }
 
 function beginLayoutMutationCompletion(state = null) {
   if (Number.isSafeInteger(state?.completionGeneration) && state.completionGeneration > 0) {
     return state.completionGeneration;
   }
-  const generation = ++layoutMutationGeneration;
-  pendingLayoutMutationGeneration = generation;
+  const generation = runtimeState.beginLayoutMutation();
   if (state) state.completionGeneration = generation;
   return generation;
 }
@@ -14966,6 +15904,7 @@ function performLayoutRender(request = {}) {
     if (!dockviewLayoutActive()) {
       renderPaneTabStrips();
       syncPanelVisibility(previousActive);
+      renderAutoApproveButtons();
     }
     completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;
@@ -16022,6 +16961,7 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-nav',
   '.topbar-search',
   '.topbar-language-menu',
+  '#backendHealthIndicator',
   '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
@@ -16416,6 +17356,13 @@ function createTopbarCenterTools() {
 function createTopbarRightTools() {
   const group = document.createElement('div');
   group.className = 'topbar-right-tools';
+  // GUI.md invariant: the backend-health control is the ONE permanently mounted, fixed icon-sized
+  // shell in .topbar-right-tools, built once HERE and first in the row so it holds a stable slot
+  // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
+  // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
+  // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
+  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  group.append(createBackendHealthIndicator());
   group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
   return group;
 }
@@ -18354,8 +19301,8 @@ async function openFileExplorerAt(path, options = {}) {
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
-  const openGeneration = ++fileExplorerOpenGeneration;
-  const openStillCurrent = () => openGeneration === fileExplorerOpenGeneration;
+  const openGeneration = fileWorkspaceState.beginOpen();
+  const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
@@ -18424,7 +19371,19 @@ const fileExplorerFsBatchOperations = new Map();
 // the bounded completion so the queued item can repair immediately on arrival.
 const fileExplorerFsBatchReadyGenerations = new Map();
 const fileExplorerFsBatchDelayMs = 8;
-const fileExplorerFsBatchTriggerCountLimit = 64;
+// The bounds /api/fs/batch refuses above are SERVER facts, and the server states them in the boot
+// payload (`filesystemBatchLimits` in yolomux_lib/web.py) exactly the way it states maxSessionTabs.
+// `filesystem.MAX_BATCH_REQUESTS` stays the one copy: the server refuses a body above it with a 400
+// invalid_request, its own watch-batch producer chunks at it (`submit_filesystem_watch_batches`),
+// and this flush splits at it. A literal here would be a fourth copy free to drift from all three.
+// A payload that does not state a bound is a server this bundle cannot make a bounded promise
+// about, so it falls back to the only size no server can refuse for being too large: one item.
+function fileExplorerServerStatedLimit(value, unstated) {
+  return Number.isSafeInteger(value) && value > 0 ? value : unstated;
+}
+const fileExplorerFsBatchLimits = (typeof bootstrap === 'object' && bootstrap?.filesystemBatchLimits) || {};
+const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);
+const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
@@ -18823,10 +19782,19 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   });
 }
 
-async function flushFileExplorerFsBatch() {
-  fileExplorerFsBatchTimer = null;
-  const items = fileExplorerFsBatchQueue.splice(0);
-  if (!items.length) return;
+function fileExplorerFsBatchChunks(items) {
+  // Consecutive slices in queue order, like the server's own root partitioner: chunk n owns items
+  // [offset, offset + size), nothing is reordered and nothing is dropped.
+  const size = fileExplorerFsBatchRequestLimit;
+  const chunks = [];
+  for (let offset = 0; offset < items.length; offset += size) chunks.push(items.slice(offset, offset + size));
+  return chunks;
+}
+
+async function postFileExplorerFsBatchChunk(items) {
+  // One chunk settles its own items and NEVER throws: a chunk that fails must not decide anything
+  // for the chunks around it, and every item it owns must end resolved, rejected, or admitted as a
+  // queued operation. A promise left unsettled here hangs whatever awaited that directory listing.
   const requests = items.map(item => {
     item.sent = true;
     return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
@@ -18841,11 +19809,35 @@ async function flushFileExplorerFsBatch() {
     for (const item of items) {
       settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
+    return {ok: true};
   } catch (error) {
     if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
-    const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
-    return {ok: results.every(result => result.ok === true)};
+    try {
+      const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
+      return {ok: results.every(result => result.ok === true)};
+    } catch (fallbackError) {
+      for (const item of items) rejectFileExplorerFsBatchItem(item, fallbackError);
+      return {ok: false};
+    }
   }
+}
+
+async function flushFileExplorerFsBatch() {
+  fileExplorerFsBatchTimer = null;
+  const items = fileExplorerFsBatchQueue.splice(0);
+  if (!items.length) return {ok: true, chunks: 0};
+  // The whole queue used to go into ONE body. A Differ pointed at a worktree that was deleted
+  // re-lists every open directory at once, which is routinely more than the server accepts, and the
+  // server refused the entire body with a 400 invalid_request — so an operation touching more than
+  // the bound failed outright rather than being split. Chunks are posted in order, one at a time,
+  // so a mass re-list does not turn into a simultaneous fan-out of requests either.
+  const results = [];
+  for (const chunk of fileExplorerFsBatchChunks(items)) results.push(await postFileExplorerFsBatchChunk(chunk));
+  return {
+    ok: results.every(result => result.ok === true),
+    chunks: results.length,
+    ...(results.some(result => result.pending === true) ? {pending: true} : {}),
+  };
 }
 
 async function fetchDirectory(path, options = {}) {
@@ -19720,7 +20712,7 @@ function fileExplorerSyncPlanForFile(path) {
     root = normalizedHome;
   }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
-  const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
+  const expandPaths = root && targetDir !== root && pathIsInsideDirectory(targetDir, root) ? [targetDir] : [];
   return {
     session,
     root,
@@ -20266,9 +21258,9 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
-    const interactionGeneration = fileExplorerInteractionGeneration;
+    const interactionGeneration = fileWorkspaceState.interactionGeneration();
     requestAnimationFrame(() => {
-      if (interactionGeneration !== fileExplorerInteractionGeneration) return;
+      if (!fileWorkspaceState.interactionIsCurrent(interactionGeneration)) return;
       const syncPromise = fileSyncPath
         ? syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})
         : syncFileExplorerRootToActiveTmux(syncItem, {force: explicit});
@@ -20290,8 +21282,7 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
 }
 
 function cancelPendingFileExplorerActiveSync(options = {}) {
-  fileExplorerInteractionGeneration += 1;
-  if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
+  fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
   fileExplorerSyncState.generation += 1;
   fileExplorerSyncState.inFlightSignature = '';
   resetFileExplorerAppliedSyncPlan();
@@ -20309,7 +21300,7 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
-  forgetFileExplorerSyncManualCollapse(path);
+  forgetFileExplorerSyncManualCollapse(dirnameOf(path));
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
@@ -20987,7 +21978,16 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   }
   const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
   const direction = mode === 'za' ? -1 : 1;
+  // Differ only. A deleted file is a real diff result and stays a visible child, but a run of them
+  // interleaved with live edits is what a reader has to skip past to find the file they can still
+  // open. Ranking deletion ahead of every other key groups deleted children at the bottom of each
+  // directory. Directories are not ranked: they carry no `deleted` flag and keep their existing
+  // dirs-before-files order. Finder listings carry no `deleted` either, so passing this option
+  // there is a no-op rather than a second ordering rule.
+  const deletedRank = entry => options.deletedLast === true && entry?.deleted === true ? 1 : 0;
   return visible.sort((left, right) => {
+    const deletedResult = deletedRank(left) - deletedRank(right);
+    if (deletedResult !== 0) return deletedResult;
     const leftKind = left.kind === 'dir' ? 0 : 1;
     const rightKind = right.kind === 'dir' ? 0 : 1;
     if (leftKind !== rightKind) return leftKind - rightKind;
@@ -21369,42 +22369,6 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   };
 }
 
-function applyFileTreeRowDataset(row, state) {
-  const {entry, fullPath} = state;
-  syncFileTreeRowKindClass(row, entry.kind);
-  row.classList.toggle('compact', state.compact);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
-  setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
-  setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
-  setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
-  setRowDataset(row, 'indexExcluded', state.indexExcludedEntry ? 'true' : 'false');
-  setRowDataset(row, 'tabberType', '');
-  setRowDataset(row, 'tabberSession', '');
-  setRowDataset(row, 'tabberWindow', '');
-  setRowDataset(row, 'tabberRepoRoot', '');
-  setRowDataset(row, 'tabberItem', '');
-  setRowDataset(row, 'tabberBranch', '');
-  if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
-  setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
-  row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle(CLS.selected, state.selected);
-  row.classList.toggle('expanded', state.expanded);
-  row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
-  row.classList.toggle('loading-children', state.pendingExpansion);
-  row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('indexed-directory', state.indexedDirectory);
-  row.classList.toggle('index-excluded-entry', state.indexExcludedEntry);
-  row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
-  applySessionHighlightRowClass(row, state.sessionHighlightClass);
-  // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
-  // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
-  row.classList.toggle('is-symlink', entry.is_symlink === true);
-  row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-}
-
 function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && (entry.is_repo === true || Boolean(row.dataset.syncTargetTitle))) {
@@ -21512,23 +22476,111 @@ function bindFinderRowHandlers(row, state) {
   };
 }
 
-function bindDifferRowData(row, state) {
-  const {entry, fullPath, differMode, changedFile, changedFileStatus} = state;
-  // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
-  setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
-  setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
-  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? changedFileStatus : '');
-  setRowDataset(row, 'changeRel', changedFile?.abs_path ? (changedFile.path || '') : '');
-  setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
-  setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
-  if (differMode && entry.kind === 'dir') {
-    setRowDataset(row, 'changesFolderToggle', fullPath);
-    setRowDataset(row, 'openChangeDirectory', fullPath);
-    setRowDataset(row, 'changeRel', state.relDir);
-  } else if (!differMode) {
-    setRowDataset(row, 'changesFolderToggle', '');
-    setRowDataset(row, 'openChangeDirectory', '');
-  }
+function TreeRowViewModel(options = {}) {
+  return Object.freeze({
+    path: String(options.path || ''),
+    kind: String(options.kind || ''),
+    name: String(options.name || ''),
+    paddingLeft: String(options.paddingLeft || ''),
+    dataset: Object.freeze({...options.dataset}),
+    classes: Object.freeze({...options.classes}),
+    selected: options.selected === true,
+    expandable: options.expandable === true,
+    expanded: options.expanded === true,
+    current: options.current === true,
+    draggable: options.draggable === true,
+    icon: String(options.icon || ''),
+    label: String(options.label || ''),
+    content: Object.freeze({...options.content}),
+    gitClass: String(options.gitClass || ''),
+    sessionHighlightClass: String(options.sessionHighlightClass || ''),
+    recencyEntry: options.recencyEntry || null,
+    recencyOptions: Object.freeze({...options.recencyOptions}),
+  });
+}
+
+const TREE_ROW_MANAGED_CLASSES = Object.freeze([
+  'compact', CLS.selected, 'expanded', CLS.collapsed, 'loading-children', 'is-repo',
+  'indexed-directory', 'index-excluded-entry', 'indexed-descendant-directory', 'is-symlink',
+  'symlink-broken', 'new-entry', 'current-file', 'current-directory', 'repo-non-main',
+  'file-tree-row--changed-ancestor', 'tabber-row', 'tabber-active-window',
+  'tabber-active-session', 'tabber-status-long',
+]);
+
+function patchTreeRow(row, model) {
+  syncFileTreeRowKindClass(row, model.kind);
+  for (const [key, value] of Object.entries(model.dataset)) setRowDataset(row, key, value);
+  if (row.style.paddingLeft !== model.paddingLeft) row.style.paddingLeft = model.paddingLeft;
+  setTreeItemAria(row, {selected: model.selected, expandable: model.expandable, expanded: model.expanded});
+  row.draggable = model.draggable;
+  for (const className of TREE_ROW_MANAGED_CLASSES) row.classList.toggle(className, model.classes[className] === true);
+  if (model.current) row.setAttribute('aria-current', 'true');
+  else row.removeAttribute('aria-current');
+  applyGitStatusRowClass(row, model.gitClass);
+  applySessionHighlightRowClass(row, model.sessionHighlightClass);
+  updateFileTreeRowContents(row, model.icon, model.label, model.content);
+  if (model.recencyEntry) applyFileTreeRowRecency(row, model.recencyEntry, model.recencyOptions);
+  return row;
+}
+
+function fileTreeRowViewModel(state) {
+  const {entry, fullPath, derivedState} = state;
+  const differData = state.differMode && entry.kind === 'dir'
+    ? {changesFolderToggle: fullPath, openChangeDirectory: fullPath, changeRel: state.relDir}
+    : {changesFolderToggle: '', openChangeDirectory: '', changeRel: derivedState.changedFile?.abs_path ? (derivedState.changedFile.path || '') : ''};
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: state.paddingLeft,
+    selected: state.selected,
+    expandable: entry.kind === 'dir',
+    expanded: state.expanded,
+    current: state.currentFile || state.currentDirectoryRow,
+    draggable: entry.kind === 'file' || entry.kind === 'dir',
+    icon: derivedState.icon,
+    label: derivedState.displayName.text,
+    content: derivedState.contentOptions,
+    gitClass: derivedState.gitClass,
+    sessionHighlightClass: state.sessionHighlightClass,
+    recencyEntry: entry,
+    recencyOptions: {...state.options, differMode: state.differMode},
+    dataset: {
+      path: fullPath,
+      kind: entry.kind,
+      name: entry.name,
+      isRepo: entry.is_repo === true ? 'true' : 'false',
+      isSymlink: entry.is_symlink === true ? 'true' : 'false',
+      symlinkTarget: entry.symlink_target || '',
+      indexed: state.indexedDirectory ? 'true' : 'false',
+      indexExcluded: state.indexExcludedEntry ? 'true' : 'false',
+      tabberType: '', tabberSession: '', tabberWindow: '', tabberRepoRoot: '', tabberItem: '', tabberBranch: '',
+      openChangeFile: derivedState.changedFile?.abs_path || '',
+      openChangeSession: derivedState.changedFile?.abs_path ? (derivedState.changedFile.session || '') : '',
+      openChangeStatus: derivedState.changedFile?.abs_path ? derivedState.changedFileStatus : '',
+      openChangeRepo: derivedState.changedFile?.abs_path ? (derivedState.changedFile.repo || '') : '',
+      changeSize: derivedState.changedFile?.abs_path && derivedState.changedFile.size !== null && derivedState.changedFile.size !== undefined ? derivedState.changedFile.size : '',
+      ...differData,
+    },
+    classes: {
+      compact: state.compact,
+      [CLS.selected]: state.selected,
+      expanded: state.expanded,
+      [CLS.collapsed]: entry.kind === 'dir' && !state.expanded,
+      'loading-children': state.pendingExpansion,
+      'is-repo': entry.kind === 'dir' && entry.is_repo === true,
+      'indexed-directory': state.indexedDirectory,
+      'index-excluded-entry': state.indexExcludedEntry,
+      'indexed-descendant-directory': state.indexedDescendantDirectory,
+      'is-symlink': entry.is_symlink === true,
+      'symlink-broken': entry.kind === 'symlink-broken',
+      'new-entry': state.newEntry,
+      'current-file': state.currentFile,
+      'current-directory': state.currentDirectoryRow,
+      'repo-non-main': derivedState.repoNonMain === true,
+      'file-tree-row--changed-ancestor': Boolean(derivedState.changedAncestor?.count),
+    },
+  });
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -21538,11 +22590,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
   if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
-  applyFileTreeRowDataset(row, rowState);
-  applyFileTreeRowDerivedState(row, rowState.derivedState);
+  patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
-  bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
@@ -21561,7 +22610,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   };
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
-  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder});
+  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {
@@ -22198,7 +23247,7 @@ function fileExplorerIndexBadgeText(path) {
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
-  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed')));
+  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : (status === 'stale' ? t('finder.index.staleBadge') : t('finder.index.indexed'))));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
@@ -22211,7 +23260,72 @@ function fileExplorerIndexBadgeTitle(path) {
   const status = fileExplorerIndexStatus.get(normalized);
   if (status === 'too_large') return t('finder.index.partial');
   if (status === 'error') return t('common.errorDetail', {error: ''});
+  if (status === 'stale') return t('finder.index.staleTitle');
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
+}
+
+// The ONE file-index freshness derivation for every surface. `/api/fs/search` and
+// `/api/fs/index-status` both spread `SnapshotFreshness.payload_fields()`
+// (yolomux_lib/search/file_index.py), so the Finder index badge and Quick Open read this record and
+// nothing else. A second copy of this judgement is exactly how the live incident shipped: a snapshot
+// whose producer was dead degraded to "building" and the user was told nothing at all.
+const FILE_INDEX_STALE_FRESHNESS_STATES = ['stale', 'orphaned'];
+
+function fileIndexFreshnessFromPayload(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const state = String(source.freshness || '');
+  const rawAge = Number(source.snapshot_age_seconds);
+  return {
+    state,
+    reason: String(source.freshness_reason || ''),
+    producerState: String(source.producer_state || ''),
+    ageSeconds: Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null,
+    // `stale`, `freshness`, `index_state` and `index_coverage` are four projections of ONE backend
+    // verdict. Read them together here so no caller can re-derive a friendlier answer from one of
+    // them; `missing` is deliberately not stale, because nothing was served to mislabel.
+    stale: source.stale === true
+      || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
+      || String(source.index_state || '') === 'follower-stale'
+      || String(source.index_coverage || '') === 'unverified',
+    refreshingElsewhere: source.refreshing_elsewhere === true,
+  };
+}
+
+// Words a non-engineer can act on, never a raw field dump. Rendered (not derived) so a locale change
+// re-renders the same record in the new language.
+function fileIndexFreshnessMessage(freshness) {
+  if (!freshness || freshness.stale !== true) return '';
+  const lines = [freshness.ageSeconds === null
+    ? t('finder.index.staleResultsUnknownAge')
+    : t('finder.index.staleResults', {age: relativeTimeFormat(freshness.ageSeconds)})];
+  if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
+  else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
+  else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
+  if (freshness.refreshingElsewhere) lines.push(t('finder.index.staleRefreshRunning'));
+  return lines.join(' ');
+}
+
+// A live progressive BFS crawl publishes usable rows while it keeps walking. Its authoritative live
+// state is `progressive_coverage`, not the top-level `coverage`/`too_large` fields, which can still
+// carry a superseded generation's terminal verdict. While the crawl is actively walking and has
+// neither been truncated nor reached full coverage, the root is BUILDING (partial-but-growing), not
+// the terminal "file limit reached" state — so results keep flowing and no capped-index warning fires.
+function fileIndexProgressiveCoverage(payload) {
+  const coverage = payload && typeof payload.progressive_coverage === 'object' ? payload.progressive_coverage : null;
+  return coverage;
+}
+
+function fileIndexProgressiveStillBuilding(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  return Boolean(coverage && coverage.truncated === false && coverage.full_coverage === false);
+}
+
+function fileIndexPublishedGeneration(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  const published = coverage ? Number(coverage.published_generation) : NaN;
+  if (Number.isFinite(published) && published > 0) return published;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  return Number.isFinite(generation) && generation > 0 ? generation : 0;
 }
 
 // Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
@@ -22219,8 +23333,16 @@ function fileExplorerIndexBadgeTitle(path) {
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
+  const freshness = fileIndexFreshnessFromPayload(payload);
+  // A live progressive crawl that has not been truncated and has not reached full coverage is still
+  // building: it is not the terminal capped state, even if an older persisted snapshot for this root
+  // was truncated. This must be read before the too_large/partial derivation below so an in-progress
+  // BFS is never mislabelled "file limit reached".
+  if (fileIndexProgressiveStillBuilding(payload)) return 'building';
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (state === 'error' || payload.error) return 'error';
+  // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
+  if (freshness.stale) return 'stale';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
 }
@@ -22242,7 +23364,10 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
   fileIndexPartialWarningRoots.add(normalized);
-  const count = Math.max(0, Number(payload.count) || 0);
+  // Report the live indexed count, not a stale 0 from a superseded snapshot: prefer the progressive
+  // crawl's entry_count when present, then the top-level count.
+  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
+  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
   const limit = Math.max(0, Number(payload.max_files) || count);
   emitNotification('indexCoverage', {
     key: normalized,
@@ -22265,11 +23390,24 @@ function applyFileIndexStatusPayload(root, payload) {
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
-  else if (status === 'ready') fileIndexPartialWarningRoots.delete(normalized);
+  // Any non-capped status clears a prior "file limit reached" warning: a superseded truncated
+  // generation must not keep a stale banner (with its stale count) on screen once the live crawl is
+  // partial-but-growing, ready, or stale again.
+  else fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
+  // Track the progressive published generation so newly-published BFS rows re-surface in an open
+  // Quick Open palette without a retype (below), independently of the top-level lifecycle generation.
+  const publishedGeneration = fileIndexPublishedGeneration(payload);
+  const previousPublished = Number(fileExplorerIndexPublishedGeneration.get(normalized) || 0);
+  if (publishedGeneration > previousPublished) fileExplorerIndexPublishedGeneration.set(normalized, publishedGeneration);
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  // An open Quick Open palette no longer re-issues the WHOLE query on every index-status poll or
+  // published-generation tick: the server-pushed search_progress signal now streams the newly-committed
+  // matches by cursor (steps 6-8), so the redundant full re-query per tick is retired here. The one
+  // explicit full-snapshot repair remains for the cases a cursor cannot bridge (rebase_required, a root
+  // with no committed baseline yet, or an authoritative background-refresh completion).
   return true;
 }
 
@@ -22311,7 +23449,9 @@ function syncFileIndexStatusPollInterval() {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (['ready', 'too_large'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
+  // `stale` is a settled answer, not progress: polling it per rendered row cannot revive a dead
+  // producer, it only spams the endpoint.
+  if (['ready', 'too_large', 'stale'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 
@@ -23224,49 +24364,14 @@ function bindTabberRowDragSource(row) {
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
-function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
   const expandable = entry.kind === 'dir';
   const collapsedSet = options.collapsedSet instanceof Set ? options.collapsedSet : fileExplorerTabberCollapsed;
   const expanded = expandable && !collapsedSet.has(fullPath);
-  syncFileTreeRowKindClass(row, entry.kind);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'tabberType', data.type || '');
-  setRowDataset(row, 'tabberSession', data.session || '');
-  setRowDataset(row, 'tabberWindow', data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '');
-  setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
-  setRowDataset(row, 'tabberItem', data.item || '');
-  setRowDataset(row, 'tabberBranch', data.branchText || '');
-  setRowDataset(row, 'paneTab', tabberRowDragItem(row));
-  setRowDataset(row, 'openChangeFile', '');
-  setRowDataset(row, 'openChangeSession', '');
-  setRowDataset(row, 'openChangeStatus', '');
-  setRowDataset(row, 'openChangeRepo', '');
-  setRowDataset(row, 'openChangeDirectory', '');
-  setRowDataset(row, 'changesFolderToggle', '');
-  setRowDataset(row, 'changeRel', '');
-  setRowDataset(row, 'changeSize', '');
-  const paddingLeft = fileTreeRowPadding(depth);
-  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
-  setTreeItemAria(row, {selected, expandable, expanded});
-  row.draggable = tabberRowIsTabDragSource(row);
-  row.classList.toggle(CLS.selected, selected);
-  row.classList.toggle('expanded', expanded);
-  row.classList.toggle(CLS.collapsed, expandable && !expanded);
-  row.classList.add('tabber-row');
-  row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
-  row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
   const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
-  row.classList.toggle('tabber-status-long', data.type === 'window'
-    && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)));
-  row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
-  row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
-  if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
-  else row.removeAttribute('aria-current');
   const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
@@ -23291,16 +24396,57 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
-  updateFileTreeRowContents(row, icon, label, {
-    iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
-    disclosureExpanded: expandable ? expanded : undefined,
-    nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
-    dateHtml: data.dateHtml || '',
+  const paneTab = data.type === 'session' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: fileTreeRowPadding(depth),
+    selected,
+    expandable,
+    expanded,
+    current: current || (data.type === 'session' && data.active === true),
+    draggable: Boolean(paneTab && isLayoutItem(paneTab) && !isFileExplorerItem(paneTab)),
+    icon,
+    label,
+    content: {
+      iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
+      disclosureExpanded: expandable ? expanded : undefined,
+      nameHtml,
+      dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
+      dateHtml: data.dateHtml || '',
+    },
+    recencyEntry: entry,
+    recencyOptions: options,
+    dataset: {
+      path: fullPath, kind: entry.kind, name: entry.name,
+      isRepo: '', isSymlink: '', symlinkTarget: '', indexed: '', indexExcluded: '',
+      tabberType: data.type || '', tabberSession: data.session || '',
+      tabberWindow: data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '',
+      tabberRepoRoot: data.repoRoot || '', tabberItem: data.item || '', tabberBranch: data.branchText || '', paneTab,
+      openChangeFile: '', openChangeSession: '', openChangeStatus: '', openChangeRepo: '',
+      openChangeDirectory: '', changesFolderToggle: '', changeRel: '', changeSize: '',
+    },
+    classes: {
+      [CLS.selected]: selected,
+      expanded,
+      [CLS.collapsed]: expandable && !expanded,
+      'tabber-row': true,
+      'tabber-active-window': data.type === 'window' && data.active === true,
+      'tabber-active-session': data.type === 'session' && data.active === true,
+      'tabber-status-long': data.type === 'window' && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)),
+      'current-file': current && entry.kind !== 'dir',
+      'current-directory': current && entry.kind === 'dir',
+    },
   });
+}
+
+function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+  const data = entry.tabber || {};
+  const model = tabberTreeRowViewModel(row, fullPath, entry, depth, options);
+  patchTreeRow(row, model);
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
-  applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;
@@ -25383,6 +26529,9 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
+  // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
+  if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
@@ -25565,22 +26714,24 @@ async function refreshOpenFileGitMetadata(path) {
   }
 }
 
-async function fetchFilesystemOperationPayload(url, operation) {
+async function fetchFilesystemOperationPayload(url, operation, options = {}) {
   try {
-    return await apiFetchJson(url);
+    return await apiFetchJson(url, {}, {quietStatuses: options.quietStatuses});
   } catch (error) {
     if (!isApiPendingResponse(error)) throw error;
     return waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation,
+      quietStatuses: options.quietStatuses,
     });
   }
 }
 
-async function fetchFileReadPayload(path) {
+async function fetchFileReadPayload(path, options = {}) {
   return fetchFilesystemOperationPayload(
     `/api/fs/read?path=${encodeURIComponent(path)}`,
     'read',
+    options,
   );
 }
 
@@ -25686,6 +26837,17 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
 }
 
+function textFileStateFromReadPayload(payload) {
+  return applyFileGitMetadata({
+    mtime: filePayloadMtime(payload),
+    size: payload.size,
+    kind: 'text',
+    original: payload.content,
+    content: payload.content,
+    dirty: false,
+  }, payload);
+}
+
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
@@ -25714,14 +26876,7 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   try {
     const payload = await fetchFileReadPayload(path);
-    return {state: applyFileGitMetadata({
-      mtime: filePayloadMtime(payload),
-      size: payload.size,
-      kind: 'text',
-      original: payload.content,
-      content: payload.content,
-      dirty: false,
-    }, payload)};
+    return {state: textFileStateFromReadPayload(payload)};
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
@@ -25762,6 +26917,80 @@ function markOpenFileMissing(path) {
   if (retainLoadedDiff) void refreshOpenFileDiff(path, {silent: true});
 }
 
+// Per-path content generation. Bumped whenever a VALID (loaded, non-error) editor payload is applied
+// for a path -- the open lane (openFilesSetAndShow), a disk reload (loadOpenFileStateFromDisk), or the
+// render-driven load (loadFileEditorState in 92_codemirror_editor.js). Every non-authoritative "missing"
+// producer captures this generation before its authoritative probe and re-checks it before marking an
+// open editor missing, so a stale/late verdict cannot overwrite a newer valid render
+// (last-writer-by-generation wins). This is the ONE fence shared by all four producers -- the two text
+// reload lanes, the media load lane, and the command-palette tab validator.
+const openFileContentGeneration = new Map();
+
+function bumpOpenFileContentGeneration(path) {
+  openFileContentGeneration.set(path, (openFileContentGeneration.get(path) || 0) + 1);
+}
+
+function openFileContentGenerationIsCurrent(path, generation) {
+  return (openFileContentGeneration.get(path) || 0) === generation;
+}
+
+// The ONE shared guard for the TEXT "open editor is missing" verdict. A directory-listing OMISSION or
+// tombstone is never proof an already-open file is gone: a stale or racing /api/fs/list can drop an
+// entry whose exact-path /api/fs/read still returns its bytes, and letting that omission mark the editor
+// missing clobbers loaded content and flops it to "(missing on disk)" (0.7.3 P0). Both text reload lanes
+// -- the explicit/background reload (loadOpenFileStateFromDisk) and the ~1/sec visible-tab poll
+// (refreshOpenFileFromFetchedStatus) -- route their omission-driven "missing" verdict through here.
+// ONLY an authoritative exact-path /api/fs/read 404 (genuine deletion) may mark an open editor missing,
+// and that 404 is fenced against newer per-path state: if a newer valid render landed while the read
+// was in flight, the stale 404 is dropped. Returns:
+//   {missing:true}  -- authoritative 404, still current: caller marks the editor missing
+//   {state}         -- exact read returned bytes: caller may apply it as recovered content
+//   null            -- inconclusive (non-404 error) or superseded by a newer render: keep loaded content
+async function resolveOpenFileMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let payload = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet so
+    // the strict browser error gate does not flag an expected-outcome probe.
+    payload = await fetchFileReadPayload(path, {quietStatuses: [404]});
+  } catch (error) {
+    const status = Number(error?.status) || 0;
+    if (status !== 404) return null;                                            // not proof of absence
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    return {missing: true};
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;   // newer render won
+  if (openFileKindForPreviewPath(basenameOf(path)) !== 'text') return null;     // non-text: keep content
+  return {state: textFileStateFromReadPayload(payload)};
+}
+
+// Media sibling of resolveOpenFileMissingVerdict, sharing the same fence and rule but a media-appropriate
+// authoritative probe. Image/media editors are never read byte-for-byte to prove existence, so the
+// authoritative exact-path check is /api/fs/info (a single-path stat), not a directory listing. A
+// directory omission never marks a media editor missing; only an authoritative exact-path 404 (or the
+// path no longer being a file) does, and only if no newer render landed while the probe was in flight.
+// Returns:
+//   {missing:true}  -- authoritative 404 / non-file, still current: caller marks missing
+//   {state}         -- present: caller applies the rebuilt media/image/raw state
+//   {error}         -- inconclusive probe (non-404 network/error): caller shows an error, not "missing"
+//   null            -- superseded by a newer render: keep the newer content
+async function resolveOpenMediaMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let info = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet.
+    info = await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`, {}, {quietStatuses: [404]});
+  } catch (error) {
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    if (Number(error?.status) === 404) return {missing: true};                  // authoritative absence
+    return {error};                                                             // inconclusive
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;    // newer render won
+  if (String(info?.kind || '') !== 'file') return {missing: true};              // path is not a file anymore
+  const built = await openFileStateFromDisk(path, info);                        // rebuild media/image/raw
+  return built.missing ? {missing: true} : built;
+}
+
 async function recoverOpenFileAfterMissing(path, entry = null) {
   const state = fileState.get(path);
   if (!state?.externalMissing) return false;
@@ -25786,7 +27015,39 @@ function markOpenFileExternalError(path, error) {
   renderOpenFilePath(path);
 }
 
+// One in-flight disk reload per open file. Every reload funnels through
+// replaceOpenFileStateFromDisk() -- the explicit reloadOpenFileFromDisk(), the files_changed push
+// refresh, and the visible-tab poll -- so this is the single place where two requests for one file
+// can collapse into one /api/fs/read.
+//
+// The duplicate was always there; it was hidden by accident. Before filesystem reads had their own
+// jobd lane, a read could not be dispatched while the explicit reload's directory batch held the
+// single shared interactive worker, so the explicit reload's read always went first and the push
+// refresh found nothing left to do. Once reads got a reserved lane the two ran concurrently and the
+// same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
+const openFileReloadFlights = new Map();
+
 async function replaceOpenFileStateFromDisk(path, entry = null) {
+  const flight = openFileReloadFlights.get(path);
+  if (flight) {
+    const joined = await flight;
+    // Only an entry-bearing caller knows which content it was told to fetch. If the shared reload
+    // did not reach that content, fall through and run exactly one more -- never assume the read
+    // somebody else started was new enough. An entry-less explicit reload has no such reference
+    // point and accepts the shared result, which is the same race any single read already has.
+    if (!entry || !fileEntryChanged(fileState.get(path), entry)) return joined;
+  }
+  const started = loadOpenFileStateFromDisk(path, entry);
+  openFileReloadFlights.set(path, started);
+  try {
+    return await started;
+  } finally {
+    // Only retire our own flight; a joiner that fell through has already replaced it.
+    if (openFileReloadFlights.get(path) === started) openFileReloadFlights.delete(path);
+  }
+}
+
+async function loadOpenFileStateFromDisk(path, entry = null) {
   const previous = fileState.get(path);
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);
@@ -25795,11 +27056,19 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
-    markOpenFileMissing(path);
-    return false;
+    // A directory-listing omission is not proof of absence -- confirm through the shared guard, which
+    // only reports missing on an authoritative exact-path 404 and fences it against a newer render.
+    const verdict = await resolveOpenFileMissingVerdict(path);
+    if (!verdict) return false;                        // inconclusive/superseded: keep editor content
+    if (verdict.missing) {
+      markOpenFileMissing(path);
+      return false;
+    }
+    loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
+  bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
@@ -25861,8 +27130,14 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   if (!entry) {
     if (fetched.missing) {
       if (state.externalMissing) return;
-      clearFileAutosaveTimer(path);
-      markOpenFileMissing(path);
+      // Same shared guard as the explicit reload lane: a directory omission alone must not mark an open
+      // editor missing; only an authoritative exact-path 404 (fenced against a newer render) does.
+      const verdict = await resolveOpenFileMissingVerdict(path);
+      if (verdict && verdict.missing) {
+        clearFileAutosaveTimer(path);
+        markOpenFileMissing(path);
+      }
+      // verdict null (inconclusive/superseded) or {state} (file present) -> keep the loaded editor content.
     } else {
       markOpenFileExternalError(path, fetched.error);
     }
@@ -26279,6 +27554,7 @@ function codeMirrorApiIsUsable(api) {
     && api?.highlightActiveLine
     && api?.search
     && api?.openSearchPanel
+    && api?.LanguageSupport
   );
 }
 
@@ -26327,8 +27603,10 @@ async function loadCodeMirrorApi() {
 }
 
 function codeMirrorMarkdownCodeLanguages(api) {
-  if (!api?.LanguageDescription) return null;
-  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
+  if (!api?.LanguageDescription || !api?.LanguageSupport) return null;
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (
+    mode && api.StreamLanguage ? new api.LanguageSupport(api.StreamLanguage.define(mode)) : null
+  ));
   const languageEntries = [
     {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
     {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},
@@ -32361,7 +33639,7 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
     : splitNode(direction, newNode, root, splitPct));
-  const pointerReleaseMutation = dockviewLayoutActive() && pendingLayoutMutationGeneration > 0;
+  const pointerReleaseMutation = dockviewLayoutActive() && runtimeState.layoutMutationSnapshot().pending > 0;
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
@@ -33524,7 +34802,7 @@ function replaceSessionMetadata(oldSession, newSession) {
   }
 }
 
-function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
+function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
   clearPendingTmuxSession(oldSession);
   markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
@@ -33535,7 +34813,11 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {
+    focusSession: newSession,
+    prune: false,
+    completionGeneration: options.completionGeneration,
+  });
   renderUploadResult(newSession);
 }
 
@@ -33637,8 +34919,12 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
-        replaceTmuxSessionInClient(session, renamed, payload.sessions);
-        await ensureTerminalRunning(renamed);
+        const layoutGeneration = beginLayoutMutationCompletion();
+        replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
+        await Promise.all([
+          waitForLayoutMutationCompletion(layoutGeneration),
+          ensureTerminalRunning(renamed),
+        ]);
       },
     );
     if (!mutation.committed) return false;
@@ -34918,6 +36204,15 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
     pruneDeadSession(session);
     return;
   }
+  // A share-scoped viewer cannot confirm liveness against the host roster: /api/tmux-session-exists
+  // is host-only (share_access=none) and the server forbids it for a share token. Reconnect the
+  // share-view socket directly -- the same outcome as an unknown (null) roster answer -- instead of
+  // issuing a request the scope forbids. Gated on the shared scope owner every host-only producer uses.
+  if (!clientCanUseUnscopedHostRequests()) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    scheduleTerminalReconnect(session, item, lifecycleToken);
+    return;
+  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).
@@ -35509,6 +36804,7 @@ const dockviewLayoutState = {
   applyingFromLayout: false,
   adoptingFromDockview: false,
   syncQueued: false,
+  syncQueuedLayoutSignature: '',
   hostLayoutFrame: 0,
   pendingLoadFrame: 0,
   pendingCompletionFrame: 0,
@@ -37177,16 +38473,34 @@ function queueDockviewLayoutAdoption() {
   if (dockviewLayoutState.applyingFromLayout || dockviewLayoutState.adoptingFromDockview) return;
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
+  dockviewLayoutState.syncQueuedLayoutSignature = layoutSlotsExactSignature(layoutSlots);
   queueMicrotask(adoptDockviewLayout);
 }
 
 function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
+  const queuedLayoutSignature = dockviewLayoutState.syncQueuedLayoutSignature;
+  dockviewLayoutState.syncQueuedLayoutSignature = '';
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
   if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
+  if (queuedLayoutSignature && queuedLayoutSignature !== layoutSlotsExactSignature(layoutSlots)) {
+    // A server/app mutation won while this vendor callback was queued. Reassert that newer layout;
+    // adopting the stale Dockview snapshot would make a renamed or newly created tab inactive.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   let next = layoutSlotsFromDockviewJson(api.toJSON());
+  const missingPendingSessions = pendingTmuxSessionNames()
+    .filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
+  if (missingPendingSessions.length) {
+    // A Dockview callback may observe an intermediate vendor snapshot after the app has already
+    // committed a rename/create. Reassert the exact app layout instead of inventing placement for
+    // the omitted pending terminal; stable user-owned removals still adopt normally.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   const missingSurfaces = layoutFileSurfaceItems().filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
   if (missingSurfaces.length) {
     next = layoutWithSidePaneItems(next, missingSurfaces, {side: paneSideLeft});
@@ -37195,8 +38509,10 @@ function adoptDockviewLayout() {
   if (!layoutHasRestorableContent(next)) return;
   const nextSignature = layoutSlotsSignature(next);
   if (nextSignature === layoutSlotsSignature(layoutSlots)) {
+    // fromJSON creates tab renderers while applyingFromLayout is true, so their first render
+    // deliberately leaves the shell empty. The queued adoption is the first callback after that
+    // guard clears: populate tab chrome here without repeating mounted-panel reconciliation.
     dockviewRefreshTabs();
-    dockviewSyncMountedPanels();
     return;
   }
   dockviewLayoutState.lastAppliedLayoutSignature = nextSignature;
@@ -37404,13 +38720,11 @@ function dockviewSlotForGroupId(groupId, usedSlots = new Set()) {
 
 function dockviewEnsureMountedTerminal(item, panel) {
   if (!isTmuxSession(item)) return;
-  queueMicrotask(() => {
-    if (!panel?.isConnected || !itemInLayout(item)) return;
-    const slot = slotForItem(item);
-    if (slot && activeItemForSide(slot) !== item) return;
-    if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
-    if (typeof scheduleFit === 'function') scheduleFit(item);
-  });
+  if (!panel?.isConnected || !itemInLayout(item)) return;
+  const slot = slotForItem(item);
+  if (slot && activeItemForSide(slot) !== item) return;
+  if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
+  if (typeof scheduleFit === 'function') scheduleFit(item);
 }
 
 function createDockviewPanelRenderer() {
@@ -37428,10 +38742,10 @@ function createDockviewPanelRenderer() {
     }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
-    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
-    updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
+    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
+    updatePanelSlot(panel, item, slot);
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
     dockviewEnsureMountedTerminal(item, panel);
@@ -37451,10 +38765,8 @@ function createDockviewPanelRenderer() {
     onHide: pool,
     dispose: pool,
     layout: () => {
-      if (isTmuxSession(item)) {
-        dockviewEnsureMountedTerminal(item, panel);
-        scheduleFit(item);
-      }
+      if (dockviewLayoutState.applyingFromLayout || !isTmuxSession(item)) return;
+      dockviewEnsureMountedTerminal(item, panel);
     },
   };
 }
@@ -37953,6 +39265,16 @@ function toolbarButtonHtml(options = {}) {
   return domBuilderElementHtml(createToolbarButton(options));
 }
 
+function panelDetailCloseButtonHtml(item) {
+  const label = t('pane.details.hide');
+  return toolbarButtonHtml({
+    className: 'panel-detail-close',
+    dataset: {detailToggle: item},
+    title: label,
+    ariaLabel: label,
+  });
+}
+
 function actionRowHtml(options = {}) {
   return domBuilderElementHtml(createActionRow(options));
 }
@@ -37962,7 +39284,9 @@ function segmentedControlHtml(options = {}) {
 }
 
 function bindActionDispatcher(parent, handlers = {}, options = {}) {
-  return delegate(parent, options.type || 'click', options.selector || '[data-action]', async (event, target) => {
+  const type = options.type || 'click';
+  const listenerOptions = options.listenerOptions || {};
+  const listener = delegate(parent, type, options.selector || '[data-action]', async (event, target) => {
     const action = target?.dataset?.action || '';
     const handler = handlers[action];
     if (!handler || options.ignore?.(event, target) === true) return;
@@ -37970,7 +39294,8 @@ function bindActionDispatcher(parent, handlers = {}, options = {}) {
     if (options.stopPropagation !== false) event.stopPropagation();
     if (options.skipDisabled !== false && (target.disabled || target.hidden)) return;
     await handler(event, target, action);
-  }, options.listenerOptions || {});
+  }, listenerOptions);
+  return listener ? () => parent.removeEventListener(type, listener, listenerOptions) : null;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -38655,6 +39980,17 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
   ${afterBodyHtml}`;
 }
 
+function createFramedPanel({item, className = 'panel', dataset = {}, frame = {}, bind = null} = {}) {
+  const panel = document.createElement('article');
+  panel.className = className;
+  panel.id = panelDomId(item);
+  for (const [key, value] of Object.entries(dataset)) panel.dataset[key] = String(value ?? '');
+  panel.innerHTML = panelFrameHtml({item, ...frame});
+  bindPanelShell(panel, item);
+  if (typeof bind === 'function') bind(panel, item);
+  return panel;
+}
+
 function paneTabDragSourceItem(itemOrGetter, event) {
   return typeof itemOrGetter === 'function' ? String(itemOrGetter(event) || '') : String(itemOrGetter || '');
 }
@@ -38665,25 +40001,32 @@ function paneTabDragSourceSlot(item, sourceSlotOrGetter, event) {
 }
 
 function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = null, options = {}) {
-  if (!tab || tab.__yolomuxPaneTabNativeDragBound) return;
-  tab.__yolomuxPaneTabNativeDragBound = true;
-  tab.draggable = true;
-  tab.addEventListener('dragstart', event => {
-    if (options.ignore?.(event) === true) {
-      event.preventDefault?.();
-      return;
-    }
-    const item = paneTabDragSourceItem(itemOrGetter, event);
-    if (!isLayoutItem(item)) {
-      event.preventDefault?.();
-      return;
-    }
-    event.stopPropagation();
-    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
-      dragImage: options.dragImage,
-    });
+  if (!tab) return;
+  bindOnce(tab, 'pane-tab-native-drag', () => {
+    tab.draggable = true;
+    const dragstart = event => {
+      if (options.ignore?.(event) === true) {
+        event.preventDefault?.();
+        return;
+      }
+      const item = paneTabDragSourceItem(itemOrGetter, event);
+      if (!isLayoutItem(item)) {
+        event.preventDefault?.();
+        return;
+      }
+      event.stopPropagation();
+      startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
+        dragImage: options.dragImage,
+      });
+    };
+    tab.addEventListener('dragstart', dragstart);
+    tab.addEventListener('dragend', endSessionDrag);
+    return () => {
+      tab.draggable = false;
+      tab.removeEventListener('dragstart', dragstart);
+      tab.removeEventListener('dragend', endSessionDrag);
+    };
   });
-  tab.addEventListener('dragend', endSessionDrag);
 }
 
 function createPaneTab(side, item, displayContext = {}) {
@@ -39402,31 +40745,32 @@ function eventTargetIsTerminalFocusSurface(target) {
 }
 
 function bindPaneFrameControls(panel, session) {
-  if (!panel || panel.dataset.frameControlsBound === 'true') return;
-  panel.dataset.frameControlsBound = 'true';
-  panel.addEventListener('click', async event => {
-    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
-    if (!button || !panel.contains(button)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-    if (button.dataset.paneActions !== undefined) {
-      const rect = button.getBoundingClientRect();
-      showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
-      return;
-    }
-    if (button.dataset.paneMinimize !== undefined) {
-      minimizePaneFromLayout(button.dataset.paneMinimize || session);
-      return;
-    }
-    if (button.dataset.paneExpand !== undefined) {
-      expandPaneFromLayout(button.dataset.paneExpand || session);
-      return;
-    }
-    if (button.dataset.paneClose !== undefined) {
-      closePaneFrameItem(button.dataset.paneClose || session);
-    }
-  }, true);
+  if (!panel) return null;
+  return bindOnce(panel, 'pane-frame-controls', () => {
+    const handleClick = async event => {
+      const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
+      if (!button || !panel.contains(button)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      if (button.dataset.paneActions !== undefined) {
+        const rect = button.getBoundingClientRect();
+        showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
+        return;
+      }
+      if (button.dataset.paneMinimize !== undefined) {
+        minimizePaneFromLayout(button.dataset.paneMinimize || session);
+        return;
+      }
+      if (button.dataset.paneExpand !== undefined) {
+        expandPaneFromLayout(button.dataset.paneExpand || session);
+        return;
+      }
+      if (button.dataset.paneClose !== undefined) closePaneFrameItem(button.dataset.paneClose || session);
+    };
+    panel.addEventListener('click', handleClick, true);
+    return () => panel.removeEventListener('click', handleClick, true);
+  });
 }
 
 function bindPanelPopover(panel) {
@@ -40402,11 +41746,11 @@ function searchHistoryResultHtml(result, index) {
   const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
   const title = structuredMessageText(result, 'title') || t('common.result');
   const snippet = structuredMessageText(result, 'snippet');
-  return `<button type="button" class="search-history-result" data-search-result-index="${index}">
+  return `${toolbarButtonHtml({className: 'search-history-result', action: 'search-history-result', dataset: {searchResultIndex: index}, html: `
     <span class="search-history-row-meta">${esc(meta)}</span>
     <span class="search-history-row-title">${esc(title)}</span>
     <span class="search-history-row-snippet">${esc(snippet)}</span>
-  </button>`;
+  `})}`;
 }
 
 function searchHistoryResultsHtml() {
@@ -40423,12 +41767,12 @@ function runHistoryRowHtml(row) {
   const disabled = sessions.includes(session) ? '' : ' disabled';
   const prompt = row?.prompt ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.prompt'))}</span>${esc(row.prompt)}</div>` : '';
   const summary = row?.latest_summary ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.summary'))}</span>${esc(row.latest_summary)}</div>` : '';
-  return `<button type="button" class="search-history-run" data-run-history-session="${esc(session)}"${disabled}>
+  return `${toolbarButtonHtml({className: 'search-history-run', action: 'run-history-session', dataset: {runHistorySession: session}, disabled: Boolean(disabled), html: `
     <span class="search-history-row-title">${esc(session || t('common.unknown'))}</span>
     <span class="search-history-row-meta">${esc(meta.join(' · '))}</span>
     ${prompt}
     ${summary}
-  </button>`;
+  `})}`;
 }
 
 function runHistoryRowsHtml() {
@@ -40451,8 +41795,8 @@ function searchHistoryPanelHtml() {
   return `
     <form class="search-history-search" data-search-history-form>
       <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
-      <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
-      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
+      ${toolbarButtonHtml({type: 'submit', className: 'preferences-search-button', label: t('common.search')})}
+      ${toolbarButtonHtml({className: 'preferences-reset-all', action: 'run-history-refresh', dataset: {runHistoryRefresh: true}, label: t('common.refresh')})}
     </form>
     ${errorHtml}
     <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
@@ -40578,56 +41922,46 @@ async function openRunHistorySession(session) {
 }
 
 function bindSearchHistoryPanel(panel) {
-  if (!panel || panel.dataset.searchHistoryBound === 'true') return;
-  panel.dataset.searchHistoryBound = 'true';
-  panel.addEventListener('submit', event => {
-    const form = event.target.closest('[data-search-history-form]');
-    if (!form || !panel.contains(form)) return;
-    event.preventDefault();
-    runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
-  });
-  panel.addEventListener('click', event => {
-    const refresh = event.target.closest('[data-run-history-refresh]');
-    if (refresh && panel.contains(refresh)) {
+  if (!panel) return null;
+  return bindOnce(panel, 'search-history-panel', () => {
+    const handleSubmit = event => {
+      const form = event.target.closest('[data-search-history-form]');
+      if (!form || !panel.contains(form)) return;
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryState.query});
-      return;
-    }
-    const result = event.target.closest('[data-search-result-index]');
-    if (result && panel.contains(result)) {
-      event.preventDefault();
-      openSearchHistoryResult(result.dataset.searchResultIndex);
-      return;
-    }
-    const run = event.target.closest('[data-run-history-session]');
-    if (run && panel.contains(run)) {
-      event.preventDefault();
-      openRunHistorySession(run.dataset.runHistorySession);
-    }
+      runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
+    };
+    panel.addEventListener('submit', handleSubmit);
+    const disposeActions = bindActionDispatcher(panel, {
+      'run-history-refresh': () => loadSearchHistoryPanelData({query: searchHistoryState.query}),
+      'search-history-result': (_event, result) => openSearchHistoryResult(result.dataset.searchResultIndex),
+      'run-history-session': (_event, run) => openRunHistorySession(run.dataset.runHistorySession),
+    });
+    return () => {
+      panel.removeEventListener('submit', handleSubmit);
+      disposeActions?.();
+    };
   });
 }
 
 function createSearchHistoryPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel search-history-panel';
-  panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: searchHistoryItemId,
-    headClass: 'search-history-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel search-history-panel',
+    frame: {
+      headClass: 'search-history-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(searchHistoryItemId)}
       </div>`,
-    bodyClass: 'search-history-body info-pane',
-    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+      bodyClass: 'search-history-body info-pane',
+      bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+    },
+    bind: bindSearchHistoryPanel,
   });
-  bindPanelShell(panel, searchHistoryItemId);
-  bindSearchHistoryPanel(panel);
-  return panel;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -40840,44 +42174,42 @@ function bindInfoPanel(panel) {
 }
 
 function createInfoPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel info-tree-panel';
-  panel.id = panelDomId(infoItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: infoItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
-    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
+    className: 'panel info-panel info-tree-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
+      afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
       </div>`,
-    bodyClass: 'info-pane',
-    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+      bodyClass: 'info-pane',
+      bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+    },
+    bind: bindInfoPanel,
   });
-  bindPanelShell(panel, infoItemId);
-  bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   return panel;
 }
 
 function createYoagentPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel yoagent-panel';
-  panel.id = panelDomId(yoagentItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: yoagentItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
-    afterHeadHtml: `<div class="info-actions-bar">
+    className: 'panel info-panel yoagent-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
+      afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}" ${activitySummaryEnabled ? '' : 'disabled aria-disabled="true"'}>${esc(t('yoagent.refresh'))}</button>
         </div>
       </div>`,
-    bodyClass: 'info-pane',
-    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+      bodyClass: 'info-pane',
+      bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+    },
+    bind: bindYoagentPanel,
   });
-  bindPanelShell(panel, yoagentItemId);
-  bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
   renderYoagentPanel({scrollBottom: true});
   loadYoagentConversation({silent: true, scrollBottom: true});
@@ -41663,8 +42995,8 @@ function yoagentPendingWaitsHtml() {
 }
 
 function setYoagentJobs(items, options = {}) {
-  if (options.invalidateRequest !== false) yoagentJobsState.guard.invalidate();
   yoagentJobsState.items = Array.isArray(items) ? items : [];
+  if (options.invalidateRequest !== false) yoagentJobsResource().replace(yoagentJobsState.items, 'jobs-push', options);
   return yoagentJobsState.items;
 }
 
@@ -41803,7 +43135,6 @@ function yoagentChatQueueHtml() {
 function applyYoagentConversationPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
-  if (options.source !== 'request') yoagentConversationState.guard.invalidate();
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const hadPendingWaits = Array.isArray(yoagentConversationState.pendingWaits) && yoagentConversationState.pendingWaits.length > 0;
   yoagentConversationState.pendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
@@ -41813,6 +43144,7 @@ function applyYoagentConversationPayload(payload = {}, options = {}) {
   yoagentConversationState.displayPath = String(payload.transcript_display_path || yoagentConversationState.path);
   yoagentConversationState.loaded = true;
   yoagentConversationState.loading = false;
+  if (options.source !== 'request') yoagentConversationResource().replace(payload, 'conversation-push', options);
   if (hadPendingWaits && !yoagentConversationState.pendingWaits.length && yoagentChatState.queue.length) {
     if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
     else Promise.resolve().then(() => drainYoagentChatQueue());
@@ -41824,7 +43156,7 @@ function applyYoagentStreamPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const streamId = String(payload.stream_id || '').trim();
   if (!streamId) return false;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'stream'});
   if (!(yoagentConversationState.streamingMessages instanceof Map)) yoagentConversationState.streamingMessages = new Map();
   const createdAt = String(payload.created_at || new Date().toISOString());
   const content = String(payload.content || '');
@@ -42091,56 +43423,74 @@ function yoagentRecentAgentsMessageHtml() {
   });
 }
 
-async function loadYoagentConversation(options = {}) {
+function syncYoagentLatestResourceState(state, snapshot) {
+  state.loading = snapshot.loading;
+  state.request = snapshot.request;
+}
+
+function yoagentConversationResource() {
+  if (yoagentConversationState.resource) return yoagentConversationState.resource;
+  yoagentConversationState.resource = createLatestResource({
+    initial: null,
+    load: () => apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'}),
+    apply(payload) {
+      applyYoagentConversationPayload(payload, {source: 'request'});
+      return payload;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState(snapshot, event) {
+      syncYoagentLatestResourceState(yoagentConversationState, snapshot);
+      const options = event.context || {};
+      if (event.phase === 'failed' && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error: snapshot.error}));
+      if (event.phase === 'settled' && options.render !== false) {
+        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+      }
+    },
+  });
+  return yoagentConversationState.resource;
+}
+
+function yoagentJobsResource() {
+  if (yoagentJobsState.resource) return yoagentJobsState.resource;
+  yoagentJobsState.resource = createLatestResource({
+    initial: yoagentJobsState.items,
+    load: () => apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'}),
+    apply(payload) {
+      applyYoagentJobsPayload(payload, {source: 'request'});
+      return yoagentJobsState.items;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState(snapshot, event) {
+      syncYoagentLatestResourceState(yoagentJobsState, snapshot);
+      const options = event.context || {};
+      if (event.phase === 'failed' && !options.silent) console.warn('YO!agent jobs refresh failed', snapshot.error);
+      if (event.phase === 'applied' && options.render !== false && yoagentPanelIsActive()) {
+        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+      }
+    },
+  });
+  return yoagentJobsState.resource;
+}
+
+function loadYoagentConversation(options = {}) {
   if (readOnlyMode) return false;
   if (yoagentConversationState.request && options.force !== true) return yoagentConversationState.request;
   if (yoagentConversationState.loaded && options.force !== true) return;
-  const requestIsCurrent = yoagentConversationState.guard.begin();
   yoagentConversationState.loading = true;
   if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      return applyYoagentConversationPayload(payload, {source: 'request'});
-    } catch (error) {
-      if (requestIsCurrent() && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
-      return false;
-    } finally {
-      if (yoagentConversationState.request === request) {
-        yoagentConversationState.loading = false;
-        yoagentConversationState.request = null;
-        if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
-      }
-    }
-  })();
-  yoagentConversationState.request = request;
-  return request;
+  const target = options.force === true ? Symbol('forced-conversation') : 'conversation';
+  return yoagentConversationResource().read(target, options);
 }
 
-async function loadYoagentJobs(options = {}) {
+function loadYoagentJobs(options = {}) {
   if (yoagentJobsState.request && options.force !== true) return yoagentJobsState.request;
-  const requestIsCurrent = yoagentJobsState.guard.begin();
   yoagentJobsState.loading = true;
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      applyYoagentJobsPayload(payload, {source: 'request'});
-      if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
-      return true;
-    } catch (error) {
-      if (requestIsCurrent() && !options.silent) console.warn('YO!agent jobs refresh failed', error);
-      return false;
-    } finally {
-      if (yoagentJobsState.request === request) {
-        yoagentJobsState.loading = false;
-        yoagentJobsState.request = null;
-      }
-    }
-  })();
-  yoagentJobsState.request = request;
-  return request;
+  const target = options.force === true ? Symbol('forced-jobs') : 'jobs';
+  return yoagentJobsResource().read(target, options);
 }
 
 let yoagentAgentAvailabilityRefreshPromise = null;
@@ -42447,7 +43797,7 @@ function cancelActiveYoagentChatRequest() {
 }
 
 async function clearYoagentConversation() {
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'clear'});
   yoagentConversationState.messages = [];
   yoagentConversationState.pendingWaits = [];
   yoagentChatState.queue = [];
@@ -42540,7 +43890,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'chat-send'});
   yoagentChatState.activeRequest = {id: requestId, streamId, controller, text, cancelled: false};
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
@@ -42617,7 +43967,7 @@ function updateYoagentActionPreview(previewId, patch) {
 
 async function executeYoagentActionSend(previewId) {
   if (!previewId || readOnlyMode || yoagentChatState.busy) return;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'action-send'});
   hideYoagentStartupInfo();
   yoagentChatState.busy = true;
   updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));
@@ -42803,12 +44153,10 @@ const chatState = {
   followTail: true,
   draft: '',
   typingActive: false,
-  typingTimer: null,
-  typingExpiryTimer: null,
+  lifecycleScope: null,
   requestGeneration: 0,
   olderGeneration: 0,
   contextGeneration: 0,
-  requestController: null,
   searchGeneration: 0,
   searchOpen: false,
   searchVisible: false,
@@ -42817,20 +44165,29 @@ const chatState = {
   searchSnapshot: null,
   acknowledgedTone: '',
   acknowledgementStartedAt: 0,
-  acknowledgementTimer: null,
   notifiedIds: new Set(),
   emojiCatalogPromise: null,
   emojiOpen: false,
   emojiCategory: 'recent',
   searchQuery: '',
-  olderObserver: null,
-  olderObserverTarget: null,
   statusSignature: null,
   timelineSignature: '',
   lastAnnouncement: '',
   renderedAnnouncement: '',
   clientIp: '',
 };
+
+function chatLifecycleScope() {
+  if (chatState.lifecycleScope?.current()) return chatState.lifecycleScope;
+  const scope = createLifecycleScope({
+    isCurrent: () => chatState.lifecycleScope === scope,
+    onDispose: () => {
+      if (chatState.lifecycleScope === scope) chatState.lifecycleScope = null;
+    },
+  });
+  chatState.lifecycleScope = scope;
+  return scope;
+}
 const chatEmojiOverlayController = createDismissableOverlayController({
   trapFocus: true,
   onOpen: () => {
@@ -42854,10 +44211,13 @@ function chatApiPost(path, payload, options = {}) {
 }
 
 function chatRequestOptions() {
-  if (!chatState.requestController || chatState.requestController.signal.aborted) {
-    chatState.requestController = new AbortController();
+  const scope = chatLifecycleScope();
+  let controller = scope.value('request-controller');
+  if (!controller || controller.signal.aborted) {
+    controller = new AbortController();
+    scope.replace('request-controller', controller, value => value.abort());
   }
-  return {signal: chatState.requestController.signal};
+  return {signal: controller.signal};
 }
 
 function beginChatLoadingRequest(generationKey) {
@@ -43343,24 +44703,24 @@ function chatMediaPanelBodyHtml(url) {
 
 function createChatMediaPanel(item) {
   const url = chatMediaUrlForItem(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-media-panel';
-  panel.id = panelDomId(item);
-  panel.dataset.chatMediaUrl = url;
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item,
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    bodyClass: 'info-pane yochat-media-pane',
-    bodyHtml: chatMediaPanelBodyHtml(url),
-    toastStack: false,
+    className: 'panel info-panel chat-media-panel',
+    dataset: {chatMediaUrl: url},
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      bodyClass: 'info-pane yochat-media-pane',
+      bodyHtml: chatMediaPanelBodyHtml(url),
+      toastStack: false,
+    },
+    bind(panel) {
+      installLinkContextMenu(panel);
+      panel.addEventListener('click', event => {
+        const action = event.target.closest('[data-chat-media-action]');
+        if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
+      });
+    },
   });
-  bindPanelShell(panel, item);
-  installLinkContextMenu(panel);
-  panel.addEventListener('click', event => {
-    const action = event.target.closest('[data-chat-media-action]');
-    if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
-  });
-  return panel;
 }
 
 function relocalizeChatMediaPanel(panel, item) {
@@ -43388,16 +44748,19 @@ function chatIntroductionGreetingKey(browserInstanceId = chatBrowserInstanceId) 
 
 function replaceChatTyping(typing) {
   chatState.typing = (Array.isArray(typing) ? typing : []).filter(item => Number(item?.expires_at_utc) > Date.now() / 1000);
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  const scope = chatLifecycleScope();
+  scope.release('typing-expiry-timer');
   const earliest = Math.min(...chatState.typing.map(item => Number(item.expires_at_utc)).filter(Number.isFinite));
   if (!Number.isFinite(earliest)) return;
-  chatState.typingExpiryTimer = setTimeout(() => {
-    chatState.typingExpiryTimer = null;
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('typing-expiry-timer', timer);
+    if (!scope.current()) return;
     replaceChatTyping(chatState.typing);
     renderChatPanel();
     loadChatBootstrap({incoming: false});
   }, Math.max(0, (earliest * 1000) - Date.now()) + 20);
+  scope.ownTimer('typing-expiry-timer', timer);
 }
 
 function chatMergeMessages(messages, options = {}) {
@@ -43417,10 +44780,7 @@ function chatMergeMessages(messages, options = {}) {
     const fromThisInstance = message.sender_instance_id === chatBrowserInstanceId;
     if (options.incoming === true && fromThisInstance && id > chatState.readUpToId) chatAdvanceReadCursor(id);
     if (options.incoming === true && !fromThisInstance) {
-      if (chatState.acknowledgementTimer) {
-        clearTimeout(chatState.acknowledgementTimer);
-        chatState.acknowledgementTimer = null;
-      }
+      chatState.lifecycleScope?.release('acknowledgement-timer');
       chatState.acknowledgedTone = '';
       chatState.unread.set(id, message);
       chatState.lastAnnouncement = chatNotificationBody(message);
@@ -43565,12 +44925,16 @@ async function chatAcknowledgeUpTo(messageId) {
   for (const [id] of acknowledged) chatState.unread.delete(id);
   chatState.acknowledgedTone = tone;
   chatState.acknowledgementStartedAt = Date.now();
-  if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
-  chatState.acknowledgementTimer = setTimeout(() => {
+  const scope = chatLifecycleScope();
+  scope.release('acknowledgement-timer');
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('acknowledgement-timer', timer);
+    if (!scope.current()) return;
     chatState.acknowledgedTone = '';
-    chatState.acknowledgementTimer = null;
     renderChatStatus();
   }, agentStatusPulsePeriodMs);
+  scope.ownTimer('acknowledgement-timer', timer);
   renderChatStatus();
   return chatAdvanceReadCursor(newest);
 }
@@ -43582,15 +44946,17 @@ function chatAcknowledge() {
 
 function setChatTyping(active, options = {}) {
   const next = active === true;
-  if (chatState.typingTimer) {
-    clearTimeout(chatState.typingTimer);
-    chatState.typingTimer = null;
-  }
+  const scope = chatLifecycleScope();
+  scope.release('typing-heartbeat-timer');
   if (next === chatState.typingActive && !options.heartbeat) return;
   chatState.typingActive = next;
   chatApiPost('/api/chat/typing', {browser_instance_id: chatBrowserInstanceId, typing: next}, {keepalive: options.keepalive}).catch(() => {});
   if (next) {
-    chatState.typingTimer = setTimeout(() => setChatTyping(true, {heartbeat: true}), chatTypingRefreshMs);
+    const timer = setTimeout(() => {
+      scope.release('typing-heartbeat-timer', timer);
+      if (scope.current()) setChatTyping(true, {heartbeat: true});
+    }, chatTypingRefreshMs);
+    scope.ownTimer('typing-heartbeat-timer', timer);
   }
 }
 
@@ -43981,48 +45347,51 @@ function autosizeChatComposer(panel = document.getElementById(panelDomId(chatIte
 
 function installChatComposerResizeObserver(panel) {
   if (!panel) return false;
-  panel?._chatComposerResizeObserver?.disconnect?.();
-  panel._chatComposerResizeObserver = null;
+  const scope = chatLifecycleScope();
+  scope.release('composer-resize-observer');
   const pane = panel?.querySelector('.chat-pane');
   if (!pane || typeof ResizeObserver !== 'function') return false;
-  panel._chatComposerResizeObserver = new ResizeObserver(() => {
+  const observer = new ResizeObserver(() => {
+    if (!scope.current() || scope.value('composer-resize-observer') !== observer) return;
     autosizeChatComposer(panel);
     if (chatState.followTail) chatScrollTimelineToBottom(panel);
     else syncChatTailState(panel);
   });
-  panel._chatComposerResizeObserver.observe(pane);
+  scope.ownObserver('composer-resize-observer', observer);
+  observer.observe(pane);
   return true;
 }
 
 function syncChatHistoryObserver(panel = document.getElementById(panelDomId(chatItemId))) {
   const target = panel?.querySelector('[data-chat-history-sentry]');
-  if (chatState.olderObserverTarget === target && chatState.olderObserver) return true;
-  chatState.olderObserver?.disconnect?.();
-  chatState.olderObserver = null;
-  chatState.olderObserverTarget = null;
+  const scope = chatLifecycleScope();
+  const currentObserver = scope.value('older-history-observer');
+  if (currentObserver?.target === target) return true;
+  scope.release('older-history-observer');
   if (!target || typeof IntersectionObserver !== 'function') return false;
-  chatState.olderObserver = new IntersectionObserver(entries => {
+  const observer = new IntersectionObserver(entries => {
+    if (!scope.current() || scope.value('older-history-observer') !== observer) return;
     if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;
     loadOlderChatMessages();
   }, {root: panel.querySelector('[data-chat-timeline]'), threshold: 0});
-  chatState.olderObserver.observe(target);
-  chatState.olderObserverTarget = target;
+  observer.target = target;
+  scope.ownObserver('older-history-observer', observer);
+  observer.observe(target);
   return true;
 }
 
 function createChatPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-panel';
-  panel.id = panelDomId(chatItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: chatItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
-    afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+    className: 'panel info-panel chat-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
+      afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
       <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
     </div>`,
-    bodyClass: 'info-pane chat-pane',
-    bodyHtml: `<div class="chat-history-search-split">
+      bodyClass: 'info-pane chat-pane',
+      bodyHtml: `<div class="chat-history-search-split">
         <div class="chat-search-results" data-chat-search-results hidden></div>
         <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
       </div>
@@ -44035,10 +45404,9 @@ function createChatPanel() {
         <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
         <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
       </div>`,
+    },
+    bind: bindChatPanel,
   });
-  bindPanelShell(panel, chatItemId);
-  bindChatPanel(panel);
-  return panel;
 }
 
 function mountChatPanel() {
@@ -44082,26 +45450,17 @@ function handleChatInvalidation(type) {
 }
 
 function clearChatLifecycle(options = {}) {
-  if (chatState.typingTimer) clearTimeout(chatState.typingTimer);
-  chatState.typingTimer = null;
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  chatState.lifecycleScope?.release('typing-heartbeat-timer');
+  chatState.lifecycleScope?.release('typing-expiry-timer');
   if (chatState.typingActive) setChatTyping(false, {keepalive: options.keepalive === true});
   closeChatEmojiPicker({returnFocus: false});
   if (options.destroy === true) {
-    const panel = document.getElementById(panelDomId(chatItemId));
-    panel?._chatComposerResizeObserver?.disconnect?.();
-    if (panel) panel._chatComposerResizeObserver = null;
     chatState.requestGeneration += 1;
     chatState.olderGeneration += 1;
     chatState.contextGeneration += 1;
     chatState.searchGeneration += 1;
     chatState.loadingRequest = null;
-    chatState.requestController?.abort?.();
-    chatState.requestController = null;
-    chatState.olderObserver?.disconnect?.();
-    chatState.olderObserver = null;
-    chatState.olderObserverTarget = null;
+    chatState.lifecycleScope?.dispose('chat-destroy');
     chatState.olderRequested = false;
     chatState.followTail = true;
     chatState.timelineSignature = '';
@@ -44322,6 +45681,17 @@ function costPricingProfileChoices(path) {
   }));
 }
 
+// The offered cleanup times come from the server (prune_schedule owns the list);
+// the client never spells its own copy of them.
+function statsPruneLocalTimeChoices() {
+  const payloadChoices = clientSettingsPayload?.choices?.['stats.prune_at_local_time'];
+  const catalogChoices = settingCatalogEntry('stats.prune_at_local_time').choices;
+  const values = Array.isArray(payloadChoices) && payloadChoices.length
+    ? payloadChoices
+    : Array.isArray(catalogChoices) ? catalogChoices : [];
+  return values.map(value => ({value, label: value}));
+}
+
 function yoagentModelPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeModelPreferenceChoices() : backend === 'codex' ? yoagentCodexModelPreferenceChoices() : [];
 }
@@ -44492,6 +45862,7 @@ function preferenceSections() {
       preferenceSettingItem('performance.popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
       preferenceSettingItem('performance.popover_hide_delay_ms', {type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms'}),
       preferenceSettingItem('performance.remote_resize_delay_ms', {type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'}),
+      preferenceSettingItem('stats.prune_at_local_time', {type: 'select', choices: statsPruneLocalTimeChoices()}),
     ]},
     {id: PREFERENCE_SECTION_IDS.cost, title: t('pref.section.cost'), items: [
       preferenceSettingItem('cost.openai_pricing_profile', {type: 'radio', choices: costPricingProfileChoices('cost.openai_pricing_profile')}),
@@ -44889,26 +46260,24 @@ function preferencesPanelHtml() {
     ${resetBlock}`;
 }
 function createPreferencesPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel preferences-panel';
-  panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: prefsItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel preferences-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>`,
-    bodyClass: 'preferences-body',
-    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+      bodyClass: 'preferences-body',
+      bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+    },
+    bind: bindPreferencesPanel,
   });
-  bindPanelShell(panel, prefsItemId);
-  bindPreferencesPanel(panel);
-  return panel;
 }
 
 function focusPreferencesSearch(panel = null, options = {}) {
@@ -44960,19 +46329,15 @@ function renderPreferencesPanels(options = {}) {
       const shouldKeepDom = activeControl && options.force !== true;
       // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
-      const prevScroll = scroller();
-      const scrollTop = prevScroll.scrollTop;
-      const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
-      }
-      if (options.focusSearch !== true) {
-        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
-        restore();
-        requestAnimationFrame(restore);
+        reconcilePanelBody({
+          body,
+          html: `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+          anchors: options.focusSearch === true ? [] : [elementScrollAnchor('.preferences-scroll', true)],
+        });
       }
     }
     bindPreferencesPanel(panel);
@@ -45024,9 +46389,10 @@ function autosizePreferenceTextareas(root) {
 }
 
 function bindPreferencesPanel(panel) {
-  if (!panel || panel.dataset.preferencesBound === 'true') return;
-  panel.dataset.preferencesBound = 'true';
-  panel.addEventListener('input', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'preferences-panel', () => {
+    const scope = createLifecycleScope();
+    scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
       preferencesSearchText = search.value || '';
@@ -45053,7 +46419,7 @@ function bindPreferencesPanel(panel) {
       if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
     }
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     const delivery = event.target.closest('[data-notification-delivery]');
     if (delivery && panel.contains(delivery)) {
       setNotificationDelivery(delivery.dataset.notificationDelivery, delivery.checked);
@@ -45064,21 +46430,21 @@ function bindPreferencesPanel(panel) {
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);
   });
-  panel.addEventListener('wheel', event => {
+    scope.ownEvent('wheel', panel, 'wheel', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('touchmove', event => {
+    scope.ownEvent('touchmove', panel, 'touchmove', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('scroll', event => {
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
   }, true);
-  panel.addEventListener('focusout', () => {
+    scope.ownEvent('focusout', panel, 'focusout', () => {
     setTimeout(() => {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  bindActionDispatcher(panel, {
+    const disposeActions = bindActionDispatcher(panel, {
     'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
@@ -45128,6 +46494,9 @@ function bindPreferencesPanel(panel) {
       scheduleShareUiStatePublish();
     },
     'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    return () => scope.dispose('preferences-panel-unbound');
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -45415,10 +46784,14 @@ function bindPreferencesPanel(panel) {
           if (tombstone.kind === 'bucket') bucketsByIdentity.delete(identity);
         }
         for (const [identity, bucket] of bucketReplacements) bucketsByIdentity.set(identity, bucket);
-        const candidateEnd = Math.max(
-          activeGeneration.window_end,
-          ...delta.buckets.map(bucket => bucket.start + bucket.duration),
-        );
+        const openBucketEnd = delta.buckets.find(bucket => bucket.open)?.start + concreteResolution();
+        const candidateEnd = delta.source_generation > activeGeneration.source_generation
+          && Number.isSafeInteger(openBucketEnd)
+          ? openBucketEnd
+          : Math.max(
+            activeGeneration.window_end,
+            ...delta.buckets.map(bucket => bucket.start + bucket.duration),
+          );
         const candidateStart = candidateEnd - selection.range_seconds;
         const buckets = [...bucketsByIdentity.values()]
           .filter(bucket => bucket.start >= candidateStart && bucket.start + bucket.duration <= candidateEnd);
@@ -45516,6 +46889,15 @@ function bindPreferencesPanel(panel) {
 
     function reportFailure(message) {
       return failureOwner.report(message);
+    }
+
+    // A payload this bundle cannot read is an outcome with a reason, not a reason to draw nothing.
+    // `exactFields` rejects any snapshot/delta whose top-level shape differs, which is exactly what
+    // a server upgraded under an already-open tab sends; both catch sites below used to discard that
+    // rejection, so YO!stats went blank and said nothing until the page was reloaded.
+    function reportContractViolation(error) {
+      if (error?.statsContractViolation !== true) return false;
+      return reportFailure(`YO!stats cannot read this server's data (${error.message}); reload the page to pick up the current YOLOmux bundle`);
     }
 
     function reportCadenceStall(now) {
@@ -45642,7 +47024,8 @@ function bindPreferencesPanel(panel) {
         if (snapshot && requestMatches(request, serial) && running && visible && !zoomedStatic) {
           acceptSnapshot(snapshot);
         }
-      } catch (_error) {
+      } catch (error) {
+        reportContractViolation(error);
         scheduleRepair();
       } finally {
         tickBusy = false;
@@ -45692,6 +47075,7 @@ function bindPreferencesPanel(panel) {
         if (error?.pending === true && Number.isSafeInteger(error.retryAfterMs)) {
           pendingRetryMs = error.retryAfterMs;
         }
+        reportContractViolation(error);
       } finally {
         repairBusy = false;
         if (succeeded) {
@@ -45913,12 +47297,12 @@ function bindPreferencesPanel(panel) {
     let capabilitiesPromise = null;
     let startPromise = null;
     let controller = null;
-    let source = null;
+    let lifecycleScope = null;
     let streamEpoch = 0;
+    let streamTransportToken = 0;
     let running = false;
     let visible = true;
     let readFenceRecovery = null;
-    let readinessTimer = null;
     let readinessEpoch = 0;
     let healthy = false;
     let deliverySequence = 0;
@@ -45926,39 +47310,32 @@ function bindPreferencesPanel(panel) {
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
     let lastDeliveryEpoch = 0;
-    let pageRetirementReason = '';
+    const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
+      && options.pageLifecycle !== undefined;
+    const transportLifecycle = options.pageTransportLifecycle || (
+      ownsPageTransportLifecycle
+        ? createPageTransportLifecycle(options.pageLifecycle)
+        : pageTransportLifecycle
+    );
+    streamTransportToken = transportLifecycle.begin();
 
-    // How the client knows it is unloading rather than failing.
-    //
-    // The browser aborts an open EventSource as part of unloading the document and fires
-    // the very same `error` event a dead server or a dropped network fires, with no
-    // payload to tell them apart. Measured against live 7771 (probe: authenticated page,
-    // stream open and healthy, `location.replace('about:blank')`): `beforeunload` ran at
-    // t+0ms, the EventSource `error` at t+6ms, `pagehide` at t+18ms, and
-    // `document.visibilityState` was still "visible" at both `beforeunload` and
-    // `pagehide`. So `beforeunload` is the earliest event that discriminates the two, and
-    // visibility does not discriminate them at all. Latch on `beforeunload` or `pagehide`,
-    // whichever the browser delivers first.
-    //
-    // The latch is cleared by anything that proves the document is still transporting: a
-    // `pageshow` (bfcache restore) or any stream delivery. A navigation another listener
-    // cancels therefore cannot leave a genuine mid-session failure permanently
-    // misclassified, and a genuine failure that has not been preceded by an unload signal
-    // is never reclassified at all.
-    const pageLifecycle = options.pageLifecycle === undefined
-      ? (typeof globalThis?.addEventListener === 'function' ? globalThis : null)
-      : options.pageLifecycle;
-    if (pageLifecycle && typeof pageLifecycle.addEventListener === 'function') {
-      for (const eventName of ['beforeunload', 'pagehide']) {
-        pageLifecycle.addEventListener(eventName, () => {
-          if (!pageRetirementReason) pageRetirementReason = `page_${eventName}`;
-        });
-      }
-      pageLifecycle.addEventListener('pageshow', () => { pageRetirementReason = ''; });
+    function ensureLifecycleScope() {
+      if (lifecycleScope?.current()) return lifecycleScope;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      transportLifecycle.start();
+      return scope;
     }
+    ensureLifecycleScope();
 
     function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
-      pageRetirementReason = '';
+      transportLifecycle.noteDelivery(streamTransportToken);
+      streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
       if (acceptedDelta) acceptedDeltaSequence = Math.min(Number.MAX_SAFE_INTEGER, acceptedDeltaSequence + 1);
       lastDeliveryKind = kind;
@@ -45974,7 +47351,7 @@ function bindPreferencesPanel(panel) {
         running,
         visible,
         healthy,
-        streamOpen: source !== null,
+        streamOpen: lifecycleScope?.value('stream') !== null,
         streamEpoch,
         deliverySequence,
         acceptedDeltaSequence,
@@ -45990,8 +47367,7 @@ function bindPreferencesPanel(panel) {
     }
 
     function clearReadinessTimer() {
-      if (readinessTimer !== null && typeof clock.clearTimeout === 'function') clock.clearTimeout(readinessTimer);
-      readinessTimer = null;
+      lifecycleScope?.release('readiness-timer');
     }
 
     function readinessMessage(error) {
@@ -46008,11 +47384,13 @@ function bindPreferencesPanel(panel) {
     }
 
     function scheduleReadinessRetry() {
-      if (!running || !visible || readinessTimer !== null || typeof clock.setTimeout !== 'function') return;
-      readinessTimer = clock.setTimeout(() => {
-        readinessTimer = null;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
         void beginActivation().catch(() => {});
       }, readinessRetryMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
     }
 
     function handleReadinessFailure(error, epoch) {
@@ -46077,13 +47455,14 @@ function bindPreferencesPanel(panel) {
 
     function closeStream() {
       streamEpoch += 1;
-      const closing = source;
-      source = null;
-      if (closing) closing.close();
+      for (const eventName of ['delta', 'ready', 'repair', 'unavailable', 'error']) {
+        lifecycleScope?.release(`stream-${eventName}`);
+      }
+      lifecycleScope?.release('stream');
     }
 
     function routeStreamFailure(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleTransportFailure();
     }
@@ -46092,24 +47471,25 @@ function bindPreferencesPanel(panel) {
     // itself performs while unloading. A server-sent `unavailable` frame and a rejected
     // `delta`/`ready` frame are the server or the payload failing and stay failures.
     function routeStreamTransportError(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
-      if (!pageRetirementReason) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      const retirementReason = transportLifecycle.reasonSince(streamTransportToken);
+      if (!retirementReason) {
         routeStreamFailure(candidate, epoch);
         return;
       }
-      const reason = pageRetirementReason;
       closeStream();
-      controller.handleTransportRetirement(reason);
+      controller.handleTransportRetirement(retirementReason);
     }
 
     function routeStreamRepair(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleReconnect({requiresFullSnapshot: false});
     }
 
     function openStream() {
-      if (!running || !visible || source || !controller?.generation()) return;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('stream') || !controller?.generation()) return;
       const request = controller.deltaRequest();
       const url = exactUrl('/api/stats-stream', [
         ['range_seconds', request.range_seconds],
@@ -46127,9 +47507,10 @@ function bindPreferencesPanel(panel) {
         return;
       }
       streamEpoch = epoch;
-      source = candidate;
-      candidate.addEventListener('delta', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      streamTransportToken = transportLifecycle.begin();
+      scope.ownStream('stream', candidate);
+      scope.ownEvent('stream-delta', candidate, 'delta', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           if (controller.acceptDelta(JSON.parse(event.data))) {
             recordStreamDelivery('delta', epoch, {acceptedDelta: true});
@@ -46138,8 +47519,8 @@ function bindPreferencesPanel(panel) {
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('ready', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      scope.ownEvent('stream-ready', candidate, 'ready', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           const ready = JSON.parse(event.data);
           exactFields(ready, ['cache_generation', 'revision'], 'ready');
@@ -46158,9 +47539,9 @@ function bindPreferencesPanel(panel) {
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('repair', () => routeStreamRepair(candidate, epoch));
-      candidate.addEventListener('unavailable', () => routeStreamFailure(candidate, epoch));
-      candidate.addEventListener('error', () => routeStreamTransportError(candidate, epoch));
+      scope.ownEvent('stream-repair', candidate, 'repair', () => routeStreamRepair(candidate, epoch));
+      scope.ownEvent('stream-unavailable', candidate, 'unavailable', () => routeStreamFailure(candidate, epoch));
+      scope.ownEvent('stream-error', candidate, 'error', () => routeStreamTransportError(candidate, epoch));
     }
 
     async function activate(epoch) {
@@ -46216,12 +47597,14 @@ function bindPreferencesPanel(panel) {
       clearReadinessTimer();
       const timeout = typeof clock.setTimeout === 'function'
         ? new Promise((_resolve, reject) => {
-          readinessTimer = clock.setTimeout(() => {
-            readinessTimer = null;
+          const scope = ensureLifecycleScope();
+          const timer = clock.setTimeout(() => {
+            scope.release('readiness-timer', timer);
             const error = new Error(`current stats readiness timed out after ${readinessTimeoutMs}ms`);
             if (startPromise === null && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
             reject(error);
           }, readinessTimeoutMs);
+          scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
         })
         : null;
       const activation = Promise.resolve().then(() => activate(epoch));
@@ -46243,7 +47626,7 @@ function bindPreferencesPanel(panel) {
     function start() {
       if (running) {
         if (startPromise) return startPromise;
-        if (controller || readinessTimer !== null) return Promise.resolve(controller);
+        if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
         return beginActivation();
       }
       running = true;
@@ -46288,7 +47671,7 @@ function bindPreferencesPanel(panel) {
           controller.setVisible(visible);
           if (!running) controller.stop();
         }
-        if (visible && running && !controller && !startPromise && readinessTimer === null) {
+        if (visible && running && !controller && !startPromise && lifecycleScope?.value('readiness-timer') === null) {
           void beginActivation().catch(() => {});
         }
       },
@@ -46316,8 +47699,9 @@ function bindPreferencesPanel(panel) {
       stop() {
         running = false;
         readinessEpoch += 1;
-        clearReadinessTimer();
-        closeStream();
+        streamEpoch += 1;
+        lifecycleScope?.dispose('stats-client-stop');
+        if (ownsPageTransportLifecycle) transportLifecycle.dispose('stats-client-stop');
         if (controller) controller.stop();
         startPromise = null;
       },
@@ -47797,6 +49181,156 @@ function bindPreferencesPanel(panel) {
 })();
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Debug graph/history runtime declarations used by the following rendering partial.
+
+const debugRuntimeFacades = new Map();
+
+function registerDebugRuntimeFacade(name, facade) {
+  const key = String(name || '');
+  if (!key || !facade || typeof facade !== 'object' || debugRuntimeFacades.has(key)) return false;
+  debugRuntimeFacades.set(key, Object.freeze({...facade}));
+  return true;
+}
+
+function debugRuntimeFacade(name) {
+  return debugRuntimeFacades.get(String(name || '')) || null;
+}
+
+const debugRuntimeState = {
+  subTab: 'graph',
+  graphRangeSeconds: 15 * 60,
+  graphResolutionOverrideSeconds: 0,
+  graphChartLayout: 0,
+  graphHiddenCharts: null,
+  graphVisibleCharts: null,
+  statsUiPreferencesLoaded: false,
+};
+
+function debugGraphLocalizedLabel(item = {}) {
+  if (!item.labelKey) return String(item.label || '');
+  const params = {...(item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(item.labelKey, params);
+}
+
+function debugGraphLocalizedDescription(item = {}) {
+  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
+  if (!descKey) return '';
+  const params = {...(item.descParams || item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(descKey, params);
+}
+
+function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
+  if (!descKey) return '';
+  const text = desc || t(descKey, params);
+  if (!text || text === descKey) return '';
+  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
+}
+
+function normalizedJsDebugSubTab(value) {
+  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
+}
+
+function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
+  const seconds = Number(value);
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  if (options.some(option => option.seconds === seconds)) return seconds;
+  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
+  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+}
+
+function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds, nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true});
+  return debugRuntimeState.graphRangeSeconds;
+}
+
+function loadJsDebugStatsUiPreferences() {
+  if (debugRuntimeState.statsUiPreferencesLoaded) return;
+  debugRuntimeState.statsUiPreferencesLoaded = true;
+  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+  debugRuntimeState.subTab = normalizedJsDebugSubTab(saved.subTab);
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
+  debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
+  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
+  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
+  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
+  for (const key of visible) hidden.delete(key);
+  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
+  debugRuntimeState.graphHiddenCharts = hidden;
+  debugRuntimeState.graphVisibleCharts = visible;
+  // Respect a previously-persisted level selection (including an intentionally
+  // empty one); only fresh state falls back to the warning+error default.
+  const storedLogLevels = Array.isArray(saved.logLevels)
+    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
+    : null;
+  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+}
+
+function saveJsDebugStatsUiPreferences() {
+  if (!debugRuntimeState.statsUiPreferencesLoaded) return;
+  try {
+    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
+      subTab: debugRuntimeState.subTab,
+      rangeSeconds: debugRuntimeState.graphRangeSeconds,
+      resolutionOverrideSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
+      chartLayout: debugRuntimeState.graphChartLayout,
+      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
+      visibleCharts: [...(debugRuntimeState.graphVisibleCharts instanceof Set ? debugRuntimeState.graphVisibleCharts : [])].sort(),
+      logLevels: [...jsDebugLogsState.levels].sort(),
+    }));
+  } catch (_) {
+  }
+}
+
+function debugGraphHiddenChartKeys() {
+  loadJsDebugStatsUiPreferences();
+  if (!(debugRuntimeState.graphHiddenCharts instanceof Set)) debugRuntimeState.graphHiddenCharts = new Set();
+  if (!(debugRuntimeState.graphVisibleCharts instanceof Set)) debugRuntimeState.graphVisibleCharts = new Set();
+  return debugRuntimeState.graphHiddenCharts;
+}
+
+function debugGraphChartVisible(key) {
+  const chartKey = String(key || '');
+  if (chartKey === 'modelTokens' && !debugRuntimeState.graphVisibleCharts.has(chartKey)) return false;
+  return !debugGraphHiddenChartKeys().has(chartKey);
+}
+
+function setDebugGraphChartVisible(key, visible) {
+  const chartKey = String(key || '');
+  if (!chartKey) return;
+  const hidden = debugGraphHiddenChartKeys();
+  if (visible) {
+    hidden.delete(chartKey);
+    debugRuntimeState.graphVisibleCharts.add(chartKey);
+  } else {
+    hidden.add(chartKey);
+    debugRuntimeState.graphVisibleCharts.delete(chartKey);
+  }
+  saveJsDebugStatsUiPreferences();
+  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
+  // while a graph control is focused, but deferring the user's own activation
+  // leaves aria-pressed and the chart body visibly stale until focus moves.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
+}
+
+function jsDebugGraphRangeOptionIndex(rangeSeconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  return Math.max(0, options.findIndex(option => option.seconds === normalized));
+}
+
+function jsDebugGraphRangeLabel(seconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
+  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // JavaScript debug panel rendering and controls.
 
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
@@ -47854,8 +49388,18 @@ const jsDebugHistoryReadiness = {
   overlayVisible: false,
   overlayTimer: null,
 };
-let jsDebugSubTab = 'graph';
 const jsDebugSystemPollMs = 5000;
+// The retry cadence used while `/api/system-status` answers with a TYPED REFUSAL (no snapshot has
+// been published yet, or the newest one is past its freshness deadline and its aged body is
+// withheld). The producer rebuilds on demand, so the body a reader is waiting for usually exists
+// far sooner than the next 5s poll; waiting a whole poll interval would leave the panel blank on
+// first open for the entire cold-start window.
+const jsDebugSystemRefusalPollMs = 500;
+// The Advanced body's own cadence. It matches `ADVANCED_CADENCE_SECONDS` in
+// yolomux_lib/system_status_snapshot.py: asking faster than the producer republishes only re-reads
+// the same bytes. It is a MINIMUM AGE, not a second interval -- the one `debug-system` interval
+// drives both reads (see `pollDebugSystemStatus`).
+const jsDebugSystemAdvancedPollMs = 10000;
 const jsDebugLogsPollMs = 5000;
 const jsDebugSystemState = {
   payload: null,
@@ -47863,27 +49407,51 @@ const jsDebugSystemState = {
   inFlight: false,
   updatedAt: 0,
 };
+// The Advanced disclosure's body, from `GET /api/system-status/advanced`. It is a SEPARATE ROUTE,
+// not a second copy: since the snapshot split, the core body no longer carries `refresh`,
+// `top_endpoints`, `top_background_work`, `top_event_types`, `login_throttle`,
+// `largest_active_transcripts`, `transcripts_cache` or `owner.debug`/`owner.control`, so this is
+// the ONE place those facts live in the client. There is no second poller and no second cache.
+const jsDebugSystemAdvancedState = {
+  payload: null,
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+};
+// Which Daemons roster rows the reader opened, and whether Advanced diagnostics is open. This is
+// deliberately NOT read back out of the DOM: the 5s poll re-renders the roster, and DOM-held
+// disclosure state would snap every open row shut twice per poll.
+const jsDebugSystemRosterState = {
+  expanded: new Set(),
+  advancedOpen: false,
+};
 const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
 // Fresh state hides the chatty info/debug levels; warnings and errors are the
 // signal a first-time viewer needs. Info/Debug remain one toggle away and their
 // selection persists (see save/load of jsDebugStatsUiPreferences).
 const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
+// Logs Clear identity is a per-producer (epoch, sequence) cursor, never wall time:
+// `serverEpoch`/`serverSequence` track the last validated server envelope, and
+// `clearedCursors` holds the {epoch, sequence} captured by the most recent Clear for
+// each producer. A record is hidden only while its producer epoch still matches the
+// cursor and its sequence is at or below it, so a clock rollback cannot resurface a
+// hidden record and a producer epoch reset resurfaces everything.
+const jsDebugClientLogEpoch = reloadClientJourneyId;
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
-  clearedAt: 0,
+  serverEpoch: '',
+  serverSequence: 0,
+  clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
-let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
-let jsDebugGraphResolutionOverrideSeconds = 0;
 // When a Resolution change needs a history fetch, this holds the value to restore and the
 // history generation to match so a stale response cannot revert a newer request. Cleared
 // on the matching ready (success) or error (revert + toast). Null when the last change was
 // served from cache (instant, no overlay).
 let jsDebugGraphPendingResolutionChange = null;
-let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
   pending: false,
@@ -47934,6 +49502,11 @@ const jsDebugCurrentObservationState = {
   instrumentationCostMs: 0,
   receipts: new Map(),
 };
+let jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+function currentObservationLifecycleScope() {
+  if (jsDebugCurrentObservationLifecycleScope.disposed()) jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+  return jsDebugCurrentObservationLifecycleScope;
+}
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
@@ -47958,12 +49531,19 @@ const jsDebugGraphZoomMinBuckets = 3;
 let jsDebugGraphLastPointerType = 'mouse';
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveTimer = 0;
+let jsDebugGraphLifecycleScope = createLifecycleScope();
+function debugGraphLifecycleScope() {
+  if (jsDebugGraphLifecycleScope.disposed()) jsDebugGraphLifecycleScope = createLifecycleScope();
+  return jsDebugGraphLifecycleScope;
+}
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
-let jsDebugGraphHiddenCharts = null;
-let jsDebugGraphVisibleCharts = null;
-let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
+let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+function debugPricingRefreshLifecycleScope() {
+  if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+  return jsDebugPricingRefreshLifecycleScope;
+}
 const jsDebugUsageAtomBackfill = {state: 'unknown', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -48007,7 +49587,6 @@ const jsDebugGraphMiddleWindowMs = jsDebugGraphTiers[1].maxAgeMs;
 const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
-const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
@@ -48023,7 +49602,9 @@ const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
 // non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
 // left between the coarser (60s) data fetches — the chart stays visibly live even where
-// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+// data no longer streams. Ranges over 1h and fixed historical zooms are static by design.
+// A hidden document or a hidden panel is different: neither is inherently static, they simply
+// do not repaint, so the axis holds where it was until the tab/document is shown again.
 const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
@@ -48181,7 +49762,6 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 // jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
 // former raw/rollup Map split was only bookkeeping over the same keyspace.
 const jsDebugGraphBuckets = new Map();
-const jsDebugGraphEventRecords = new Map();
 // NOT display cache: short-lived staging retained for the established renderer's
 // bucket bookkeeping. Current browser observations are uploaded separately.
 const jsDebugGraphPendingServerBuckets = new Map();
@@ -48242,130 +49822,6 @@ const jsDebugGraphChartGroups = Object.freeze([
 const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
   ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
-
-function debugGraphLocalizedLabel(item = {}) {
-  if (!item.labelKey) return String(item.label || '');
-  const params = {...(item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(item.labelKey, params);
-}
-
-function debugGraphLocalizedDescription(item = {}) {
-  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
-  if (!descKey) return '';
-  const params = {...(item.descParams || item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(descKey, params);
-}
-
-function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
-  if (!descKey) return '';
-  const text = desc || t(descKey, params);
-  if (!text || text === descKey) return '';
-  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
-}
-
-function normalizedJsDebugSubTab(value) {
-  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
-}
-
-function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
-  const seconds = Number(value);
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  if (options.some(option => option.seconds === seconds)) return seconds;
-  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
-  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-}
-
-function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
-  syncDebugGraphResolutionOverride(nowMs, {persist: true});
-  return jsDebugGraphRangeSeconds;
-}
-
-function loadJsDebugStatsUiPreferences() {
-  if (jsDebugStatsUiPreferencesLoaded) return;
-  jsDebugStatsUiPreferencesLoaded = true;
-  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-  jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
-  jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
-  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
-  for (const key of visible) hidden.delete(key);
-  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
-  jsDebugGraphHiddenCharts = hidden;
-  jsDebugGraphVisibleCharts = visible;
-  // Respect a previously-persisted level selection (including an intentionally
-  // empty one); only fresh state falls back to the warning+error default.
-  const storedLogLevels = Array.isArray(saved.logLevels)
-    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
-    : null;
-  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
-  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
-}
-
-function saveJsDebugStatsUiPreferences() {
-  if (!jsDebugStatsUiPreferencesLoaded) return;
-  try {
-    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
-      subTab: jsDebugSubTab,
-      rangeSeconds: jsDebugGraphRangeSeconds,
-      resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
-      chartLayout: jsDebugGraphChartLayout,
-      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
-      visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
-      logLevels: [...jsDebugLogsState.levels].sort(),
-    }));
-  } catch (_) {
-  }
-}
-
-function debugGraphHiddenChartKeys() {
-  loadJsDebugStatsUiPreferences();
-  if (!(jsDebugGraphHiddenCharts instanceof Set)) jsDebugGraphHiddenCharts = new Set();
-  if (!(jsDebugGraphVisibleCharts instanceof Set)) jsDebugGraphVisibleCharts = new Set();
-  return jsDebugGraphHiddenCharts;
-}
-
-function debugGraphChartVisible(key) {
-  const chartKey = String(key || '');
-  if (chartKey === 'modelTokens' && !jsDebugGraphVisibleCharts.has(chartKey)) return false;
-  return !debugGraphHiddenChartKeys().has(chartKey);
-}
-
-function setDebugGraphChartVisible(key, visible) {
-  const chartKey = String(key || '');
-  if (!chartKey) return;
-  const hidden = debugGraphHiddenChartKeys();
-  if (visible) {
-    hidden.delete(chartKey);
-    jsDebugGraphVisibleCharts.add(chartKey);
-  } else {
-    hidden.add(chartKey);
-    jsDebugGraphVisibleCharts.delete(chartKey);
-  }
-  saveJsDebugStatsUiPreferences();
-  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
-  // while a graph control is focused, but deferring the user's own activation
-  // leaves aria-pressed and the chart body visibly stale until focus moves.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
-}
-
-function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
-  return Math.max(0, options.findIndex(option => option.seconds === normalized));
-}
-
-function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
-  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
-}
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
@@ -48498,13 +49954,13 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const previousRangeSeconds = Number(state.requestedRangeSeconds) || 0;
-  const nextRangeSeconds = Number(jsDebugGraphRangeSeconds) || 0;
+  const nextRangeSeconds = Number(debugRuntimeState.graphRangeSeconds) || 0;
   const loadingOlder = Number(state.loadedStartSeconds) > 0
     && previousRangeSeconds > 0
     && nextRangeSeconds > previousRangeSeconds;
   const snapshot = setJsDebugHistoryReadiness('loading', {
     reason: retry ? 'retry' : (loadingOlder ? 'older' : 'initial'),
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
     requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
@@ -48815,7 +50271,7 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
   // (finest supported exact cell) when the picker is on AUTO.
-  const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
+  const override = Math.max(0, Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
   const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
   return choices.length ? Number(choices[0]) : 1;
@@ -48855,7 +50311,7 @@ function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resol
 
 function resetJsDebugHistoryReadiness() {
   return setJsDebugHistoryReadiness('idle', {
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: 0,
     targetEndSeconds: 0,
     requestedStartSeconds: 0,
@@ -48911,8 +50367,35 @@ function debugStatHtml(label, value, key = '') {
 }
 
 function debugSubTabButtonHtml(tab, label) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
-  return `<button type="button" class="js-debug-subtab${active ? ' active' : ''}" role="tab" data-js-debug-subtab="${esc(tab)}" aria-selected="${active ? 'true' : 'false'}"><span class="session-button-dir">${esc(label)}</span></button>`;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
+  return toolbarButtonHtml({
+    className: `js-debug-subtab${active ? ' active' : ''}`,
+    role: 'tab',
+    action: 'debug-subtab',
+    dataset: {jsDebugSubtab: tab},
+    attributes: {'aria-selected': active ? 'true' : 'false'},
+    html: `<span class="session-button-dir">${esc(label)}</span>`,
+  });
+}
+
+function debugEventsSubviewHtml() {
+  const counts = debugEventCounts();
+  const apiCopyLabel = debugApiCopyButtonLabel();
+  return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
+      <div class="js-debug-toolbar">
+        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+        </div>
+        <div class="js-debug-actions">
+          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
+        </div>
+      </div>
+      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
+    </div>`;
 }
 
 function debugSubTabsHtml() {
@@ -48926,7 +50409,7 @@ function debugSubTabsHtml() {
 }
 
 function debugSubViewAttrs(tab) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
   return `data-js-debug-subview="${esc(tab)}"${active ? '' : ' hidden'}`;
 }
 
@@ -48989,6 +50472,7 @@ function debugClientLogRecord(event, index = 0) {
   return {
     id: `client:${redacted?.id ?? index}`,
     owner: 'client',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(timestampMs)),
     level: debugClientLogLevel(redacted),
@@ -49009,6 +50493,7 @@ function debugServerLogRecord(entry, index = 0) {
   return {
     id: `server:${redacted?.id ?? index}`,
     owner: 'server',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestamp) ? timestamp : (Number.isFinite(timestampMs) ? timestampMs / 1000 : 0),
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(
       Number.isFinite(timestamp) ? timestamp * 1000 : timestampMs,
@@ -49030,15 +50515,79 @@ function debugMergedLogRecords() {
     .map(debugServerLogRecord);
   const client = jsDebugEvents.map(debugClientLogRecord);
   const seen = new Set();
+  const cursors = jsDebugLogsState.clearedCursors || {};
+  const producerEpoch = owner => owner === 'server' ? jsDebugLogsState.serverEpoch : jsDebugClientLogEpoch;
   return [...server, ...client]
     .filter(entry => {
       if (seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
     })
-    .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
+    // Clear hides only records at or below the per-producer cleared sequence, and only while
+    // the producer's epoch still matches — a ring/epoch reset resurfaces everything. Wall time
+    // is never consulted, so a clock rollback cannot resurface a record hidden by a later Clear.
+    .filter(entry => {
+      const cursor = cursors[entry.owner];
+      if (!cursor) return true;
+      return !(cursor.epoch === producerEpoch(entry.owner) && Number(entry.sequence) <= Number(cursor.sequence));
+    })
     .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
     .slice(0, 500);
+}
+
+// Clear captures the current per-producer high-water sequence under its live epoch, so
+// only records visible at Clear time are hidden. A later record above the cursor, a clock
+// rollback, or a producer epoch reset all correctly resurface. This is the ONE owner of the
+// cleared-cursor identity; nothing consults wall time.
+function jsDebugLogRecordCleared() {
+  const highWaterSequence = ids => ids.reduce((max, id) => (Number.isSafeInteger(id) && id > max ? id : max), 0);
+  jsDebugLogsState.clearedCursors = {
+    server: {
+      epoch: jsDebugLogsState.serverEpoch,
+      sequence: highWaterSequence(jsDebugLogsState.payload.map(entry => Number(entry?.id))),
+    },
+    client: {
+      epoch: jsDebugClientLogEpoch,
+      sequence: highWaterSequence(jsDebugEvents.map(event => Number(event?.id))),
+    },
+  };
+}
+
+// Validate a raw /api/logs envelope before it is adopted. A malformed, missing-epoch, or
+// sequence-inconsistent envelope is rejected with a bounded reason so the poll can keep the
+// last good snapshot and surface the failure visibly. Duplicate or repeated ids are NOT an
+// envelope error: the server may legitimately re-emit a record, so the poll stores the raw
+// logs and de-duplication happens at render time in debugMergedLogRecords (dedup by id).
+function jsDebugValidateServerLogEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.ok !== true) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (typeof payload.epoch !== 'string' || payload.epoch === '') {
+    return {ok: false, reason: 'missing epoch'};
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (!Array.isArray(payload.logs)) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  for (const entry of payload.logs) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    const id = Number(entry.id);
+    if (!Number.isSafeInteger(id) || id < 0) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    // Duplicate or nonmonotonic ids are accepted and stored raw; the render owner
+    // (debugMergedLogRecords) de-duplicates by id. Only an id beyond the envelope's own
+    // declared sequence is envelope-inconsistent and rejected.
+    if (id > sequence) {
+      return {ok: false, reason: 'log id exceeds envelope sequence'};
+    }
+  }
+  return {ok: true, epoch: payload.epoch, sequence, logs: payload.logs};
 }
 
 function debugVisibleLogRecords() {
@@ -49728,11 +51277,6 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     debugGraphMergeBucket(target, bucket);
     jsDebugGraphBuckets.delete(key);
   }
-  const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
-    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
-    jsDebugGraphEventRecords.delete(id);
-  }
 }
 
 function recordJsDebugEventForGraph(event) {
@@ -49761,6 +51305,18 @@ function jsDebugCurrentObservationEventSnapshot(event) {
   return snapshot;
 }
 
+// Finalize a reserved observation EXACTLY ONCE: snapshot its current live content into the
+// immutable upload event, then release the live-event reference so no later measurement can
+// rewrite it. A failure's content is already complete, and a restored (pre-finalized) entry
+// is never re-snapshotted.
+function finalizeJsDebugCurrentObservation(entry) {
+  if (!entry || entry.finalized) return entry;
+  entry.event = jsDebugCurrentObservationEventSnapshot(entry.liveEvent || entry.event);
+  entry.finalized = true;
+  entry.liveEvent = null;
+  return entry;
+}
+
 function queueJsDebugCurrentObservation(key, event) {
   if (!clientCanUseUnscopedHostRequests()) return;
   if (jsDebugCurrentObservationState.keys.has(key)) return;
@@ -49770,9 +51326,15 @@ function queueJsDebugCurrentObservation(key, event) {
     jsDebugCurrentObservationState.drops += 1;
     return;
   }
-  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, releaseBlocking};
+  // Reserve identity immediately, keeping a reference to the live event. A failure reserves
+  // its already-complete identity and finalizes at once; a non-failure API observation stays
+  // open until its bounded byte/timing enrichment arrives (finalizeJsDebugCurrentObservationBytes)
+  // or the flush finalizes whatever it measured. Every other event has no post-queue enrichment,
+  // so it finalizes immediately.
+  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, liveEvent: event, releaseBlocking, finalized: false};
   jsDebugCurrentObservationState.keys.add(entry.key);
   jsDebugCurrentObservationState.queue.push(entry);
+  if (releaseBlocking || observationEvent.type !== 'api') finalizeJsDebugCurrentObservation(entry);
   if (releaseBlocking) {
     jsDebugCurrentObservationState.receipts.set(entry.key, {
       key: entry.key,
@@ -50186,7 +51748,9 @@ function restoreJsDebugCurrentObservationReceipts() {
       }
       restoredEntries.set(entry.key, entry);
       state.keys.add(entry.key);
-      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true});
+      // A restored receipt journal carries already-finalized, immutable content; it is never
+      // re-snapshotted, so it has no live event and is marked finalized on adoption.
+      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, liveEvent: null, releaseBlocking: true, finalized: true});
     }
   }
   if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
@@ -50232,6 +51796,14 @@ function installJsDebugCurrentObservationLiveness() {
   state.livenessTimer = setInterval(() => {
     recordJsDebugClientHealthObservation(0, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
+  currentObservationLifecycleScope().ownTimer('liveness', state.livenessTimer, clearInterval);
+}
+
+function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
+  const state = jsDebugCurrentObservationState;
+  jsDebugCurrentObservationLifecycleScope.dispose(reason);
+  state.timer = null;
+  state.livenessTimer = null;
 }
 
 installJsDebugCurrentObservationLiveness();
@@ -50424,12 +51996,15 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
   if (state.timer !== null) {
     if (delay !== 0) return;
     clearTimeout(state.timer);
+    currentObservationLifecycleScope().release('flush', state.timer);
     state.timer = null;
   }
   state.timer = setTimeout(() => {
+    currentObservationLifecycleScope().relinquish('flush', state.timer);
     state.timer = null;
     void flushJsDebugCurrentObservations();
   }, delay);
+  currentObservationLifecycleScope().ownTimer('flush', state.timer);
 }
 
 async function flushJsDebugCurrentObservations() {
@@ -50444,6 +52019,9 @@ async function flushJsDebugCurrentObservations() {
   }
   if (state.inFlight) return state.inFlight;
   if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  // Any observation still open at flush time (e.g. an API response that never reported bytes)
+  // finalizes with whatever it measured, so its content is immutable before it is uploaded.
+  for (const entry of state.queue) finalizeJsDebugCurrentObservation(entry);
   const entries = [...state.queue.filter(entry => entry.releaseBlocking), ...state.queue.filter(entry => !entry.releaseBlocking)]
     .slice(0, jsDebugObservationUploadMaxItems);
   const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
@@ -50530,19 +52108,16 @@ async function flushJsDebugCurrentObservations() {
   return inFlight;
 }
 
-function recordApiDebugResponseBytesForGraph(event, responseBytes) {
-  if (!event || !Number.isFinite(event.id)) return;
-  const record = jsDebugGraphEventRecords.get(event.id);
-  if (!record?.bucket) return;
-  const nextBytes = Number(responseBytes);
-  if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(record.responseBytes || 0);
-  const delta = nextBytes - previousBytes;
-  record.responseBytes = nextBytes;
-  record.lastSeenAt = Date.now();
-  if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
+// The bytes finalizer for a still-open API observation. The live event already carries the
+// measured, bounded byte count (Content-Length or a response clone; rejected, hung, or
+// unconsumed bodies simply leave it absent), so this locates the reserved queue entry by live
+// identity and finalizes it exactly once. A late measurement for an already-finalized (or
+// immediate-failure) observation finds no open entry and cannot rewrite its immutable content.
+function finalizeJsDebugCurrentObservationBytes(liveEvent) {
+  if (!liveEvent || typeof liveEvent !== 'object') return;
+  const entry = jsDebugCurrentObservationState.queue.find(item => item && item.liveEvent === liveEvent && !item.finalized);
+  if (!entry) return;
+  finalizeJsDebugCurrentObservation(entry);
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -50679,7 +52254,6 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 
 function clearJsDebugGraphData() {
   jsDebugGraphBuckets.clear();
-  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
   // the cache we just cleared (kept the reload-idempotency of the rendered history).
@@ -51104,9 +52678,9 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
-  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
-  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === debugRuntimeState.graphResolutionOverrideSeconds) return false;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   if (persist) saveJsDebugStatsUiPreferences();
   return true;
 }
@@ -51139,7 +52713,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) {
     let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
     // Point-cap: an explicit override that would render more than the budget of buckets
@@ -51227,7 +52801,7 @@ function debugGraphContributingSourceSlices(domain) {
   return slices;
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = debugRuntimeState.graphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
@@ -51247,10 +52821,10 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
 // debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
   const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
-  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
 }
 
-function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
+function debugGraphDomain(nowMs = Date.now(), rangeSeconds = debugRuntimeState.graphRangeSeconds) {
   const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   if (debugGraphZoomDomainValid()) {
     const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
@@ -51859,29 +53433,24 @@ function debugGraphClientMetricSeriesDefs(buckets) {
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
-  for (const [bucketIndex, bucket] of buckets.entries()) {
+  for (const bucket of buckets) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      processes.set(processId, {label: String(process?.label || processId), bucketIndex});
+      if (!processes.has(processId)) processes.set(processId, {label: String(process?.label || processId)});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {
-    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
-    value: bucket => bucket.cpuCount ? bucket.cpuTotalPercent / bucket.cpuCount : 0,
-    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
-  };
-  if (!processes.size) return [fallbackSelf];
-  const activeProcessId = processes.has(currentProcessId)
-    ? currentProcessId
-    : [...processes.entries()].sort((left, right) => right[1].bucketIndex - left[1].bucketIndex || left[0].localeCompare(right[0]))[0][0];
+  // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
+  // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
+  // promoted in its place, and there is no aggregate `cpu` fallback series.
+  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([processId, process]) => {
-      const current = processId === activeProcessId;
+      const current = processId === currentProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
       const displayLabel = legacyWebPort && process.label === processId
         ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
@@ -52065,7 +53634,7 @@ function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
-  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -52115,7 +53684,7 @@ function debugGraphChartToggleControlsHtml() {
 }
 
 function debugGraphLayoutControlsHtml() {
-  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
+  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${debugRuntimeState.graphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
 }
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
@@ -53064,7 +54633,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
   }
   return defaultBuckets;
 }
@@ -53234,17 +54803,19 @@ function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   // A stale revision means these rows may be old, not that the known roster is empty.
   // Keep the count and breakdown honest while the per-session stale text explains freshness.
   const sessions = new Set(rows.map(row => row.session));
-  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  // ONE compact summary carries the stale count; the per-session stale specifics move under the
+  // Live breakdown rather than being repeated as header prose.
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions${staleSessions.length ? ` (${staleSessions.length} stale)` : ''}`;
   const details = rows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
     const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
   }).join('');
-  const staleText = staleSessions.length
-    ? ` ${staleSessions.map(item => `${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`).join('; ')}`
+  const stalePerSession = staleSessions.length
+    ? `<ul class="js-debug-agent-window-detail-stale">${staleSessions.map(item => `<li>${esc(`${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`)}</li>`).join('')}</ul>`
     : '';
   const state = staleSessions.length ? 'stale' : 'current';
-  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span>${staleText ? `<span class="js-debug-agent-window-detail-stale">${esc(staleText.trim())}</span>` : ''}<details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul>${stalePerSession}</details></div>`;
 }
 
 function refreshDebugAgentWindowLiveDetails() {
@@ -53390,7 +54961,7 @@ function debugGraphChartLabel(group, buckets = []) {
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(jsDebugGraphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
     ${debugGraphHistoryOverlayHtml()}
   </div>`;
 }
@@ -54336,11 +55907,18 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
-  if (jsDebugPricingRefreshState.timer !== null) clearTimeout(jsDebugPricingRefreshState.timer);
+  if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
   jsDebugPricingRefreshState.timer = setTimeout(() => {
+    debugPricingRefreshLifecycleScope().relinquish('status', jsDebugPricingRefreshState.timer);
     jsDebugPricingRefreshState.timer = null;
     void refreshDebugCostPricingStatus();
   }, 750);
+  debugPricingRefreshLifecycleScope().ownTimer('status', jsDebugPricingRefreshState.timer);
+}
+
+function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
+  jsDebugPricingRefreshLifecycleScope.dispose(reason);
+  jsDebugPricingRefreshState.timer = null;
 }
 
 async function refreshDebugCostPricingStatus() {
@@ -54416,8 +55994,8 @@ function debugGraphHtml() {
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
-  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
-  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
+  const domain = debugGraphDomain(nowMs, debugRuntimeState.graphRangeSeconds);
+  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: debugRuntimeState.graphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
   // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
   // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
@@ -54431,9 +56009,8 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
-    rangeSeconds: jsDebugGraphRangeSeconds,
+    rangeSeconds: debugRuntimeState.graphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
     zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
@@ -54508,8 +56085,8 @@ function jsDebugStatsLayoutItemsVisible(items) {
 
 function jsDebugCurrentStatsSelection() {
   return {
-    rangeSeconds: normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds),
-    resolution: normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO',
+    rangeSeconds: normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds),
+    resolution: normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds) || 'AUTO',
   };
 }
 
@@ -54648,7 +56225,7 @@ function jsDebugStatsLivePushEnabled() {
   // A drag zoom is a fixed historical domain. The shared range slider is the
   // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
   // every durable one-second push.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
 }
 
 function jsDebugStatsPollIntervalMs() {
@@ -54685,8 +56262,11 @@ function pollJsDebugStatsOnInterval() {
 }
 
 // Fire the full-retention prefetch once shortly after the current range lands, then on a
-// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
-// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+// slow cadence. The poll loop stops when the panel is hidden and the prefetch itself is
+// retired (see below), so neither does any work while the panel is hidden. This is only the
+// poll/prefetch path: the live SSE stream is separate and tracks DOCUMENT visibility, not the
+// active tab, so a hidden panel on a still-visible page keeps applying deltas (it just does
+// not repaint); only a hidden document tears the stream down.
 function maybePrefetchJsDebugHistory() {
   if (!jsDebugStatsPollState.firstSampleReceived) return;
   if (jsDebugHistoryPrefetchState.inFlight) return;
@@ -54913,7 +56493,9 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
       record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
-      if (!record.cpu_count || source.includes(':8881')) {
+      // No serving-port preference: the exact serving port owns the solid CPU series in
+      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      if (!record.cpu_count) {
         record.cpu_total_percent = value;
         record.cpu_count = 1;
       }
@@ -55241,10 +56823,25 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSystemPolling({pollNow: visible});
-    syncDebugLogsPolling({pollNow: visible});
+    syncDebugSubviewActivation({pollNow: visible});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
+  });
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', event => {
+    void event;
+    stopDebugGraphLiveTicker();
+    disposeDebugPricingRefreshLifecycle('pagehide');
+    disposeJsDebugCurrentObservationLifecycle('pagehide');
+  });
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted !== true) return;
+    installJsDebugCurrentObservationLiveness();
+    scheduleJsDebugCurrentObservationFlush();
+    if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+    syncDebugGraphLiveTicker();
   });
 }
 
@@ -55285,9 +56882,15 @@ function debugSystemNumber(value, digits = 0) {
   return Number.isFinite(number) ? number.toLocaleString(undefined, {maximumFractionDigits: digits}) : t('common.notAvailable');
 }
 
+// The ONE label/value list renderer. A third tuple element is the reason the value is an em dash;
+// it rides along as a title and a machine-readable attribute so an unmeasured row in a disclosure
+// carries its reason exactly the way an unmeasured roster cell already does.
 function debugSystemRowsHtml(rows = []) {
-  return `<dl class="js-debug-system-kv">${rows.map(([label, value]) => `
-    <div><dt>${esc(label)}</dt><dd>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`).join('')}</dl>`;
+  return `<dl class="js-debug-system-kv">${rows.map(([label, value, reason]) => {
+    const explain = reason ? ` title="${esc(reason)}" data-value-reason="${esc(reason)}"` : '';
+    return `
+    <div><dt>${esc(label)}</dt><dd${explain}>${esc(value == null || value === '' ? t('common.notAvailable') : value)}</dd></div>`;
+  }).join('')}</dl>`;
 }
 
 function debugSystemCardHtml(title, body, options = {}) {
@@ -55296,326 +56899,908 @@ function debugSystemCardHtml(title, body, options = {}) {
   </section>`;
 }
 
-function debugSystemTmuxSignalWatcherCardHtml(watcher = {}) {
-  const knownStates = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
-  const state = knownStates.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
-  const demandKnown = typeof watcher.demanded === 'boolean';
-  const demanded = watcher.demanded === true;
-  const labels = {
-    'never-started': 'Never started',
-    attaching: 'Attaching',
-    'no-sessions': 'No sessions',
-    attached: 'Attached',
-    exited: 'Exited',
-  };
-  const defaultReasons = {
-    'never-started': 'Tmux signal watcher has not been started',
-    attaching: 'Tmux control client is attaching',
-    'no-sessions': 'No tmux sessions are configured to watch',
-    attached: 'Control client is attached',
-    exited: 'Tmux control client exited',
-  };
-  const sessions = Array.isArray(watcher.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
-  const issue = state === 'exited' || (state === 'never-started' && watcher.demanded !== false);
-  const stateLabel = state === 'never-started' && demandKnown && !demanded ? 'Idle' : labels[state];
-  return `<section class="js-debug-system-card" data-js-debug-tmux-signal-watcher data-tmux-signal-watcher-state="${esc(state)}" data-tmux-signal-watcher-demanded="${demandKnown ? String(demanded) : 'unknown'}" role="${issue ? 'alert' : 'status'}">
-    <h3>Tmux signal watcher</h3>${debugSystemRowsHtml([
-      ['State', stateLabel],
-      ['Demand', demandKnown ? (demanded ? 'Yes' : 'No') : t('common.notAvailable')],
-      ['Control client PID', Number(watcher.process_pid) > 0 ? watcher.process_pid : '—'],
-      ['Sessions', sessions || '—'],
-      ['Detail', watcher.reason || defaultReasons[state]],
-    ])}
-  </section>`;
+// The sentence each tmux control-client state means when the payload published no reason of its
+// own. One owner, read by the child row and by its disclosure.
+const DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS = Object.freeze({
+  'never-started': 'Tmux signal watcher has not been started',
+  attaching: 'Tmux control client is attaching',
+  'no-sessions': 'No tmux sessions are configured to watch',
+  attached: 'Control client is attached',
+  exited: 'Tmux control client exited',
+});
+
+// The ONE predicate for "this watcher is an actionable problem". An exited control client is one;
+// so is a watcher that was demanded and never started. An undemanded watcher never is.
+function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  return state === 'exited' || (state === 'never-started' && watcher?.demanded !== false);
 }
 
-function debugSystemServiceState(service = {}) {
-  const pid = Number(service.pid || 0);
-  if (pid <= 0) {
-    if (Number(service.restart_backoff_seconds || 0) > 0) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
-    return {label: t('state.idle'), tone: 'muted'};
-  }
-  const transportReason = String(service.transport_reason || '').trim();
-  if (transportReason) {
-    const failure = String(service.last_failure || '').trim();
-    return {label: `Transport: ${failure || transportReason}`, tone: 'bad', reason: transportReason};
-  }
-  if (service.healthy === false) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
-  return {label: t('debug.system.localServices.state.running'), tone: 'good'};
-}
-
-const DEBUG_SYSTEM_SERVICE_FRESH_MS = 60_000;
-const debugSystemLocalServicesState = {records: new Map(), signature: ''};
-const debugSystemLocalServiceFields = Object.freeze([
-  {key: 'status', labelKey: 'debug.system.localServices.field.status'},
-  {key: 'pid', labelKey: 'debug.system.localServices.field.pid'},
-  {key: 'started', labelKey: 'debug.system.localServices.field.started'},
-  {key: 'lastRan', labelKey: 'debug.system.localServices.field.lastRan'},
-  {key: 'uptime', labelKey: 'debug.system.localServices.field.uptime'},
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu'},
-  {key: 'memory', labelKey: 'debug.system.localServices.field.memory'},
-  {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
-  {key: 'generation', labelKey: 'debug.system.localServices.field.generation'},
-  {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
-  {key: 'lastSuccess', labelKey: 'debug.system.localServices.field.lastSuccess'},
-  {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
-  {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
-  {key: 'cache', labelKey: 'debug.system.localServices.field.cache'},
-  {key: 'products', labelKey: 'debug.system.localServices.field.products'},
-  {key: 'runtime', labelKey: 'debug.system.localServices.field.runtime'},
+// NO staleness threshold lives here any more, deliberately. It used to be 30 seconds applied to
+// the age of the last PUBLISHED document -- but the observer publishes only when a service-state
+// signature changes, so on a healthy quiet system that age grows without bound and the panel
+// declared its own monitor dead after 30 seconds of everything being fine. The liveness decision
+// now belongs to `yolomux_lib/backend_health/observer.py:BackendHealthObserver.liveness`, which is
+// the only party that owns the probe thread and the monotonic cadence its deadline is derived
+// from, and this panel renders `observer_alive` rather than re-deriving it from a number it cannot
+// interpret. The STORE owns history and persistence and no longer decides liveness at all: it
+// could not see the cadence, and it aged the fact on the wall clock, so a clock step backwards
+// held "alive" forever and a step forwards produced a false red.
+// Health metrics that are whole counts. They share the one metric-envelope cell renderer with the
+// three process metrics; only the number formatting differs.
+const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set(['restart_count', 'observations', 'request_count', 'error_count', 'completed_count']);
+// The three measurements the local-service projection publishes per process, versus the retained
+// health measurements. They carry different DOM attributes because they have different producers
+// and different coverage, and `tests/test_gate_panels.py` pins the process set exactly.
+const DEBUG_SYSTEM_PROCESS_METRIC_KEYS = new Set(['cpu_now_percent', 'rss_bytes', 'uptime_seconds']);
+// The roster's metric columns, in render order, and for each one which of the two published
+// aggregates it is counted by. `retained` totals come from the observer's per-epoch store;
+// `counters` come from this web process's own RPC ledger. The two have different denominators and
+// independent coverage, so a column is only ever flagged partial by the aggregate it actually came
+// from. `parts` means one cell shows two envelopes (average and maximum response time) -- it is
+// still two typed metrics, rendered through the same one cell renderer, in one column.
+// `priority: secondary` is what the responsive layout drops first; every dropped value is repeated
+// in the row's own disclosure, so narrowing the window never hides a number.
+const DEBUG_SYSTEM_ROSTER_COLUMNS = Object.freeze([
+  {key: 'latency', labelKey: 'debug.system.roster.column.latency', parts: ['latency_average_ms', 'latency_max_ms'], coverage: 'counters', priority: 'primary'},
+  {key: 'uptime_seconds', labelKey: 'debug.system.localServices.field.uptime', priority: 'primary'},
+  {key: 'rss_bytes', labelKey: 'debug.system.localServices.field.memory', priority: 'secondary'},
+  {key: 'cpu_now_percent', labelKey: 'debug.graph.chart.cpu', priority: 'secondary'},
+  {key: 'restart_count', labelKey: 'debug.system.roster.column.restarts', coverage: 'retained', priority: 'secondary'},
+  {key: 'request_count', labelKey: 'debug.system.roster.column.requests', coverage: 'counters', priority: 'secondary'},
+  {key: 'error_count', labelKey: 'debug.system.roster.column.errors', coverage: 'counters', priority: 'secondary'},
 ]);
+// The denominator, spelled out. `web_process` counts what THIS web process issued -- not everything
+// the service ever served -- and a reader who is not told that reads the number as the latter.
+const DEBUG_SYSTEM_HEALTH_SCOPE_LABELS = Object.freeze({web_process: 'this web process'});
+// Machine-readable reason codes rendered as the sentence a reader can act on. An unmapped code is
+// printed verbatim rather than dropped, because an unexplained code still names the fact.
+const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
+  observer_unattached: 'the backend-health observer is not attached to this web process',
+  resource_unobserved: 'the observer has never recorded this service',
+  counters_not_observed: 'the observer never read a counter sample, so every retained total would be a structural zero',
+  web_process_scope: 'the retained history starts before this web process, so these counts cover less time than the restarts beside them',
+  missed_final_sample: 'a restart happened before the final counter sample could be read',
+  history_corrupt: 'the retained history file was unreadable and was reset',
+  history_unreadable: 'the retained history file could not be read and was reset',
+  history_schema_unsupported: 'the retained history was written by a newer schema and was reset',
+  history_port_mismatch: 'the retained history belonged to another port and was reset',
+  // The roster's two STRUCTURAL absences. Neither is a failure and neither is a zero: the
+  // observer watches the six local services from this web process, so it has no restart,
+  // request, error or latency series for the web process itself, and the tmux signal watcher
+  // is an in-process subsystem with no separate process to measure.
+  web_process_not_observed: 'the backend-health observer watches the local services from this web process, so it has never observed this web process itself',
+  subsystem_not_observed: 'this is an in-process subsystem, not a separate process, so it has no independent process or traffic measurement',
+  schema_unsupported: 'the backend published a local-services schema this panel does not render',
+  // Diagnostics the sampler and the watcher publish only once they have run. Before that the field
+  // is ABSENT, which is why it renders as the unmeasured em dash and not as `0` or `0ms`.
+  sampler_cycles_not_published: 'the stats sampler has not published a cycle count yet',
+  sampler_cycle_not_timed: 'the stats sampler has not completed a timed cycle yet',
+  history_not_assembled: 'no history query has been assembled since this process started',
+  history_never_requested: 'no history request has been served since this process started, so there is no ratio to take',
+  watcher_demand_unpublished: 'the watcher has not published whether it is demanded',
+  state_reason_unpublished: 'the service published no explanation for its current state',
+  process_not_running: 'no process is running for this service, so it has no pid',
+  // The CPU-budget block's two absences. The reason for an unpushed PROCESS sample is not spelled
+  // here: `system_status_server_block` publishes that sentence inside the envelope, and a second
+  // copy in this map would be one more divergent copy of the same fact.
+  cpu_budget_stale: 'no CPU sample has arrived recently, so the current CPU reading below is not current',
+  cpu_budget_never_sampled: 'statsd has never pushed a CPU sample, so no CPU percentage has been measured against the budget',
+  usage_no_accepted_atom: 'no usage atom has been accepted since this process started',
+  usage_conflicts_not_published: 'the usage store has not published a quarantined-conflict count',
+  // Liveness, from `backend_health/observer.py:BACKEND_HEALTH_NO_CYCLE_OBSERVED`. Attached but not
+  // yet probing is a different fact from probing and stopped.
+  no_observer_cycle_recorded: 'the observer is attached but has not completed a probe cycle yet',
+  observer_cycles_failing: 'the observer is still attempting cycles but they are failing, so nothing new is being recorded',
+  observer_cycles_stalled: 'the observer stopped attempting probe cycles',
+});
 
-function debugSystemServiceName(service = {}) {
-  return String(service.service || t('debug.system.localServices.serviceFallback')).trim() || t('debug.system.localServices.serviceFallback');
+// The ONE status-to-semantics owner for the roster. Every caller that needs a colour, a dot or a
+// non-colour state word goes through it, so "green means ready" cannot drift between the roster
+// row, the summary strip and the child row. Colour is never the only carrier: the tone picks the
+// paint, `debugSystemRosterStateLabel` picks the word, and both are rendered together.
+//   good  -- ready and serving
+//   muted -- legitimately idle / not demanded (gray, NOT an alert)
+//   warn  -- starting, recovering, backing off, stale or partial (amber, transient)
+//   bad   -- actionable: degraded, down, transport failed, unavailable (red)
+const DEBUG_SYSTEM_STATE_TONES = Object.freeze({
+  running: 'good',
+  ready: 'good',
+  attached: 'good',
+  ok: 'good',
+  idle: 'muted',
+  'no-sessions': 'muted',
+  'never-started': 'muted',
+  not_running: 'muted',
+  not_demanded: 'muted',
+  starting: 'warn',
+  attaching: 'warn',
+  recovering: 'warn',
+  backoff: 'warn',
+  stale: 'warn',
+  partial: 'warn',
+  // The panel cannot read this payload's rows, which is not the same as the service being down.
+  // `warn`, because the fact being reported is about THIS panel's ability to render, not about
+  // the daemon: painting it `bad` would report an outage nobody observed.
+  schema_unsupported: 'warn',
+});
+
+function debugSystemStateTone(state) {
+  const token = String(state || '').trim();
+  if (!token) return 'bad';
+  return DEBUG_SYSTEM_STATE_TONES[token] || 'bad';
 }
 
-function debugSystemPrevText(value) {
-  const text = String(value == null || value === '' ? t('common.notAvailable') : value);
-  const prefix = t('debug.system.localServices.prevPrefix');
-  return text.startsWith(`${prefix} `) ? text : t('debug.system.localServices.prevValue', {value: text});
+// `debugSystemMeasuredMetric` used to live here: an adapter that wrapped a raw number because
+// `payload.server` was published as plain floats, outside the typed-metric contract every other
+// row obeys. It could not do its job -- `Number(null)` is `0`, and `0` is finite -- so an
+// unsampled value arrived stamped `measured`. `yolomux_lib/app.py:system_status_server_block` now
+// publishes the web process through the same `local_service_projection.measurement` envelope as
+// the six services beside it, so there is no raw-float dialect left to adapt and the roster reads
+// ONE shape everywhere.
+
+// A metric that is absent by STRUCTURE, not by failure. It renders as the panel's unavailable
+// text with its reason code, exactly like an unmeasured typed envelope, so a column nobody
+// observes can never read as `0`.
+function debugSystemAbsentMetric(reasonCode) {
+  return {state: 'unavailable', value: null, reason_code: String(reasonCode || ''), reason: debugSystemHealthReasonText(reasonCode)};
 }
 
-function debugSystemStripPrevText(value) {
-  const prefix = t('debug.system.localServices.prevPrefix').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return String(value || '').replace(new RegExp(`^${prefix}\\s*`), '');
+function debugSystemHealthReasonText(code) {
+  const token = String(code || '').trim();
+  if (!token) return '';
+  return DEBUG_SYSTEM_HEALTH_REASON_TEXT[token] || token.replace(/_/g, ' ');
 }
 
-function debugSystemDictSummaryText(dict) {
-  const entries = dict && typeof dict === 'object' ? Object.entries(dict) : [];
-  return entries.map(([key, value]) => `${key} ${value}`).join('\n');
+// The panel has ONE spelling for a value nobody measured: an em dash carrying its reason. The
+// roster cells already obeyed it; the diagnostics inside a row's disclosure did not, and printed
+// either `t('common.notAvailable')` ("not available / not available") or a `|| 0` fallback that
+// renders an unpublished counter as a confident `0ms`. Both are the same defect wearing different
+// clothes, so every unmeasured scalar in a disclosure now comes from here.
+//   `format` turns a FINITE value into its text; it is never called for an absent one, so no
+//   formatter can invent a zero on the way through.
+function debugSystemScalar(value, reasonCode, format = current => debugSystemNumber(current)) {
+  const number = Number(value);
+  if (value == null || !Number.isFinite(number)) return {text: '—', reason: debugSystemHealthReasonText(reasonCode)};
+  return {text: String(format(number)), reason: ''};
 }
 
-function debugSystemQueueText(service = {}) {
-  return debugSystemDictSummaryText(service.queues);
+function debugSystemHealthReasonListText(reasons) {
+  const codes = (Array.isArray(reasons) ? reasons : []).map(String).filter(Boolean);
+  return codes.map(code => `${code} (${debugSystemHealthReasonText(code)})`).join('; ');
 }
 
-function debugSystemCacheText(service = {}) {
-  return debugSystemDictSummaryText(service.cache);
-}
-
-function debugSystemProductCountersText(service = {}) {
-  const counters = service.product_counters && typeof service.product_counters === 'object' ? service.product_counters : {};
-  return Object.entries(counters)
-    .map(([task, byOutcome]) => `${task}: ${debugSystemDictSummaryText(byOutcome).split('\n').join(', ')}`)
-    .join('\n');
-}
-
-function debugSystemProductRuntimeText(service = {}) {
-  const runtime = service.product_runtime_ms && typeof service.product_runtime_ms === 'object' ? service.product_runtime_ms : {};
-  const work = service.product_work_totals && typeof service.product_work_totals === 'object' ? service.product_work_totals : {};
-  return [...new Set([...Object.keys(runtime), ...Object.keys(work)])]
-    .map(task => {
-      const stats = runtime[task];
-      const workText = debugSystemDictSummaryText(work[task]).split('\n').join(', ');
-      const runtimeText = stats ? `avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})` : '';
-      return `${task}: ${[runtimeText, workText].filter(Boolean).join(' · ')}`;
-    })
-    .join('\n');
-}
-
-function debugSystemLocalServiceRecord(name) {
-  let record = debugSystemLocalServicesState.records.get(name);
-  if (!record) {
-    record = {name, fields: new Map(), startedAt: 0, exitedAt: 0, lastPid: 0, running: false};
-    debugSystemLocalServicesState.records.set(name, record);
-  }
-  return record;
-}
-
-function debugSystemLocalServiceUpdateLifecycle(record, service = {}, nowSeconds) {
-  const pid = Number(service.pid || 0);
-  const running = pid > 0;
-  const serverStartedAt = Number(service.started_at || 0);
-  const uptimeSeconds = Number(service.uptime_seconds);
-  if (running) {
-    record.lastPid = pid;
-    record.exitedAt = 0;
-    record.startedAt = serverStartedAt > 0
-      ? serverStartedAt
-      : (Number.isFinite(uptimeSeconds) ? Math.max(0, nowSeconds - uptimeSeconds) : (record.running ? record.startedAt : nowSeconds));
-  } else if (record.running) {
-    record.exitedAt = nowSeconds;
-  }
-  record.running = running;
-}
-
-function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSeconds) {
-  const state = debugSystemServiceState(service);
-  const pid = Number(service.pid || 0);
-  const running = pid > 0;
-  const resources = service.resources && typeof service.resources === 'object' ? service.resources : {};
-  const previous = record.fields.get(fieldKey);
-  const previousDisplay = debugSystemStripPrevText(previous?.display || '');
-  const previousAvailable = previousDisplay && previousDisplay !== '—' && previousDisplay !== t('common.notAvailable');
-  const previousValue = () => previousAvailable ? {display: debugSystemPrevText(previousDisplay), identity: `prev:${previous?.identity || previousDisplay}`, previous: true} : null;
-  const valueOrPrevious = value => {
-    if (running) return value;
-    if (value.display && value.display !== '—' && value.display !== t('common.notAvailable')) return {display: debugSystemPrevText(value.display), identity: `prev:${value.identity}`, previous: true};
-    return previousValue() || value;
-  };
-  if (fieldKey === 'status') return {display: state.label, identity: state.label, tone: state.tone};
-  if (fieldKey === 'pid') {
-    if (running) return {display: String(pid), identity: String(pid)};
-    return record.lastPid > 0 ? {display: debugSystemPrevText(record.lastPid), identity: `prev:${record.lastPid}`, previous: true} : {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'started') {
-    return record.startedAt > 0
-      ? {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `started:${record.startedAt}`, dynamic: true}
-      : {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'lastRan') {
-    if (running && record.startedAt > 0) return {display: relativeTimeFormat(Math.max(0, nowSeconds - record.startedAt)), identity: `running:${record.startedAt}`, dynamic: true};
-    if (record.exitedAt > 0) return {display: t('debug.system.localServices.exitedAgo', {time: relativeTimeFormat(Math.max(0, nowSeconds - record.exitedAt))}), identity: `exited:${record.exitedAt}`, dynamic: true, previous: true};
-    return {display: '—', identity: 'empty'};
-  }
-  if (fieldKey === 'uptime') return valueOrPrevious({display: service.uptime_seconds == null ? '—' : debugGraphUptimeText(service.uptime_seconds), identity: String(service.uptime_seconds ?? '')});
-  if (fieldKey === 'cpu') return valueOrPrevious({display: resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`, identity: String(resources.cpu_percent ?? '')});
-  if (fieldKey === 'memory') return valueOrPrevious({display: resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes), identity: String(resources.rss_bytes ?? '')});
-  if (fieldKey === 'clients') return valueOrPrevious({display: service.clients == null ? '—' : debugSystemNumber(service.clients), identity: String(service.clients ?? '')});
-  if (fieldKey === 'generation') return valueOrPrevious({display: service.generation == null ? '—' : debugSystemNumber(service.generation), identity: String(service.generation ?? '')});
-  if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
-  if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
-  if (fieldKey === 'lastSuccess') {
-    const lastSuccess = Number(service.last_success || 0);
-    return valueOrPrevious(lastSuccess > 0 ? {display: relativeTimeFormat(Math.max(0, nowSeconds - lastSuccess)), identity: String(lastSuccess), dynamic: true} : {display: '—', identity: 'empty'});
-  }
-  if (fieldKey === 'queues') {
-    const queueText = debugSystemQueueText(service);
-    return valueOrPrevious({display: queueText || '—', identity: queueText});
-  }
-  if (fieldKey === 'cache') {
-    const cacheText = debugSystemCacheText(service);
-    return valueOrPrevious({display: cacheText || '—', identity: cacheText});
-  }
-  if (fieldKey === 'products') {
-    const productsText = debugSystemProductCountersText(service);
-    return valueOrPrevious({display: productsText || '—', identity: productsText});
-  }
-  if (fieldKey === 'runtime') {
-    const runtimeText = debugSystemProductRuntimeText(service);
-    return valueOrPrevious({display: runtimeText || '—', identity: runtimeText});
-  }
-  return {display: '—', identity: 'empty'};
-}
-
-function debugSystemLocalServicesCardHtml() {
-  return `<section class="js-debug-system-card js-debug-system-card--wide" data-js-debug-local-services-card>
-    <h3>${esc(t('debug.system.localServices.title'))}</h3><div data-js-debug-local-services></div>
-  </section>`;
-}
-
-function debugSystemLocalServiceCellLayoutAttrs(fieldKey) {
-  return fieldKey === 'runtime' ? ' style="white-space:pre-wrap;overflow-wrap:anywhere"' : '';
-}
-
-function debugSystemLocalServicesTableHtml(serviceNames = []) {
-  const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
-    <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
-    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}"${debugSystemLocalServiceCellLayoutAttrs(field.key)}>—</td>`).join('')}</tr>`).join('')}</tbody>
-  </table></div>`;
-}
-
+// The ONE metric-envelope cell renderer: the three process metrics and every M8 health metric go
+// through it. A value that is not `measured` renders its typed reason, never `0` -- a confident
+// zero with no measurement behind it is the failure this panel exists to prevent.
 function debugSystemMetricText(metric = {}, key = '') {
   if (metric.state !== 'measured') return String(metric.reason || t('common.notAvailable'));
   if (key === 'cpu_now_percent') return `${debugSystemNumber(metric.value, 1)}%`;
   if (key === 'rss_bytes') return debugGraphTerseBytesText(metric.value);
   if (key === 'uptime_seconds') return debugGraphUptimeText(metric.value);
+  if (key === 'latency_average_ms' || key === 'latency_max_ms') return debugGraphTerseTimeText(metric.value);
+  if (DEBUG_SYSTEM_HEALTH_COUNT_KEYS.has(key)) return debugSystemNumber(metric.value, 0);
   return debugSystemNumber(metric.value, 1);
 }
 
-function debugSystemNormalizedLocalServicesTableHtml(localServices = {}) {
+// Is the monitor still LOOKING? That is the question this answers, and it is not the same
+// question as "when did a service last change state".
+//
+// The old model asked the second question and printed the first one's answer. The observer
+// persists only when the service-state signature CHANGES, so on a healthy quiet system the
+// document's age grows without bound while the observer probes every 2 seconds -- and any age
+// over 30 seconds was rendered as "STOPPED UPDATING". A silent system reported its own monitor
+// as dead, and the quieter the machine the louder the lie.
+//
+// The backend now publishes liveness as its own bounded fact, decided by the OBSERVER -- the only
+// party that owns the thread whose survival is the question and the monotonic cadence the deadline
+// is derived from. There is deliberately NO threshold constant here: a panel cannot see the
+// observer's interval, and a second copy of the number is how the two drift apart.
+//   unavailable    -- no observer is attached to this web process
+//   never-observed -- attached, but no probe cycle has completed yet AND none has failed
+//   stopped        -- it was probing and is not completing cycles: the case that earns the banner
+//   current        -- it is still probing
+function debugSystemHealthStaleness(health = {}) {
+  if (health.available !== true) return {state: 'unavailable', ageSeconds: null, cycleAgeSeconds: null};
+  const ageSeconds = Number(health.age_seconds);
+  const publishedAge = Number.isFinite(ageSeconds) && health.age_seconds != null ? ageSeconds : null;
+  const rawCycleAge = Number(health.observer_cycle_age_seconds);
+  const cycleAgeSeconds = Number.isFinite(rawCycleAge) && health.observer_cycle_age_seconds != null ? rawCycleAge : null;
+  // The TYPED reason first, then the generic absence. An observer that throws on its first cycle
+  // and every one after it publishes `observer_cycles_failing` with a NULL cycle age -- there is no
+  // completed cycle to age. Reading only the null age classified that as "attached, hasn't looked
+  // yet", which is a quiet non-alerting line, so a continuously failing monitor with an empty
+  // history raised nothing anywhere on the screen. Only `no_observer_cycle_recorded` means the
+  // observer has genuinely not started; any other published reason is a stated failure.
+  const livenessReason = String(health.observer_liveness_reason_code || '');
+  const typedFailure = health.observer_alive !== true && livenessReason !== '' && livenessReason !== 'no_observer_cycle_recorded';
+  if (cycleAgeSeconds === null && !typedFailure) return {state: 'never-observed', ageSeconds: publishedAge, cycleAgeSeconds: null};
+  if (health.observer_alive !== true) return {state: 'stopped', ageSeconds: publishedAge, cycleAgeSeconds};
+  return {state: 'current', ageSeconds: publishedAge, cycleAgeSeconds};
+}
+
+// The one sentence that says what the retained snapshot IS right now. ONE call site:
+// `debugSystemHealthExplanations`, which is the only thing that decides where a sentence is
+// printed. The headline states the FACT and carries no elapsed time, deliberately, because the
+// compact alert slot is a `role="alert"` live region: any elapsed time in it changes on every
+// 5-second poll, so a screen reader would re-announce the whole banner every five seconds for as
+// long as the condition lasted. The numbers live in the provenance rows below, which are not a
+// live region.
+function debugSystemHealthSnapshotHeadline(health = {}) {
+  const {state, cycleAgeSeconds} = debugSystemHealthStaleness(health);
+  // A monitor that has failed every cycle since it started has no last cycle, so the numbers below
+  // do not describe one. Saying they do would be the same fabricated measurement this panel spends
+  // the rest of its length refusing to print.
+  const stoppedTail = cycleAgeSeconds === null
+    ? 'Nothing below has been measured by this process.'
+    : 'Every retained number below describes its last cycle, not now.';
+  // After a restart the RETAINED history is real while THIS observer process has completed no
+  // cycle. "This process has not looked yet" and "there is nothing to look at" are different
+  // facts with different fixes, and saying the second when the first is true tells a reader their
+  // history is gone when it is sitting right underneath.
+  const retained = Number(health.resources) > 0 || Number(health.revision) > 0;
+  const notYet = retained
+    ? `The backend-health observer is attached but this process has not completed its first probe cycle yet — ${debugSystemHealthReasonText(health.observer_liveness_reason_code || 'no_observer_cycle_recorded')}. The numbers below are the retained history from before the restart.`
+    : 'The backend-health observer is attached but has not completed a probe cycle yet, and nothing has been retained, so nothing below has been measured.';
+  return {
+    unavailable: `Backend health is unavailable — ${debugSystemHealthReasonText(health.reason_code || 'observer_unattached')}. Restarts, requests, errors and response times below are not measured; they are not zero.`,
+    'never-observed': notYet,
+    // The typed reason, not a generic sentence: an observer that is throwing on every cycle is a
+    // bug to fix, one that stopped being scheduled is a thread to restart. Static text, so this
+    // stays safe inside the `role="alert"` slot -- no elapsed time, no re-announcement.
+    stopped: `Backend health STOPPED UPDATING — ${debugSystemHealthReasonText(health.observer_liveness_reason_code || 'observer_cycles_stalled')}. ${stoppedTail}`,
+    current: 'Backend health is current: the observer is still completing probe cycles, and a long-unchanged state below means a quiet system, not a stalled one.',
+  }[state];
+}
+
+// The ONE owner of every stale/error EXPLANATION this panel prints, and of where each one is
+// printed. It used to have two producers -- the compact alert slot wrote its own history-reset and
+// persistence sentences while the provenance block wrote near-identical ones a screen further down,
+// and the stopped/unavailable headline was rendered by BOTH -- so a reader who opened Advanced read
+// the same fact twice in two different wordings, which is exactly the divergent-copies defect.
+//
+// It returns the two disjoint halves of one set:
+//   `alerts` -- the explanations that interrupt a reader. Rendered ONCE, only by the compact alert
+//               slot above the roster.
+//   `quiet`  -- the non-alerting status sentence, or `null` whenever an alert already says it.
+//               Rendered ONCE, only by the provenance block inside Advanced.
+// Exactly one surface prints any given sentence, and neither surface composes its own; the
+// provenance ROWS keep the machine-readable reason code, which is a measured field, not prose.
+function debugSystemHealthExplanations(health = {}) {
+  const {state} = debugSystemHealthStaleness(health);
+  const headline = debugSystemHealthSnapshotHeadline(health);
+  const alerting = state === 'stopped' || state === 'unavailable';
+  const alerts = alerting ? [['backend-health', headline]] : [];
+  const resetReason = String(health.history_reset_reason || '');
+  if (resetReason) {
+    alerts.push(['history-reset', `${resetReason} — ${debugSystemHealthReasonText(resetReason)}; counts from before the reset are gone.`]);
+  }
+  const persistenceState = String(health.persistence_state || '');
+  if (persistenceState && persistenceState !== 'ok') {
+    const why = String(health.persistence_reason_code || '');
+    alerts.push(['persistence', `Retained history persistence is ${persistenceState}${why ? ` — ${debugSystemHealthReasonText(why)}` : ''}; the retained history may not survive a restart.`]);
+  }
+  return {alerts, quiet: alerting ? null : headline};
+}
+
+function debugSystemHealthSnapshotHtml(health = {}) {
+  const {state, ageSeconds, cycleAgeSeconds} = debugSystemHealthStaleness(health);
+  const resetReason = String(health.history_reset_reason || '');
+  const persistenceState = String(health.persistence_state || '');
+  const persistenceDegraded = persistenceState !== '' && persistenceState !== 'ok';
+  const {quiet} = debugSystemHealthExplanations(health);
+  // The two facts, adjacent and separately labelled, so a reader can see that a long "Last state
+  // change" beside a short "Last checked" is a QUIET system and not a broken one.
+  const checked = debugSystemScalar(cycleAgeSeconds, 'no_observer_cycle_recorded', value => `${relativeTimeFormat(value)} (${debugSystemNumber(value, 1)}s ago)`);
+  const cycles = debugSystemScalar(health.observer_cycles, health.observer_liveness_reason_code || 'observer_unattached');
+  const rawEpochStartedAt = Number(health.observer_epoch_started_at);
+  const epochStartedAt = Number.isFinite(rawEpochStartedAt) ? rawEpochStartedAt : 0;
+  const rows = [
+    ['Snapshot revision', Number(health.revision) > 0 ? `#${String(health.revision)}` : t('common.notAvailable')],
+    ['Observer last checked', checked.text, checked.reason],
+    // NOT `debugSystemNumber` directly: `Number(null)` is 0, so an absent cycle count would have
+    // been rendered as a measured zero -- the fabricated zero this whole block exists to refuse.
+    ['Observer cycles', cycles.text, cycles.reason],
+    ['Last state change', ageSeconds == null ? 'never' : `${relativeTimeFormat(ageSeconds)} (${debugSystemNumber(ageSeconds, 1)}s old)`],
+    ['Observer epoch', String(health.observer_epoch || '') || t('common.notAvailable')],
+    // The wall-clock instant this observer epoch began collecting -- i.e. how far back the
+    // retained history actually reaches. The backend already publishes it as
+    // `observer_epoch_started_at`; this is the reader-facing label for it. Absent (never
+    // available) reads as not-available rather than the epoch-zero date a bare `new Date(0)`
+    // would print.
+    ['History retained since', epochStartedAt > 0 ? debugGraphTimeLabel(epochStartedAt * 1000, {includeDate: true, includeSeconds: true}) : t('common.notAvailable')],
+    ['Services retained', Number.isFinite(Number(health.resources)) ? debugSystemNumber(health.resources) : t('common.notAvailable')],
+  ];
+  // The reason CODE, not its sentence. The sentence is an explanation and the alert slot above the
+  // roster owns every one of those; this row's job is to name the machine-readable field the
+  // backend published, which is a measured value like every other row here.
+  if (resetReason) rows.push(['History reset', resetReason]);
+  else if (String(health.history_coverage || '')) rows.push(['History coverage', String(health.history_coverage)]);
+  if (persistenceDegraded) {
+    const why = String(health.persistence_reason_code || '');
+    rows.push(['Persistence', `${persistenceState}${why ? ` — ${why}` : ''}`]);
+  }
+  const alerting = state === 'stopped' || state === 'unavailable' || persistenceDegraded || Boolean(resetReason);
+  // NOT a live region. Every row below carries an age that advances on each 5-second poll, so a
+  // `role="status"` here re-announced the whole provenance block every five seconds. Anything
+  // here worth interrupting a reader for is already raised, once, by the compact alert slot --
+  // which is why `quiet` is null in exactly those states and no headline is printed here.
+  return `<div class="js-debug-system-health-snapshot${alerting ? ' js-debug-system-health-snapshot--alert' : ''}" data-system-health-snapshot data-health-available="${health.available === true}" data-health-staleness="${esc(state)}" data-health-alerting="${alerting}">
+    ${quiet ? `<p data-system-health-headline>${esc(quiet)}</p>` : ''}${debugSystemRowsHtml(rows)}
+  </div>`;
+}
+
+function debugSystemHealthCoverage(health = {}) {
+  return health.coverage && typeof health.coverage === 'object' ? health.coverage : {};
+}
+
+// The coverage state that governs one column, so a `partial` flag always points at the aggregate
+// the number in that cell actually came from.
+function debugSystemHealthColumnCoverage(health, column) {
+  const coverage = debugSystemHealthCoverage(health);
+  const value = column.coverage === 'retained' ? coverage.retained_counters : coverage.counters;
+  return String(value || 'unavailable');
+}
+
+function debugSystemHealthScopeLabel(health = {}) {
+  const scope = String(debugSystemHealthCoverage(health).counter_scope || '');
+  if (!scope) return '';
+  return DEBUG_SYSTEM_HEALTH_SCOPE_LABELS[scope] || scope;
+}
+
+// The denominator sentence, and its ONE owner. It is a property of the AGGREGATE, not of any one
+// service: every row shares the same `web_process` scope, so rendering it per row printed the same
+// paragraph six times and rendering it per column printed "this web process" in three headers --
+// where, being `white-space: nowrap`, it also pinned three numeric columns to 121-127px that could
+// not shrink. It is now stated once, beneath the table, by this function.
+function debugSystemHealthScopeSentence(health = {}) {
+  const scope = String(debugSystemHealthCoverage(health).counter_scope || '');
+  if (!scope) return '';
+  return `Requests, errors and response times count only what ${debugSystemHealthScopeLabel(health)} issued (scope: ${scope}) — not everything this service has ever served.`;
+}
+
+// Every sentence that qualifies the numbers in THIS row, so a partial count can never be read as a
+// complete one. The scope sentence is deliberately absent: it is identical for every row and is
+// stated once by `debugSystemHealthScopeSentence` in the table caption.
+function debugSystemHealthCoverageNotes(health = {}) {
+  const coverage = debugSystemHealthCoverage(health);
+  const notes = [];
+  if (String(coverage.counters || '') === 'partial') {
+    notes.push(`Requests, errors and response times are PARTIAL: ${debugSystemHealthReasonListText(coverage.counter_reasons) || 'no reason was published'}.`);
+  }
+  const retained = String(coverage.retained_counters || '');
+  if (retained === 'partial') {
+    notes.push(`Retained totals (restarts, observations) are PARTIAL: ${debugSystemHealthReasonListText(coverage.retained_counter_reasons) || 'no reason was published'}.`);
+  } else if (retained === 'unavailable') {
+    notes.push(`Retained totals are unavailable: ${debugSystemHealthReasonText(health.unavailable_reason_code || 'observer_unattached')}.`);
+  }
+  return notes;
+}
+
+function debugSystemHealthObservedText(health = {}) {
+  if (health.observed !== true) {
+    return `Not observed — ${debugSystemHealthReasonText(health.unavailable_reason_code || 'observer_unattached')}.`;
+  }
+  const state = String(health.state || '') || t('common.notAvailable');
+  const ageSeconds = Number(health.state_age_seconds);
+  const held = Number.isFinite(ageSeconds) && health.state_age_seconds != null
+    ? ` for ${debugGraphUptimeText(ageSeconds)}`
+    : ' (the observer has not published how long)';
+  const reason = String(health.reason_code || '');
+  const recovery = String(health.recovery_outcome || '');
+  const since = Number(health.since_revision) > 0 ? ` since revision #${String(health.since_revision)}` : '';
+  const detail = [reason && reason !== 'none' ? `reason ${reason}` : '', recovery && recovery !== 'none' ? `recovery ${recovery}` : '']
+    .filter(Boolean)
+    .join(', ');
+  return `Observed state: ${state}${held}${since}${detail ? ` — ${detail}` : ''}.`;
+}
+
+// The published health fields the five columns have no room for. They go through the SAME metric
+// envelope, so an unobserved sample count still reads as its reason and never as 0.
+function debugSystemHealthDetailText(health = {}) {
+  const metrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
+  const parts = [
+    `observer samples: ${debugSystemMetricText(metrics.observations, 'observations')}`,
+    `completed requests: ${debugSystemMetricText(metrics.completed_count, 'completed_count')}`,
+  ];
+  // A pid and a revision are identifiers, not quantities: `4,242` is not a pid anyone can grep for.
+  if (health.observed === true && Number(health.pid) > 0) {
+    parts.push(`peer pid ${String(health.pid)} (epoch ${String(health.process_epoch || '') || t('common.notAvailable')})`);
+  }
+  return `${parts.join(' · ')}.`;
+}
+
+// Errors are only actionable with their reasons. This is the web process's own ledger breakdown,
+// under the same `web_process` denominator as the Errors column beside it.
+function debugSystemHealthErrorsByReasonText(health = {}) {
+  const errors = health.errors_by_reason && typeof health.errors_by_reason === 'object' ? health.errors_by_reason : {};
+  const entries = Object.entries(errors).filter(([, count]) => Number(count) > 0);
+  if (!entries.length) return '';
+  return `Errors by reason: ${entries.map(([reason, count]) => `${reason} ${debugSystemNumber(count)}`).join(', ')}.`;
+}
+
+// `transitions_truncated` means older rows EXIST. Saying "16 changes" when 42 happened is the same
+// lie as a partial count rendered as complete, so the count and the window are always stated apart.
+function debugSystemHealthTransitionsHtml(health = {}, nowSeconds) {
+  const transitions = Array.isArray(health.transitions) ? health.transitions : [];
+  const total = Number(health.transitions_total);
+  const totalText = Number.isFinite(total) ? debugSystemNumber(total) : String(transitions.length);
+  if (!transitions.length) {
+    if (health.observed !== true) return '';
+    return `<p data-subsystem-transitions data-transitions-truncated="false">No state change has been recorded for this service yet.</p>`;
+  }
+  const truncated = health.transitions_truncated === true;
+  // "at least N" when the count is a floor. A history retained before the lifetime counter existed
+  // can only yield a lower bound, and printing it as an exact total would restate the defect the
+  // counter was added to remove.
+  const countText = health.transitions_total_exact === false ? `at least ${totalText}` : totalText;
+  const header = truncated
+    ? `${countText} state changes recorded — showing the latest ${debugSystemNumber(transitions.length)}; older rows exist and are not shown here.`
+    : `${countText} state changes recorded — all of them are shown.`;
+  const rows = transitions
+    .slice()
+    .reverse()
+    .map(row => {
+      const wallTime = Number(row?.wall_time);
+      const when = Number.isFinite(wallTime) && wallTime > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - wallTime)) : 'time not retained';
+      const reason = String(row?.reason_code || '');
+      const recovery = String(row?.recovery_outcome || '');
+      const detail = [reason && reason !== 'none' ? reason : '', recovery && recovery !== 'none' ? `recovery ${recovery}` : ''].filter(Boolean).join(', ');
+      return `<li>rev #${esc(String(row?.revision ?? '?'))} · ${esc(when)} · ${esc(String(row?.previous_state || '?'))} → ${esc(String(row?.new_state || '?'))}${detail ? ` (${esc(detail)})` : ''}</li>`;
+    })
+    .join('');
+  return `<p data-subsystem-transitions data-transitions-truncated="${truncated}">${esc(header)}</p><ol class="js-debug-system-health-transitions">${rows}</ol>`;
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE DAEMONS ROSTER
+//
+// One adapter (`debugSystemRosterRows`) turns the ONE `/api/system-status` payload into stable
+// top-level and child rows, and one renderer (`debugSystemRosterHtml`) draws them. Deliberately
+// absent, because each would be a second copy of something that already has an owner:
+//   * no service inventory -- the ids and their order come from `local_services.inventory`, owned
+//     by `yolomux_lib/local_service_projection.py:LOCAL_SERVICE_INVENTORY`;
+//   * no label map -- the display names come from the backend row's `label`
+//     (`yolomux_lib/app.py:system_status_service`);
+//   * no status classifier -- the paint comes from `debugSystemStateTone` and the word from
+//     `debugSystemRosterStateLabel`;
+//   * no metric formatter -- every cell goes through `debugSystemMetricText`.
+// Row order never depends on health, so repeated scanning always finds a service in the same place.
+// ---------------------------------------------------------------------------------------------
+
+const DEBUG_SYSTEM_ROSTER_WEB_ID = 'web';
+const DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID = 'tmux-signal-watcher';
+// The row that stands for the whole local-services block when the panel cannot read the payload
+// well enough to know which services exist, and the count of rows that are always present.
+const DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID = 'local-services';
+// Every metric column a row can carry, in one list, so a row whose metrics are absent by
+// STRUCTURE spells that absence once instead of repeating the column names per row.
+const DEBUG_SYSTEM_ROSTER_METRIC_KEYS = Object.freeze([
+  'cpu_now_percent', 'rss_bytes', 'uptime_seconds', 'restart_count',
+  'request_count', 'error_count', 'latency_average_ms', 'latency_max_ms',
+]);
+const debugSystemRosterAbsentMetrics = reasonCode =>
+  Object.fromEntries(DEBUG_SYSTEM_ROSTER_METRIC_KEYS.map(key => [key, debugSystemAbsentMetric(reasonCode)]));
+// The tmux control-client states this panel knows, and how each one reads as a roster state.
+// `never-started` is only an issue when something actually demanded the watcher; undemanded is
+// idle-by-design and must stay gray and non-alerting.
+const DEBUG_SYSTEM_TMUX_WATCHER_STATES = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
+const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
+  running: 'debug.system.roster.state.ready',
+  idle: 'state.idle',
+  issue: 'debug.system.localServices.state.issue',
+  unavailable: 'debug.system.roster.state.unavailable',
+  attached: 'debug.system.roster.state.attached',
+  attaching: 'debug.system.roster.state.attaching',
+  'no-sessions': 'debug.system.roster.state.noSessions',
+  'never-started': 'debug.system.roster.state.neverStarted',
+  exited: 'debug.system.roster.state.exited',
+  schema_unsupported: 'debug.system.roster.state.unsupported',
+});
+
+function debugSystemRosterStateLabel(state) {
+  const key = DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS[String(state || '')];
+  if (key) return t(key);
+  return String(state || '') || t('common.notAvailable');
+}
+
+// Status is never carried by colour alone: the dot glyph differs by tone, the state WORD is always
+// rendered beside it, and `data-subsystem-state` carries the machine-readable state. A row may
+// override the tone when the STATE alone does not decide it (an undemanded watcher that never
+// started is idle; a demanded one in the same state is an outage) -- the state word and the
+// attribute still report the published state either way.
+function debugSystemRosterStatusHtml(state, toneOverride = '') {
+  const tone = toneOverride || debugSystemStateTone(state);
+  const glyph = tone === 'muted' ? '○' : '●';
+  return `<span class="js-debug-roster-status js-debug-system-state js-debug-system-state--${esc(tone)}" data-subsystem-tone="${esc(tone)}">`
+    + `<span class="js-debug-roster-dot" aria-hidden="true">${glyph}</span>`
+    + `<span data-subsystem-state-label>${esc(debugSystemRosterStateLabel(state))}</span></span>`;
+}
+
+// Every value on a roster row, in one shape, whatever produced it. `metrics` is always a full set
+// of typed envelopes -- a producer that has no series for a column supplies a STRUCTURAL absence
+// with its reason code rather than letting the cell fall back to a bare zero.
+function debugSystemRosterWebRow(payload = {}, port = '') {
+  const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
+  const absent = debugSystemAbsentMetric('web_process_not_observed');
+  return {
+    id: DEBUG_SYSTEM_ROSTER_WEB_ID,
+    kind: 'web',
+    parentId: '',
+    label: t('debug.system.roster.web'),
+    qualifier: port ? `:${port}` : '',
+    state: payload.ok === false ? 'issue' : 'running',
+    reason: payload.ok === false ? String(jsDebugSystemState.error || '') : '',
+    metrics: {
+      // Typed envelopes straight from the backend, exactly like a service row. They were built
+      // here from raw floats until the producer started publishing the envelope, which is what
+      // let an unsampled `0` render as `measured 0.0B` / `measured 0%` and be summed into the
+      // strip's Memory and CPU totals while ~160MB of real RSS went uncounted.
+      cpu_now_percent: server.cpu_percent,
+      rss_bytes: server.rss_bytes,
+      uptime_seconds: server.uptime_seconds,
+      // The backend-health observer runs IN this web process and observes the six local services;
+      // it has never observed this process, so these four have no series at all. Rendering them as
+      // 0 restarts / 0 requests / 0 errors / 0 ms would be four fabricated measurements.
+      restart_count: absent,
+      request_count: absent,
+      error_count: absent,
+      latency_average_ms: absent,
+      latency_max_ms: absent,
+    },
+    health: {},
+  };
+}
+
+function debugSystemRosterTmuxWatcherRow(payload = {}) {
+  const watcher = payload.tmux_signal_watcher && typeof payload.tmux_signal_watcher === 'object' ? payload.tmux_signal_watcher : {};
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+  return {
+    id: DEBUG_SYSTEM_ROSTER_TMUX_WATCHER_ID,
+    kind: 'child',
+    parentId: DEBUG_SYSTEM_ROSTER_WEB_ID,
+    label: t('debug.system.roster.tmuxSignalWatcher'),
+    qualifier: '',
+    state,
+    // Undemanded and never started is idle by design, not an outage; demanded and never started is
+    // the outage. The one issue predicate decides the paint here and the compact alert above, and
+    // `data-subsystem-state` keeps saying which of the five typed states was actually published.
+    tone: debugSystemTmuxSignalWatcherIsIssue(watcher) ? 'bad' : (state === 'attaching' ? 'warn' : (state === 'attached' ? 'good' : 'muted')),
+    reason: String(watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state] || ''),
+    metrics: debugSystemRosterAbsentMetrics('subsystem_not_observed'),
+    health: {},
+  };
+}
+
+// The ONE row a payload this panel cannot render produces. Not a per-service row and not a
+// variant of one: a schema mismatch means the panel does not know which services exist, so
+// iterating `inventory`, reading `services`, or interpreting any field out of that payload would
+// all be the same unearned confidence in different clothes. One row, one typed state, no payload.
+function debugSystemRosterUnsupportedSchemaRow() {
+  return {
+    id: DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID,
+    kind: 'service',
+    parentId: '',
+    label: t('debug.system.localServices.title'),
+    // No daemon id to put beside the name: this row stands for the whole block.
+    qualifier: '',
+    state: 'schema_unsupported',
+    reason: debugSystemHealthReasonText('schema_unsupported'),
+    pid: 0,
+    metrics: debugSystemRosterAbsentMetrics('schema_unsupported'),
+    health: {},
+    service: {},
+  };
+}
+
+function debugSystemRosterServiceRow(service = {}) {
+  const id = String(service?.id || service?.service || '');
+  const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
+  const health = service?.health && typeof service.health === 'object' ? service.health : {};
+  const healthMetrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
+  // No schema guard here. This adapter is reached only for a schema this panel renders, because
+  // an unsupported one never gets as far as a per-service row -- see `debugSystemRosterRows`.
+  // Guarding field by field made the rule graded rather than absolute: it left the row trusting
+  // the unknown payload's `id`, `label` and shape while refusing its numbers, which is a
+  // half-trust that has to be re-decided every time a field is added.
+  return {
+    id,
+    kind: 'service',
+    parentId: '',
+    label: String(service?.label || id),
+    qualifier: id,
+    state: String(service?.state || 'unavailable'),
+    reason: String(service?.reason || ''),
+    pid: Number(service?.pid || 0),
+    metrics: {
+      cpu_now_percent: metrics.cpu_now_percent,
+      rss_bytes: metrics.rss_bytes,
+      uptime_seconds: metrics.uptime_seconds,
+      restart_count: healthMetrics.restart_count,
+      request_count: healthMetrics.request_count,
+      error_count: healthMetrics.error_count,
+      latency_average_ms: healthMetrics.latency_average_ms,
+      latency_max_ms: healthMetrics.latency_max_ms,
+    },
+    health,
+    service,
+  };
+}
+
+// The ONE adapter. Top-level rows in the inventory's declared order, with the web process first and
+// its owned in-process subsystem nested beneath it.
+function debugSystemRosterRows(payload = {}) {
+  // Empty for a schema this panel cannot render, so `inventory`, `services` and the web row's port
+  // qualifier are all absent by construction rather than by a branch further down.
+  const localServices = debugSystemRenderableLocalServices(payload);
   const inventory = Array.isArray(localServices.inventory) ? localServices.inventory.map(String) : [];
   const services = Array.isArray(localServices.services) ? localServices.services : [];
   const servicesById = new Map(services.map(service => [String(service?.id || service?.service || ''), service]));
-  const rows = inventory.map(id => servicesById.get(id) || {
-    id,
-    label: id,
-    state: 'unavailable',
-    reason: 'Service status is missing',
-    metrics: {},
-  });
-  const metricKeys = ['cpu_now_percent', 'rss_bytes', 'uptime_seconds'];
-  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table js-debug-system-local-services-table--rows">
-    <thead><tr><th>Service</th><th>Status</th><th>PID</th><th>CPU</th><th>Memory</th><th>Uptime</th><th>Reason</th></tr></thead>
-    <tbody>${rows.map(service => {
-      const id = String(service?.id || service?.service || '');
-      const state = String(service?.state || 'unavailable');
-      const reason = String(service?.reason || '');
-      const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
-      return `<tr data-subsystem-row data-subsystem-id="${esc(id)}" data-subsystem-state="${esc(state)}">
-        <th scope="row"><span class="js-debug-system-service-name">${esc(service?.label || id)}</span><span>${esc(id)}</span></th>
-        <td data-subsystem-value><span class="js-debug-system-state js-debug-system-state--${state === 'running' ? 'good' : (state === 'idle' ? 'muted' : 'bad')}">${esc(state)}</span></td>
-        <td>${Number(service?.pid || 0) > 0 ? esc(String(service.pid)) : '—'}</td>
-        ${metricKeys.map(key => `<td data-subsystem-metric="${esc(key)}" data-metric-state="${esc(metrics[key]?.state || 'unavailable')}">${esc(debugSystemMetricText(metrics[key], key))}</td>`).join('')}
-        <td><span data-subsystem-reason${reason ? '' : ' hidden'}>${esc(reason)}</span></td>
-      </tr>`;
-    }).join('')}</tbody>
-  </table></div>`;
-}
-
-function debugSystemLocalServiceCellMap(root) {
-  const cells = new Map();
-  root.querySelectorAll?.('[data-js-debug-service-cell]').forEach(cell => {
-    cells.set(`${cell.dataset.service || ''}\x1f${cell.dataset.field || ''}`, cell);
-  });
-  return cells;
-}
-
-function ensureDebugSystemLocalServicesTable(root, serviceNames) {
-  if (!root) return;
-  const signature = serviceNames.join('\x1f');
-  const table = root.querySelector('.js-debug-system-local-services-table');
-  if (table && root.dataset.signature === signature) return;
-  root.innerHTML = serviceNames.length ? debugSystemLocalServicesTableHtml(serviceNames) : `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
-  root.dataset.signature = signature;
-}
-
-function updateDebugSystemLocalServiceCell(cell, record, fieldKey, value, nowMs) {
-  const field = record.fields.get(fieldKey) || {display: '', identity: '', lastChangedAt: nowMs};
-  if (field.identity !== value.identity) field.lastChangedAt = nowMs;
-  field.display = value.display;
-  field.identity = value.identity;
-  record.fields.set(fieldKey, field);
-  if (cell.textContent !== value.display) cell.textContent = value.display;
-  cell.classList.toggle('js-debug-system-service-cell--prev', value.previous === true);
-  cell.classList.toggle('js-debug-system-service-cell--fresh', value.previous !== true && nowMs - field.lastChangedAt <= DEBUG_SYSTEM_SERVICE_FRESH_MS);
-  cell.classList.toggle('js-debug-system-service-cell--stale', value.previous === true || nowMs - field.lastChangedAt > DEBUG_SYSTEM_SERVICE_FRESH_MS);
-}
-
-function updateDebugSystemLocalServicesCard(card, payload = {}) {
-  const root = card?.querySelector?.('[data-js-debug-local-services]');
-  if (!root) return;
-  if (Number(payload.local_services?.schema_version) === 1) {
-    root.innerHTML = debugSystemNormalizedLocalServicesTableHtml(payload.local_services);
-    root.dataset.signature = `schema-1:${(payload.local_services?.inventory || []).join('\x1f')}`;
-    return;
+  const port = String(localServices.health?.port || '');
+  const rows = [debugSystemRosterWebRow(payload, port), debugSystemRosterTmuxWatcherRow(payload)];
+  // A version this panel does not render means it does not know which services exist, so it lists
+  // none of them and says so once. The web process and its in-process subsystem stay, because
+  // neither is described by `local_services` at all.
+  if (!debugSystemLocalServicesSchemaSupported(payload)) {
+    rows.push(debugSystemRosterUnsupportedSchemaRow());
+    return rows;
   }
-  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  const incomingNames = services.map(debugSystemServiceName);
-  const retainedNames = [...debugSystemLocalServicesState.records.keys()].filter(name => !incomingNames.includes(name));
-  const serviceNames = [...incomingNames, ...retainedNames];
-  ensureDebugSystemLocalServicesTable(root, serviceNames);
-  const cells = debugSystemLocalServiceCellMap(root);
-  const nowMs = Date.now();
-  const nowSeconds = nowMs / 1000;
-  const servicesByName = new Map(services.map(service => [debugSystemServiceName(service), service]));
-  for (const name of serviceNames) {
-    const service = servicesByName.get(name) || {service: name, pid: 0};
-    const record = debugSystemLocalServiceRecord(name);
-    debugSystemLocalServiceUpdateLifecycle(record, service, nowSeconds);
-    const state = debugSystemServiceState(service);
-    const headState = root.querySelector(`[data-js-debug-service-state="${cssEscape(name)}"]`);
-    if (headState) {
-      headState.textContent = state.label;
-      headState.className = `js-debug-system-state js-debug-system-state--${state.tone}`;
+  for (const id of inventory) {
+    // A service in the inventory with no row is a MISSING row, not an absent service: it renders
+    // unavailable with a reason rather than silently disappearing from the roster.
+    rows.push(debugSystemRosterServiceRow(servicesById.get(id) || {
+      id,
+      label: id,
+      state: 'unavailable',
+      reason: 'Service status is missing',
+      metrics: {},
+    }));
+  }
+  return rows;
+}
+
+// What the whole roster adds up to -- EVERY number in the strip, over ONE population, from the one
+// array of rows the table itself renders.
+//
+// The counts used to come from these rows while CPU and memory came from `local_services.totals`,
+// which the backend computes over the six local services only: `LocalServicesCollector.collect`
+// raises if anything outside `LOCAL_SERVICE_INVENTORY` appears, so the web process cannot be in it
+// and that total is child-only by contract. The strip therefore put "8 ready" next to a CPU figure
+// that excluded one of the eight. Summing here, over the rendered rows, makes the two structurally
+// incapable of disagreeing -- there is no second population to keep in step.
+//
+// `cpuMeasured`/`rssMeasured` count how many rows actually published a value, because a sum over
+// zero measurements is an ABSENCE, not `0%`.
+//
+// The state counts run over EVERY row the table draws, including the nested child. They used to
+// skip `kind === 'child'`, so the strip said "7" while eight rows rendered and a red tmux-watcher
+// row was absent from the `issues` count that is supposed to be why a reader opens this view. The
+// filter is gone: `population` is `rows.length`, the same array `debugSystemRosterHtml` renders,
+// so the count and the render cannot answer "how many rows are there" differently.
+//
+// `resourcePopulation` answers a DIFFERENT question -- how many of those rows own a process whose
+// CPU and memory can be summed at all. A row with a `parentId` runs INSIDE its parent, so its
+// resources are already inside the parent's figure; counting it as an unmeasured row would flag
+// every complete total as partial forever. It is counted in this same pass, off the same array,
+// off the `parentId` the renderer already uses to nest the row.
+function debugSystemRosterSummary(rows = []) {
+  const counts = {
+    ready: 0, idle: 0, issues: 0,
+    population: rows.length, resourcePopulation: 0,
+    cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0,
+  };
+  for (const row of rows) {
+    if (!row.parentId) counts.resourcePopulation += 1;
+    const tone = row.tone || debugSystemStateTone(row.state);
+    if (tone === 'good') counts.ready += 1;
+    else if (tone === 'muted') counts.idle += 1;
+    else counts.issues += 1;
+    const cpu = row.metrics?.cpu_now_percent;
+    if (cpu?.state === 'measured') {
+      counts.cpuPercent += Number(cpu.value) || 0;
+      counts.cpuMeasured += 1;
     }
-    for (const field of debugSystemLocalServiceFields) {
-      const cell = cells.get(`${name}\x1f${field.key}`);
-      if (!cell) continue;
-      updateDebugSystemLocalServiceCell(cell, record, field.key, debugSystemLocalServiceFieldValue(service, record, field.key, nowSeconds), nowMs);
+    const rss = row.metrics?.rss_bytes;
+    if (rss?.state === 'measured') {
+      counts.rssBytes += Number(rss.value) || 0;
+      counts.rssMeasured += 1;
     }
   }
+  return counts;
+}
+
+// ONE owner for "this number covers less than it looks like", rendered by both the roster's metric
+// cells and the summary strip. It used to be the literal word `partial` written out twice, verbatim,
+// in two renderers.
+//
+// It is a FOOTNOTE to the number, so it renders as one: a real `<sup>` marker directly after the
+// value (`826MB*`), not a word beside it that reads as a second value in a dense row. The panel had
+// no footnote-marker convention before this, so `*` becomes it -- every partial-coverage mark in
+// this panel uses this function, not a second glyph.
+//
+// A bare `*` is meaningless to a screen reader, so the glyph is hidden from the accessibility tree
+// and the word rides in the panel's existing `a11y-only` span: a sighted reader gets the marker, a
+// screen reader still hears "partial". The full sentence stays where it already was -- the cell's
+// own `title` and the row's disclosure -- and every machine-readable attribute stays on the caller's
+// element, not on this marker.
+const DEBUG_SYSTEM_COVERAGE_FLAG_MARKER = '*';
+function debugSystemCoverageFlagHtml() {
+  return `<sup class="js-debug-system-coverage-flag" data-coverage-flag><span aria-hidden="true">${DEBUG_SYSTEM_COVERAGE_FLAG_MARKER}</span><span class="a11y-only">${esc(t('debug.system.roster.coverage.partial'))}</span></sup>`;
+}
+
+// One cell. `parts` renders two typed envelopes side by side; both still go through the one metric
+// text renderer and both still carry their own state and coverage, so an untimed average and a
+// measured maximum cannot be collapsed into one number.
+function debugSystemRosterMetricCellHtml(row, column) {
+  const health = row.health && typeof row.health === 'object' ? row.health : {};
+  const keys = column.parts || [column.key];
+  const coverageState = column.coverage ? debugSystemHealthColumnCoverage(health, column) : '';
+  const rendered = keys.map(key => {
+    const metric = row.metrics?.[key];
+    const attribute = DEBUG_SYSTEM_PROCESS_METRIC_KEYS.has(key) ? 'data-subsystem-metric' : 'data-subsystem-health-metric';
+    const measured = metric?.state === 'measured';
+    // A partial count is flagged in the cell itself; the reason sits in the row's own disclosure.
+    const flag = measured && coverageState === 'partial' ? debugSystemCoverageFlagHtml() : '';
+    const coverageAttr = column.coverage ? ` data-metric-coverage="${esc(coverageState)}"` : '';
+    // An unmeasured value is an em dash in the ROW and its full sentence in the row's disclosure.
+    // Printing the whole reason in the cell is what made the old table wider than its scroller; the
+    // rule that matters is unchanged -- it is never `0`, never blank and never green -- and the
+    // reason is carried in three readable places: the cell's title, the cell's reason code, and
+    // the metric list inside the disclosure.
+    const reason = measured ? '' : debugSystemMetricText(metric, key);
+    const explain = measured ? '' : ` title="${esc(reason)}" data-metric-reason="${esc(metric?.reason_code || '')}"`;
+    return `<span ${attribute}="${esc(key)}" data-metric-state="${esc(metric?.state || 'unavailable')}"${coverageAttr}${explain}>${measured ? esc(debugSystemMetricText(metric, key)) : '—'}${flag}</span>`;
+  });
+  const body = rendered.join('<span class="js-debug-roster-sep" aria-hidden="true"> / </span>');
+  // The column's own name, inside the cell, from the SAME `column.labelKey` the header uses -- one
+  // label string, two positions. It is shown if and only if the header row is hidden, which is the
+  // contract `.js-debug-roster-dropped` already has with the columns it copies. Below 36rem the row
+  // stacks into two lines and a header can no longer label anything above it, and `12.5ms / 340ms`
+  // with no name beside it is not a readable row.
+  const label = `<span class="js-debug-roster-celllabel">${esc(t(column.labelKey))}</span>`;
+  return `<td role="cell" class="js-debug-roster-cell js-debug-roster-cell--${esc(column.priority)}" data-subsystem-column="${esc(column.key)}">${label}${body}</td>`;
+}
+
+// The explicit ARIA roles below are load-bearing, not decoration: below 36rem the roster's boxes
+// become `display: block` so the row can lay out as two readable lines, and a `display: block`
+// table loses its implicit table/row/cell semantics in every engine. The roles restate exactly what
+// the native elements already mean at every other width, so the structure a screen reader hears is
+// the same one at 390px as at 1920px.
+function debugSystemRosterHeaderHtml() {
+  const columns = DEBUG_SYSTEM_ROSTER_COLUMNS.map(column => {
+    const healthColumn = column.coverage ? ` data-subsystem-health-column="${esc(column.parts ? column.parts[0] : column.key)}"` : '';
+    return `<th role="columnheader" scope="col" class="js-debug-roster-cell js-debug-roster-cell--${esc(column.priority)}" data-subsystem-column="${esc(column.key)}"${healthColumn}>${esc(t(column.labelKey))}</th>`;
+  }).join('');
+  return `<thead role="rowgroup"><tr role="row"><th role="columnheader" scope="col" class="js-debug-roster-service">${esc(t('debug.system.roster.column.service'))}</th>`
+    + `<th role="columnheader" scope="col" class="js-debug-roster-statushead">${esc(t('debug.system.localServices.field.status'))}</th>${columns}</tr></thead>`;
+}
+
+function debugSystemRosterRowHtml(row, {expanded, columnCount, payload, nowSeconds}) {
+  const detailId = `js-debug-roster-detail-${row.id}`;
+  const rowClass = `js-debug-roster-row js-debug-roster-row--${row.kind}`;
+  const name = row.qualifier ? `${row.label} · ${row.qualifier}` : row.label;
+  const toggleLabel = t(expanded ? 'debug.system.roster.collapse' : 'debug.system.roster.expand', {service: name});
+  const cells = DEBUG_SYSTEM_ROSTER_COLUMNS.map(column => debugSystemRosterMetricCellHtml(row, column)).join('');
+  const head = `<tr role="row" class="${rowClass}" data-subsystem-row data-subsystem-id="${esc(row.id)}" data-subsystem-kind="${esc(row.kind)}" data-subsystem-state="${esc(row.state)}"${row.parentId ? ` data-subsystem-parent="${esc(row.parentId)}"` : ''}>
+    <th role="rowheader" scope="row" class="js-debug-roster-service">
+      <button type="button" class="js-debug-roster-toggle" data-js-debug-roster-toggle="${esc(row.id)}" data-js-debug-system-focus-key="roster-toggle:${esc(row.id)}" aria-expanded="${expanded ? 'true' : 'false'}" aria-controls="${esc(detailId)}" aria-label="${esc(toggleLabel)}">
+        <span class="js-debug-roster-chevron" aria-hidden="true">${expanded ? '▾' : '▸'}</span>
+        <span class="js-debug-system-service-name">${esc(row.label)}</span>${row.qualifier ? `<span class="js-debug-roster-qualifier">${esc(row.qualifier)}</span>` : ''}
+      </button>
+    </th>
+    <td role="cell" class="js-debug-roster-statuscell" data-subsystem-value>${debugSystemRosterStatusHtml(row.state, row.tone)}<span class="js-debug-roster-reason" data-subsystem-reason${row.reason ? '' : ' hidden'}>${esc(row.reason)}</span></td>
+    ${cells}
+  </tr>`;
+  // Lazy CONTENT, stable TARGET. The transition list, the coverage notes, the sampler families and
+  // the cache dictionaries are BUILT only for an expanded row -- rendering them for eight rows and
+  // hiding them with CSS is the default-DOM weight this redesign exists to remove. The empty
+  // container still exists, because `aria-controls` must resolve to a real element for the state
+  // the button reports to mean anything.
+  return `${head}<tr role="row" class="js-debug-roster-detailrow" data-subsystem-detail-row data-subsystem-id="${esc(row.id)}" data-subsystem-detail-built="${expanded ? 'true' : 'false'}"${expanded ? '' : ' hidden'}>
+    <td role="cell" colspan="${columnCount}" id="${esc(detailId)}">${expanded ? debugSystemRosterDetailHtml(row, payload, nowSeconds) : ''}</td>
+  </tr>`;
+}
+
+// The roster. `expanded` is passed in rather than read from module state so the render is a pure
+// function of the payload plus the disclosure set, which is what makes it testable off-browser.
+function debugSystemRosterHtml(payload = {}, {nowSeconds = Date.now() / 1000, expanded = new Set()} = {}) {
+  const rows = debugSystemRosterRows(payload);
+  const columnCount = 2 + DEBUG_SYSTEM_ROSTER_COLUMNS.length;
+  // The denominator, once. Every row publishes the same counter scope, so this is a fact about the
+  // table and it is stated beneath it -- not repeated in three column headers and in every expanded
+  // row, which is how the same sentence used to appear nine times in one view.
+  const sentences = [...new Set(rows.map(row => debugSystemHealthScopeSentence(row.health)).filter(Boolean))];
+  // A sibling paragraph rather than a `<caption>`: a caption participates in the table's own
+  // min-content width, so a 120-character sentence would become the new reason the roster cannot
+  // narrow -- trading three over-wide columns for one over-wide table.
+  const caption = sentences.length === 1
+    ? `<p class="js-debug-system-column-scope" data-subsystem-scope-caption>${esc(sentences[0])}</p>`
+    : '';
+  const body = rows.map(row => debugSystemRosterRowHtml(row, {
+    expanded: expanded.has(row.id),
+    columnCount,
+    payload,
+    nowSeconds,
+  })).join('');
+  return `<div class="js-debug-system-table-wrap js-debug-roster-wrap"><table role="table" class="js-debug-system-table js-debug-roster-table" data-js-debug-roster>
+    ${debugSystemRosterHeaderHtml()}
+    <tbody role="rowgroup">${body}</tbody>
+  </table></div>${caption}`;
+}
+
+// The values the responsive layout may have DROPPED -- and only those. Service, Status, Latency and
+// Uptime are `priority: primary` and survive every width, so listing them here restated, directly
+// underneath, seven columns the reader could already see: that was ~40 lines of disclosure of which
+// the top third was duplication.
+//
+// The secondary columns stay in the markup because "a narrow window must never be the reason a
+// number is unreachable" is the load-bearing rule -- but they are only DISPLAYED by the same
+// container query that hides them from the row (`.js-debug-roster-dropped`), so at a width where
+// the column is visible its copy is not. One source of truth for which columns can drop:
+// DEBUG_SYSTEM_ROSTER_COLUMNS' own `priority`, the same field the CSS class comes from.
+function debugSystemRosterMetricListHtml(row) {
+  const entries = [];
+  for (const column of DEBUG_SYSTEM_ROSTER_COLUMNS) {
+    if (column.priority !== 'secondary') continue;
+    const keys = column.parts || [column.key];
+    entries.push([t(column.labelKey), keys.map(key => debugSystemMetricText(row.metrics?.[key], key)).join(' / ')]);
+  }
+  if (!entries.length) return '';
+  return `<div class="js-debug-roster-dropped" data-subsystem-dropped-metrics>${debugSystemRowsHtml(entries)}</div>`;
+}
+
+function debugSystemRosterDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const sections = [debugSystemRosterMetricListHtml(row)];
+  if (row.kind === 'web') sections.push(debugSystemWebProcessDetailHtml(payload));
+  else if (row.kind === 'child') sections.push(debugSystemTmuxSignalWatcherDetailHtml(payload.tmux_signal_watcher));
+  else sections.push(debugSystemServiceDetailHtml(row, payload, nowSeconds));
+  return `<div class="js-debug-roster-detail">${sections.filter(Boolean).join('')}</div>`;
+}
+
+// The retained observation, spelled out, for one service row. This is the block that used to be
+// rendered under EVERY service whether or not anyone asked for it.
+function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now() / 1000) {
+  const notes = debugSystemHealthCoverageNotes(health);
+  const errorsByReason = debugSystemHealthErrorsByReasonText(health);
+  return `<div class="js-debug-system-health-row" data-subsystem-health-row data-subsystem-observed="${health.observed === true}">
+    <p data-subsystem-health-state>${esc(debugSystemHealthObservedText(health))}</p>
+    <p data-subsystem-health-detail>${esc(debugSystemHealthDetailText(health))}</p>
+    ${errorsByReason ? `<p data-subsystem-errors-by-reason>${esc(errorsByReason)}</p>` : ''}
+    ${notes.length ? `<ul class="js-debug-system-health-notes">${notes.map(note => `<li data-subsystem-coverage-note>${esc(note)}</li>`).join('')}</ul>` : ''}
+    ${debugSystemHealthTransitionsHtml(health, nowSeconds)}
+  </div>`;
+}
+
+// The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
+// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed
+// from the payload. The guard is exact, not `>=`: rendering an older payload through the roster
+// would print absent health as though it had been measured, which is the defect the version number
+// exists to prevent.
+//
+// It has ONE reader: `debugSystemRosterServiceRow`, which turns a false answer into the typed
+// `schema_unsupported` row state. There used to be a second -- a whole retained per-cell table,
+// with its own classifier, its own lifecycle state map and its own freshness rules -- rendered as
+// a card inside Advanced for exactly this case. Two renderers and two classifiers for one
+// condition the roster already covers is the divergent-copies defect; the roster says it in one
+// typed state now, and the legacy view is gone.
+function debugSystemLocalServicesSchemaSupported(payload = {}) {
+  return Number(payload.local_services?.schema_version) === 3;
+}
+
+// The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather
+// than aspirational. It hands back an EMPTY block for a schema this panel cannot render, so no
+// field of an unreadable payload can reach any renderer by any path -- including a path added
+// later by someone who never read the version guard.
+//
+// This exists because the guard used to live inside `debugSystemRosterRows`, one branch DOWN from
+// the reads: `inventory`, `services` and `health.port` were all pulled out of the payload above
+// it, and the port was handed to the web row before the branch was ever evaluated. An unsupported
+// payload therefore still changed the rendered HTML while the tests asserted it was interpreted
+// nowhere, and the suite stayed green. A rule written at one call site is not a rule; a rule that
+// owns the only read is.
+function debugSystemRenderableLocalServices(payload = {}) {
+  if (!debugSystemLocalServicesSchemaSupported(payload)) return {};
+  return payload.local_services && typeof payload.local_services === 'object' ? payload.local_services : {};
 }
 
 function debugSystemRolesHtml(roles = {}) {
@@ -55745,153 +57930,544 @@ function debugSystemSamplerFamiliesHtml(value, nowSeconds = Date.now() / 1000) {
   </table></div>`;
 }
 
-function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() / 1000) {
+// The YO!stats sampler diagnostics. One owner, rendered in exactly one place: statsd's own row
+// disclosure. It used to be a standalone default card two screens above the service it describes.
+function debugSystemStatsSamplerBodyHtml(services = [], nowSeconds = Date.now() / 1000) {
   const statsd = (services || []).find(service => String(service?.service || '') === 'statsd') || {};
   const profile = statsd.history_profile && typeof statsd.history_profile === 'object' ? statsd.history_profile : {};
   const requests = Math.max(0, Number(statsd.history_requests) || 0);
   const hits = Math.min(requests, Math.max(0, Number(statsd.history_cache_hits) || 0));
-  const hitRate = requests > 0 ? `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})` : '—';
+  // A ratio with no denominator and an unassembled query are absences too, so they carry their
+  // reason like every other em dash in this block rather than being three bare dashes beside three
+  // explained ones.
+  const hitRate = requests > 0
+    ? {text: `${debugSystemNumber((hits / requests) * 100, 1)}% (${hits}/${requests})`, reason: ''}
+    : {text: '—', reason: debugSystemHealthReasonText('history_never_requested')};
   const historyQuery = profile.returned_records == null || profile.source_records == null
-    ? '—'
-    : `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`;
+    ? {text: '—', reason: debugSystemHealthReasonText('history_not_assembled')}
+    : {text: `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`, reason: ''};
   const usage = statsd.usage && typeof statsd.usage === 'object' ? statsd.usage : {};
   const usageHealth = usage.health && typeof usage.health === 'object' ? usage.health : {};
   const usageState = ['ok', 'warning', 'idle'].includes(usageHealth.state) ? usageHealth.state : 'idle';
   const usageLabel = usageState === 'warning' ? 'Warning' : (usageState === 'ok' ? 'Healthy' : 'Idle');
   const usageReason = usageHealth.reason || 'no usage health evidence';
-  const acceptedAge = Number(usageHealth.last_accepted_atom_age_seconds);
+  // The last two unmeasured values in this disclosure. They read "—" and "not available" side by
+  // side in the same strip before this; both are absences and both now carry their reason.
+  const accepted = debugSystemScalar(usageHealth.last_accepted_atom_age_seconds, 'usage_no_accepted_atom', value => debugGraphTerseTimeText(value * 1000));
+  const conflicts = debugSystemScalar(usage.quarantined_conflict_count, 'usage_conflicts_not_published');
   const usageHtml = `<div class="js-debug-usage-health js-debug-usage-health--${esc(usageState)}" data-js-debug-usage-health="${esc(usageState)}" ${usageState === 'warning' ? 'role="alert"' : 'role="status"'}>
     <strong>${esc(usageLabel)}:</strong> <span>${esc(usageReason)}</span>
-    <span>Last accepted ${Number.isFinite(acceptedAge) ? esc(debugGraphTerseTimeText(acceptedAge * 1000)) : '—'} · Quarantined conflicts ${esc(debugSystemNumber(usage.quarantined_conflict_count))}</span>
+    <span>Last accepted <span${accepted.reason ? ` title="${esc(accepted.reason)}" data-value-reason="${esc(accepted.reason)}"` : ''}>${esc(accepted.text)}</span> · Quarantined conflicts <span${conflicts.reason ? ` title="${esc(conflicts.reason)}" data-value-reason="${esc(conflicts.reason)}"` : ''}>${esc(conflicts.text)}</span></span>
   </div>`;
+  // Every unpublished sampler field goes through the ONE unmeasured spelling. Before this, three
+  // rows here each lied differently: the deadlines printed "not available / not available" while
+  // the rest of the panel printed an em dash with a reason, and `Last cycle` and `Last history
+  // latency` used `|| 0` -- rendering a sampler that has never run as a measured `0ms`.
+  const lastCycle = debugSystemScalar(statsd.sampler_last_cycle_seconds, 'sampler_cycle_not_timed', value => debugGraphTerseTimeText(value * 1000));
+  const late = debugSystemScalar(statsd.sampler_late_cycles, 'sampler_cycles_not_published');
+  const missed = debugSystemScalar(statsd.sampler_missed_cycles, 'sampler_cycles_not_published');
+  const assemble = debugSystemScalar(profile.assemble_ms, 'history_not_assembled', value => debugGraphTerseTimeText(value));
   const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
-    ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
-    ['Late / missed deadlines', `${debugSystemNumber(statsd.sampler_late_cycles)} / ${debugSystemNumber(statsd.sampler_missed_cycles)}`],
-    ['History cache hit rate', hitRate],
-    ['Last history latency', debugGraphTerseTimeText(Number(profile.assemble_ms || 0))],
-    ['Last history query', historyQuery],
+    ['Last cycle', lastCycle.text, lastCycle.reason],
+    ['Late / missed deadlines', `${late.text} / ${missed.text}`, late.reason || missed.reason],
+    ['History cache hit rate', hitRate.text, hitRate.reason],
+    ['Last history latency', assemble.text, assemble.reason],
+    ['Last history query', historyQuery.text, historyQuery.reason],
   ]);
-  return debugSystemCardHtml(
-    'YO!stats sampler',
-    `${aggregate}${usageHtml}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
-    {wide: true},
-  );
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.sampler'))}</h4>${aggregate}${usageHtml}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`;
+}
+
+// ---- rehomed diagnostics: each block now lives under the row that owns it -------------------
+
+function debugSystemWebProcessDetailHtml(payload = {}) {
+  const server = payload.server && typeof payload.server === 'object' ? payload.server : {};
+  const clientEvents = payload.client_events && typeof payload.client_events === 'object' ? payload.client_events : {};
+  const chat = payload.chat && typeof payload.chat === 'object' ? payload.chat : {};
+  // System CPU is the fourth metric off the same unpushed sample. It printed a confident `0.0%`
+  // beside three cells that had already learned to say why they were empty, so it goes through
+  // the ONE envelope renderer with its reason like every other unmeasured value in a disclosure.
+  const systemCpu = server.system_cpu_percent && typeof server.system_cpu_percent === 'object' ? server.system_cpu_percent : {};
+  const systemCpuText = debugSystemScalar(systemCpu.value, '', value => `${debugSystemNumber(value, 1)}%`);
+  const identity = debugSystemRowsHtml([
+    ['Version', server.version],
+    ['PID', server.pid],
+    ['State directory', payload.state_dir],
+    ['System CPU', systemCpuText.text, systemCpuText.text === '—' ? String(systemCpu.reason || '') : ''],
+  ]);
+  const events = debugSystemRowsHtml([
+    ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
+    ['Published events', clientEvents.published_events],
+    ['Delivered events', clientEvents.delivered_events],
+    ['Chat subscribers', chat.subscribers],
+    ['Chat messages', chat.store?.message_rows],
+    ['Typing leases', chat.store?.typing_leases],
+  ]);
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    <p class="js-debug-roster-note" data-subsystem-unobserved-note>${esc(debugSystemHealthReasonText('web_process_not_observed'))}</p>
+    <h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.eventsChat'))}</h4>${events}`;
+}
+
+function debugSystemTmuxSignalWatcherDetailHtml(watcher = {}) {
+  const state = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher?.state || '')) ? String(watcher.state) : 'exited';
+  const demandKnown = typeof watcher?.demanded === 'boolean';
+  const demanded = watcher?.demanded === true;
+  const sessions = Array.isArray(watcher?.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
+  const issue = debugSystemTmuxSignalWatcherIsIssue(watcher);
+  const stateLabel = state === 'never-started' && demandKnown && !demanded ? t('state.idle') : debugSystemRosterStateLabel(state);
+  return `<div data-js-debug-tmux-signal-watcher data-tmux-signal-watcher-state="${esc(state)}" data-tmux-signal-watcher-demanded="${demandKnown ? String(demanded) : 'unknown'}" role="${issue ? 'alert' : 'status'}">
+    ${debugSystemRowsHtml([
+      ['State', stateLabel],
+      // One unmeasured spelling in this view too: an unpublished demand flag is the em dash with
+      // its reason, not a fourth wording of "not available" beside three em dashes.
+      ['Demand', demandKnown ? (demanded ? 'Yes' : 'No') : '—', demandKnown ? '' : debugSystemHealthReasonText('watcher_demand_unpublished')],
+      ['Control client PID', Number(watcher?.process_pid) > 0 ? watcher.process_pid : '—'],
+      ['Sessions', sessions || '—'],
+      ['Detail', watcher?.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[state]],
+    ])}
+    <p class="js-debug-roster-note" data-subsystem-unobserved-note>${esc(debugSystemHealthReasonText('subsystem_not_observed'))}</p>
+  </div>`;
+}
+
+function debugSystemSearchCachesDetailHtml(payload = {}) {
+  const search = payload.search_index && typeof payload.search_index === 'object' ? payload.search_index : {};
+  const caches = payload.caches && typeof payload.caches === 'object' ? payload.caches : {};
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.searchCaches'))}</h4>${debugSystemRowsHtml([
+    ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
+    ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
+    ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
+    ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
+  ])}`;
+}
+
+// Which rehomed diagnostic block belongs to which service. One table, so a block cannot end up
+// rendered twice or under a service that does not own it.
+const DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL = Object.freeze({
+  statsd: (payload, nowSeconds) => debugSystemStatsSamplerBodyHtml(
+    (services => (Array.isArray(services) ? services : []))(debugSystemRenderableLocalServices(payload).services),
+    nowSeconds,
+  ),
+  indexd: payload => debugSystemSearchCachesDetailHtml(payload),
+});
+
+function debugSystemServiceDetailHtml(row, payload = {}, nowSeconds = Date.now() / 1000) {
+  const identity = debugSystemRowsHtml([
+    ['Service id', row.id],
+    ['PID', Number(row.pid) > 0 ? row.pid : '—', Number(row.pid) > 0 ? '' : debugSystemHealthReasonText('process_not_running')],
+    ['Reason', row.reason || '—', row.reason ? '' : debugSystemHealthReasonText('state_reason_unpublished')],
+  ]);
+  const owned = DEBUG_SYSTEM_ROSTER_SERVICE_DETAIL[row.id];
+  return `<h4 class="js-debug-roster-detail-title">${esc(t('debug.system.roster.detail.process'))}</h4>${identity}
+    ${debugSystemServiceHealthDetailHtml(row.health, nowSeconds)}
+    ${owned ? owned(payload, nowSeconds) : ''}`;
 }
 
 function debugSystemCpuBudgetCardHtml(budget = {}) {
-  const status = ['ok', 'watching', 'warning'].includes(budget.status) ? budget.status : 'ok';
+  // `stale` was missing from this list, so the ONE state the backend publishes to say "no sample
+  // stands behind these numbers" was coerced to `ok` -- the card rendered healthy exactly when the
+  // budget was unknown. `DEBUG_SYSTEM_STATE_TONES` has painted `stale` as `warn` all along; the
+  // vocabulary existed and this whitelist dropped the connection.
+  const status = ['ok', 'watching', 'warning', 'stale'].includes(budget.status) ? budget.status : 'ok';
   const consumers = Array.isArray(budget.top_consumers) ? budget.top_consumers : [];
   const consumerText = consumers.map(row => {
     const owner = [row?.role, row?.surface].filter(Boolean).join(':');
     return `${owner || t('common.notAvailable')} ${debugSystemNumber(row?.compute_ms_total, 1)}ms`;
   }).join(' · ') || 'None';
-  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}">${debugSystemRowsHtml([
-    ['Status', status],
-    ['Current / budget', `${debugSystemNumber(budget.current_percent, 1)}% / ${debugSystemNumber(budget.budget_percent, 1)}%`],
+  // The numerator is a measurement and the denominator is a policy constant. Only the numerator
+  // can be absent, and when it is, the pair reads "— / 30.0%" with its reason rather than a
+  // confident "0.0% / 30.0%" that looks like a measured idle server.
+  const current = debugSystemScalar(budget.current_percent, 'cpu_budget_never_sampled', value => `${debugSystemNumber(value, 1)}%`);
+  return debugSystemCardHtml('CPU budget', `<div data-js-debug-cpu-budget="${esc(status)}"${budget.stale === true ? ' data-js-debug-cpu-budget-stale="true"' : ''}>${debugSystemRowsHtml([
+    ['Status', status, status === 'stale' ? debugSystemHealthReasonText('cpu_budget_stale') : ''],
+    ['Current / budget', `${current.text} / ${debugSystemNumber(budget.budget_percent, 1)}%`, current.reason],
     ['Sustained', `${debugSystemNumber(budget.sustained_seconds, 0)}s / ${debugSystemNumber(budget.sustained_budget_seconds, 0)}s`],
     ['Top compute owners', consumerText],
   ])}</div>`);
 }
 
-function debugSystemRecoveryBannersHtml(localServices = {}) {
-  const events = Array.isArray(localServices.recovery_events) ? localServices.recovery_events : [];
-  return events.map(event => `<section class="js-debug-system-recovery-banner" data-system-recovery-banner role="alert">
-    <strong>${esc(event?.subsystem || 'Subsystem')} recovered from ${esc(event?.event || 'a storage failure')}</strong>
-    <span>Quarantined ${esc(event?.quarantined_artifact || t('common.notAvailable'))} at ${esc(event?.quarantined_path || t('common.notAvailable'))}.</span>
-    <span>Fresh storage is active at ${esc(event?.destination_path || t('common.notAvailable'))}.</span>
-    ${event?.reason ? `<span>${esc(event.reason)}</span>` : ''}
-  </section>`).join('');
+// The compact summary strip: what the whole roster adds up to, in one line, above it.
+// Its facts container is deliberately NOT a live region: it carries "Updated N seconds ago",
+// which changes on every 5-second poll, so announcing it meant announcing the clock forever.
+// The meaningful half -- the state counts -- is spoken by debugSystemAnnounceHtml, which is its
+// own render region precisely so a moving timestamp cannot rewrite it.
+function debugSystemSummaryStripHtml(payload = {}) {
+  const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
+  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
+  const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
+  // NO CPU BUDGET DENOMINATOR HERE. The strip used to print `CPU 172.5% / 30%`: a POPULATION sum
+  // over every roster row, divided by `SERVER_CPU_BUDGET_PERCENT`, which is the budget for the WEB
+  // PROCESS ALONE (`yolomux_lib/app.py:SERVER_CPU_BUDGET_PERCENT`, published through
+  // `server_cpu_budget_payload` beside the web process's OWN `current_percent`). Eight processes
+  // measured against one process's budget reads as a 575%-over-budget alarm that nothing is
+  // actually breaching. There is no published population budget to divide by, and inventing one
+  // here (30% x rows) would be this renderer re-deciding a backend policy constant.
+  //   So the number is LABELLED as what it is -- a sum across the roster -- and the budget stays
+  //   with the one figure it applies to, in the CPU budget card (`debugSystemCpuBudgetCardHtml`),
+  //   which renders the web process's own current reading against it. That also removes the strip
+  //   as a second renderer of the budget percentage.
+  // A sum over SOME of the population is not the population's total. Excluding an unmeasured row
+  // stops the strip fabricating a zero, but a bare `48.0MB` still reads as "this is the memory" --
+  // the same silent undercount with a better reason. The panel already has ONE spelling for
+  // "this number covers less than it looks like": `data-metric-coverage="partial"` plus the
+  // footnote marker `debugSystemCoverageFlagHtml` renders for the roster's metric cells. That one
+  // function is called here rather than inventing a second convention such as an inline `1/2`,
+  // which would also mean composing English outside the locale catalog.
+  //   The denominator comes from the SAME `counts` the numbers do -- one array, one pass,
+  //   no second accumulator. It is `resourcePopulation`, not `population`: a nested row runs
+  //   inside its parent's process, so its CPU and memory are already inside the parent's figure
+  //   and it is not a row this total failed to cover.
+  //   The coverage object carries its OWN measured/population numbers, so the renderer below
+  //   never re-derives which count a fact belongs to from its key.
+  const coverageFor = measuredRows => {
+    const population = counts.resourcePopulation;
+    if (measuredRows <= 0 || measuredRows >= population) return {state: '', reason: '', measured: measuredRows, population};
+    return {
+      state: 'partial',
+      measured: measuredRows,
+      population,
+      reason: `this total covers the ${measuredRows} of ${population} rows that own a process and published a measurement; the rest are unmeasured, not zero`,
+    };
+  };
+  const cpuCoverage = coverageFor(counts.cpuMeasured);
+  const memoryCoverage = coverageFor(counts.rssMeasured);
+  const facts = [
+    ['counts', t('debug.system.roster.summary.counts', counts)],
+    // An em dash when NOTHING in the population was measured -- the same one unmeasured spelling
+    // the roster cells and the disclosures use, never a summed `0`.
+    ['cpu', t('debug.system.roster.summary.cpu', {
+      current: counts.cpuMeasured > 0 ? `${debugSystemNumber(counts.cpuPercent, 1)}%` : '—',
+    }), cpuCoverage],
+    ['memory', t('debug.system.roster.summary.memory', {value: counts.rssMeasured > 0 ? debugGraphTerseBytesText(counts.rssBytes) : '—'}),
+      memoryCoverage],
+    ['owner', t('debug.system.roster.summary.owner', {
+      value: owner.owner ? t('backgroundOwner.thisServer') : (Number(owner.current_owner?.port) > 0 ? `:${owner.current_owner.port}` : t('common.notAvailable')),
+    })],
+    ['updated', `${t('debug.system.roster.summary.updated', {time: generatedAgo})}${jsDebugSystemState.error ? ` · ${jsDebugSystemState.error}` : ''}`],
+  ];
+  // The Refresh control is `aria-disabled` while a refresh is in flight, never `disabled`. A
+  // `disabled` attribute makes the browser BLUR the element the moment it lands, so activating
+  // Refresh by mouse or by Enter threw the reader out to `document.body`: by the time
+  // `refreshDebugSystemViews` looked for a focus key, the view no longer contained
+  // `document.activeElement`, so it captured nothing and the next render had nothing to restore.
+  // The same blur hit the plain 5-second poll for anyone whose focus was resting on this button.
+  // `aria-disabled` keeps the control focusable and reachable to a screen reader mid-refresh, and
+  // re-entry stays impossible because `pollDebugSystemStatus` returns early while `inFlight` --
+  // that early return is the ONE owner of the "one refresh at a time" rule, not a second guard here.
+  return `<div class="js-debug-system-toolbar js-debug-roster-summary" data-js-debug-roster-summary>
+    <h3 class="js-debug-roster-summary-title">${esc(t('debug.tab.services'))}</h3>
+    <div class="js-debug-roster-summary-facts">${facts.map(([key, text, coverage = {state: '', reason: ''}]) => {
+      const explain = coverage.reason || '';
+      const flag = coverage.state === 'partial' ? debugSystemCoverageFlagHtml() : '';
+      return `<span data-js-debug-roster-summary-fact="${esc(key)}"`
+        + `${coverage.state ? ` data-metric-coverage="${esc(coverage.state)}" data-metric-measured-rows="${esc(String(coverage.measured))}" data-metric-population-rows="${esc(String(coverage.population))}"` : ''}`
+        + `${explain ? ` title="${esc(explain)}" data-value-reason="${esc(explain)}"` : ''}`
+        + `>${esc(text)}${flag}</span>`;
+    }).join('')}</div>
+    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh data-js-debug-system-focus-key="roster-refresh"${jsDebugSystemState.inFlight ? ' aria-disabled="true"' : ''}>${esc(t('common.refresh'))}</button>
+  </div>`;
+}
+
+// ONE compact alert slot. Every critical recovery/persistence/observer failure lands here, once,
+// above the roster -- not repeated in every row and not restored as a second large alert card.
+function debugSystemAlertsHtml(payload = {}) {
+  const localServices = debugSystemRenderableLocalServices(payload);
+  const health = localServices.health && typeof localServices.health === 'object' ? localServices.health : {};
+  // Every backend-health explanation, from the ONE owner. This slot does not compose a sentence of
+  // its own -- when it did, the same fact reached the reader twice in two wordings. `stopped` means
+  // the observer is no longer probing; a quiet system -- one where nothing has changed for hours --
+  // is `current`, and the owner returns it as `quiet`, so no alert is raised at all.
+  const alerts = [...debugSystemHealthExplanations(health).alerts];
+  if (debugSystemTmuxSignalWatcherIsIssue(payload.tmux_signal_watcher)) {
+    const watcher = payload.tmux_signal_watcher || {};
+    const watcherState = DEBUG_SYSTEM_TMUX_WATCHER_STATES.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+    alerts.push(['tmux-signal-watcher', `${t('debug.system.roster.tmuxSignalWatcher')}: ${watcher.reason || DEBUG_SYSTEM_TMUX_WATCHER_DEFAULT_REASONS[watcherState]}`]);
+  }
+  for (const event of Array.isArray(localServices.recovery_events) ? localServices.recovery_events : []) {
+    alerts.push(['recovery', `${event?.subsystem || 'Subsystem'} recovered from ${event?.event || 'a storage failure'}: quarantined ${event?.quarantined_artifact || t('common.notAvailable')} at ${event?.quarantined_path || t('common.notAvailable')}; fresh storage is active at ${event?.destination_path || t('common.notAvailable')}.${event?.reason ? ` ${event.reason}` : ''}`]);
+  }
+  if (!alerts.length) return '';
+  return `<div class="js-debug-system-alert" data-js-debug-system-alert role="alert">${alerts.map(([kind, text]) => `<p data-system-alert="${esc(kind)}"${kind === 'recovery' ? ' data-system-recovery-banner' : ''}>${esc(text)}</p>`).join('')}</div>`;
+}
+
+// Everything a reader consults deliberately rather than scans. Collapsed by default and BUILT only
+// when open: a closed section costs nothing but its summary line.
+//
+// `advanced` is the view of the SEPARATE `/api/system-status/advanced` body (see
+// `debugSystemAdvancedView`). Since the snapshot split, `refresh`, the top-N folds and
+// `owner.debug` no longer exist in the core payload at all, so reading them off `payload` would
+// render six permanently empty cards. When the advanced body has not arrived, the cards that need
+// it are NOT drawn as empty shells -- the section says which state it is in and draws only the
+// cards the core body genuinely owns.
+function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
+  const open = jsDebugSystemRosterState.advancedOpen === true;
+  const summary = `<summary data-js-debug-system-advanced-summary data-js-debug-system-focus-key="advanced-summary">${esc(t('debug.system.roster.advanced'))}</summary>`;
+  if (!open) return `<details class="js-debug-system-advanced" data-js-debug-system-advanced>${summary}</details>`;
+  const body = advanced.payload && typeof advanced.payload === 'object' ? advanced.payload : null;
+  const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
+  const currentOwner = owner.current_owner || {};
+  const advancedOwner = body && body.owner && typeof body.owner === 'object' ? body.owner : {};
+  const refresh = body && body.refresh && typeof body.refresh === 'object' ? body.refresh : {};
+  const localRefreshing = refresh.local_refreshing || {};
+  const coalescing = refresh.coalescing || {};
+  const totals = debugSystemRenderableLocalServices(payload).totals || {};
+  const cards = [
+    debugSystemCpuBudgetCardHtml(payload.cpu_budget || {}),
+    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
+      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
+      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
+      ['Index mode', owner.search_index?.mode],
+      ...(body ? [['Generations', advancedOwner.debug?.generation_count]] : []),
+    ])),
+    ...(body ? [
+      debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
+        ['Processes', totals.processes],
+        ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
+        ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
+      ])),
+      debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
+      debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+      debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(body.top_endpoints, 'endpoint'), {wide: true}),
+      debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(body.top_background_work, 'worker'), {wide: true}),
+    ] : []),
+    debugSystemCardHtml('Backend-health snapshot', debugSystemHealthSnapshotHtml(debugSystemRenderableLocalServices(payload).health || {}), {wide: true}),
+  ];
+  return `<details class="js-debug-system-advanced" data-js-debug-system-advanced open>${summary}
+    ${debugSystemAdvancedStatusHtml(advanced)}
+    <div class="js-debug-system-grid">${cards.filter(Boolean).join('')}</div>
+  </details>`;
+}
+
+// The four regions of the Daemons view, in the order a reader needs them. `debugSystemInnerHtml`
+// stays the ONE place the shape is declared; `refreshDebugSystemViews` replaces regions one at a
+// time so a poll does not destroy an open disclosure or the focused control inside it.
+// The ONE live region that speaks on its own: what the roster adds up to, and nothing else. It is
+// its own render region deliberately -- the region cache only rewrites a region whose generated
+// HTML changed, so keeping the volatile "Updated N seconds ago" out of this one is what stops a
+// screen reader being re-announced at every 5-second poll. Counts come from the same
+// `debugSystemRosterSummary` owner the visible strip uses, so there is no second state map.
+function debugSystemAnnounceHtml(payload = {}) {
+  const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
+  return `<p class="a11y-only" role="status" aria-live="polite" data-js-debug-system-announce>${esc(t('debug.system.roster.summary.counts', counts))}</p>`;
+}
+
+function debugSystemRegionHtml(region, payload) {
+  if (region === 'announce') return debugSystemAnnounceHtml(payload);
+  if (region === 'summary') return debugSystemSummaryStripHtml(payload);
+  if (region === 'alerts') return debugSystemAlertsHtml(payload);
+  if (region === 'roster') {
+    const generatedAt = Number(payload.generated_at);
+    return debugSystemRosterHtml(payload, {
+      nowSeconds: Number.isFinite(generatedAt) && generatedAt > 0 ? generatedAt : Date.now() / 1000,
+      expanded: jsDebugSystemRosterState.expanded,
+    });
+  }
+  return debugSystemAdvancedHtml(payload, debugSystemAdvancedView());
+}
+
+const DEBUG_SYSTEM_REGIONS = Object.freeze(['announce', 'summary', 'alerts', 'roster', 'advanced']);
+
+// ---------------------------------------------------------------------------------------------
+// THE TYPED SNAPSHOT REFUSAL
+//
+// `/api/system-status` and `/api/system-status/advanced` are served from retained background
+// snapshots. Before the first publish, or past the freshness deadline, the answer is HTTP 200 with
+// `ok:false` and a `snapshot` block -- and WITHOUT the body: the aged report is withheld, never
+// relabelled as current. Both routes share one shape, so this panel parses it once, and every
+// surface renders the state it was told rather than an absence dressed up as a measurement.
+// ---------------------------------------------------------------------------------------------
+const DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT = Object.freeze({
+  unavailable: 'No system-status snapshot has been published yet.',
+  stale: 'The newest system-status snapshot is past its freshness deadline, so its aged numbers are withheld.',
+});
+
+function debugSystemSnapshotRefusal(payload) {
+  if (!payload || typeof payload !== 'object' || payload.ok !== false) return null;
+  const snapshot = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {};
+  // `age_seconds` is published as null for a snapshot that never existed. `Number(null)` is 0, and
+  // printing "age 0.0s" for a snapshot nobody has ever built is the same defect this whole panel is
+  // about, so the absence is carried as an absence.
+  const age = snapshot.age_seconds === null || snapshot.age_seconds === undefined ? NaN : Number(snapshot.age_seconds);
+  return {
+    state: String(snapshot.state || 'unavailable'),
+    reasonCode: String(snapshot.reason_code || ''),
+    reason: String(snapshot.reason || ''),
+    ageSeconds: Number.isFinite(age) && age >= 0 ? age : null,
+  };
+}
+
+// The whole Daemons view when the core body is a refusal. It replaces the roster rather than
+// drawing one: with no payload behind it, every row would be a fabricated `unavailable`, which is
+// exactly the "unmeasured shown as measured" failure this panel exists to avoid.
+function debugSystemSnapshotRefusalHtml(refusal) {
+  const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[refusal.state] || `The system-status snapshot is ${refusal.state}.`;
+  const age = refusal.ageSeconds === null ? '' : ` Newest snapshot age ${debugSystemNumber(refusal.ageSeconds, 1)}s.`;
+  const retry = ` Retrying every ${debugSystemNumber(jsDebugSystemRefusalPollMs / 1000, 1)}s.`;
+  return `<div class="js-debug-system-loading" role="status" data-js-debug-system-snapshot-state="${esc(refusal.state)}" data-js-debug-system-snapshot-reason-code="${esc(refusal.reasonCode)}">${esc(`${headline}${refusal.reason ? ` ${refusal.reason}` : ''}${age}${retry}`)}</div>`;
+}
+
+// The ONE view of the Advanced body handed to the renderer: the payload when it is current, the
+// typed refusal when the producer withheld it, and this client's own fetch error when the request
+// itself failed.
+function debugSystemAdvancedView() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload);
+  return {
+    payload: refusal ? null : (jsDebugSystemAdvancedState.payload || null),
+    refusal,
+    error: jsDebugSystemAdvancedState.error,
+    inFlight: jsDebugSystemAdvancedState.inFlight,
+  };
+}
+
+function debugSystemAdvancedStatusHtml(advanced = {}) {
+  if (advanced.payload) return '';
+  if (advanced.error) {
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="error">${esc(advanced.error)}</p>`;
+  }
+  if (advanced.refusal) {
+    const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[advanced.refusal.state] || `The advanced diagnostics snapshot is ${advanced.refusal.state}.`;
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="${esc(advanced.refusal.state)}" data-js-debug-system-advanced-reason-code="${esc(advanced.refusal.reasonCode)}">${esc(`${headline}${advanced.refusal.reason ? ` ${advanced.refusal.reason}` : ''}`)}</p>`;
+  }
+  return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="loading">${esc(t('common.loading'))}</p>`;
 }
 
 function debugSystemInnerHtml() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemState.payload);
+  if (refusal) return debugSystemSnapshotRefusalHtml(refusal);
   const payload = jsDebugSystemState.payload;
   if (!payload) {
     const message = jsDebugSystemState.error || t('common.loading');
     return `<div class="js-debug-system-loading" role="status">${esc(message)}</div>`;
   }
-  const server = payload.server || {};
-  const owner = payload.owner || {};
-  const currentOwner = owner.current_owner || {};
-  const refresh = payload.refresh || {};
-  const localRefreshing = refresh.local_refreshing || {};
-  const coalescing = refresh.coalescing || {};
-  const search = payload.search_index || {};
-  const caches = payload.caches || {};
-  const clientEvents = payload.client_events || {};
-  const chat = payload.chat || {};
-  const tmuxSignalWatcher = payload.tmux_signal_watcher || {};
-  const recurringWork = Array.isArray(refresh.recurring_work) ? refresh.recurring_work : [];
-  const totals = payload.local_services?.totals || {};
-  const cpuBudget = payload.cpu_budget || {};
-  const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
-  const cards = [
-    debugSystemCardHtml('Server', debugSystemRowsHtml([
-      ['Status', payload.ok ? 'Running' : 'Issue'],
-      ['Version', server.version], ['PID', server.pid], ['Uptime', debugGraphUptimeText(server.uptime_seconds)],
-      ['Process CPU', `${debugSystemNumber(server.cpu_percent, 1)}%`], ['System CPU', `${debugSystemNumber(server.system_cpu_percent, 1)}%`],
-      ['Memory', debugGraphTerseBytesText(server.rss_bytes)], ['State directory', payload.state_dir],
-    ])),
-    debugSystemCpuBudgetCardHtml(cpuBudget),
-    debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
-      ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
-      ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
-      ['Index mode', owner.search_index?.mode], ['Generations', owner.debug?.generation_count],
-    ])),
-    debugSystemCardHtml('Worker totals', debugSystemRowsHtml([
-      ['Processes', totals.processes], ['CPU', `${debugSystemNumber(totals.cpu_percent, 1)}%`],
-      ['Memory', debugGraphTerseBytesText(totals.rss_bytes)],
-      ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
-      ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
-    ])),
-    debugSystemCardHtml('Search & caches', debugSystemRowsHtml([
-      ['Indexed roots', search.root_count], ['Builds', search.build_count], ['Scanned entries', search.scanned_entries],
-      ['Ignored entries', search.ignored_entries], ['Index bytes', debugGraphTerseBytesText(search.cache_bytes)],
-      ['Session files cache', `${debugSystemNumber(caches.session_files?.files)} files · ${debugGraphTerseBytesText(caches.session_files?.bytes)}`],
-      ['Activity cache', `${debugSystemNumber(caches.activity?.files)} files · ${debugGraphTerseBytesText(caches.activity?.bytes)}`],
-    ])),
-    debugSystemCardHtml('Events & chat', debugSystemRowsHtml([
-      ['SSE subscribers', Object.values(clientEvents.channel_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0)],
-      ['Published events', clientEvents.published_events],
-      ['Delivered events', clientEvents.delivered_events],
-      ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
-    ])),
-    debugSystemTmuxSignalWatcherCardHtml(tmuxSignalWatcher),
-    debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(recurringWork), {wide: true}),
-    debugSystemStatsSamplerCardHtml(services),
-    debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
-    debugSystemLocalServicesCardHtml(),
-    debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
-    debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
-  ];
-  return `<div class="js-debug-system-toolbar">
-    <span role="status">Updated ${esc(generatedAgo)}${jsDebugSystemState.error ? ` · ${esc(jsDebugSystemState.error)}` : ''}</span>
-    <button type="button" class="preferences-inline-action" data-js-debug-system-refresh${jsDebugSystemState.inFlight ? ' disabled' : ''}>${esc(t('common.refresh'))}</button>
-  </div>${debugSystemRecoveryBannersHtml(payload.local_services)}<div class="js-debug-system-grid">${cards.join('')}</div>`;
+  return DEBUG_SYSTEM_REGIONS
+    .map(region => `<div class="js-debug-system-region" data-js-debug-system-region="${region}">${debugSystemRegionHtml(region, payload)}</div>`)
+    .join('');
+}
+
+// The last HTML written into each region wrapper. A region whose HTML did not change is not
+// touched at all, which is what lets an expanded row keep its DOM -- and its focus -- while the
+// summary strip's "Updated 2s ago" repaints every five seconds.
+const debugSystemRenderedRegions = new WeakMap();
+
+// The ONE seeder for that cache, called by every site that builds the five regions from
+// `debugSystemInnerHtml`. A site that writes the regions and does not record what it wrote leaves
+// each region's WeakMap value `undefined`, so the very next poll compares `undefined` against the
+// freshly generated HTML, finds them different, and assigns `innerHTML` to all five -- a wholesale
+// DOM replacement on an UNCHANGED payload, which is precisely what this cache exists to prevent,
+// and it discards the focused control and any open disclosure row with it.
+//
+// `refreshDebugSystemViews` seeded its own build inline; `createDebugPanel` and `renderDebugPanels`
+// build the same five regions through `debugPanelHtml` and did not, so the first poll after panel
+// creation and after every full rerender rebuilt everything. This is one owner called from all
+// three, not a second cache: a second cache would be the divergent copy this panel keeps paying for.
+function seedDebugSystemRenderedRegions(root, payload = jsDebugSystemState.payload) {
+  if (!root || !payload) return;
+  for (const region of root.querySelectorAll('[data-js-debug-system-region]')) {
+    debugSystemRenderedRegions.set(region, debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload));
+  }
+}
+
+function debugSystemFocusKey() {
+  const active = document.activeElement;
+  return String(active?.dataset?.jsDebugSystemFocusKey || '');
+}
+
+function debugSystemRestoreFocus(view, focusKey) {
+  if (!focusKey) return;
+  if (debugSystemFocusKey() === focusKey) return;
+  // `preventScroll` matters: the caller restores the panel's own scroll position immediately after,
+  // and a focus() that scrolls first would fight it.
+  view.querySelector(`[data-js-debug-system-focus-key="${cssEscape(focusKey)}"]`)?.focus?.({preventScroll: true});
 }
 
 function refreshDebugSystemViews() {
   for (const view of document.querySelectorAll('[data-js-debug-system]')) {
     const scrollTop = view.scrollTop;
     const scrollLeft = view.scrollLeft;
-    const oldLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
-    view.innerHTML = debugSystemInnerHtml();
-    const newLocalServicesCard = view.querySelector('[data-js-debug-local-services-card]');
-    let localServicesCard = newLocalServicesCard;
-    if (oldLocalServicesCard && newLocalServicesCard && jsDebugSystemState.payload) {
-      newLocalServicesCard.replaceWith(oldLocalServicesCard);
-      localServicesCard = oldLocalServicesCard;
+    const focusKey = view.contains(document.activeElement) ? debugSystemFocusKey() : '';
+    // A typed refusal is NOT a payload: it has no regions to update, so it takes the shell branch
+    // below and `debugSystemInnerHtml` renders the state it was told.
+    const payload = debugSystemSnapshotRefusal(jsDebugSystemState.payload) ? null : jsDebugSystemState.payload;
+    const regions = view.querySelectorAll('[data-js-debug-system-region]');
+    // First render, or a view whose shell is not the current one: build the whole shell. Every
+    // later render replaces only the regions whose GENERATED html changed -- the cache holds what
+    // was generated, never `region.innerHTML`, because the browser's own serialization of the same
+    // markup differs and would make every region look changed on the next poll.
+    if (!payload || regions.length !== DEBUG_SYSTEM_REGIONS.length) {
+      view.innerHTML = debugSystemInnerHtml();
+      seedDebugSystemRenderedRegions(view, payload);
+    } else {
+      for (const region of regions) {
+        const html = debugSystemRegionHtml(String(region.dataset.jsDebugSystemRegion || ''), payload);
+        if (debugSystemRenderedRegions.get(region) === html) continue;
+        region.innerHTML = html;
+        debugSystemRenderedRegions.set(region, html);
+      }
     }
-    if (jsDebugSystemState.payload) updateDebugSystemLocalServicesCard(localServicesCard, jsDebugSystemState.payload);
+    debugSystemRestoreFocus(view, focusKey);
     restoreElementScrollPosition(view, scrollTop, scrollLeft);
     view.setAttribute('aria-busy', jsDebugSystemState.inFlight ? 'true' : 'false');
   }
 }
 
+// Disclosure state lives OUTSIDE the DOM so a re-render cannot close a row the reader opened.
+function toggleDebugSystemRosterRow(id) {
+  const key = String(id || '');
+  if (!key) return;
+  if (jsDebugSystemRosterState.expanded.has(key)) jsDebugSystemRosterState.expanded.delete(key);
+  else jsDebugSystemRosterState.expanded.add(key);
+  refreshDebugSystemViews();
+}
+
+// The Advanced body, fetched ONLY while the reader has the disclosure open.
+//
+// LAZINESS IS THE POINT: the whole reason the backend split this half out is that transcript scans
+// and top-N folds should not run on the five-second poll of a panel whose Advanced section is
+// closed. Reading the route on every poll would move that work back onto the producer and undo the
+// split, so the closed-disclosure early return below is load-bearing, not a nicety
+// (tests/system_health_panel.test.js pins it).
+//
+// It is not a second poller: it has no interval of its own. `pollDebugSystemStatus` -- the one
+// owner of the `debug-system` timer -- drives it, and `jsDebugSystemAdvancedPollMs` is the minimum
+// age at which a re-read can produce different bytes.
+async function pollDebugSystemAdvanced({force = false} = {}) {
+  if (jsDebugSystemAdvancedState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (jsDebugSystemRosterState.advancedOpen !== true) return false;
+  const age = Date.now() - jsDebugSystemAdvancedState.updatedAt;
+  if (!force && jsDebugSystemAdvancedState.updatedAt > 0 && age < jsDebugSystemAdvancedPollMs) return false;
+  jsDebugSystemAdvancedState.inFlight = true;
+  jsDebugSystemAdvancedState.error = '';
+  try {
+    const payload = await apiFetchJsonQuiet('/api/system-status/advanced', {cache: 'no-store'});
+    jsDebugSystemAdvancedState.payload = payload;
+    // A refusal carries no body, so it does not start a cadence window: the next poll asks again.
+    jsDebugSystemAdvancedState.updatedAt = debugSystemSnapshotRefusal(payload) ? 0 : Date.now();
+    return true;
+  } catch (error) {
+    jsDebugSystemAdvancedState.error = userMessageText(error);
+    jsDebugSystemAdvancedState.updatedAt = 0;
+    return false;
+  } finally {
+    jsDebugSystemAdvancedState.inFlight = false;
+    refreshDebugSystemViews();
+  }
+}
+
+// How long until the next poll. A typed refusal is answered in half a second, not in five: the
+// producer builds on demand, so the body the reader is waiting for normally exists well before the
+// next scheduled poll. This is the NORMAL first read of the panel after any quiet period -- the
+// slots are demand-gated -- not a rare cold-start edge case, so the panel would otherwise be blank
+// for a full poll interval every time somebody opens it.
+function debugSystemPollDelayMs() {
+  if (debugSystemSnapshotRefusal(jsDebugSystemState.payload)) return jsDebugSystemRefusalPollMs;
+  if (jsDebugSystemRosterState.advancedOpen === true && debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload)) {
+    return jsDebugSystemRefusalPollMs;
+  }
+  return jsDebugSystemPollMs;
+}
+
 async function pollDebugSystemStatus({force = false} = {}) {
   if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
   jsDebugSystemState.inFlight = true;
   jsDebugSystemState.error = '';
   refreshDebugSystemViews();
@@ -55905,15 +58481,28 @@ async function pollDebugSystemStatus({force = false} = {}) {
   } finally {
     jsDebugSystemState.inFlight = false;
     refreshDebugSystemViews();
+    // Both reads ride the one poll: the Advanced fetch returns immediately unless its disclosure is
+    // open and its retained body is old enough to have been replaced.
+    await pollDebugSystemAdvanced();
+    retimeDebugSystemPolling();
   }
 }
 
+// Re-arm the ONE `debug-system` timer at the delay the current state deserves. `resetRuntimeInterval`
+// keeps the existing timer when the delay is unchanged, so calling this after every poll costs
+// nothing on the steady path.
+function retimeDebugSystemPolling() {
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) return;
+  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, debugSystemPollDelayMs());
+}
+
 function syncDebugSystemPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-system');
     return;
   }
-  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, jsDebugSystemPollMs);
+  // ONE arming site for the ONE timer, so the delay rule cannot drift between the two callers.
+  retimeDebugSystemPolling();
   if (pollNow || !jsDebugSystemState.payload) void pollDebugSystemStatus({force: true});
 }
 
@@ -55945,15 +58534,23 @@ function refreshDebugLogsViews() {
 
 async function pollDebugLogs({force = false} = {}) {
   if (jsDebugLogsState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
   jsDebugLogsState.inFlight = true;
   jsDebugLogsState.error = '';
   refreshDebugLogsViews();
   try {
     const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
-    jsDebugLogsState.payload = Array.isArray(payload?.logs)
-      ? shareRedactDiagnosticValue(payload.logs.slice(-500))
-      : [];
+    const envelope = jsDebugValidateServerLogEnvelope(payload);
+    if (!envelope.ok) {
+      // A malformed, missing-epoch, or envelope-inconsistent poll fails visibly and keeps the
+      // last good snapshot rather than adopting an untrustworthy server response. Duplicate ids
+      // are not a rejectable error: they are stored raw and de-duplicated at render time.
+      jsDebugLogsState.error = envelope.reason;
+      return false;
+    }
+    jsDebugLogsState.payload = shareRedactDiagnosticValue(envelope.logs.slice(-500));
+    jsDebugLogsState.serverEpoch = envelope.epoch;
+    jsDebugLogsState.serverSequence = envelope.sequence;
     jsDebugLogsState.updatedAt = Date.now();
     return true;
   } catch (error) {
@@ -55966,7 +58563,7 @@ async function pollDebugLogs({force = false} = {}) {
 }
 
 function syncDebugLogsPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-logs');
     return;
   }
@@ -55974,33 +58571,101 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
   if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
 }
 
-function debugPanelHtml() {
+function debugSubviewNoop() {}
+
+function renderDebugEventsSubview(panel, options = {}) {
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
   const counts = debugEventCounts();
-  const apiCopyLabel = debugApiCopyButtonLabel();
+  const values = {
+    events: jsDebugEvents.length,
+    api: counts.apiCalls,
+    sse: counts.sseEvents,
+    errors: counts.errors,
+  };
+  for (const [key, value] of Object.entries(values)) {
+    const stat = panel.querySelector(`[data-js-debug-stat="${key}"]`);
+    if (stat) stat.textContent = String(value);
+  }
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const anchor = debugLogScrollAnchor(log);
+  log.value = text;
+  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+}
+
+function debugSubviewDescriptor({id, html, render = debugSubviewNoop, bind = debugSubviewNoop, activate = debugSubviewNoop, deactivate = debugSubviewNoop, relocalize = debugSubviewNoop}) {
+  return Object.freeze({id, html, render, bind, activate, deactivate, relocalize});
+}
+
+const DEBUG_SUBVIEWS = Object.freeze([
+  debugSubviewDescriptor({
+    id: 'logs',
+    html: () => `<div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`,
+    render: () => refreshDebugLogsViews(),
+    activate: ({pollNow = false} = {}) => syncDebugLogsPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-logs'),
+  }),
+  debugSubviewDescriptor({
+    id: 'system',
+    html: () => `<div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>`,
+    activate: ({pollNow = false} = {}) => syncDebugSystemPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-system'),
+  }),
+  debugSubviewDescriptor({
+    id: 'events',
+    html: debugEventsSubviewHtml,
+    render: renderDebugEventsSubview,
+  }),
+  debugSubviewDescriptor({
+    id: 'graph',
+    html: () => `<div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`,
+    render: (panel, options = {}) => refreshDebugGraphElement(panel.querySelector('[data-js-debug-graph]'), options),
+    bind: panel => {
+      bindDebugGraphTouchSelection(panel);
+      bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
+    },
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+  }),
+  debugSubviewDescriptor({
+    id: 'cost',
+    html: yoCostPanelHtml,
+    render: (panel, options = {}) => renderYoCostPanels(options),
+    bind: bindYoCostPanel,
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+    relocalize: relocalizeYoCostPanelChrome,
+  }),
+]);
+
+function debugSubview(id) {
+  return DEBUG_SUBVIEWS.find(view => view.id === id);
+}
+
+function debugPanelSubviewDescriptors() {
+  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
+}
+
+function syncDebugSubviewActivation({pollNow = false} = {}) {
+  for (const view of debugPanelSubviewDescriptors()) {
+    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
+    else view.deactivate();
+  }
+}
+
+function debugPanelHtml() {
   return `
     ${debugSubTabsHtml()}
-    <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
-      <div class="js-debug-toolbar">
-        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
-          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
-          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
-          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
-          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
-        </div>
-        <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
-          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
-        </div>
-      </div>
-      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
-    </div>
-    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
-    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>
-    <div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`;
+    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
-  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  const result = relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  for (const view of debugPanelSubviewDescriptors()) view.relocalize(panel);
+  return result;
 }
 
 function yoCostPanelHtml() {
@@ -56038,52 +58703,54 @@ function openYoCostTranscriptPreview(event) {
 }
 
 function bindYoCostPanel(panel) {
-  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
-  panel.dataset.jsYoCostBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  panel.addEventListener('scroll', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'yo-cost-panel', () => {
+    const scope = createLifecycleScope();
+    const disposeTouchSelection = bindDebugGraphTouchSelection(panel);
+    scope.replace('touch-selection', disposeTouchSelection, dispose => dispose?.());
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
     panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
   }, {capture: true, passive: true});
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => { handleDebugGraphPointerMove(event, panel); });
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('input', panel, 'input', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('change', panel, 'change', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
     openYoCostTranscriptPreview(event);
+    });
+    return () => scope.dispose('yo-cost-panel-unbound');
   });
 }
 
 function createYoCostPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-yocost-panel';
-  panel.id = panelDomId(yocostItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: yocostItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
-    bodyClass: 'preferences-body js-yocost-body',
-    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    className: 'panel js-yocost-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
+      bodyClass: 'preferences-body js-yocost-body',
+      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    },
+    bind: panel => debugSubview('cost').bind(panel),
   });
-  bindPanelShell(panel, yocostItemId);
-  bindYoCostPanel(panel);
-  return panel;
 }
 
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
@@ -56109,15 +58776,14 @@ function renderYoCostPanels({force = false} = {}) {
       continue;
     }
     const body = panel.querySelector('.js-yocost-body');
-    const scroll = body?.querySelector('.js-yocost-scroll');
-    const scrollTop = scroll?.scrollTop || 0;
-    const scrollLeft = scroll?.scrollLeft || 0;
-    const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-    if (body) {
-      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
-      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-    }
+    reconcilePanelBody({
+      body,
+      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+      anchors: [
+        elementScrollAnchor('.js-yocost-scroll'),
+        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+      ],
+    });
     delete panel.dataset.jsDebugGraphRefreshPending;
     bindYoCostPanel(panel);
     rendered = true;
@@ -56143,25 +58809,27 @@ function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(
 
 function createDebugPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-debug-panel';
-  panel.id = panelDomId(debugPaneItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: debugPaneItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel js-debug-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(debugPaneItemId)}
       </div>`,
-    bodyClass: 'preferences-body js-debug-body',
-    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+      bodyClass: 'preferences-body js-debug-body',
+      bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+    },
+    bind: bindDebugPanel,
   });
-  bindPanelShell(panel, debugPaneItemId);
-  bindDebugPanel(panel);
+  // `debugPanelHtml` above just wrote the five Daemons regions. Record what it wrote, or the first
+  // poll after this panel appears replaces every one of them for no change at all.
+  seedDebugSystemRenderedRegions(panel);
   return panel;
 }
 
@@ -56194,20 +58862,25 @@ function renderDebugPanels(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      const outerScroll = body.querySelector('.js-debug-scroll');
-      const outerScrollTop = outerScroll?.scrollTop || 0;
-      const outerScrollLeft = outerScroll?.scrollLeft || 0;
-      const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-      const logAnchor = debugLogScrollAnchor(body.querySelector('[data-js-debug-log]'));
-      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
-      restoreElementScrollPosition(body.querySelector('.js-debug-scroll'), outerScrollTop, outerScrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-      restoreDebugLogScrollAnchor(body.querySelector('[data-js-debug-log]'), logAnchor, {scrollToBottom: options.scrollLogToBottom === true});
+      reconcilePanelBody({
+        body,
+        html: `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+        anchors: [
+          elementScrollAnchor('.js-debug-scroll'),
+          keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+          {
+            capture: root => debugLogScrollAnchor(root.querySelector('[data-js-debug-log]')),
+            restore: (root, value) => restoreDebugLogScrollAnchor(root.querySelector('[data-js-debug-log]'), value, {scrollToBottom: options.scrollLogToBottom === true}),
+          },
+        ],
+        // Same contract as `createDebugPanel`: record the five Daemons regions just written.
+        afterReplace: seedDebugSystemRenderedRegions,
+      });
     }
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -56220,34 +58893,14 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
-  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
-  if (meta) meta.textContent = debugMetaText();
-  const counts = debugEventCounts();
-  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
-  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
-  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
-  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
-  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
-  if (statApi) statApi.textContent = String(counts.apiCalls);
-  if (statSse) statSse.textContent = String(counts.sseEvents);
-  if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
-  if (panel.querySelector('[data-js-debug-subview="logs"]')) refreshDebugLogsViews();
-  const graph = panel.querySelector('[data-js-debug-graph]');
-  refreshDebugGraphElement(graph, options);
-  const log = panel.querySelector('[data-js-debug-log]');
-  if (!log) return;
-  const text = jsDebugTextForClipboard();
-  if (log.value === text) return;
-  const anchor = debugLogScrollAnchor(log);
-  log.value = text;
-  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+  for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
 }
 
 function debugGraphFocusedControl(graph) {
@@ -56273,7 +58926,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
   }
   const rangeLabel = graph.querySelector('[data-js-debug-range-label]');
   if (rangeLabel) {
-    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(jsDebugGraphRangeSeconds, nowMs);
+    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(debugRuntimeState.graphRangeSeconds, nowMs);
     rangeLabel.classList.toggle('js-debug-range-label--zoomed', zoomed);
     rangeLabel.title = zoomed ? debugGraphCostRangeText(domain) : '';
   }
@@ -56300,7 +58953,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     rangeControl.insertBefore(prefix, slider || rangeControl.firstChild);
   }
   graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
-    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
+    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === debugRuntimeState.graphChartLayout ? 'true' : 'false');
   });
   graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(toggle => {
     toggle.checked = debugGraphChartVisible(toggle.dataset.jsDebugChartToggle);
@@ -56370,8 +59023,9 @@ function debugGraphSlideIntervalMs(resolutionMs) {
 function debugGraphSlidingAxisActive() {
   // Live ranges up to 1h advance continuously with the wall clock so the axis
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
-  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
+  // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
+  // hidden panel is not static but simply does not repaint until it is shown again.
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
 function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
@@ -56401,11 +59055,12 @@ function debugGraphSlideLiveViews(nowMs = Date.now()) {
 }
 
 function stopDebugGraphLiveTicker() {
-  if (jsDebugGraphLiveTimer) clearTimeout(jsDebugGraphLiveTimer);
+  if (jsDebugGraphLiveTimer) debugGraphLifecycleScope().release('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
 }
 
 function debugGraphLiveTimerTick() {
+  debugGraphLifecycleScope().relinquish('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const nowMs = Date.now();
@@ -56421,6 +59076,7 @@ function syncDebugGraphLiveTicker() {
   }
   if (jsDebugGraphLiveTimer) return;
   jsDebugGraphLiveTimer = setTimeout(debugGraphLiveTimerTick, Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
+  debugGraphLifecycleScope().ownTimer('live-ticker', jsDebugGraphLiveTimer);
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
@@ -56477,11 +59133,13 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
 function bindDebugCostSummaryTabButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
-    if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
-    anchor.dataset.jsDebugCostDetailsBound = 'true';
-    anchor.addEventListener('click', event => {
+    bindOnce(anchor, 'debug-cost-details', () => {
+      const handleClick = event => {
       event.preventDefault();
       selectSession(yocostItemId, {userInitiated: true});
+      };
+      anchor.addEventListener('click', handleClick);
+      return () => anchor.removeEventListener('click', handleClick);
     });
   });
 }
@@ -56489,23 +59147,22 @@ function bindDebugCostSummaryTabButtons(graph) {
 function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
-    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === debugRuntimeState.subTab;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
-    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === debugRuntimeState.subTab;
     view.hidden = !active;
   });
 }
 
 function setDebugSubTab(tab) {
   loadJsDebugStatsUiPreferences();
-  jsDebugSubTab = normalizedJsDebugSubTab(tab);
+  debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs'});
+  syncDebugSubviewActivation({pollNow: true});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -56540,7 +59197,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const state = jsDebugHistoryReadiness;
   if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+    && Number(state.requestedRangeSeconds) === Number(debugRuntimeState.graphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
     && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
     && Number(state.requestedResolutionSeconds) === Number(coverageResolutionSeconds);
@@ -56561,7 +59218,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
 function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;
@@ -56573,7 +59230,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
   if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
-      requestedRangeSeconds: jsDebugGraphRangeSeconds,
+      requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
       requestedStartSeconds,
       attemptCount: 0,
       error: '',
@@ -56585,10 +59242,10 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
-  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const previousSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
   const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   saveJsDebugStatsUiPreferences();
   // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
   // value now, before any fetch resolves.
@@ -56612,7 +59269,7 @@ function setDebugGraphResolutionOverride(value) {
   const pending = {
     previousSeconds,
     targetSeconds: normalized,
-    rangeSeconds: Number(jsDebugGraphRangeSeconds),
+    rangeSeconds: Number(debugRuntimeState.graphRangeSeconds),
     requestedResolutionSeconds: Number(jsDebugHistoryReadiness.requestedResolutionSeconds),
     targetStartSeconds: Number(jsDebugHistoryReadiness.targetStartSeconds),
     targetEndSeconds: Number(jsDebugHistoryReadiness.targetEndSeconds),
@@ -56645,8 +59302,8 @@ function clearDebugGraphPendingResolutionChange({hideOverlay = false} = {}) {
 function debugGraphResolutionChangeDataSatisfied(pending, state) {
   if (!pending || state?.phase !== 'ready') return false;
   if (Number(state.generation) < Number(pending.armedGeneration)) return false;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
-  if (Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
+  if (Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
   if (Number(state.resolutionSeconds) !== Number(pending.requestedResolutionSeconds)) return false;
   const intervals = [...(state.requestCoverageIntervals || [])]
     .filter(interval => Number(interval.resolutionSeconds) === Number(pending.requestedResolutionSeconds))
@@ -56699,10 +59356,10 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
     return;
   }
   if (state.phase !== 'error') return;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return;
   clearDebugGraphPendingResolutionChange();
   const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
+  debugRuntimeState.graphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
   const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
@@ -56719,7 +59376,7 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
+  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
 }
@@ -56993,11 +59650,12 @@ function handleDebugGraphTouchMove(event, panel) {
 }
 
 function bindDebugGraphTouchSelection(panel) {
-  if (!panel || panel.dataset.jsDebugTouchSelectionBound === 'true') return;
-  panel.dataset.jsDebugTouchSelectionBound = 'true';
-  panel.addEventListener('touchmove', event => {
-    handleDebugGraphTouchMove(event, panel);
-  }, {passive: false});
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-graph-touch-selection', () => {
+    const handleTouchMove = event => { handleDebugGraphTouchMove(event, panel); };
+    panel.addEventListener('touchmove', handleTouchMove, {passive: false});
+    return () => panel.removeEventListener('touchmove', handleTouchMove, {passive: false});
+  });
 }
 
 function startDebugGraphSelection(candidate, event = null) {
@@ -57261,53 +59919,70 @@ function handleDebugGraphControlEvent(event, panel) {
 }
 
 function bindDebugPanel(panel) {
-  if (!panel || panel.dataset.debugBound === 'true') return;
-  panel.dataset.debugBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
-  panel.addEventListener('focusout', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-panel', () => {
+    const scope = createLifecycleScope();
+    for (const view of debugPanelSubviewDescriptors()) view.bind(panel);
+    syncDebugSubviewActivation({pollNow: true});
+    const disposeActions = bindActionDispatcher(panel, {
+    'debug-subtab': (_event, button) => setDebugSubTab(button.dataset.jsDebugSubtab),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    scope.ownEvent('focusout', panel, 'focusout', event => {
     const graph = event.target?.closest?.('[data-js-debug-graph]');
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
   });
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => {
     handleDebugGraphPointerMove(event, panel);
   });
-  panel.addEventListener('pointerleave', () => {
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => {
     debugGraphClearInteractionLinesUnlessPinned(panel);
   });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => {
+    scope.ownEvent('input', panel, 'input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
-    const subtab = event.target.closest('[data-js-debug-subtab]');
-    if (subtab && panel.contains(subtab)) {
-      event.preventDefault();
-      setDebugSubTab(subtab.dataset.jsDebugSubtab);
-      return;
-    }
     const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
     if (systemRefresh && panel.contains(systemRefresh)) {
       event.preventDefault();
       void pollDebugSystemStatus({force: true});
+      return;
+    }
+    // One disclosure control per roster row. It is a real <button>, so mouse click, Enter and Space
+    // all arrive here through the same one path -- there is no key handler duplicating the rule.
+    const rosterToggle = event.target.closest('[data-js-debug-roster-toggle]');
+    if (rosterToggle && panel.contains(rosterToggle)) {
+      event.preventDefault();
+      toggleDebugSystemRosterRow(rosterToggle.dataset.jsDebugRosterToggle);
+      return;
+    }
+    const advancedSummary = event.target.closest('[data-js-debug-system-advanced-summary]');
+    if (advancedSummary && panel.contains(advancedSummary)) {
+      // The <details> would toggle itself, but the next poll re-renders it from state; recording
+      // the intent here is what makes it survive.
+      event.preventDefault();
+      jsDebugSystemRosterState.advancedOpen = !jsDebugSystemRosterState.advancedOpen;
+      refreshDebugSystemViews();
+      // Opening is the demand signal for the Advanced body: fetch it here rather than waiting up to
+      // five seconds for the next poll. Closing fetches nothing.
+      if (jsDebugSystemRosterState.advancedOpen) void pollDebugSystemAdvanced({force: true});
       return;
     }
     const logLevel = event.target.closest('[data-js-debug-log-level]');
@@ -57330,7 +60005,7 @@ function bindDebugPanel(panel) {
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
-      jsDebugLogsState.clearedAt = Date.now();
+      jsDebugLogRecordCleared();
       refreshDebugLogsViews();
       statusEl.textContent = t('debug.logs.cleared');
       return;
@@ -57347,8 +60022,17 @@ function bindDebugPanel(panel) {
       clearJsDebugEvents();
       statusEl.textContent = t('debug.cleared');
     }
+    });
+    return () => scope.dispose('debug-panel-unbound');
   });
 }
+
+registerDebugRuntimeFacade('panel', {
+  createDebugPanel,
+  createYoCostPanel,
+  renderDebugPanels,
+  renderYoCostPanels,
+});
 const changesOutsideRepoKey = 'Outside repo';
 
 function sessionForFileRepo(path) {
@@ -58367,6 +61051,9 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.added || 0),
     Number(item.removed || 0),
     item.uploaded === true ? 1 : 0,
+    // A file that has just been deleted can match on every other field. Without this bit the
+    // update is judged unchanged and the D row never appears.
+    item.missing === true ? 1 : 0,
   ]);
   const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
     item.repo || '',
@@ -58377,6 +61064,12 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.removed || 0),
     Number.isFinite(Number(item.behind)) ? Number(item.behind) : null,
     Number.isFinite(Number(item.ahead)) ? Number(item.ahead) : null,
+    // Both new serialized facts about a retired root: that it is gone, and that it therefore
+    // carries no comparison refs. A live-to-missing transition with matching counts is otherwise
+    // indistinguishable here, so the stale compare controls would survive the repo vanishing.
+    item.missing === true ? 1 : 0,
+    String(item.from_ref || ''),
+    String(item.to_ref || ''),
   ]);
   return JSON.stringify({
     session: payload?.session || '',
@@ -58876,6 +61569,12 @@ function changesRepoTotals(repoInfo, entries) {
 }
 
 function changesRepoTotalsHtml(repoInfo, entries) {
+  // A repo that is gone has no diff to total. State what it DID hold -- the deduped count of
+  // remembered files -- so one collapsed row never stands in silently for hundreds of them.
+  if (repoInfo?.missing === true) {
+    const remembered = Number(repoInfo.touched_count || 0);
+    return `<span class="changes-repo-totals" title="${esc(t('filetab.missingTitle'))}"><span class="changes-repo-count">${esc(tPlural('changes.fileCount', remembered))}</span></span>`;
+  }
   const totals = changesRepoTotals(repoInfo, entries);
   const title = `+${totals.added} -${totals.removed} ${tPlural('changes.fileCount', totals.count)}`;
   return `<span class="changes-repo-totals" title="${esc(title)}"><span class="changes-diff-add">+${totals.added}</span><span class="changes-diff-remove">-${totals.removed}</span><span class="changes-repo-count">${totals.count}</span></span>`;
@@ -59067,7 +61766,10 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     if (!entriesByDir.has(key)) entriesByDir.set(key, []);
     const siblings = entriesByDir.get(key);
     if (!siblings.some(e => e.name === fileName)) {
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, missing: item.missing === true, changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
+      // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
+      // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
+      // file created and then removed is missing but still displays A.
+      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, deleted: status === 'D', changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
@@ -59160,20 +61862,30 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       section.className = 'changes-repo-group';
       section.dataset.changesRepo = repo;
     }
-    const collapsed = changesRepoCollapsed.has(repo);
-    section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
+    // A gone repo is never collapsible, so it never joins the collapsed set.
+    const repoIsMissing = repoInfo?.missing === true;
+    const collapsed = !repoIsMissing && changesRepoCollapsed.has(repo);
+    section.classList.toggle(CLS.collapsed, collapsed);
     const repoLabel = repo === changesOutsideRepoKey ? t('changes.outsideRepo') : compactHomePath(repo);
-    const hasGit = repo && repo !== changesOutsideRepoKey;
+    // A missing repo has no working tree, so it gets no FROM/TO comparison controls either.
+    const hasGit = repo && repo !== changesOutsideRepoKey && !repoIsMissing;
+    section.dataset.changesRepoMissing = repoIsMissing ? 'true' : 'false';
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
       head = makeButton({className: 'changes-repo-head'});
       section.prepend(head);
     }
-    head.dataset.changesRepoToggle = repo;
-    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    head.innerHTML = `${disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+    // A gone repo has no children, no refs and no open action, so it gets no disclosure control
+    // and no child list -- one header row saying it is missing on disk, and nothing that offers to
+    // reveal content that cannot exist.
+    if (repoIsMissing) delete head.dataset.changesRepoToggle;
+    else head.dataset.changesRepoToggle = repo;
+    if (repoIsMissing) head.removeAttribute('aria-expanded');
+    else head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    head.disabled = repoIsMissing;
+    head.innerHTML = `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
     // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
     let refsRow = section.querySelector(':scope > .changes-repo-refs');
     if (hasGit && !collapsed) {
@@ -59194,7 +61906,9 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     }
     // Update file list using the unified tree renderer
     let fileList = section.querySelector(':scope > .changes-file-list');
-    if (!collapsed) {
+    if (repoIsMissing) {
+      fileList?.remove();
+    } else if (!collapsed) {
       if (!fileList) {
         fileList = document.createElement('div');
         fileList.className = 'changes-file-list';
@@ -60101,13 +62815,6 @@ function setEditorPreviewFontSize(value) {
 // they may coexist in separate panes without a global mode switch rebuilding one another.
 function createFileExplorerPanel(item = finderItemId) {
   const view = fileExplorerViewForItem(item) || 'finder';
-  const panel = document.createElement('article');
-  panel.className = `panel file-explorer-panel file-explorer-${view}`;
-  panel.id = panelDomId(item);
-  panel.dataset.panelItem = item;
-  // Refresh paths select panels by their fixed view. Keep this identity alongside the
-  // item identity so Finder, Differ, and Tabber can coexist without global-mode drift.
-  panel.dataset.fileExplorerView = view;
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
@@ -60133,18 +62840,21 @@ function createFileExplorerPanel(item = finderItemId) {
             </span>
           </div>
         </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession(), 'differ')}</div></div>` : '';
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-explorer-head',
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    headAfterTabsHtml: finderToolbarHtml,
-    bodyClass: 'file-explorer-pane',
-    bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+    className: `panel file-explorer-panel file-explorer-${view}`,
+    dataset: {panelItem: item, fileExplorerView: view},
+    frame: {
+      headClass: 'file-explorer-head',
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      headAfterTabsHtml: finderToolbarHtml,
+      bodyClass: 'file-explorer-pane',
+      bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
         <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
+    },
+    bind: bindChangesPanel,
   });
-  bindPanelShell(panel, item);
-  bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
@@ -60640,14 +63350,13 @@ function relocalizeFileEditorPanel(panel, item) {
 
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel file-editor-panel';
-  panel.dataset.filePath = path;
-  panel.dataset.layoutItem = item;
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-editor-panel-head',
-    controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
+    className: 'panel file-editor-panel',
+    dataset: {filePath: path, layoutItem: item},
+    frame: {
+      headClass: 'file-editor-panel-head',
+      controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -60659,9 +63368,9 @@ function createFileEditorPanel(item) {
             closeLabel: t('editor.closePane'),
           })}
         </div>`,
-    afterHeadHtml: fileEditorToolbarHtml(item),
-    bodyClass: 'file-editor-panel-body',
-    bodyHtml: `<div class="file-editor-content">
+      afterHeadHtml: fileEditorToolbarHtml(item),
+      bodyClass: 'file-editor-panel-body',
+      bodyHtml: `<div class="file-editor-content">
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
@@ -60676,8 +63385,8 @@ function createFileEditorPanel(item) {
           <div class="file-editor-image-panel" hidden></div>
         </div>
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>`,
+    },
   });
-  bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
@@ -62471,22 +65180,8 @@ function resetPreviewZoomSurfaceClasses(shell) {
 }
 
 function disconnectPreviewZoomSurface(shell, options = {}) {
-  if (typeof shell?._previewZoomControlsCleanup === 'function') {
-    shell._previewZoomControlsCleanup();
-    shell._previewZoomControlsCleanup = null;
-  }
-  if (shell?._previewZoomResizeObserver) {
-    shell._previewZoomResizeObserver.disconnect();
-    shell._previewZoomResizeObserver = null;
-  }
-  if (shell?._previewZoomResizeFrame) {
-    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-    shell._previewZoomResizeFrame = 0;
-  }
-  if (shell?._previewZoomRevealTimer) {
-    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = 0;
-  }
+  shell?._previewZoomLifecycleScope?.dispose('preview-zoom-disconnect');
+  if (shell) shell._previewZoomLifecycleScope = null;
   shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
   if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
 }
@@ -62683,14 +65378,17 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
   const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
   if (!toolbar || !viewport) return false;
-  const cleanup = [];
+  const lifecycleScope = createLifecycleScope({
+    isCurrent: () => shell._previewZoomLifecycleScope === lifecycleScope,
+    onDispose: () => {
+      if (shell._previewZoomLifecycleScope === lifecycleScope) shell._previewZoomLifecycleScope = null;
+    },
+  });
+  shell._previewZoomLifecycleScope = lifecycleScope;
+  let nextListenerId = 0;
   const bind = (target, type, handler, listenerOptions = false) => {
     if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, listenerOptions);
-    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
-  };
-  shell._previewZoomControlsCleanup = () => {
-    while (cleanup.length) cleanup.pop()();
+    lifecycleScope.ownEvent(`listener-${nextListenerId += 1}`, target, type, handler, listenerOptions);
   };
   bind(toolbar, 'click', event => {
     const button = event.target?.closest?.('[data-preview-zoom-action]');
@@ -62708,12 +65406,15 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   // debounce after the last apply reveals it once at the settled size.
   shell.classList.add('file-editor-preview-zoom-measuring');
   const scheduleReveal = () => {
-    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
-    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
-      shell._previewZoomRevealTimer = 0;
+    if (!lifecycleScope.current() || !shell.classList.contains('file-editor-preview-zoom-measuring')) return;
+    lifecycleScope.release('reveal-timer');
+    let timer = null;
+    timer = ownerWindow?.setTimeout?.(() => {
+      lifecycleScope.release('reveal-timer', timer);
+      if (!lifecycleScope.current()) return;
       shell.classList.remove('file-editor-preview-zoom-measuring');
     }, 150);
+    lifecycleScope.ownTimer('reveal-timer', timer, value => ownerWindow?.clearTimeout?.(value));
   };
   const applyAndScheduleReveal = applyOptions => {
     applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
@@ -62727,17 +65428,25 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
       // so applying synchronously here would re-trigger this observer and emit the noisy
       // "ResizeObserver loop completed with undelivered notifications" warning.
       const ownerWin = previewZoomOwnerWindow(shell);
-      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
-        shell._previewZoomResizeFrame = 0;
+      lifecycleScope.release('resize-frame');
+      let frame = 0;
+      frame = schedulePreviewZoomFrame(shell, () => {
+        lifecycleScope.release('resize-frame', frame);
+        if (!lifecycleScope.current()) return;
         applyAndScheduleReveal();
       });
+      lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
     });
-    shell._previewZoomResizeObserver = resizeObserver;
+    lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
   }
   bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
-  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
+  let initialFrame = 0;
+  initialFrame = schedulePreviewZoomFrame(shell, () => {
+    lifecycleScope.release('initial-frame', initialFrame);
+    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true});
+  });
+  lifecycleScope.ownTimer('initial-frame', initialFrame, value => ownerWindow?.cancelAnimationFrame?.(value));
   return true;
 }
 
@@ -63031,21 +65740,35 @@ function notebookStructuredPreview(source) {
   return {label: t('preview.notebook.title'), text: out.join('\n'), language: 'markdown', error: ''};
 }
 
-function structuredPreviewValue(path, text) {
-  const ext = fileExtensionOf(path);
-  const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
-  if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
-  if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: t('preview.structured.title', {format: t('preview.format.config')}), text: source, language: 'ini', error: ''};
-  return {label: t('preview.structured.title', {format: 'YAML'}), text: source, language: 'yaml', error: ''};
+function parseJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
 }
 
-function renderStructuredPreviewInto(container, path, text) {
-  const value = structuredPreviewValue(path, text);
+function parseGeoJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
+}
+
+function parseExcalidrawStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
+}
+
+function parseNotebookStructuredPreviewStrategy(source) { return notebookStructuredPreview(source); }
+function parseTomlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''}; }
+function parseXmlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'XML'}), text: source, language: 'xml', error: ''}; }
+function parseDrawioStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'Draw.io XML'}), text: source, language: 'xml', error: ''}; }
+
+function parseStructuredPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const source = String(text ?? '');
+  const ext = fileExtensionOf(path);
+  const parse = renderer.parseByExtension?.[ext];
+  if (parse) return parse(source);
+  const language = renderer?.languageByExtension?.[ext] || 'yaml';
+  const format = language === 'ini' ? t('preview.format.config') : 'YAML';
+  return {label: t('preview.structured.title', {format}), text: source, language, error: ''};
+}
+
+function renderStructuredPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const value = renderer.parse(path, text, renderer);
   const bounded = boundedPreviewText(value.text);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-data-preview';
@@ -63239,12 +65962,8 @@ function renderJsonLinesTablePreviewInto(container, path, text) {
   container.replaceChildren(wrapper);
 }
 
-function renderTablePreviewInto(container, path, text) {
-  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
-    renderJsonLinesTablePreviewInto(container, path, text);
-    return;
-  }
-  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
+function parseDelimitedPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const delimiter = renderer.delimiterByExtension[fileExtensionOf(path)];
   const maxRows = 200;
   const maxCols = 50;
   const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
@@ -63254,6 +65973,11 @@ function renderTablePreviewInto(container, path, text) {
     if (cells.length > maxCols) truncatedColumns = true;
     return cells.slice(0, maxCols);
   });
+  return {delimiter, lines, maxRows, rows, truncatedColumns};
+}
+
+function renderDelimitedPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const {delimiter, lines, maxRows, rows, truncatedColumns} = renderer.parse(path, text, renderer);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-table-preview';
   const header = document.createElement('div');
@@ -63425,65 +66149,81 @@ function renderHtmlPreviewInto(container, path, text) {
   container.replaceChildren(...children);
 }
 
+const PREVIEW_SURFACE_CLASSES = Object.freeze([
+  'markdown-body', 'html-preview-body', 'image-preview-body', 'pdf-preview-body',
+  'data-preview-body', 'media-preview-body', 'code-preview-body',
+]);
+
+function cleanupStandardPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+  container._mermaidSig = null;
+}
+
+function cleanupMarkdownPreviewStrategy(container) {
+  container._mermaidSig = null;
+}
+
+function cleanupMermaidPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+}
+
+function markdownPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, fileEditorPreviewDisplayMode, context]);
+}
+
+function mermaidPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
+}
+
+function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+  const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
+  if (currentSignature === signature) return;
+  container._previewPath = path;
+  container._previewText = text;
+  container._previewDisplayMode = fileEditorPreviewDisplayMode;
+  container._previewContext = context;
+  renderMarkdownPreviewInto(container, text, path, {context});
+}
+
+function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  container._mermaidSig = signature;
+  container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+}
+
+function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
+function renderImagePreviewStrategy({container, path, state, context}) { renderRawImagePreviewInto(container, path, state, {context}); }
+function renderPdfPreviewStrategy({container, path}) { renderPdfPreviewInto(container, path); }
+function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
+function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
+function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
+function renderNativeMediaPreviewStrategy({container, path, state, renderer}) { renderNativeMediaPreviewInto(container, path, state, renderer.kind); }
+function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }
+function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
+
+function renderPreviewDescriptor(renderer, context) {
+  renderer.cleanup(context.container, context);
+  const signature = typeof renderer.signature === 'function' ? renderer.signature(context) : null;
+  return renderer.render({...context, renderer, signature});
+}
+
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const state = fileState.get(path) || null;
-  const previewKind = previewKindForPath(path, state);
+  const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
-  container.classList.toggle('markdown-body', previewKind === 'markdown');
-  container.classList.toggle('html-preview-body', previewKind === 'html');
-  container.classList.toggle('image-preview-body', previewKind === 'image');
-  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
-  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
-  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
-  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
+  for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  if (previewKind === 'markdown') {
-    container._mermaidSig = null;
-    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
-    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
-    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
-    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
-      container._previewPath = path;
-      container._previewText = text;
-      container._previewDisplayMode = fileEditorPreviewDisplayMode;
-      container._previewContext = previewContext;
-      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
-    }
-  } else if (previewKind === 'mermaid') {
-    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
-    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
-    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
-    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
-    // re-renders with the new palette.
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    const mermaidSig = JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', previewContext]);
-    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
-      container._mermaidSig = mermaidSig;
-      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
-    }
-  } else {
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    container._mermaidSig = null;
-    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
-    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
-    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
-    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
-    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
-    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
-    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
-    else renderEditorCodePreviewInto(container, path, text);
-  }
+  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -66314,8 +69054,24 @@ function loadFileEditorState(path, panel, item) {
       const fetched = await fetchFileEntryStatus(path);
       const entry = fetched.entry;
       if (!entry) {
-        if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error));
+        if (fetched.missing) {
+          // A directory-listing omission is not proof a media file is gone. Confirm through the shared
+          // authoritative /api/fs/info guard (fenced against newer per-path state) before marking missing;
+          // a stale/racing omission must never clobber an open, valid media view.
+          const verdict = await resolveOpenMediaMissingVerdict(path);
+          if (verdict?.missing) {
+            markOpenFileMissing(path);
+          } else if (verdict?.state) {
+            setFileState(path, verdict.state);
+            bumpOpenFileContentGeneration(path);
+            if (panel) renderFileEditorPanel(panel, item);
+          } else if (verdict?.error) {
+            setFileState(path, fileErrorState(verdict.error));
+          }
+          // verdict null (superseded by a newer render): keep the newer content.
+        } else {
+          setFileState(path, fileErrorState(fetched.error));
+        }
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -66329,6 +69085,7 @@ function loadFileEditorState(path, panel, item) {
       } else {
         setFileState(path, rawPreviewFileState(path, entry));
       }
+      bumpOpenFileContentGeneration(path);
       if (panel) renderFileEditorPanel(panel, item);
       renderSessionButtons();
       renderPaneTabStrips();
@@ -66344,6 +69101,7 @@ function loadFileEditorState(path, panel, item) {
         content: payload.content,
         dirty: false,
       }, payload));
+      bumpOpenFileContentGeneration(path);
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {
@@ -67619,12 +70377,11 @@ function shareReplaySendUiMessage(message = {}) {
 }
 
 function shareReplayResetKeyframeRequestBackoff() {
-  shareReplayKeyframeInFlight = false;
-  shareReplayKeyframeBackoffMs = 0;
+  shareReplayState.resetKeyframeRequest();
 }
 
 function shareReplayNextKeyframeRequestBackoff() {
-  const previous = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
+  const previous = shareReplayState.keyframeRequestSnapshot().backoffMs;
   if (!previous) return shareReplayKeyframeRequestInitialBackoffMs;
   return Math.min(shareReplayKeyframeRequestMaxBackoffMs, Math.round(previous * 1.7));
 }
@@ -67632,11 +70389,10 @@ function shareReplayNextKeyframeRequestBackoff() {
 function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
   const now = Date.now();
   shareReplayRecordLastReplayError(reason, detail);
-  const activeBackoffMs = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
-  const lastRequestAt = Math.max(0, Math.round(Number(shareReplayKeyframeLastRequestAt) || 0));
-  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, shareReplayKeyframeInFlight ? activeBackoffMs : 0);
-  if (lastRequestAt > 0 && now - lastRequestAt < requestFloorMs) {
-    shareReplayKeyframeRequestSuppressedCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestSuppressedCount) || 0)) + 1;
+  let keyframeRequest = shareReplayState.keyframeRequestSnapshot();
+  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, keyframeRequest.inFlight ? keyframeRequest.backoffMs : 0);
+  if (keyframeRequest.lastAt > 0 && now - keyframeRequest.lastAt < requestFloorMs) {
+    shareReplayState.suppressKeyframeRequest();
     void shareUploadDebugProfile('share-keyframe-request-suppressed', {
       reason: String(reason || 'replay-error'),
       detail,
@@ -67644,16 +70400,14 @@ function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
     });
     return false;
   }
-  shareReplayKeyframeRequestCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestCount) || 0)) + 1;
-  shareReplayKeyframeLastRequestAt = now;
-  shareReplayKeyframeBackoffMs = shareReplayNextKeyframeRequestBackoff();
-  shareReplayKeyframeInFlight = true;
+  shareReplayState.beginKeyframeRequest(now, shareReplayNextKeyframeRequestBackoff());
+  keyframeRequest = shareReplayState.keyframeRequestSnapshot();
   const payload = {
     reason: String(reason || 'replay-error'),
     error: String(detail.error || '').slice(0, 500),
     digest: String(detail.digest || ''),
-    backoffMs: shareReplayKeyframeBackoffMs,
-    suppressed: shareReplayKeyframeRequestSuppressedCount,
+    backoffMs: keyframeRequest.backoffMs,
+    suppressed: keyframeRequest.suppressed,
   };
   for (const key of ['epoch', 'sequence', 'baseSequence', 'currentEpoch', 'lastSequence']) {
     const value = Number(detail[key]);
@@ -68796,8 +71550,8 @@ function shareReplayApplyStaticKeyframe(payload = {}, message = {}) {
   shareReplayApplyScrollEntries(payload.scroll || []);
   if (payload.viewport && typeof payload.viewport === 'object') applyShareViewportState(payload.viewport);
   bindShareReplayPaneTabPopovers(root);
-  shareReplayCurrentEpoch = Math.max(0, Math.round(Number(message.epoch) || Number(payload.epoch) || shareReplayCurrentEpoch || 1));
-  shareReplayLastSequence = Math.max(0, Math.round(Number(message.sequence) || Number(payload.sequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  shareReplayState.acceptSequence(Number(message.epoch) || Number(payload.epoch) || replaySequence.epoch || 1, Number(message.sequence) || Number(payload.sequence) || 0);
   shareReplayLastKeyframe = {payload, message};
   setShareReplayShellStatus('mirrored', {
     digest: payload.digest,
@@ -68822,15 +71576,16 @@ function shareReplayFrameNumberDetail(message = {}) {
     epoch: frameNumber(message.epoch),
     sequence: frameNumber(message.sequence),
     baseSequence: frameNumber(message.baseSequence ?? payload.baseSequence),
-    currentEpoch: Math.max(0, Math.round(Number(shareReplayCurrentEpoch) || 0)),
-    lastSequence: Math.max(0, Math.round(Number(shareReplayLastSequence) || 0)),
+    currentEpoch: shareReplayState.sequenceSnapshot().epoch,
+    lastSequence: shareReplayState.sequenceSnapshot().last,
   };
 }
 
 function shareReplayErrorDetail(reason = 'replay-error', detail = {}) {
   const cleanDetail = detail && typeof detail === 'object' ? detail : {};
-  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? shareReplayCurrentEpoch) || 0));
-  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? shareReplayLastSequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? replaySequence.epoch) || 0));
+  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? replaySequence.last) || 0));
   const epoch = Number(cleanDetail.epoch);
   const sequence = Number(cleanDetail.sequence);
   const baseSequence = Number(cleanDetail.baseSequence);
@@ -69007,9 +71762,8 @@ function shareReplaySkipUnknownNodeDelta(payload = {}, sequenceStatus = {}) {
   const sequence = Number(sequenceStatus.sequence);
   const epoch = Number(sequenceStatus.epoch);
   if (!Number.isFinite(epoch) || !Number.isFinite(sequence)) return false;
-  shareReplayStaleFrames += 1;
-  shareReplayCurrentEpoch = epoch;
-  shareReplayLastSequence = sequence;
+  shareReplayState.recordStaleFrame();
+  shareReplayState.acceptSequence(epoch, sequence);
   setShareReplayShellStatus('mirrored', {sequence});
   return true;
 }
@@ -69020,10 +71774,10 @@ function applyShareReplayDelta(payload = {}, message = {}) {
   const sequenceStatus = shareReplayDeltaSequenceStatus(message);
   if (!sequenceStatus.ok) {
     if (sequenceStatus.stale === true) {
-      shareReplayStaleFrames += 1;
+      shareReplayState.recordStaleFrame();
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     shareReplayRequestKeyframe(sequenceStatus.reason, {
       ...sequenceStatus,
       frameType: message.type || shareMirrorProtocol.frames.domDelta,
@@ -69047,8 +71801,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (expectedDigest && expectedDigest !== actualDigest) {
       throw new Error('replay DOM digest mismatch');
     }
-    shareReplayCurrentEpoch = sequenceStatus.epoch;
-    shareReplayLastSequence = sequenceStatus.sequence;
+    shareReplayState.acceptSequence(sequenceStatus.epoch, sequenceStatus.sequence);
     setShareReplayShellStatus('mirrored', {
       sequence: sequenceStatus.sequence,
       digest: expectedDigest || actualDigest,
@@ -69058,7 +71811,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (shareReplayErrorIsUnknownNode(error) && shareReplaySkipUnknownNodeDelta(payload, sequenceStatus)) {
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
     shareReplayRequestKeyframe('replay-error', {
       ...shareReplayFrameNumberDetail(message),
@@ -71233,22 +73986,85 @@ function shareDebugSecretValues() {
   return Array.from(values).sort((a, b) => b.length - a.length);
 }
 
+// W2 diagnostic redaction contract. This is the JavaScript conformance implementation of the ONE
+// neutral redaction contract whose authoritative fixture is tests/fixtures/diagnostic_redaction.json
+// (also enforced against yolomux_lib/diagnostic_redaction.py). JS and Python cannot share a regex
+// engine, so the shared fixture is the single parent: both sides must produce byte-identical output
+// for every case. Any change here that diverges from the Python owner must update the fixture and
+// keep both green. Grammar is anchored (^...$) so exact credential names match while near names like
+// `tokenizer`/`secretary` do not; the string path redacts share URLs, share-token query parameters,
+// Authorization/Cookie headers (including malformed/unknown-scheme fail-closed), secret assignments,
+// and bare Bearer values, then bounds to 4000 chars. Redaction is a security boundary: fail closed.
+// The regex owners and replacer callbacks are declared below shareRedactDiagnosticValue so the
+// pair stays inside the historical [shareRedactSecretText, shareDebugNumber) slice window that
+// stats_current_panel.test.js evaluates in isolation; function hoisting and post-eval calls resolve
+// the const temporal-dead-zone before either redactor runs.
 function shareRedactSecretText(value) {
-  return shareReplayRedactText(value);
+  let text = String(value ?? '');
+  const runtimeSecrets = typeof shareDebugSecretValues === 'function' ? shareDebugSecretValues() : [];
+  for (const secret of runtimeSecrets) {
+    if (secret) text = text.split(secret).join('[redacted-share-token]');
+  }
+  text = text
+    .replace(DIAGNOSTIC_SHARE_URL_RE, '[redacted-share-url]')
+    .replace(DIAGNOSTIC_SHARE_TOKEN_QUERY_RE, '$1[redacted-share-token]')
+    .replace(DIAGNOSTIC_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_SECRET_ASSIGNMENT_RE, diagnosticRedactSecretAssignment)
+    .replace(DIAGNOSTIC_BEARER_VALUE_RE, '$1$2[redacted-secret]');
+  return text.length > 4000 ? `${text.slice(0, 4000)}[truncated]` : text;
 }
 
-function shareRedactDiagnosticValue(value, depth = 0) {
+function shareRedactDiagnosticValue(value, key = '', depth = 0) {
   if (depth > 12) return '[truncated-depth]';
-  if (typeof value === 'string') return shareRedactSecretText(value);
-  if (typeof value !== 'object' || value === null) return value;
-  if (Array.isArray(value)) return value.map(item => shareRedactDiagnosticValue(item, depth + 1));
-  const result = {};
-  for (const [key, rawValue] of Object.entries(value)) {
-    result[key] = /token|secret/i.test(key) && typeof rawValue === 'string'
-      ? '[redacted-share-token]'
-      : shareRedactDiagnosticValue(rawValue, depth + 1);
+  if (DIAGNOSTIC_SECRET_KEY_RE.test(String(key || ''))) return '[redacted-share-token]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 256).map(item => shareRedactDiagnosticValue(item, key, depth + 1));
   }
-  return result;
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [name, rawValue] of Object.entries(value)) {
+      result[String(name).slice(0, 120)] = shareRedactDiagnosticValue(rawValue, String(name), depth + 1);
+    }
+    return result;
+  }
+  if (typeof value === 'string') return shareRedactSecretText(value);
+  return value;
+}
+
+const DIAGNOSTIC_SECRET_NAME_SOURCE = '(?:token|secret|password|passwd|(?:proxy[_-]?)?authorization|'
+  + '(?:set[_-]?)?cookie|bearer|(?:x[_-]?)?api[_-]?key|client[_-]?secret|'
+  + '(?:access|refresh|share)[_-]?token|x[_-]?share[_-]?token)';
+const DIAGNOSTIC_SECRET_KEY_RE = new RegExp(`^${DIAGNOSTIC_SECRET_NAME_SOURCE}$`, 'i');
+const DIAGNOSTIC_SHARE_URL_RE = /(?:https?:\/\/[^"'\s<>]+)?\/share\/[A-Za-z0-9_-]+(?:#[^"'\s<>]*)?/g;
+const DIAGNOSTIC_SHARE_TOKEN_QUERY_RE = /([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s"']+/gi;
+const DIAGNOSTIC_AUTHORIZATION_HEADER_RE = /\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)(?:Basic|Bearer)[ \t]+[^\s,;"'<>}]+(?![^\r\n]*=)(?=[ \t]+(?:failed\b|after\b|at[ \t]+\/|Cookie[ \t]*:)|[;\r\n]|$)/gi;
+const DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE = /(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*\[redacted-secret\])(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*(?:\r?\n|$))(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*["'])\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_COOKIE_HEADER_RE = /\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$)(?:[ \t]*;[ \t]*[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$))*(?![ \t]*;)(?![^\r\n]*=)/gi;
+const DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE = /(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*\[redacted-secret\])(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*(?:\r?\n|$))\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_SECRET_ASSIGNMENT_RE = new RegExp(
+  '\\b(?<prefix>' + DIAGNOSTIC_SECRET_NAME_SOURCE + '\\b["\']?[ \\t]*(?:=|:)[ \\t]*)'
+  + '(?:(?<quote>["\'])(?<quoted_value>(?:\\\\[^\\r\\n]|(?!\\k<quote>)[^\\\\\\r\\n])*)\\k<quote>|'
+  + '(?<unterminated_quote>["\'])(?<unterminated_value>[^\\r\\n]*)|'
+  + '(?<value>[^&#\\s,;"\'<>}]+))',
+  'gi',
+);
+const DIAGNOSTIC_BEARER_VALUE_RE = /\b(Bearer)([ \t]+)([^\s,;:="'<>]+)/gi;
+
+function diagnosticRedactSecretHeader(...args) {
+  const groups = args[args.length - 1];
+  return `${groups.name}${groups.separator}[redacted-secret]`;
+}
+
+function diagnosticRedactSecretAssignment(...args) {
+  const groups = args[args.length - 1];
+  const quote = groups.quote || '';
+  if (groups.unterminated_quote) return `${groups.prefix}[redacted-secret]`;
+  const value = quote ? groups.quoted_value : groups.value;
+  if (typeof value === 'string' && value.startsWith('[redacted-')) return args[0];
+  return `${groups.prefix}${quote}[redacted-secret]${quote}`;
 }
 
 function shareDebugNumber(value) {
@@ -71415,7 +74231,11 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 }
 
 function shareReplayFrameByteLength(value = {}) {
-  const text = stableDigestJson(shareRedactDiagnosticValue(value));
+  // Measure the true serialized wire size of the frame. The diagnostic redactor bounds strings to
+  // 4000 chars, arrays to 256 entries, and keys to 120 chars, which collapses a large DOM keyframe
+  // to a fraction of its real size; the byte length is a number that is never emitted as text, so
+  // redaction is not needed here and must not be applied to the size measurement.
+  const text = stableDigestJson(value);
   return utf8ByteLength(text);
 }
 
@@ -71485,22 +74305,24 @@ function shareReplayTerminalPlaceholderDiagnostics() {
 
 function shareReplayHealthDiagnostics() {
   const terminalPlaceholders = shareReplayTerminalPlaceholderDiagnostics();
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const keyframeRequest = shareReplayState.keyframeRequestSnapshot();
   return shareRedactDiagnosticValue({
     kind: 'share-replay-health',
     at: new Date().toISOString(),
     match: shareReplayShellState.status === 'mirrored' && terminalPlaceholders.healthy,
     status: shareReplayShellState.status || 'idle',
     userStatus: shareReplayUserStatusText(shareReplayShellState.status || ''),
-    epoch: shareReplayCurrentEpoch,
-    sequence: shareReplayLastSequence,
+    epoch: replaySequence.epoch,
+    sequence: replaySequence.last,
     keyframeBytes: shareReplayLastKeyframeBytes,
     deltaBytes: shareReplayLastDeltaBytes,
-    droppedFrames: shareReplayDroppedFrames,
-    staleFrames: shareReplayStaleFrames,
-    keyframeRequests: shareReplayKeyframeRequestCount,
-    keyframeRequestsSuppressed: shareReplayKeyframeRequestSuppressedCount,
-    keyframeRequestBackoffMs: shareReplayKeyframeBackoffMs,
-    keyframeRequestInFlight: shareReplayKeyframeInFlight,
+    droppedFrames: replaySequence.dropped,
+    staleFrames: replaySequence.stale,
+    keyframeRequests: keyframeRequest.count,
+    keyframeRequestsSuppressed: keyframeRequest.suppressed,
+    keyframeRequestBackoffMs: keyframeRequest.backoffMs,
+    keyframeRequestInFlight: keyframeRequest.inFlight,
     hostKeyframesSuppressed: shareReplayHostKeyframeSuppressedCount,
     hostKeyframePending: Boolean(shareReplayHostKeyframeTimer),
     replayLatencyMs: shareReplayLastLatencyMs,
@@ -72679,6 +75501,35 @@ function installShareReadonlyInteractionBlocker() {
     window.addEventListener(name, blockShareReadonlyInteraction, {capture: true, passive: false});
   }
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Terminal mobile-accessory action declarations used by the following orchestration partial.
+
+const terminalRuntimeFacades = new Map();
+
+function registerTerminalRuntimeFacade(name, facade) {
+  const key = String(name || '');
+  if (!key || !facade || typeof facade !== 'object' || terminalRuntimeFacades.has(key)) return false;
+  terminalRuntimeFacades.set(key, Object.freeze({...facade}));
+  return true;
+}
+
+function terminalRuntimeFacade(name) {
+  return terminalRuntimeFacades.get(String(name || '')) || null;
+}
+
+const terminalMobileAccessoryActionFamilies = Object.freeze({
+  primary: Object.freeze(['tmux-prefix', 'backspace', 'more']),
+  side: Object.freeze(['tab', 'shift', 'ctrl']),
+  dpad: Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']),
+});
+registerTerminalRuntimeFacade('mobile-accessory-actions', terminalMobileAccessoryActionFamilies);
+
+let clientEventTransportLifecycleScope = null;
+function currentClientEventTransportLifecycleScope() {
+  if (!clientEventTransportLifecycleScope || clientEventTransportLifecycleScope.disposed()) clientEventTransportLifecycleScope = createLifecycleScope();
+  return clientEventTransportLifecycleScope;
+}
 
 function paneFrameControlsHtml(session, options = {}) {
   const role = paneRoleForSlot(options.slot || slotForItem(session));
@@ -72817,7 +75668,6 @@ function panelActiveTabName(session) {
   if (id === `events-pane-${session}`) return 'events';
   return 'terminal';
 }
-
 const tmuxStatusModes = new Map();
 
 // Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
@@ -72909,14 +75759,14 @@ const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'sh
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade('mobile-accessory-actions').primary;
 // Esc renders alone in the top-left corner. Tab, Shift, and Ctrl fill the left utility column;
 // Ctrl anchors the bottom row before Alt/Cmd, and Copy/Paste stack beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);
+const terminalMobileAccessorySideActions = terminalRuntimeFacade('mobile-accessory-actions').side;
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = terminalRuntimeFacade('mobile-accessory-actions').dpad;
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -73734,13 +76584,11 @@ async function cycleTmuxStatusMode(session) {
 }
 
 function createPanel(session) {
-  const panel = document.createElement('article');
-  panel.className = 'panel';
-  panel.id = panelDomId(session);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: session,
-    controlsHtml: panelControlsHtml(session),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    frame: {
+      controlsHtml: panelControlsHtml(session),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
@@ -73750,11 +76598,11 @@ function createPanel(session) {
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>`,
-    bodyClass: 'tab-pane active',
-    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
-    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
-    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
-    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
+      bodyClass: 'tab-pane active',
+      bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+      bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+      toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
@@ -73774,10 +76622,9 @@ function createPanel(session) {
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
       </div>`,
+    },
+    bind: bindPanelControls,
   });
-  bindPanelShell(panel, session);
-  bindPanelControls(panel, session);
-  return panel;
 }
 
 function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
@@ -73876,8 +76723,10 @@ function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusState.guard.invalidate();
   backgroundOwnerStatusState.payload = payload;
+  if (options.source !== 'request' && options.source !== 'resource-replace') {
+    backgroundOwnerStatusResource().replace(payload, 'background-owner-push', {...options, source: 'resource-replace'});
+  }
   backgroundOwnerStatusState.updatedAt = Date.now();
   backgroundOwnerStatusState.error = '';
   backgroundOwnerStatusState.loading = false;
@@ -73893,35 +76742,45 @@ function backgroundOwnerStatusIsFresh() {
     && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
 }
 
-async function refreshBackgroundOwnerStatus(options = {}) {
-  if (shareViewMode) return false;
+function syncBackgroundOwnerStatusResource(snapshot, event) {
+  backgroundOwnerStatusState.request = snapshot.request;
+  backgroundOwnerStatusState.loading = snapshot.loading && !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = snapshot.error ? userMessageSnapshot(snapshot.error) : '';
+  const options = event.context || {};
+  if (event.phase === 'loading' || event.phase === 'failed') {
+    if (options.render !== false) renderInfoPanel();
+    if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
+  }
+}
+
+function backgroundOwnerStatusResource() {
+  if (backgroundOwnerStatusState.resource) return backgroundOwnerStatusState.resource;
+  backgroundOwnerStatusState.resource = createLatestResource({
+    initial: backgroundOwnerStatusState.payload,
+    load: () => apiFetchJson('/api/background/status', {cache: 'no-store'}),
+    apply(payload, {context}) {
+      applyBackgroundOwnerStatusPayload(payload, {...(context || {}), source: 'request'});
+      return payload;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState: syncBackgroundOwnerStatusResource,
+  });
+  return backgroundOwnerStatusState.resource;
+}
+
+function refreshBackgroundOwnerStatus(options = {}) {
+  if (shareViewMode) return Promise.resolve(false);
   // Every consumer observes the same current snapshot. A reconnect may require a new request
   // after this settles, but must not discard and duplicate the request boot already owns.
   if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
-  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
-  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return Promise.resolve(true);
   backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
   backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      return applyBackgroundOwnerStatusPayload(payload, options);
-    } catch (error) {
-      if (!requestIsCurrent()) return false;
-      backgroundOwnerStatusState.error = userMessageSnapshot(error);
-      backgroundOwnerStatusState.loading = false;
-      if (options.render !== false) renderInfoPanel();
-      if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-      return false;
-    } finally {
-      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
-    }
-  })();
-  backgroundOwnerStatusState.request = request;
-  return request;
+  return backgroundOwnerStatusResource().read('background-owner-status', options);
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -78498,6 +81357,36 @@ function renderAutoApproveButton(session, payload) {
   updateTypingIndicator(session);
 }
 
+function tmuxSessionStreamLifecycleScope(scopes, session) {
+  scopes.get(session)?.dispose('replaced');
+  let scope = null;
+  const token = tmuxSessionLifecycleToken(session);
+  scope = createLifecycleScope({
+    isCurrent: () => scopes.get(session) === scope && tmuxSessionLifecycleTokenIsCurrent(token),
+    onDispose: () => {
+      tmuxSessionLifecycleReleaseScope(token, scope);
+      if (scopes.get(session) === scope) scopes.delete(session);
+    },
+  });
+  tmuxSessionLifecycleOwnScope(token, scope);
+  scopes.set(session, scope);
+  return {scope, token};
+}
+
+function ownTmuxSessionStream(scope, token, source) {
+  tmuxSessionLifecycleOwnSource(token?.name, source);
+  return scope.replace('stream', source, value => {
+    tmuxSessionLifecycleReleaseSource(token, value);
+    value?.close?.();
+  });
+}
+
+function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
+  const scope = scopes.get(session);
+  if (!scope || (expectedSource && scope.value('stream') !== expectedSource)) return false;
+  return scope.dispose('stopped');
+}
+
 function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
@@ -78514,10 +81403,9 @@ function startSummaryStream(session) {
   // plain paragraphs, then the model's markdown summary renders properly.
   let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
+  const {scope, token} = tmuxSessionStreamLifecycleScope(summaryLifecycleScopes, session);
   let source = null;
-  const streamIsCurrent = () => source
-    && summaryStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
+  const streamIsCurrent = () => source && scope.current() && scope.value('stream') === source;
   const renderSummary = () => {
     renderScheduled = false;
     if (!streamIsCurrent()) return;
@@ -78533,8 +81421,7 @@ function startSummaryStream(session) {
     }
   };
   source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
-  tmuxSessionLifecycleOwnSource(session, source);
-  summaryStreams.set(session, source);
+  ownTmuxSessionStream(scope, token, source);
   renderSummary();
   source.addEventListener('meta', event => {
     if (!streamIsCurrent()) return;
@@ -78585,11 +81472,7 @@ function startSummaryStream(session) {
 }
 
 function stopSummaryStream(session, expectedSource = null) {
-  const source = summaryStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  summaryStreams.delete(session);
+  stopTmuxSessionStreamScope(summaryLifecycleScopes, session, expectedSource);
 }
 
 function reloadIsSafe() {
@@ -78791,7 +81674,17 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'superseded_request', payload);
+  if (!requestIsCurrent()) {
+    // A superseded response still carries a true fact about the SERVER's build queue: which build
+    // will observe the request that produced it. That fact is not about whether THIS client request
+    // is still current, so discarding it with the payload is what left a forced read awaiting build
+    // zero -- a target every payload already satisfies -- whenever its apply lost the race against a
+    // concurrent refresh or a `transcripts_changed` push. Recording it here is safe without the
+    // epoch adoption above, because the recorder refuses an identity from any other epoch and never
+    // lowers the number.
+    noteSessionMetadataPendingIdentity(payload);
+    return noteSessionMetadataApply(false, 'superseded_request', payload);
+  }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
@@ -79411,11 +82304,10 @@ function startTranscriptStream(session, options = {}) {
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const {scope, token: lifecycleToken} = tmuxSessionStreamLifecycleScope(transcriptLifecycleScopes, session);
   const source = new EventSource(url);
-  const lifecycleToken = tmuxSessionLifecycleOwnSource(session, source);
-  const streamIsCurrent = () => transcriptStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
-  transcriptStreams.set(session, source);
+  ownTmuxSessionStream(scope, lifecycleToken, source);
+  const streamIsCurrent = () => scope.current() && scope.value('stream') === source;
   source.addEventListener('reset', event => {
     if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
@@ -79432,28 +82324,28 @@ function startTranscriptStream(session, options = {}) {
   source.addEventListener('ping', () => {});
   source.onerror = () => {
     if (!streamIsCurrent()) return;
-    stopTranscriptStream(session, source);
+    scope.release('stream', source);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken) && pane?.classList.contains(CLS.active)) {
+    if (scope.current() && pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       const reconnectTimer = setTimeout(() => {
-        tmuxSessionLifecycleReleaseTimer(lifecycleToken, reconnectTimer);
-        if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+        scope.release('reconnect', reconnectTimer);
+        if (scope.current()
             && document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
       tmuxSessionLifecycleOwnTimer(lifecycleToken, reconnectTimer);
+      scope.replace('reconnect', reconnectTimer, timer => {
+        tmuxSessionLifecycleReleaseTimer(lifecycleToken, timer);
+        clearTimeout(timer);
+      });
     }
   };
 }
 
 function stopTranscriptStream(session, expectedSource = null) {
-  const source = transcriptStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  transcriptStreams.delete(session);
+  stopTmuxSessionStreamScope(transcriptLifecycleScopes, session, expectedSource);
 }
 
 function renderTranscriptItems(container, path, items, options = {}) {
@@ -79615,6 +82507,11 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
+  // /api/event is host-only (share_access=none); the server returns 403 for a share token, and a real
+  // 403 during teardown fails the strict browser server-log-ring gate. Gate every event producer
+  // (terminal_disconnected, state_changed, notifications, watched-PR, yoagent) at this one owner rather
+  // than per call site, so no share-reachable caller can leak a forbidden host-only request.
+  if (!clientCanUseUnscopedHostRequests()) return Promise.resolve(false);
   const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
   if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   return apiFetch('/api/event', {
@@ -79686,11 +82583,13 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  if (clientEventTransportState.resyncTimer) currentClientEventTransportLifecycleScope().release('resync', clientEventTransportState.resyncTimer);
   clientEventTransportState.resyncTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('resync', clientEventTransportState.resyncTimer);
     clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('resync', clientEventTransportState.resyncTimer);
 }
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
@@ -80173,8 +83072,9 @@ function clientPushEventSessionKey(payload = {}) {
 // so they cannot be mistaken for an EventSource type with no server producer.
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -80201,16 +83101,18 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
-    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    if (clientEventTransportState.frame) currentClientEventTransportLifecycleScope().release('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
   if (clientEventTransportState.frame) return;
   clientEventTransportState.frame = requestAnimationFrame(() => {
+    currentClientEventTransportLifecycleScope().relinquish('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
+  currentClientEventTransportLifecycleScope().replace('dispatch-frame', clientEventTransportState.frame, cancelAnimationFrame);
 }
 
 function flushQueuedClientPushEvents() {
@@ -80283,6 +83185,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
     applyAttentionAcknowledgementResponse(payload);
     return;
   }
+  if (type === 'backend_health_changed') {
+    // Push-only, deliberately: this is what makes a dead backend service visible in the topbar with
+    // no diagnostics panel open. Do NOT add a /api/system-status refetch here.
+    applyBackendHealthPayload(payload);
+    return;
+  }
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -80305,9 +83213,9 @@ function handleClientPushEventNowByType(type, payload = {}) {
       // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
       // immediately recreates the retired building-index poll and can race a newer generation.
       if (payload.root && !applied) refreshFileIndexStatus(payload.root);
-      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
-      }
+      // A completed search-index refresh is authoritative: re-issue the open palette query through the
+      // one re-query owner, forcing past any in-flight search so the new snapshot's rows win.
+      requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');
@@ -80405,6 +83313,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
   }
   if (type === 'roots_changed') {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    return;
+  }
+  if (type === 'search_progress') {
+    // A per-root crawl-advance signal (path-free {scope_id, generation, revision, coverage}). The
+    // open Quick Open palette streams the newly-committed matches by cursor instead of re-querying.
+    if (typeof handleFileSearchProgressSignal === 'function') handleFileSearchProgressSignal(payload);
   }
 }
 
@@ -80501,7 +83415,7 @@ function clientEventDemandSignature(descriptor) {
 function clearClientEventDisconnectEpisode(source, options = {}) {
   const episode = clientEventTransportState.disconnectEpisode;
   if (!episode || episode.source !== source) return false;
-  if (clientEventTransportState.disconnectTimer) clearTimeout(clientEventTransportState.disconnectTimer);
+  if (clientEventTransportState.disconnectTimer) currentClientEventTransportLifecycleScope().release('disconnect-episode', clientEventTransportState.disconnectTimer);
   clientEventTransportState.disconnectTimer = null;
   clientEventTransportState.disconnectEpisode = null;
   if (options.recovered === true && episode.reported === true) {
@@ -80527,6 +83441,7 @@ function scheduleClientEventDisconnectEpisode(source) {
   };
   clientEventTransportState.disconnectEpisode = episode;
   clientEventTransportState.disconnectTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('disconnect-episode', clientEventTransportState.disconnectTimer);
     clientEventTransportState.disconnectTimer = null;
     if ((source !== null && clientEventTransportState.source !== source)
         || (source === null && clientEventTransportState.source !== null)
@@ -80539,6 +83454,23 @@ function scheduleClientEventDisconnectEpisode(source) {
       diagnosticFailure: true,
     });
   }, clientEventDisconnectGraceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('disconnect-episode', clientEventTransportState.disconnectTimer);
+  return true;
+}
+
+function clearClientEventCandidateEpisode(source) {
+  const episode = clientEventTransportState.candidateEpisode;
+  if (!episode || (source !== undefined && episode.source !== source)) return false;
+  clientEventTransportState.candidateEpisode = null;
+  return true;
+}
+
+// Abandon a pre-ready CANDIDATE stream and its retry episode without touching the ACTIVE stream.
+function abandonClientEventCandidate(source) {
+  if (clientEventTransportState.replacementSource !== source) return false;
+  clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode(source);
+  if (!currentClientEventTransportLifecycleScope().release('candidate-stream', source)) source?.close?.();
   return true;
 }
 
@@ -80548,9 +83480,10 @@ function closeClientEventStream() {
   clientEventTransportState.source = null;
   const replacementSource = clientEventTransportState.replacementSource;
   clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode();
   clientEventTransportState.connected = false;
-  source?.close?.();
-  if (replacementSource !== source) replacementSource?.close?.();
+  if (!currentClientEventTransportLifecycleScope().release('active-stream', source)) source?.close?.();
+  if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
 
 function openClientEventStream(descriptor, options = {}) {
@@ -80584,9 +83517,19 @@ function openClientEventStream(descriptor, options = {}) {
   if (replacing) {
     const priorReplacement = clientEventTransportState.replacementSource;
     clientEventTransportState.replacementSource = source;
-    priorReplacement?.close?.();
+    // One bounded retry episode per candidate: opening a new candidate (whether the first for this
+    // demand or a corrected one for changed demand) starts a fresh episode.
+    clientEventTransportState.candidateEpisode = {
+      source,
+      demandSignature: String(options.demandSignature || ''),
+      attempts: 0,
+      startedAt: performance.now(),
+    };
+    if (!currentClientEventTransportLifecycleScope().release('candidate-stream', priorReplacement)) priorReplacement?.close?.();
+    currentClientEventTransportLifecycleScope().ownStream('candidate-stream', source);
   } else {
     clientEventTransportState.source = source;
+    currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
   }
   const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
@@ -80594,6 +83537,7 @@ function openClientEventStream(descriptor, options = {}) {
       const demandedSignature = String(options.demandSignature || '');
       if (demandedSignature && demandedSignature !== clientEventDemandSignature(clientEventDemandDescriptor())) {
         clientEventTransportState.replacementSource = null;
+        clearClientEventCandidateEpisode(source);
         source.close();
         syncClientEventDemand({immediate: true});
         return;
@@ -80601,7 +83545,10 @@ function openClientEventStream(descriptor, options = {}) {
       const previousSource = clientEventTransportState.source;
       clientEventTransportState.source = source;
       clientEventTransportState.replacementSource = null;
-      previousSource?.close?.();
+      // The candidate is now the ACTIVE stream; its bounded retry episode is over.
+      clearClientEventCandidateEpisode(source);
+      currentClientEventTransportLifecycleScope().relinquish('candidate-stream', source);
+      currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
     } else if (clientEventTransportState.source !== source) {
       return;
     }
@@ -80640,7 +83587,33 @@ function openClientEventStream(descriptor, options = {}) {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    if (clientEventTransportState.replacementSource === source) return;
+    if (clientEventTransportState.replacementSource === source) {
+      // A CANDIDATE that errors before it is ever ready must not be silently retried forever while the
+      // ACTIVE stream keeps claiming to serve demand it no longer covers. Bound the retry episode: the
+      // browser EventSource auto-reconnects the same URL, so tolerate a few transient errors, then
+      // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
+      const episode = clientEventTransportState.candidateEpisode;
+      if (!episode || episode.source !== source) return;
+      episode.attempts += 1;
+      if (episode.attempts < clientEventCandidateRetryLimit) return;
+      abandonClientEventCandidate(source);
+      // The active stream does not serve the new demand: demote it so consumers fall back to HTTP
+      // instead of trusting a stream that covers only the old channel set.
+      clientEventTransportState.connected = false;
+      clientEventTransportState.reconnectPending = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+      recordSseDebugEvent('client_events_candidate_failed', {
+        attempts: episode.attempts,
+        demandSignature: episode.demandSignature,
+        diagnosticFailure: true,
+      });
+      // Force demand to be re-driven (the signature was already advanced when this candidate opened),
+      // opening one corrected candidate, and schedule an HTTP resync so no channel is left stranded.
+      clientEventTransportState.demandSignature = '';
+      scheduleReconnectResync('candidate-failed');
+      syncClientEventDemand({immediate: true});
+      return;
+    }
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     clientEventTransportState.reconnectPending = true;
@@ -80664,6 +83637,7 @@ function openClientEventStream(descriptor, options = {}) {
 }
 
 function applyClientEventDemand() {
+  currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   clientEventTransportState.demandTimer = null;
   if (!clientEventTransportState.enabled) return false;
   const descriptor = clientEventDemandDescriptor();
@@ -80683,15 +83657,35 @@ function applyClientEventDemand() {
 
 function syncClientEventDemand(options = {}) {
   if (!clientEventTransportState.enabled) return false;
-  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (clientEventTransportState.demandTimer) currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   if (options.immediate === true) return applyClientEventDemand();
   clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('demand', clientEventTransportState.demandTimer);
   return true;
 }
 
 function installClientEventStream() {
   clientEventTransportState.enabled = true;
   return syncClientEventDemand({immediate: true});
+}
+
+function disposeClientEventTransportLifecycle(reason = 'disposed') {
+  clientEventTransportLifecycleScope?.dispose(reason);
+  clientEventTransportState.source = null;
+  clientEventTransportState.replacementSource = null;
+  clientEventTransportState.connected = false;
+  clientEventTransportState.disconnectTimer = null;
+  clientEventTransportState.disconnectEpisode = null;
+  clientEventTransportState.demandTimer = null;
+  clientEventTransportState.frame = 0;
+  clientEventTransportState.resyncTimer = null;
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', () => disposeClientEventTransportLifecycle('pagehide'));
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted === true && clientEventTransportState.enabled) syncClientEventDemand({immediate: true});
+  });
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
@@ -80844,6 +83838,18 @@ function handleFocusedTerminalCopyShortcut(event) {
   event.stopPropagation?.();
   return true;
 }
+
+registerTerminalRuntimeFacade('panel', {
+  createPanel,
+  panelControlsHtml,
+  relocalizeTerminalPanelChrome,
+});
+registerTerminalRuntimeFacade('transport', {
+  connectTerminalSocket,
+  installClientEventStream,
+  startSummaryStream,
+  startTranscriptStream,
+});
 
 if (refreshMeta) {
   refreshMetaButtonChrome();

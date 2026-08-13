@@ -16,6 +16,7 @@ from yolomux_lib import jobd
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services.client import LocalServiceClient
 from yolomux_lib.local_services.client import TransportFailure
+from yolomux_lib.local_services import client as local_service_client_mod
 from yolomux_lib.local_services import runtime
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
@@ -25,6 +26,10 @@ from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
+from tests.serving_process import pid_is_serving
+from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
+from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
+from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -80,6 +85,97 @@ def test_process_record_diagnostic_rejects_a_real_unreaped_zombie():
         assert registry_mod.process_record_diagnostic(record, table=registry_mod.bounded_process_table()).current is False
     finally:
         os.waitpid(child, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="zombie lifecycle is POSIX-only")
+def test_serving_predicate_rejects_a_real_unreaped_zombie():
+    """The teardown liveness oracle must read an unreaped zombie as NOT serving.
+
+    This is the class that reddens the post-TERM teardown test under load: a child
+    that has exited but not been reaped keeps its ``/proc/<pid>/stat`` start ticks,
+    so the retired ``process_start_identity`` read returns a truthy identity and a
+    dead child reads as alive. Forge that state directly and prove the old read
+    mis-classifies it while the shared serving-member predicate does not, then prove
+    a genuinely live process still reads as serving so a real survivor is not
+    ignored.
+    """
+
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 2.0
+        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry_mod.process_state(child) == "Z", registry_mod.process_state(child)
+
+        # Red for the retired oracle: the zombie retains its start ticks.
+        assert registry_mod.process_start_identity(child)
+        # Green for the shared predicate: a zombie is not serving.
+        assert pid_is_serving(child) is False
+        # Fails closed: this live test process is still serving.
+        assert pid_is_serving(os.getpid()) is True
+    finally:
+        os.waitpid(child, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="adopted-child reaping is POSIX-only")
+def test_adopted_demand_daemon_is_reaped_not_left_a_zombie(tmp_path):
+    """A daemon adopted over a healthy socket, holding no Popen, must still be wait()-ed.
+
+    The generation that adopts a running daemon by pinging its socket never held a Popen for
+    it -- an earlier generation spawned it and dropped the handle. Before this fix the
+    healthy-socket early returns in ``ensure_started`` armed no reaper, so when the daemon
+    idle-exited nothing wait()-ed it and it lingered as an unreaped zombie: the live 7771
+    signature where an idle-exited demand daemon read as "errored". Arm the adopted reaper
+    against a real child, idle-exit it, and prove the web process reaps it and retires its
+    record instead of leaving a zombie behind.
+    """
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child never returns
+        os.close(write_fd)
+        try:
+            os.read(read_fd, 1)  # block until the parent closes the write end
+        finally:
+            os._exit(0)
+    os.close(read_fd)
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("watchd", "yolomux_lib.watchd", "watchd.sock", 1),
+    )
+    registry._write_record({
+        **current_host_identity().process_record_fields(
+            pid=child,
+            start_identity=registry_mod.process_start_identity(child),
+        ),
+        "service": "watchd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    })
+    try:
+        # No Popen held: exactly the adopted case the fresh-spawn reaper never covers.
+        assert registry.process is None
+        registry._arm_adopted_reaper()
+        assert registry._adopted_reaper_pid == child
+        # Idle-exit the adopted child; the parked reaper must reap it and retire the record.
+        os.close(write_fd)
+        deadline = time.monotonic() + 5.0
+        while registry.record_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not registry.record_path.exists(), "the adopted reaper must retire the record it named"
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child, 0)  # already reaped by the adopted reaper
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
+            pass
 
 
 def test_process_spawn_generation_reads_exact_named_environment_value(tmp_path):
@@ -581,7 +677,13 @@ def test_fixture_teardown_refreshes_generation_authority_after_term(tmp_path):
     )
 
     child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    assert not registry_mod.process_start_identity(child_pid)
+    # A raw ``process_start_identity`` read keeps returning the child's start ticks
+    # while it lingers as an unreaped zombie, so under load teardown finishes before
+    # the reaper runs and a dead child reads as alive. Route the liveness check
+    # through the shared serving-member predicate, which excludes zombies exactly as
+    # production's ``bounded_process_table`` does. A genuinely live child still reads
+    # as serving, so a real survivor is not ignored.
+    assert not pid_is_serving(child_pid)
 
 
 def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypatch):
@@ -755,6 +857,262 @@ def test_registry_captures_bounded_stderr_and_latches_repeated_start_exits(tmp_p
     assert len(starts) == registry_mod.LOCAL_SERVICE_START_EXIT_LIMIT + 1
 
 
+def _identity_probe_registry(tmp_path, monkeypatch, *, leader_pid, identities, status_response):
+    """A registry whose spawned child stays not-ready inside its (zero-length) startup window so
+
+    ensure_started reaches the ONE final identity-bearing status probe. ``identities`` is consumed
+    once per ``process_start_identity`` read: the first read is the spawn-time capture, the next is
+    the probe -- so a two-value sequence models a reused-pid imposter (the pid is alive but its
+    start-identity changed) and a one-value constant models a pid that is still exactly what we
+    spawned. ``status_response`` is what the single post-deadline ``status`` RPC returns.
+
+    Returns the registry plus three recorders: the spawn log, the list of every ``_request`` made
+    AFTER spawn -- so the negative-count assertion isolates the post-deadline probe from the
+    pre-spawn pings -- and the list of reasons passed to the REAL Error producer ``_mark_failure``.
+    """
+    starts = []
+    now = [100.0]
+    spawned = [False]
+    post_spawn_calls = []
+    mark_failure_reasons = []
+
+    class SlowChild:
+        pid = leader_pid
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            Event().wait()
+
+    reads = list(identities)
+
+    def next_identity(pid):
+        if pid != leader_pid:
+            return None
+        return reads[0] if len(reads) == 1 else reads.pop(0)
+
+    monkeypatch.setattr(registry_mod, "process_start_identity", next_identity)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: pid == leader_pid)
+    monkeypatch.setattr(registry_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
+
+    def popen(*_args, **_kwargs):
+        starts.append(True)
+        spawned[0] = True
+        return SlowChild()
+
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("fixture", "tests.fixture", "fixture.sock", 1, start_timeout_seconds=0.0),
+        popen=popen,
+        clock=lambda: now[0],
+        sleep=lambda _seconds: None,
+    )
+
+    # Record every _request made after spawn. A `ping` stays not-ready so the freshly spawned
+    # child never becomes ready inside the zero-length window; the single `status` returns the
+    # crafted identity-bearing response the final probe classifies. Because the window is empty
+    # and no pre-deadline path issues a `status` (an unhealthy ping short-circuits publication),
+    # the recorded post-spawn calls are exactly the one post-deadline probe.
+    def spy_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if spawned[0]:
+            post_spawn_calls.append((method, timeout))
+        if method == "status":
+            return dict(status_response)
+        return {"ok": False}
+
+    monkeypatch.setattr(registry, "_request", spy_request)
+
+    # Assert on the terminal-episode lifecycle via the REAL producer, not a bare counter: wrap
+    # `_mark_failure` so a duplicated or absent Error is provable, while its real side effects
+    # (start_exit_count, terminal latch, backoff) still run.
+    real_mark_failure = registry._mark_failure
+
+    def spy_mark_failure(reason="", *, exit_code=None, exited_before_ready=False):
+        mark_failure_reasons.append(reason)
+        real_mark_failure(reason, exit_code=exit_code, exited_before_ready=exited_before_ready)
+
+    monkeypatch.setattr(registry, "_mark_failure", spy_mark_failure)
+    return registry, starts, post_spawn_calls, mark_failure_reasons
+
+
+def test_registry_final_identity_probe_accepts_late_valid_and_fails_only_a_reused_pid_imposter(tmp_path, monkeypatch):
+    """W7 clause 4: ONE post-deadline identity-bearing `status` probe, classified three ways.
+
+    A live-past-deadline child whose single `status` response is valid for the EXACT spawned
+    pid/start-identity/protocol is late-valid startup -- accepted (ensure_started True), record
+    published, NO Error, exactly one generation, and exactly ONE post-deadline RPC which is
+    `status` (never `ping`+`status`). A status that is otherwise healthy but carries the WRONG
+    pid/start-identity -- a reused-pid imposter, or a peer answering our socket -- is a terminal
+    episode: ensure_started False, exactly one Error via the real producer, and no duplicate Error
+    or respawn on re-entry while backoff ownership holds. A merely not-ok/dropped status from our
+    own still-alive leader is transient not-ready: held for retry with NO Error.
+    """
+    # --- Late-valid: the ONE status response is valid AND names the exact spawned leader. ---
+    late_valid, late_starts, late_calls, late_failures = _identity_probe_registry(
+        tmp_path / "late",
+        monkeypatch,
+        leader_pid=44100,
+        identities=["ps:spawned"],
+        status_response={
+            "ok": True,
+            "version": 1,
+            "service": "fixture",
+            "pid": 44100,
+            "process_start_identity": "ps:spawned",
+        },
+    )
+    assert late_valid.ensure_started() is True
+    # Exactly ONE post-deadline RPC and it is `status` -- no ping first.
+    assert late_calls == [("status", 0.2)]
+    # The valid identity-bearing response was published as the durable record.
+    assert int(late_valid._read_record().get("pid") or 0) == 44100
+    # No Error via the real producer, no terminal/backoff latch, exactly one generation spawned.
+    assert late_failures == []
+    assert late_valid.failures == 0
+    assert late_valid._failure_reason == ""
+    assert late_valid._terminal_failure is False
+    assert late_starts == [True]
+
+    # --- Wrong-identity: a peer answers with a VALID healthy status naming a DIFFERENT pid. ---
+    # The OS leader we spawned is alive and ours (constant identity), so this exercises the new
+    # status-response identity gate, not merely the OS-pid proof.
+    peer, peer_starts, peer_calls, peer_failures = _identity_probe_registry(
+        tmp_path / "peer",
+        monkeypatch,
+        leader_pid=44300,
+        identities=["ps:spawned"],
+        status_response={
+            "ok": True,
+            "version": 1,
+            "service": "fixture",
+            "pid": 44999,
+            "process_start_identity": "ps:foreign",
+        },
+    )
+    assert peer.ensure_started() is False
+    # Exactly ONE post-deadline `status` RPC.
+    assert peer_calls == [("status", 0.2)]
+    # Exactly one terminal-episode Error via the real producer.
+    assert len(peer_failures) == 1
+    assert "status identity mismatch" in peer_failures[0]
+    assert peer.failures == 1
+    assert peer._terminal_failure is True
+    assert peer_starts == [True]
+    # Re-entry is forbidden by backoff ownership: no second Error, no second generation.
+    assert peer.ensure_started() is False
+    assert len(peer_failures) == 1
+    assert peer.failures == 1
+    assert peer_starts == [True]
+
+    # --- Reused-pid imposter: the pid is alive but now carries a DIFFERENT start-identity. ---
+    imposter, imposter_starts, imposter_calls, imposter_failures = _identity_probe_registry(
+        tmp_path / "imposter",
+        monkeypatch,
+        leader_pid=44200,
+        identities=["ps:spawned", "ps:reused"],
+        status_response={"ok": True, "version": 1, "service": "fixture", "pid": 44200},
+    )
+    assert imposter.ensure_started() is False
+    assert imposter_calls == [("status", 0.2)]
+    assert len(imposter_failures) == 1
+    assert "start-identity mismatch (reused-pid imposter)" in imposter_failures[0]
+    assert imposter.failures == 1
+    assert imposter_starts == [True]
+
+    # --- Transient not-ready: our own leader is alive but the status is simply not-ok. ---
+    transient, transient_starts, transient_calls, transient_failures = _identity_probe_registry(
+        tmp_path / "transient",
+        monkeypatch,
+        leader_pid=44400,
+        identities=["ps:spawned"],
+        status_response={"ok": False},
+    )
+    assert transient.ensure_started() is False
+    assert transient_calls == [("status", 0.2)]
+    # No Error: the child is ours and alive, just not published yet -- held for bounded retry.
+    assert transient_failures == []
+    assert transient.failures == 0
+    assert transient._failure_reason == ""
+    assert transient._terminal_failure is False
+    assert transient.next_start_at == 100.0 + registry_mod.LOCAL_SERVICE_BACKOFF_SECONDS
+    assert transient_starts == [True]
+
+
+@pytest.mark.parametrize(
+    ("status_response", "reason"),
+    [
+        ({"ok": True, "version": 1, "service": "otherd", "pid": 44500, "process_start_identity": "ps:spawned"}, "service_name_mismatch"),
+        ({"ok": True, "version": 2, "service": "fixture", "pid": 44500, "process_start_identity": "ps:spawned"}, "protocol_version_mismatch"),
+    ],
+)
+def test_registry_final_status_classifies_explicit_wire_identity_mismatch_as_terminal(
+    tmp_path, monkeypatch, status_response, reason,
+):
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path,
+        monkeypatch,
+        leader_pid=44500,
+        identities=["ps:spawned"],
+        status_response=status_response,
+    )
+
+    assert registry.ensure_started() is False
+    assert calls == [("status", 0.2)]
+    assert failures == [f"fixture startup status identity mismatch: {reason}"]
+    assert registry.failure_response()["terminal"] is True
+    assert starts == [True]
+
+
+def test_registry_final_status_requires_response_identity_and_does_not_substitute_os_identity(tmp_path, monkeypatch):
+    registry, starts, calls, failures = _identity_probe_registry(
+        tmp_path,
+        monkeypatch,
+        leader_pid=44600,
+        identities=["ps:spawned"],
+        status_response={"ok": True, "version": 1, "service": "fixture", "pid": 44600},
+    )
+
+    assert registry.ensure_started() is False
+    assert calls == [("status", 0.2)]
+    assert registry._read_record() == {}
+    assert failures == []
+    assert registry.failure_response()["terminal"] is False
+    assert starts == [True]
+
+
+def test_local_service_client_emits_one_error_for_one_terminal_startup_episode(tmp_path, monkeypatch):
+    registry, starts, calls, _failures = _identity_probe_registry(
+        tmp_path,
+        monkeypatch,
+        leader_pid=44700,
+        identities=["ps:spawned"],
+        status_response={
+            "ok": True,
+            "version": 1,
+            "service": "otherd",
+            "pid": 44700,
+            "process_start_identity": "ps:spawned",
+        },
+    )
+    client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
+    client.registry = registry
+    emitted = []
+    monkeypatch.setattr(local_service_client_mod, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
+
+    assert client.ensure_started() is False
+    assert client.ensure_started() is False
+
+    assert starts == [True]
+    assert calls == [("status", 0.2)]
+    assert len(emitted) == 1
+    args, kwargs = emitted[0]
+    assert args[:2] == ("error", "local-service:fixture")
+    assert "service_name_mismatch" in args[2]
+    assert (kwargs["category"], kwargs["event"], kwargs["delivery"]) == ("startup", "startup", "terminal")
+
+
 def test_parse_ps_cpu_seconds_covers_ps_time_shapes():
     assert parse_ps_cpu_seconds("0:00.00") == 0.0
     assert parse_ps_cpu_seconds("1:30") == 90.0
@@ -864,11 +1222,15 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     )
     requests = []
 
+    # A service answers with its own live pid; a pid that names no process
+    # cannot publish an identity record, so the fixture uses a real one.
+    service_pid = os.getpid()
+
     def fake_request(_path, envelope, **_kwargs):
         requests.append(envelope.method)
         if envelope.method == "ping":
-            return {"ok": True, "version": 5, "pid": 42}, b""
-        return {"ok": True, "version": 5, "pid": 42, "started_at": 1}, b""
+            return {"ok": True, "version": 5, "pid": service_pid}, b""
+        return {"ok": True, "version": 5, "pid": service_pid, "started_at": 1}, b""
 
     monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
 
@@ -879,6 +1241,223 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     now[0] += 1.1
     assert registry.ensure_started() is True
     assert requests.count("ping") == 2
+
+
+class _NeverExitingProcess:
+    """A spawn stand-in with no pid, so `_spawn` returns it before ownership capture."""
+
+    def poll(self):
+        return None
+
+
+def _publication_registry(tmp_path, *, clock, spawned, protocol_version=1):
+    return LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("fixture", "tests.fixture", "fixture.sock", protocol_version),
+        clock=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
+    )
+
+
+def test_registry_never_publishes_a_record_from_a_lost_post_ping_status(tmp_path, monkeypatch):
+    """One dropped status RPC after a successful ping must not brick the service.
+
+    Shipping 0.7.0 wrote `_record_from_status({})` -- a durable record carrying
+    pid 0 -- and still told the caller the service had started.  `invalid_pid`
+    is not removable on the same host and boot, so every later start was
+    refused by `remove_stale_record` forever.  The publication validator must
+    refuse that record, invalidate health, and continue through bounded startup.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    live = [True]
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if not live[0]:
+            return {}
+        if method == "ping":
+            return {"ok": True, "version": 1, "pid": 4242}
+        return {}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    first = registry.ensure_started()
+    published = registry._read_record()
+    # The daemon that answered ping is gone; only the durable record survives.
+    live[0] = False
+    registry.invalidate_rpc_health()
+    second = registry.ensure_started()
+    failure_reason = registry.status()["failure_reason"]
+
+    measured = {
+        "first_reported_started": first,
+        "record_published": registry.record_path.exists(),
+        "record_pid": int(published.get("pid") or 0),
+        "second_reported_started": second,
+        "permanently_blocked": "blocked by remove_stale_record" in failure_reason,
+    }
+    assert measured == {
+        "first_reported_started": False,
+        "record_published": False,
+        "record_pid": 0,
+        "second_reported_started": False,
+        "permanently_blocked": False,
+    }, {**measured, "failure_reason": failure_reason}
+    assert spawned == [True]
+
+
+def test_registry_recovers_a_lost_status_on_the_next_attempt_with_a_real_record(tmp_path, monkeypatch):
+    """A transient status loss costs one attempt, never the service."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    status_losses = [1]
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if method == "ping":
+            return {"ok": True, "version": 1, "pid": os.getpid()}
+        if status_losses[0] > 0:
+            status_losses[0] -= 1
+            return {}
+        return {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 1.0}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    assert registry.ensure_started() is True
+    record = registry._read_record()
+    assert record["pid"] == os.getpid()
+    assert record["service"] == "fixture"
+    assert record["protocol_version"] == 1
+    assert registry._record_process_diagnostic(record).current is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {},
+        {"ok": False, "version": 1, "pid": os.getpid()},
+        {"ok": True, "version": 1, "pid": 0},
+        {"ok": True, "version": 1, "pid": 1},
+        {"ok": True, "version": 2, "pid": os.getpid()},
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": "jobd"},
+        {"ok": True, "version": 1, "pid": 4242},
+    ),
+    ids=(
+        "lost_status",
+        "status_not_ok",
+        "invalid_pid_zero",
+        "invalid_pid_init",
+        "wrong_protocol_version",
+        "wrong_service_name",
+        "unusable_start_identity",
+    ),
+)
+def test_registry_publication_validator_refuses_every_unprovable_status(tmp_path, status):
+    """No unprovable status may reach the durable record, and none may report success."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+
+    assert registry._publish_record(status) is False
+    assert registry.record_path.exists() is False
+    assert registry.recently_healthy() is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 2.0},
+        # statsd reports a nested `service` diagnostics object, not a service name.
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": {"pid": os.getpid(), "healthy": True}},
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": "fixture"},
+    ),
+    ids=("plain", "statsd_shaped_service_object", "matching_service_name"),
+)
+def test_registry_publication_validator_accepts_a_proven_status(tmp_path, status):
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+
+    assert registry._publish_record(status) is True
+    record = registry._read_record()
+    assert record["pid"] == os.getpid()
+    assert record["service"] == "fixture"
+    assert registry._record_process_diagnostic(record).current is True
+
+
+def test_registry_writes_the_service_record_through_exactly_one_validator(tmp_path):
+    """Divergent copies of this write are the defect; keep one publication owner."""
+    source = (REPO_ROOT / "yolomux_lib" / "local_services" / "registry.py").read_text(encoding="utf-8")
+    call_lines = [
+        line.strip()
+        for line in source.splitlines()
+        if "_write_record(" in line and "def _write_record" not in line
+    ]
+    assert call_lines == ["self._write_record(record)"]
+    assert source.count("def _publish_record(") == 1
+
+
+def test_registry_reclaims_a_poisoned_invalid_pid_record_as_record_only_cleanup(tmp_path, monkeypatch):
+    """Already-poisoned 0.7.0 installs must recover without any process action.
+
+    A pid of 0 or 1 cannot name a service process, so discarding the record can
+    neither orphan nor kill anything: no signal, no adoption, no socket unlink.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    registry._write_record({
+        **current_host_identity().process_record_fields(pid=0, start_identity=""),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    })
+    registry.socket_path.parent.mkdir(parents=True, exist_ok=True)
+    registry.socket_path.touch()
+    signals = []
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+    monkeypatch.setattr(registry, "_request", lambda *args, **kwargs: {})
+
+    assert registry._remove_stale_record() is True
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.exists() is True
+    assert signals == []
+
+    assert registry.ensure_started() is False
+    assert spawned == [True]
+    assert "blocked by remove_stale_record" not in registry.status()["failure_reason"]
+
+
+def test_registry_never_reclaims_a_genuinely_live_service_record(tmp_path, monkeypatch):
+    """Safety control: a current record must stay, whatever the reclaim path allows."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    record = {
+        **current_host_identity().process_record_fields(
+            pid=os.getpid(),
+            start_identity=registry_mod.process_start_identity(os.getpid()),
+        ),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    }
+    registry._write_record(record)
+    signals = []
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+
+    diagnostic = registry._record_process_diagnostic(record)
+    assert diagnostic.current is True
+    assert diagnostic.may_remove_stale_record is False
+    assert diagnostic.may_remove_unidentifiable_record is False
+    assert registry._remove_stale_record() is False
+    assert registry._read_record()["pid"] == os.getpid()
+    # Signal 0 is the liveness probe; nothing may deliver a real signal here.
+    assert [item for item in signals if item[1] != 0] == []
 
 
 def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypatch):
@@ -913,18 +1492,25 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
         def poll(self):
             return None
 
+        def wait(self):
+            # A live replacement daemon: `_start_child_reaper` waits here until the child
+            # exits, which for this fixture never happens, so model the real Popen contract
+            # by blocking rather than fabricating an exit the test never produces.
+            Event().wait()
+
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
         popen=lambda *args, **kwargs: spawned.append((args, kwargs)) or FakeProcess(),
     )
-    stale_pid, dead_launcher = 4242, 1111
+    stale_pid, dead_launcher, replacement_pid = 4242, 1111, 5252
     registry._write_record({
         **_process_record(stale_pid),
         "service": "statsd", "pgid": stale_pid,
         "socket": str(registry.socket_path), "launcher_pid": dead_launcher,
     })
-    alive = {stale_pid: True, dead_launcher: False}
+    # The replacement daemon is live: its record cannot be published otherwise.
+    alive = {stale_pid: True, dead_launcher: False, replacement_pid: True}
     actions = []
 
     def fake_request(method, payload=None, timeout=0.2):
@@ -933,7 +1519,7 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
             alive[stale_pid] = False
             return {"ok": True}
         if spawned:
-            return {"ok": True, "version": 21, "pid": 5252, "started_at": 1}
+            return {"ok": True, "version": 21, "pid": replacement_pid, "started_at": 1}
         return {"ok": False, "error_code": "upgrade_required", "version": 22, "pid": stale_pid}
 
     monkeypatch.setattr(registry, "_request", fake_request)
@@ -1243,20 +1829,20 @@ def _table(rows):
 
 
 def _process_record(pid):
-    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
+    return FixtureProcessRecordBuilder(pid=pid).build()
 
 
 def _write_service_record(service_dir, name, pid, socket_path):
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / f"{name}.service.json").write_text(
-        registry_mod.json.dumps({**_process_record(pid), "service": name, "socket": str(socket_path)}),
+        registry_mod.json.dumps(FixtureLocalServiceRecordBuilder(service=name, socket_path=socket_path, pid=pid).build()),
         encoding="utf-8",
     )
 
 
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
     socket_path = tmp_path / "services" / "jobd.sock"
-    record = {**_process_record(100), "service": "jobd", "socket": str(socket_path)}
+    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=socket_path, pid=100).build()
     with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
@@ -1296,12 +1882,7 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
 
 
 def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
-    lease_dir = tmp_path / "server-leases"
-    lease_dir.mkdir(parents=True)
-    (lease_dir / "8881.lock").write_text(
-        registry_mod.json.dumps({**_process_record(400), "port": 8881}),
-        encoding="utf-8",
-    )
+    FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
     good = _table(
         [
             (400, 1, 400, 50.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),
@@ -1346,3 +1927,29 @@ def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, 
     assert record["launcher_pid"] == registry_mod.os.getpid()
     assert record["launcher_port"] == 8881
     assert record["worker_pids"] == [701, 702]
+
+
+def test_publish_record_clears_a_blocked_start_latch_on_healthy_adoption(tmp_path):
+    """A blocked-start guard reason must not outlive the healthy daemon it wrongly describes.
+
+    ``remove_stale_record`` correctly refuses to evict a live current-local daemon (e.g. statusd),
+    and ``_record_blocked_start`` latches "start blocked by ... (reason=current_local_process)" on
+    ``_failure_reason`` WITHOUT touching ``_record_refusal_reason``. When the SAME registry then
+    validates and publishes that healthy, identity-proven daemon, the stale latch must clear --
+    otherwise ``runtime_status`` keeps emitting it and the Daemons row shows a permanent Issue for a
+    service that is up and serving. Before the fix, ``_publish_record`` cleared the latch only when
+    it equalled the refusal reason, so a blocked-start latch survived every healthy publish.
+    """
+    now = [100.0]
+    registry = _publication_registry(tmp_path, clock=now, spawned=[])
+    registry._process_diagnostic = {"reason": "current_local_process"}
+    registry._record_blocked_start("remove_stale_record")
+    assert "start blocked by remove_stale_record" in registry._failure_reason
+    # The bug precondition: a blocked start latches _failure_reason but NOT _record_refusal_reason,
+    # so the old equality-gated clear could never fire.
+    assert registry._record_refusal_reason == ""
+
+    assert registry._publish_record({"ok": True, "version": 1, "pid": os.getpid(), "service": "fixture"}) is True
+
+    assert registry._failure_reason == "", "a published, identity-proven daemon must clear the stale blocked-start latch"
+    assert "start blocked" not in registry.failure_response()["reason"]

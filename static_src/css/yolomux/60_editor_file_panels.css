@@ -1327,13 +1327,13 @@ body.resizing-file-explorer-changes {
   box-shadow: var(--pane-resizer-hover-shadow);
 }
 .file-explorer-changes-panel {
-  --changes-row-hover-bg: var(--active-control-soft-bg);
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: rgba(148, 163, 184, 0.50);
+  --changes-indent-line: var(--changes-tree-indent-line);
   --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
-  --changes-icon-text: #a7c7ff;
+  --changes-icon-text: var(--changes-tree-icon-text);
   --pane-bar-bg: var(--panel2);
   flex: 1 1 auto;
   min-height: 0;

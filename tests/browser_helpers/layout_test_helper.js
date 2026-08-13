@@ -149,6 +149,22 @@ function serverDefaultSettings(...keys) {
   }));
 }
 
+function serverFilesystemBatchLimits() {
+  // The /api/fs/batch bounds come from the ONE owner, yolomux_lib/filesystem/__init__.py, the same
+  // way the real boot payload does. A literal here would be a copy free to drift from the constant
+  // the server actually refuses above, which is the whole reason the bundle stopped carrying one.
+  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yolomux_lib', 'filesystem', '__init__.py'), 'utf8');
+  const maxRequestsMatch = source.match(/^MAX_BATCH_REQUESTS = (\d+)$/m);
+  if (!maxRequestsMatch) throw new Error('layout_test_helper: MAX_BATCH_REQUESTS not found in yolomux_lib/filesystem/__init__.py');
+  const maxRequests = Number(maxRequestsMatch[1]);
+  const triggerMatch = source.match(/^BATCH_TRIGGER_COUNT_LIMIT = (MAX_BATCH_REQUESTS|\d+)$/m);
+  if (!triggerMatch) throw new Error('layout_test_helper: BATCH_TRIGGER_COUNT_LIMIT not found in yolomux_lib/filesystem/__init__.py');
+  const triggerCountLimit = triggerMatch[1] === 'MAX_BATCH_REQUESTS' ? maxRequests : Number(triggerMatch[1]);
+  return {maxRequests, triggerCountLimit};
+}
+
+const SERVER_FILESYSTEM_BATCH_LIMITS = Object.freeze(serverFilesystemBatchLimits());
+
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
   editor: Object.freeze({
@@ -580,6 +596,7 @@ class TestEventSource {
   }
 
   close() {
+    this.closeCount = Number(this.closeCount || 0) + 1;
     this.readyState = 2;
   }
 }
@@ -630,6 +647,67 @@ function deferredFetch() {
   return {promise, resolve, reject};
 }
 
+async function apiTransportRetirementScenario() {
+  const outcome = promise => promise.then(() => 'resolved', error => String(error?.message || error));
+  const api = loadYolomux();
+  api.setStatsCurrentNamespaceForTest(null);
+  const request = deferredFetch();
+  api.setFetchForTest(() => request.promise);
+  const pending = api.apiFetchJsonForTest('/api/auto-approve');
+  api.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
+  request.reject(new TypeError('Failed to fetch'));
+  const retiredError = await outcome(pending);
+  const retirement = api.jsDebugEventsForTest().find(event => event.type === 'api' && event.endpoint === '/api/auto-approve');
+  const retired = {error: retiredError, outcome: retirement.deliveryOutcome, reason: retirement.reason, failures: api.jsDebugFailureEventsForTest().length, backendFailures: api.backendHealthStateForTest().consecutiveFailures, consoleErrors: api.vmConsoleErrorsForTest().length};
+
+  const lateApi = loadYolomux();
+  lateApi.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
+  const lateRequest = deferredFetch();
+  lateApi.setFetchForTest(() => lateRequest.promise);
+  const latePending = lateApi.apiFetchJsonForTest('/api/late-retirement');
+  lateRequest.reject(new TypeError('Failed to fetch'));
+  const lateError = await outcome(latePending);
+  const lateEvent = lateApi.jsDebugEventsForTest().find(event => event.endpoint === '/api/late-retirement');
+  const lateRetired = {error: lateError, outcome: lateEvent.deliveryOutcome, reason: lateEvent.reason, failures: lateApi.jsDebugFailureEventsForTest().length, backendFailures: lateApi.backendHealthStateForTest().consecutiveFailures, consoleErrors: lateApi.vmConsoleErrorsForTest().length};
+
+  const resumedApi = loadYolomux();
+  resumedApi.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
+  const resumedRequest = deferredFetch();
+  resumedApi.setFetchForTest(() => resumedRequest.promise);
+  const resumedPending = resumedApi.apiFetchJsonForTest('/api/resumed-live');
+  resumedApi.windowListenersForTest('pageshow')[0]({type: 'pageshow'});
+  resumedRequest.reject(new TypeError('Failed to fetch'));
+  const resumedError = await outcome(resumedPending);
+  const resumedEvent = resumedApi.jsDebugEventsForTest().find(event => event.endpoint === '/api/resumed-live');
+  const resumedLive = {error: resumedError, outcome: resumedEvent.deliveryOutcome, failures: resumedApi.jsDebugFailureEventsForTest().length, backendFailures: resumedApi.backendHealthStateForTest().consecutiveFailures, consoleErrors: resumedApi.vmConsoleErrorsForTest().length};
+
+  api.windowListenersForTest('pageshow')[0]({type: 'pageshow'});
+  api.setStatsCurrentNamespaceForTest({
+    pageTransportLifecycle: new Proxy({}, {get() { throw new Error('public namespace used as runtime owner'); }}),
+  });
+  const first = deferredFetch();
+  const second = deferredFetch();
+  api.setFetchForTest(url => String(url).endsWith('/first') ? first.promise : second.promise);
+  const firstPending = api.apiFetchJsonForTest('/api/first');
+  const secondPending = api.apiFetchJsonForTest('/api/second');
+  api.windowListenersForTest('beforeunload')[0]({type: 'beforeunload'});
+  first.resolve(jsonResponse({ok: true}));
+  await firstPending;
+  second.reject(new TypeError('Failed to fetch'));
+  const racedError = await outcome(secondPending);
+  const raced = {error: racedError, outcome: api.jsDebugEventsForTest().find(event => event.endpoint === '/api/second').deliveryOutcome, failures: api.jsDebugFailureEventsForTest().length};
+
+  const control = loadYolomux();
+  const failure = deferredFetch();
+  control.setFetchForTest(() => failure.promise);
+  const failurePending = control.apiFetchJsonForTest('/api/auto-approve');
+  failure.reject(new TypeError('Failed to fetch'));
+  const failureError = await outcome(failurePending);
+  const [recorded] = control.jsDebugFailureEventsForTest();
+  const live = {error: failureError, type: recorded.type, endpoint: recorded.endpoint, outcome: recorded.deliveryOutcome, backendFailures: control.backendHealthStateForTest().consecutiveFailures};
+  return {retired, lateRetired, resumedLive, raced, live};
+}
+
 function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
   return {defaults, settings, mtime_ns: 1};
 }
@@ -660,6 +738,11 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
+    // The real server always states the bounds /api/fs/batch refuses above (yolomux_lib/web.py),
+    // and the bundle splits its posts at maxRequests. Seed the production values so every suite
+    // exercises the configuration a browser actually boots into; the tests that care about the
+    // split or about an unstated bound override this key explicitly.
+    filesystemBatchLimits: {...SERVER_FILESYSTEM_BATCH_LIMITS},
     serverHostname: 'test-host',
     localeRegistry: {
       fallback: 'en',
@@ -952,7 +1035,7 @@ globalThis.__layoutTestApi = {
   createTopbarOwnerStatusForTest: createTopbarOwnerStatus,
   showBackgroundOwnerContextMenuForTest: showBackgroundOwnerContextMenu,
   setBackgroundOwnerStatusPayloadForTest(payload) {
-    backgroundOwnerStatusState.guard.invalidate();
+    backgroundOwnerStatusState.resource?.replace(payload, 'test');
     backgroundOwnerStatusState.payload = payload;
     backgroundOwnerStatusState.updatedAt = Date.now();
     backgroundOwnerStatusState.loading = false;
@@ -1045,10 +1128,16 @@ globalThis.__layoutTestApi = {
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileIndexStatusFromPayloadForTest: fileIndexStatusFromPayload,
+  fileIndexFreshnessFromPayloadForTest: fileIndexFreshnessFromPayload,
+  fileIndexFreshnessMessageForTest: fileIndexFreshnessMessage,
+  fileQuickOpenWorstFreshnessForTest: fileQuickOpenWorstFreshness,
   applyFileIndexStatusPayloadForTest: applyFileIndexStatusPayload,
+  fileExplorerIndexBadgeTitleForTest: fileExplorerIndexBadgeTitle,
   fileExplorerIndexStatusForTest(root) { return fileExplorerIndexStatus.get(normalizeStoredFileExplorerIndexedDir(root)) || ''; },
   showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
   clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
+  seedFileIndexPartialWarningRootForTest(root) { fileIndexPartialWarningRoots.add(normalizeStoredFileExplorerIndexedDir(root)); },
+  fileIndexPartialWarningRootWarnedForTest(root) { return fileIndexPartialWarningRoots.has(normalizeStoredFileExplorerIndexedDir(root)); },
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
   gitStatusRowClass,
@@ -1154,7 +1243,7 @@ globalThis.__layoutTestApi = {
   clearYoagentConversationForTest: clearYoagentConversation,
   setYoagentErrorForTest(value) { yoagentChatState.error = value && typeof value === 'object' ? value : String(value || ''); },
   setYoagentNoticeForTest(value) { yoagentChatState.notice = value; },
-  setYoagentMessagesForTest(value) { yoagentConversationState.guard.invalidate(); yoagentConversationState.messages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
+  setYoagentMessagesForTest(value) { yoagentConversationState.resource?.invalidate({source: 'test'}); yoagentConversationState.messages = Array.isArray(value) ? value : []; resetYoagentComposerHistory(); },
   applyYoagentStreamPayloadForTest: applyYoagentStreamPayload,
   refreshActivitySummaryForTest: refreshActivitySummary,
   showYoagentStartupInfoOnceForTest: showYoagentStartupInfoOnce,
@@ -1284,6 +1373,11 @@ globalThis.__layoutTestApi = {
         hasSource: clientEventTransportState.disconnectEpisode.source !== null,
       } : null,
       enabled: clientEventTransportState.enabled,
+      candidateEpisode: clientEventTransportState.candidateEpisode ? {
+        source: clientEventTransportState.candidateEpisode.source,
+        attempts: clientEventTransportState.candidateEpisode.attempts,
+        demandSignature: clientEventTransportState.candidateEpisode.demandSignature,
+      } : null,
       demand: clientEventTransportState.demand,
       demandSignature: clientEventTransportState.demandSignature,
       resourceEpoch: clientEventTransportState.resourceEpoch,
@@ -1312,6 +1406,12 @@ globalThis.__layoutTestApi = {
   setServerWatchRootsSyncedAtForTest(value) { serverWatchRootsState.syncedAt = Number(value) || 0; },
   fileExplorerPaneTabHtml,
   makeButtonForTest: makeButton,
+  bindOnceForTest: bindOnce,
+  debugRuntimeFacadeForTest: debugRuntimeFacade,
+  terminalRuntimeFacadeForTest: terminalRuntimeFacade,
+  setStatsCurrentNamespaceForTest(value) { globalThis.YOLOmuxStatsCurrent = value; },
+  bindPaneFrameControlsForTest: bindPaneFrameControls,
+  bindSearchHistoryPanelForTest: bindSearchHistoryPanel,
   fetchDirectoryForTest: fetchDirectory,
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
@@ -1485,6 +1585,8 @@ globalThis.__layoutTestApi = {
   layoutWithSidePaneItems,
   layoutWithDefaultLeftSidePane,
   layoutSlotsForTest() { return cloneLayoutSlots(layoutSlots); },
+  createLifecycleScopeForTest: createLifecycleScope,
+  createLatestResourceForTest: createLatestResource,
   mobileSinglePaneModeForTest: mobileSinglePaneMode,
   narrowSingleColumnModeForTest: narrowSingleColumnMode,
   fileExplorerUsesNormalTabMovementForTest: fileExplorerUsesNormalTabMovement,
@@ -1548,6 +1650,16 @@ globalThis.__layoutTestApi = {
   chatMessageRequestsYoagentForTest: chatMessageRequestsYoagent,
   openChatSearchForTest: openChatSearch,
   replaceChatTypingForTest: replaceChatTyping,
+  chatRequestOptionsForTest: chatRequestOptions,
+  clearChatLifecycleForTest: clearChatLifecycle,
+  chatLifecycleStateForTest() {
+    return {
+      active: chatState.lifecycleScope?.current() === true,
+      requestController: chatState.lifecycleScope?.value('request-controller') || null,
+      typingTimer: chatState.lifecycleScope?.value('typing-heartbeat-timer') || null,
+      typingExpiryTimer: chatState.lifecycleScope?.value('typing-expiry-timer') || null,
+    };
+  },
   conversationAutosizeTextareaForTest: conversationAutosizeTextarea,
   chatPanelIsEngagedForTest: chatPanelIsEngaged,
   chatStatusTonesForTest: chatStatusTones,
@@ -1717,6 +1829,17 @@ globalThis.__layoutTestApi = {
   setNotificationDeliveryForTest(value = {}) { notificationDelivery = {inApp: value.inApp === true, system: value.system === true}; },
   queueClientPushEventForTest: queueClientPushEvent,
   handleClientPushEventForTest: handleClientPushEvent,
+  clientServerPushEventTypesForTest: () => [...clientServerPushEventTypes],
+  backendHealthStateForTest: () => ({...backendHealthState, resources: backendHealthState.resources.map(item => ({...item}))}),
+  backendHealthIndicatorModelForTest: backendHealthIndicatorModel,
+  applyBackendHealthPayloadForTest: applyBackendHealthPayload,
+  noteBackendHealthFailureForTest: noteBackendHealthFailure,
+  noteBackendHealthSuccessForTest: noteBackendHealthSuccess,
+  // The product resolves its host from the real topbar, which the node DOM stub does not build.
+  // Tests pass their own topbar-right-tools host to the one renderer; there is no second one.
+  syncBackendHealthIndicatorForTest: host => syncBackendHealthIndicator(host),
+  openBackendHealthDetailsForTest: openBackendHealthDetails,
+  debugSubTabForTest: () => debugRuntimeState.subTab,
   flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
   scheduleReconnectResyncForTest: scheduleReconnectResync,
   installClientEventStreamForTest: installClientEventStream,
@@ -1749,10 +1872,10 @@ globalThis.__layoutTestApi = {
   connectTerminalSocketForTest: connectTerminalSocket,
   startSummaryStreamForTest: startSummaryStream,
   stopSummaryStreamForTest: stopSummaryStream,
-  summaryStreamForTest(session) { return summaryStreams.get(session) || null; },
+  summaryStreamForTest(session) { return summaryLifecycleScopes.get(session)?.value('stream') || null; },
   startTranscriptStreamForTest: startTranscriptStream,
   stopTranscriptStreamForTest: stopTranscriptStream,
-  transcriptStreamForTest(session) { return transcriptStreams.get(session) || null; },
+  transcriptStreamForTest(session) { return transcriptLifecycleScopes.get(session)?.value('stream') || null; },
   terminalAttentionQuestionTextsForTest: terminalAttentionQuestionTexts,
   terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
   syncTerminalAttentionHighlightForTest: syncTerminalAttentionHighlight,
@@ -1834,8 +1957,12 @@ globalThis.__layoutTestApi = {
   },
   seedSessionTeardownStateForTest(session) {
     const closed = {transcript: 0, summary: 0};
-    transcriptStreams.set(session, {close() { closed.transcript += 1; }});
-    summaryStreams.set(session, {close() { closed.summary += 1; }});
+    const transcriptScope = createLifecycleScope({onDispose: () => transcriptLifecycleScopes.delete(session)});
+    transcriptScope.ownStream('stream', {close() { closed.transcript += 1; }});
+    transcriptLifecycleScopes.set(session, transcriptScope);
+    const summaryScope = createLifecycleScope({onDispose: () => summaryLifecycleScopes.delete(session)});
+    summaryScope.ownStream('stream', {close() { closed.summary += 1; }});
+    summaryLifecycleScopes.set(session, summaryScope);
     this.seedSessionLifecycleStateForTest(session);
     uploadResultRecords.set(session, {entries: [{text: 'uploaded'}], cleanupTimer: 123});
     return closed;
@@ -1882,8 +2009,8 @@ globalThis.__layoutTestApi = {
     const uploadRecord = uploadResultRecord(session);
     return {
       terminal: terminals.has(session),
-      transcript: transcriptStreams.has(session),
-      summary: summaryStreams.has(session),
+      transcript: transcriptLifecycleScopes.has(session),
+      summary: summaryLifecycleScopes.has(session),
       uploads: Boolean(uploadRecord),
       uploadTimer: uploadRecord?.cleanupTimer !== null && uploadRecord?.cleanupTimer !== undefined,
       ...this.sessionLifecycleStateForTest(session),
@@ -1893,6 +2020,8 @@ globalThis.__layoutTestApi = {
   tmuxSessionViewCommands,
   tmuxSessionNameError,
   replaceTmuxSessionInClient,
+  renameTmuxSessionForTest: renameTmuxSession,
+  layoutMutationSnapshotForTest() { return runtimeState.layoutMutationSnapshot(); },
   createNextSessionForTest: createNextSession,
   confirmSessionGoneOrReconnectForTest: confirmSessionGoneOrReconnect,
   markPendingTmuxSessionForTest: markPendingTmuxSession,
@@ -1933,6 +2062,20 @@ globalThis.__layoutTestApi = {
   layoutSlotsSignature,
   dockviewJsonFromLayoutSlots,
   layoutSlotsFromDockviewJson,
+  queueDockviewLayoutAdoptionForTest(json) {
+    const fromJsonCalls = [];
+    dockviewLayoutState.host = null;
+    dockviewLayoutState.api = {
+      toJSON() { return json; },
+      fromJSON(value) { fromJsonCalls.push(value); },
+      clear() {},
+    };
+    dockviewLayoutState.fromJsonCallsForTest = fromJsonCalls;
+    dockviewLayoutState.syncQueued = true;
+    dockviewLayoutState.syncQueuedLayoutSignature = layoutSlotsExactSignature(layoutSlots);
+  },
+  dockviewFromJsonCallsForTest() { return [...(dockviewLayoutState.fromJsonCallsForTest || [])]; },
+  adoptQueuedDockviewLayoutForTest: adoptDockviewLayout,
   adoptDockviewLayoutForTest(json, hostRect = null) {
     if (hostRect) {
       const host = document.createElement('div');
@@ -2173,7 +2316,9 @@ globalThis.__layoutTestApi = {
   imageOpenUsesSharedViewer,
   imageViewerItemFor,
   markdownPreviewInputAllowed,
+  PREVIEW_RENDERERS,
   previewRendererForPath,
+  renderPreviewDescriptor,
   previewPathIsPreviewable,
   previewKindForPath,
   defaultFileEditorViewModeForPath,
@@ -2225,6 +2370,12 @@ globalThis.__layoutTestApi = {
   fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
   reloadOpenFileFromDiskForTest: reloadOpenFileFromDisk,
+  refreshOpenFilesIfChangedForTest: refreshOpenFilesIfChanged,
+  replaceOpenFileStateFromDiskForTest: replaceOpenFileStateFromDisk,
+  loadOpenFileStateFromDiskForTest: loadOpenFileStateFromDisk,
+  loadFileEditorStateForTest: loadFileEditorState,
+  commandPaletteValidateFileTabPathsForTest: commandPaletteValidateFileTabPaths,
+  fileEditorItemForTest: fileEditorItemFor,
   saveFileEditorForTest: saveFileEditor,
   refreshOpenFileDiffForTest: refreshOpenFileDiff,
   renderEditorPreviewPane,
@@ -2262,6 +2413,18 @@ globalThis.__layoutTestApi = {
   },
   renderTreeChildrenForTest(container, parentPath, entries, depth = 0, entriesByDirPairs = [], options = {}) {
     renderTreeChildren(container, parentPath, entries, depth, {...options, entriesByDir: new Map(entriesByDirPairs)});
+  },
+  renderTabberTreeForTest: renderTabberTree,
+  treeRowContractForTest(row) {
+    return {
+      dataset: Object.fromEntries(Object.entries(row?.dataset || {}).sort(([left], [right]) => left.localeCompare(right))),
+      classes: Array.from(row?.classList?.names || row?.classList || []).sort(),
+      ariaSelected: row?.getAttribute?.('aria-selected') || '',
+      ariaExpanded: row?.getAttribute?.('aria-expanded') || '',
+      ariaCurrent: row?.getAttribute?.('aria-current') || '',
+      draggable: row?.draggable === true,
+      columns: Array.from(row?.children || []).map(child => child.className),
+    };
   },
   expandDirectoryRowForTest: expandDirectoryRow,
   collapseDirectoryRowForTest: collapseDirectoryRow,
@@ -2370,6 +2533,13 @@ globalThis.__layoutTestApi = {
     fileQuickOpenState.indexWarming = Boolean(warming);
     commandPaletteMode = 'files';
   },
+  setFileQuickOpenFreshnessForTest(freshness) {
+    fileQuickOpenState.freshness = freshness || null;
+    commandPaletteMode = 'files';
+  },
+  commandPaletteStatusTextForTest: commandPaletteStatusText,
+  commandPaletteFreshnessTextForTest: commandPaletteFreshnessText,
+  renderCommandPaletteResultsForTest: renderCommandPaletteResults,
   setFileQuickOpenLoadingForTest(loading) {
     fileQuickOpenState.loading = Boolean(loading);
     fileQuickOpenState.error = '';
@@ -2406,6 +2576,15 @@ globalThis.__layoutTestApi = {
   scheduleFileQuickOpenSearchForTest: scheduleFileQuickOpenSearch,
   refreshFileQuickOpenCandidatesForTest: refreshFileQuickOpenCandidates,
   abortFileQuickOpenSearchForTest: abortFileQuickOpenSearch,
+  sha256HexForTest: sha256HexOfString,
+  fileSearchScopeIdForTest: fileSearchScopeId,
+  mergeFileQuickOpenChangesForTest: mergeFileQuickOpenChanges,
+  rankAndPruneFileQuickOpenCandidatesForTest: rankAndPruneFileQuickOpenCandidates,
+  ingestFileQuickOpenDeltaForTest: ingestFileQuickOpenDeltaPayload,
+  handleFileSearchProgressSignalForTest: handleFileSearchProgressSignal,
+  fileQuickOpenDeltaRootsForTest() {
+    return Array.from(fileQuickOpenState.deltaRoots.values()).map(entry => ({...entry}));
+  },
   setCommandPaletteQueryForTest(value) {
     commandPaletteState.query = String(value || '');
     commandPaletteState.index = 0;
@@ -2605,6 +2784,9 @@ globalThis.__layoutTestApi = {
   onFileTreeRowClick,
   pathRelativeToDirectory,
   replaceHtmlPreservingScroll,
+  reconcilePanelBody,
+  elementScrollAnchor,
+  keyedScrollAnchor,
   pruneFileExplorerSelectionForRoot,
   selectFileTreePath,
   selectFileTreeRange,
@@ -2734,15 +2916,7 @@ globalThis.__layoutTestApi = {
   setShareReplaySequenceStateForTest(epoch, sequence) {
     shareReplayShellActive = true;
     shareReplayShellState = {status: 'mirrored'};
-    shareReplayCurrentEpoch = Math.max(0, Math.round(Number(epoch) || 0));
-    shareReplayLastSequence = Math.max(0, Math.round(Number(sequence) || 0));
-    shareReplayDroppedFrames = 0;
-    shareReplayStaleFrames = 0;
-    shareReplayKeyframeRequestCount = 0;
-    shareReplayKeyframeRequestSuppressedCount = 0;
-    shareReplayKeyframeLastRequestAt = 0;
-    shareReplayKeyframeBackoffMs = 0;
-    shareReplayKeyframeInFlight = false;
+    shareReplayState.resetViewerSequence(epoch, sequence);
   },
   shareReplayNodeMapSizeForTest() { return shareReplayNodeMap.size; },
   shareReplayTerminalPlaceholderCountForTest() { return shareReplayTerminalPlaceholders.size; },
@@ -2770,16 +2944,9 @@ globalThis.__layoutTestApi = {
   sharePointerPayloadForPointForTest: sharePointerPayloadForPoint,
   shareReplayLastDeltaBatchForTest() { return shareReplayLastDeltaBatch ? JSON.parse(JSON.stringify(shareReplayLastDeltaBatch)) : null; },
   shareReplaySequenceStateForTest() {
-    return {
-      epoch: shareReplayCurrentEpoch,
-      sequence: shareReplayLastSequence,
-      dropped: shareReplayDroppedFrames,
-      stale: shareReplayStaleFrames,
-      requests: shareReplayKeyframeRequestCount,
-      suppressed: shareReplayKeyframeRequestSuppressedCount,
-      backoffMs: shareReplayKeyframeBackoffMs,
-      inFlight: shareReplayKeyframeInFlight,
-    };
+    const sequence = shareReplayState.sequenceSnapshot();
+    const request = shareReplayState.keyframeRequestSnapshot();
+    return {epoch: sequence.epoch, sequence: sequence.last, dropped: sequence.dropped, stale: sequence.stale, requests: request.count, suppressed: request.suppressed, backoffMs: request.backoffMs, inFlight: request.inFlight};
   },
   shareReplayRequestKeyframeForTest: shareReplayRequestKeyframe,
   shareReplayHealthDiagnosticsForTest: shareReplayHealthDiagnostics,
@@ -3409,6 +3576,7 @@ module.exports = {
   sourceBetween,
   makeCatalogT,
   deferredFetch,
+  apiTransportRetirementScenario,
   settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,

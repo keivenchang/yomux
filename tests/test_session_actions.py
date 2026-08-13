@@ -140,6 +140,13 @@ def test_rename_session_detects_collision_after_sanitizing(monkeypatch, make_app
 def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     app = make_app(["1", "ant"])
     calls = []
+    retirement_identity = object()
+    monkeypatch.setattr(app_module, "capture_tmux_session_retirement", lambda session: retirement_identity)
+    monkeypatch.setattr(
+        app_module,
+        "join_tmux_session_retirement",
+        lambda identity: calls.append(["join-retirement", identity]),
+    )
 
     def fake_tmux(args, timeout=5.0):
         calls.append(args)
@@ -154,7 +161,30 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     assert status == HTTPStatus.OK
     assert payload["killed"] is True
     assert payload["sessions"] == ["ant"]
-    assert calls == [["kill-session", "-t", "1:"]]
+    assert calls == [["kill-session", "-t", "1:"], ["join-retirement", retirement_identity]]
+
+
+def test_kill_session_refuses_success_when_an_exact_process_birth_survives(monkeypatch, make_app):
+    app = make_app(["1"])
+    retirement_identity = object()
+    monkeypatch.setattr(app_module, "capture_tmux_session_retirement", lambda _session: retirement_identity)
+    monkeypatch.setattr(app_module, "tmux", lambda _args, timeout=5.0: FakeTmuxResult())
+
+    def retained(_identity):
+        raise app_module.SessionRetirementError(
+            "tmux session retained process births after kill: "
+            "({'pid': 43213, 'pgid': 43213, 'state': 'S', 'start_identity': 'proc:125', "
+            "'command': 'fixture command'},)"
+        )
+
+    monkeypatch.setattr(app_module, "join_tmux_session_retirement", retained)
+
+    payload, status = app.kill_session("1")
+
+    assert status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert payload["killed"] is False
+    for field in ("pid", "pgid", "state", "start_identity", "command"):
+        assert field in payload["error"]
 
 
 def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeypatch, make_app):

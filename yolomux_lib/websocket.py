@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import fcntl
+import io
+import select
+import socket
+import ssl
 import struct
 import termios
 from typing import Any
@@ -8,6 +12,22 @@ from typing import Any
 # hard ceiling on an inbound WebSocket frame's declared length. Browser terminal input is
 # tiny; this only bounds a hostile/buggy client so it cannot OOM the shared process.
 MAX_WS_FRAME_BYTES = 16 * 1024 * 1024
+
+
+def wait_for_ws_frame(connection: socket.socket, stream: io.BufferedReader, timeout: float) -> bool:
+    """Wait for bytes in the buffered reader or its underlying socket."""
+
+    previous_timeout = connection.gettimeout()
+    connection.setblocking(False)
+    try:
+        if stream.peek(1):
+            return True
+    except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
+        pass
+    finally:
+        connection.settimeout(previous_timeout)
+    readable, _, _ = select.select([connection], [], [], max(0.0, timeout))
+    return bool(readable)
 
 
 def set_pty_size(fd: int, rows: int, cols: int) -> None:

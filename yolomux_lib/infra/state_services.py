@@ -70,6 +70,7 @@ class ClientEventWatcherRecord:
     tmux_signal_refresh_at: float = 0.0
     next_watched_pr_poll_at: float = 0.0
     next_yoagent_job_poll_at: float = 0.0
+    next_search_progress_poll_at: float = 0.0
     # Fixed-vocabulary recurring-work diagnostics. Keys are supplied only by the
     # app's static catalog, so a caller can never create path/user/cardinality state.
     recurring_work: dict[str, dict[str, float | int]] = field(default_factory=dict)
@@ -170,6 +171,7 @@ class TabberActivityCacheRecord:
 class SessionFilesWorkRecord:
     future: Future[tuple[SessionFilesPayload, HTTPStatus, bool, float]] = field(default_factory=Future)
     owner_thread_id: int | None = None
+    worker: threading.Thread | None = None
     stable_signature: str = ""
     stable_generation: int = 0
 
@@ -242,16 +244,50 @@ class SessionFilesService:
     repo_identity_cache: dict[tuple[Any, ...], tuple[int, float, tuple[Any, ...]]] = field(default_factory=dict)
     disk_prune_lock: threading.Lock = field(default_factory=threading.Lock)
     disk_prune_record: SessionFilesDiskPruneRecord = field(default_factory=SessionFilesDiskPruneRecord)
+    accepting_work: bool = True
+    work_condition: threading.Condition = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.work_condition = threading.Condition(self.cache_lock)
+
+    def allow_work(self) -> None:
+        with self.work_condition:
+            self.accepting_work = True
 
     def reserve_work(self, key: tuple[Any, ...], stable_signature: str) -> SessionFilesWorkRecord | None:
         """Reserve background work without letting worker start order redefine freshness."""
-        with self.cache_lock:
+        with self.work_condition:
+            if not self.accepting_work:
+                return None
             if key in self.work_records:
                 return None
             record = SessionFilesWorkRecord(owner_thread_id=None)
             self.assign_stable_generation(record, stable_signature)
             self.work_records[key] = record
             return record
+
+    def start_reserved_worker(
+        self,
+        key: tuple[Any, ...],
+        record: SessionFilesWorkRecord,
+        worker: threading.Thread,
+    ) -> bool:
+        """Bind and start the exact reserved worker before lifecycle teardown can observe it."""
+
+        with self.work_condition:
+            if not self.accepting_work or self.work_records.get(key) is not record:
+                return False
+            record.worker = worker
+            try:
+                worker.start()
+            except RuntimeError:
+                record.worker = None
+                if self.work_records.get(key) is record:
+                    self.work_records.pop(key, None)
+                self.release_stable_generation(record)
+                self.work_condition.notify_all()
+                raise
+            return True
 
     def claim_work(self, key: tuple[Any, ...], thread_id: int | None, *, reserved: bool = False, stable_signature: str = "") -> tuple[SessionFilesWorkRecord, bool]:
         with self.cache_lock:
@@ -290,16 +326,53 @@ class SessionFilesService:
                 self.latest_stable_generations.pop(record.stable_signature, None)
 
     def finish_work(self, key: tuple[Any, ...], record: SessionFilesWorkRecord) -> None:
-        with self.cache_lock:
+        with self.work_condition:
+            if self.work_records.get(key) is record and record.worker is None:
+                self.work_records.pop(key, None)
+            self.release_stable_generation(record)
+            self.work_condition.notify_all()
+
+    def finish_reserved_worker(
+        self,
+        key: tuple[Any, ...],
+        record: SessionFilesWorkRecord,
+        worker: threading.Thread,
+    ) -> None:
+        with self.work_condition:
+            if record.worker is worker:
+                record.worker = None
             if self.work_records.get(key) is record:
                 self.work_records.pop(key, None)
             self.release_stable_generation(record)
+            self.work_condition.notify_all()
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Wait until every service-owned background worker has returned."""
+
+        with self.work_condition:
+            return self.work_condition.wait_for(
+                lambda: not any(record.worker is not None for record in self.work_records.values()),
+                timeout=max(0.0, float(timeout)),
+            )
 
     def cancel_all_work(self) -> None:
-        """Fence former-owner workers before dropping their single-flight records."""
-        with self.cache_lock:
-            self.work_records.clear()
+        """Fence new work and join former-owner workers before returning."""
+        with self.work_condition:
+            self.accepting_work = False
             self.latest_stable_generations.clear()
+            workers = [
+                record.worker
+                for record in self.work_records.values()
+                if record.worker is not None and record.worker is not threading.current_thread()
+            ]
+            self.work_records = {
+                key: record for key, record in self.work_records.items() if record.worker is not None
+            }
+        for worker in workers:
+            worker.join()
+        with self.work_condition:
+            self.work_records.clear()
+            self.work_condition.notify_all()
 
     def acquire_compute_slot(self, limit: int) -> None:
         """Queue distinct cold rebuilds without defeating per-key single-flight."""
@@ -318,57 +391,132 @@ class SessionFilesService:
             self.compute_slot_condition.notify()
 
 
+# The completion service runs the product-poll thread that waits for an accepted jobd operation
+# to terminalize.  Its lanes mirror jobd's own executor lanes so an interactive point read or a
+# bounded mutation completion never queues behind bulk completion polls: a bulk lane held at
+# capacity (four fs-batch/watch-diff/session-files polls that have not finished) previously
+# occupied every worker of the one shared pool, so the fifth submission -- a point read or a
+# `mkdir` -- was accepted yet could not RUN until a bulk worker freed.  `point` and `mutation`
+# get their own bounded workers and their own admission slots so cross-class isolation holds at
+# the completion boundary too, not only inside jobd.  Everything that is neither a coalescable
+# point read nor a bounded mutation (fs-batch, watch-diff, session-files, transcript/context,
+# unbounded reads and writes) shares the `bulk` lane.
+JOBD_OPERATION_LANES: tuple[str, ...] = ("point", "mutation", "bulk")
+
+
+def jobd_operation_lane(priority: str) -> str:
+    """Map one jobd submission priority onto its single completion-service lane.
+
+    Priority is computed by the caller BEFORE it reserves, so a completion never lands in a lane
+    that does not describe its work.  `point` and `mutation` are the two bounded interactive
+    classes; every other priority (`interactive`, `freshness`, `maintenance`, or any bulk work)
+    routes to the shared `bulk` lane.
+    """
+    if priority in JOBD_OPERATION_LANES and priority != "bulk":
+        return priority
+    return "bulk"
+
+
+class JobdOperationReservation:
+    """One held completion-lane slot with EXACTLY-ONCE release.
+
+    A reservation is a handle, not a bare counter: the slot it took is released through this
+    object, the release is idempotent under its own lock, and the completion callback and every
+    error path route through the same `release()`.  A double release (manual cleanup racing the
+    done-callback) is therefore a no-op rather than an over-release that would let the lane admit
+    beyond its bound.
+    """
+
+    __slots__ = ("_service", "lane", "_lock", "_released")
+
+    def __init__(self, service: JobdOperationService, lane: str) -> None:
+        self._service = service
+        self.lane = lane
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._service._release_lane_slot(self.lane)
+
+    @property
+    def released(self) -> bool:
+        with self._lock:
+            return self._released
+
+
 @dataclass
 class JobdOperationService:
-    """Bound accepted-operation completion work independently of HTTP handler threads."""
+    """Bound accepted-operation completion work independently of HTTP handler threads.
+
+    `worker_limit` and `operation_limit` are PER LANE, so each named lane owns its own bounded
+    thread pool and its own admission slots.  A bulk lane saturated at capacity cannot occupy a
+    single worker of the point or mutation lane.
+    """
 
     worker_limit: int = 4
     operation_limit: int = 64
     lock: threading.RLock = field(default_factory=threading.RLock)
     stop_event: threading.Event = field(default_factory=threading.Event)
-    executor: ThreadPoolExecutor | None = None
     futures: set[Future[Any]] = field(default_factory=set)
-    _slots: threading.BoundedSemaphore = field(init=False)
+    _lane_slots: dict[str, threading.BoundedSemaphore] = field(init=False)
+    _lane_executors: dict[str, ThreadPoolExecutor | None] = field(init=False)
     _idle_condition: threading.Condition = field(init=False)
 
     def __post_init__(self) -> None:
         self.worker_limit = max(1, int(self.worker_limit))
         self.operation_limit = max(self.worker_limit, int(self.operation_limit))
-        self._slots = threading.BoundedSemaphore(self.operation_limit)
+        self._lane_slots = {lane: threading.BoundedSemaphore(self.operation_limit) for lane in JOBD_OPERATION_LANES}
+        self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
         self._idle_condition = threading.Condition(self.lock)
 
-    def reserve(self) -> bool:
+    def reserve(self, lane: str = "bulk") -> JobdOperationReservation | None:
+        """Admit one completion into a named lane, returning its release-owning handle or None.
+
+        Returns None when the service is stopping or the lane is already at its bound; the caller
+        maps that to a `service_busy` refusal.  The lane is chosen before admission, never after.
+        """
+        if lane not in self._lane_slots:
+            raise ValueError(f"unknown jobd completion lane {lane!r}")
         with self.lock:
             if self.stop_event.is_set():
-                return False
-            return self._slots.acquire(blocking=False)
+                return None
+            if not self._lane_slots[lane].acquire(blocking=False):
+                return None
+            return JobdOperationReservation(self, lane)
 
-    def release_reservation(self) -> None:
-        self._slots.release()
+    def _release_lane_slot(self, lane: str) -> None:
+        self._lane_slots[lane].release()
 
-    def submit_reserved(self, function: Callable[..., Any], *args: Any) -> bool:
+    def submit_reserved(self, reservation: JobdOperationReservation, function: Callable[..., Any], *args: Any) -> bool:
+        """Run one accepted completion on its reserved lane; release the handle if it cannot start."""
         with self.lock:
             if self.stop_event.is_set():
-                self.release_reservation()
+                reservation.release()
                 return False
-            if self.executor is None:
-                self.executor = ThreadPoolExecutor(
+            executor = self._lane_executors[reservation.lane]
+            if executor is None:
+                executor = ThreadPoolExecutor(
                     max_workers=self.worker_limit,
-                    thread_name_prefix="jobd-operation",
+                    thread_name_prefix=f"jobd-op-{reservation.lane}",
                 )
+                self._lane_executors[reservation.lane] = executor
             try:
-                future = self.executor.submit(function, *args)
+                future = executor.submit(function, *args)
             except RuntimeError:
-                self.release_reservation()
+                reservation.release()
                 return False
             self.futures.add(future)
-            future.add_done_callback(self._finish)
+            future.add_done_callback(lambda completed: self._finish(completed, reservation))
             return True
 
-    def _finish(self, future: Future[Any]) -> None:
+    def _finish(self, future: Future[Any], reservation: JobdOperationReservation) -> None:
         with self._idle_condition:
             self.futures.discard(future)
-            self.release_reservation()
+            reservation.release()
             self._idle_condition.notify_all()
 
     def wait_for_idle(self, timeout: float) -> bool:
@@ -380,9 +528,9 @@ class JobdOperationService:
     def stop(self) -> None:
         with self.lock:
             self.stop_event.set()
-            executor = self.executor
-            self.executor = None
-        if executor is not None:
+            executors = [executor for executor in self._lane_executors.values() if executor is not None]
+            self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
+        for executor in executors:
             executor.shutdown(wait=True, cancel_futures=True)
 
 
@@ -462,10 +610,7 @@ class ClientWatchService:
     session_file_payload_signatures: dict[str, str] = field(default_factory=dict)
     transcripts_payload_signature: str = ""
     activity_summary_signature: str = ""
-    filesystem_payload_signature: str = ""
-    filesystem_full_inflight_token: str = ""
     filesystem_history: list[dict[str, Any]] = field(default_factory=list)
-    filesystem_last_full_at: float = 0.0
     filesystem_ready_product: FilesystemWatchReadyProductRecord = field(default_factory=FilesystemWatchReadyProductRecord)
     event_watcher_record: ClientEventWatcherRecord = field(default_factory=ClientEventWatcherRecord)
     # Bounded (one entry per trigger reason, not per event) count of jobd-product-backed refreshes

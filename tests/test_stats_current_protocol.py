@@ -226,6 +226,7 @@ def test_cost_report_is_strict_complete_json_safe_and_never_fabricates_reasoning
         ({"window_end": 299}, "window length"),
         ({"cache_generation": -1}, "cache_generation"),
         ({"buckets": [bucket(299, open_=True)]}, "rightmost_open"),
+        ({"buckets": [bucket(298, open_=True)], "rightmost_open": True}, "window_end"),
     ],
 )
 def test_snapshot_rejects_wrong_shape_key_bucket_window_and_generation(changes: dict[str, object], message: str):

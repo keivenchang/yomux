@@ -681,6 +681,17 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
   ${afterBodyHtml}`;
 }
 
+function createFramedPanel({item, className = 'panel', dataset = {}, frame = {}, bind = null} = {}) {
+  const panel = document.createElement('article');
+  panel.className = className;
+  panel.id = panelDomId(item);
+  for (const [key, value] of Object.entries(dataset)) panel.dataset[key] = String(value ?? '');
+  panel.innerHTML = panelFrameHtml({item, ...frame});
+  bindPanelShell(panel, item);
+  if (typeof bind === 'function') bind(panel, item);
+  return panel;
+}
+
 function paneTabDragSourceItem(itemOrGetter, event) {
   return typeof itemOrGetter === 'function' ? String(itemOrGetter(event) || '') : String(itemOrGetter || '');
 }
@@ -691,25 +702,32 @@ function paneTabDragSourceSlot(item, sourceSlotOrGetter, event) {
 }
 
 function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = null, options = {}) {
-  if (!tab || tab.__yolomuxPaneTabNativeDragBound) return;
-  tab.__yolomuxPaneTabNativeDragBound = true;
-  tab.draggable = true;
-  tab.addEventListener('dragstart', event => {
-    if (options.ignore?.(event) === true) {
-      event.preventDefault?.();
-      return;
-    }
-    const item = paneTabDragSourceItem(itemOrGetter, event);
-    if (!isLayoutItem(item)) {
-      event.preventDefault?.();
-      return;
-    }
-    event.stopPropagation();
-    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
-      dragImage: options.dragImage,
-    });
+  if (!tab) return;
+  bindOnce(tab, 'pane-tab-native-drag', () => {
+    tab.draggable = true;
+    const dragstart = event => {
+      if (options.ignore?.(event) === true) {
+        event.preventDefault?.();
+        return;
+      }
+      const item = paneTabDragSourceItem(itemOrGetter, event);
+      if (!isLayoutItem(item)) {
+        event.preventDefault?.();
+        return;
+      }
+      event.stopPropagation();
+      startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
+        dragImage: options.dragImage,
+      });
+    };
+    tab.addEventListener('dragstart', dragstart);
+    tab.addEventListener('dragend', endSessionDrag);
+    return () => {
+      tab.draggable = false;
+      tab.removeEventListener('dragstart', dragstart);
+      tab.removeEventListener('dragend', endSessionDrag);
+    };
   });
-  tab.addEventListener('dragend', endSessionDrag);
 }
 
 function createPaneTab(side, item, displayContext = {}) {
@@ -1428,31 +1446,32 @@ function eventTargetIsTerminalFocusSurface(target) {
 }
 
 function bindPaneFrameControls(panel, session) {
-  if (!panel || panel.dataset.frameControlsBound === 'true') return;
-  panel.dataset.frameControlsBound = 'true';
-  panel.addEventListener('click', async event => {
-    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
-    if (!button || !panel.contains(button)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-    if (button.dataset.paneActions !== undefined) {
-      const rect = button.getBoundingClientRect();
-      showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
-      return;
-    }
-    if (button.dataset.paneMinimize !== undefined) {
-      minimizePaneFromLayout(button.dataset.paneMinimize || session);
-      return;
-    }
-    if (button.dataset.paneExpand !== undefined) {
-      expandPaneFromLayout(button.dataset.paneExpand || session);
-      return;
-    }
-    if (button.dataset.paneClose !== undefined) {
-      closePaneFrameItem(button.dataset.paneClose || session);
-    }
-  }, true);
+  if (!panel) return null;
+  return bindOnce(panel, 'pane-frame-controls', () => {
+    const handleClick = async event => {
+      const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
+      if (!button || !panel.contains(button)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      if (button.dataset.paneActions !== undefined) {
+        const rect = button.getBoundingClientRect();
+        showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
+        return;
+      }
+      if (button.dataset.paneMinimize !== undefined) {
+        minimizePaneFromLayout(button.dataset.paneMinimize || session);
+        return;
+      }
+      if (button.dataset.paneExpand !== undefined) {
+        expandPaneFromLayout(button.dataset.paneExpand || session);
+        return;
+      }
+      if (button.dataset.paneClose !== undefined) closePaneFrameItem(button.dataset.paneClose || session);
+    };
+    panel.addEventListener('click', handleClick, true);
+    return () => panel.removeEventListener('click', handleClick, true);
+  });
 }
 
 function bindPanelPopover(panel) {
@@ -2428,11 +2447,11 @@ function searchHistoryResultHtml(result, index) {
   const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
   const title = structuredMessageText(result, 'title') || t('common.result');
   const snippet = structuredMessageText(result, 'snippet');
-  return `<button type="button" class="search-history-result" data-search-result-index="${index}">
+  return `${toolbarButtonHtml({className: 'search-history-result', action: 'search-history-result', dataset: {searchResultIndex: index}, html: `
     <span class="search-history-row-meta">${esc(meta)}</span>
     <span class="search-history-row-title">${esc(title)}</span>
     <span class="search-history-row-snippet">${esc(snippet)}</span>
-  </button>`;
+  `})}`;
 }
 
 function searchHistoryResultsHtml() {
@@ -2449,12 +2468,12 @@ function runHistoryRowHtml(row) {
   const disabled = sessions.includes(session) ? '' : ' disabled';
   const prompt = row?.prompt ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.prompt'))}</span>${esc(row.prompt)}</div>` : '';
   const summary = row?.latest_summary ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.summary'))}</span>${esc(row.latest_summary)}</div>` : '';
-  return `<button type="button" class="search-history-run" data-run-history-session="${esc(session)}"${disabled}>
+  return `${toolbarButtonHtml({className: 'search-history-run', action: 'run-history-session', dataset: {runHistorySession: session}, disabled: Boolean(disabled), html: `
     <span class="search-history-row-title">${esc(session || t('common.unknown'))}</span>
     <span class="search-history-row-meta">${esc(meta.join(' · '))}</span>
     ${prompt}
     ${summary}
-  </button>`;
+  `})}`;
 }
 
 function runHistoryRowsHtml() {
@@ -2477,8 +2496,8 @@ function searchHistoryPanelHtml() {
   return `
     <form class="search-history-search" data-search-history-form>
       <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
-      <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
-      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
+      ${toolbarButtonHtml({type: 'submit', className: 'preferences-search-button', label: t('common.search')})}
+      ${toolbarButtonHtml({className: 'preferences-reset-all', action: 'run-history-refresh', dataset: {runHistoryRefresh: true}, label: t('common.refresh')})}
     </form>
     ${errorHtml}
     <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
@@ -2604,54 +2623,44 @@ async function openRunHistorySession(session) {
 }
 
 function bindSearchHistoryPanel(panel) {
-  if (!panel || panel.dataset.searchHistoryBound === 'true') return;
-  panel.dataset.searchHistoryBound = 'true';
-  panel.addEventListener('submit', event => {
-    const form = event.target.closest('[data-search-history-form]');
-    if (!form || !panel.contains(form)) return;
-    event.preventDefault();
-    runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
-  });
-  panel.addEventListener('click', event => {
-    const refresh = event.target.closest('[data-run-history-refresh]');
-    if (refresh && panel.contains(refresh)) {
+  if (!panel) return null;
+  return bindOnce(panel, 'search-history-panel', () => {
+    const handleSubmit = event => {
+      const form = event.target.closest('[data-search-history-form]');
+      if (!form || !panel.contains(form)) return;
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryState.query});
-      return;
-    }
-    const result = event.target.closest('[data-search-result-index]');
-    if (result && panel.contains(result)) {
-      event.preventDefault();
-      openSearchHistoryResult(result.dataset.searchResultIndex);
-      return;
-    }
-    const run = event.target.closest('[data-run-history-session]');
-    if (run && panel.contains(run)) {
-      event.preventDefault();
-      openRunHistorySession(run.dataset.runHistorySession);
-    }
+      runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
+    };
+    panel.addEventListener('submit', handleSubmit);
+    const disposeActions = bindActionDispatcher(panel, {
+      'run-history-refresh': () => loadSearchHistoryPanelData({query: searchHistoryState.query}),
+      'search-history-result': (_event, result) => openSearchHistoryResult(result.dataset.searchResultIndex),
+      'run-history-session': (_event, run) => openRunHistorySession(run.dataset.runHistorySession),
+    });
+    return () => {
+      panel.removeEventListener('submit', handleSubmit);
+      disposeActions?.();
+    };
   });
 }
 
 function createSearchHistoryPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel search-history-panel';
-  panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: searchHistoryItemId,
-    headClass: 'search-history-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel search-history-panel',
+    frame: {
+      headClass: 'search-history-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(searchHistoryItemId)}
       </div>`,
-    bodyClass: 'search-history-body info-pane',
-    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+      bodyClass: 'search-history-body info-pane',
+      bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+    },
+    bind: bindSearchHistoryPanel,
   });
-  bindPanelShell(panel, searchHistoryItemId);
-  bindSearchHistoryPanel(panel);
-  return panel;
 }

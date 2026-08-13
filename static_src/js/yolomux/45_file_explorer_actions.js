@@ -1789,6 +1789,9 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
+  // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
+  if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
@@ -1971,22 +1974,24 @@ async function refreshOpenFileGitMetadata(path) {
   }
 }
 
-async function fetchFilesystemOperationPayload(url, operation) {
+async function fetchFilesystemOperationPayload(url, operation, options = {}) {
   try {
-    return await apiFetchJson(url);
+    return await apiFetchJson(url, {}, {quietStatuses: options.quietStatuses});
   } catch (error) {
     if (!isApiPendingResponse(error)) throw error;
     return waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation,
+      quietStatuses: options.quietStatuses,
     });
   }
 }
 
-async function fetchFileReadPayload(path) {
+async function fetchFileReadPayload(path, options = {}) {
   return fetchFilesystemOperationPayload(
     `/api/fs/read?path=${encodeURIComponent(path)}`,
     'read',
+    options,
   );
 }
 
@@ -2092,6 +2097,17 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
 }
 
+function textFileStateFromReadPayload(payload) {
+  return applyFileGitMetadata({
+    mtime: filePayloadMtime(payload),
+    size: payload.size,
+    kind: 'text',
+    original: payload.content,
+    content: payload.content,
+    dirty: false,
+  }, payload);
+}
+
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
@@ -2120,14 +2136,7 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   try {
     const payload = await fetchFileReadPayload(path);
-    return {state: applyFileGitMetadata({
-      mtime: filePayloadMtime(payload),
-      size: payload.size,
-      kind: 'text',
-      original: payload.content,
-      content: payload.content,
-      dirty: false,
-    }, payload)};
+    return {state: textFileStateFromReadPayload(payload)};
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
@@ -2168,6 +2177,80 @@ function markOpenFileMissing(path) {
   if (retainLoadedDiff) void refreshOpenFileDiff(path, {silent: true});
 }
 
+// Per-path content generation. Bumped whenever a VALID (loaded, non-error) editor payload is applied
+// for a path -- the open lane (openFilesSetAndShow), a disk reload (loadOpenFileStateFromDisk), or the
+// render-driven load (loadFileEditorState in 92_codemirror_editor.js). Every non-authoritative "missing"
+// producer captures this generation before its authoritative probe and re-checks it before marking an
+// open editor missing, so a stale/late verdict cannot overwrite a newer valid render
+// (last-writer-by-generation wins). This is the ONE fence shared by all four producers -- the two text
+// reload lanes, the media load lane, and the command-palette tab validator.
+const openFileContentGeneration = new Map();
+
+function bumpOpenFileContentGeneration(path) {
+  openFileContentGeneration.set(path, (openFileContentGeneration.get(path) || 0) + 1);
+}
+
+function openFileContentGenerationIsCurrent(path, generation) {
+  return (openFileContentGeneration.get(path) || 0) === generation;
+}
+
+// The ONE shared guard for the TEXT "open editor is missing" verdict. A directory-listing OMISSION or
+// tombstone is never proof an already-open file is gone: a stale or racing /api/fs/list can drop an
+// entry whose exact-path /api/fs/read still returns its bytes, and letting that omission mark the editor
+// missing clobbers loaded content and flops it to "(missing on disk)" (0.7.3 P0). Both text reload lanes
+// -- the explicit/background reload (loadOpenFileStateFromDisk) and the ~1/sec visible-tab poll
+// (refreshOpenFileFromFetchedStatus) -- route their omission-driven "missing" verdict through here.
+// ONLY an authoritative exact-path /api/fs/read 404 (genuine deletion) may mark an open editor missing,
+// and that 404 is fenced against newer per-path state: if a newer valid render landed while the read
+// was in flight, the stale 404 is dropped. Returns:
+//   {missing:true}  -- authoritative 404, still current: caller marks the editor missing
+//   {state}         -- exact read returned bytes: caller may apply it as recovered content
+//   null            -- inconclusive (non-404 error) or superseded by a newer render: keep loaded content
+async function resolveOpenFileMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let payload = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet so
+    // the strict browser error gate does not flag an expected-outcome probe.
+    payload = await fetchFileReadPayload(path, {quietStatuses: [404]});
+  } catch (error) {
+    const status = Number(error?.status) || 0;
+    if (status !== 404) return null;                                            // not proof of absence
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    return {missing: true};
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;   // newer render won
+  if (openFileKindForPreviewPath(basenameOf(path)) !== 'text') return null;     // non-text: keep content
+  return {state: textFileStateFromReadPayload(payload)};
+}
+
+// Media sibling of resolveOpenFileMissingVerdict, sharing the same fence and rule but a media-appropriate
+// authoritative probe. Image/media editors are never read byte-for-byte to prove existence, so the
+// authoritative exact-path check is /api/fs/info (a single-path stat), not a directory listing. A
+// directory omission never marks a media editor missing; only an authoritative exact-path 404 (or the
+// path no longer being a file) does, and only if no newer render landed while the probe was in flight.
+// Returns:
+//   {missing:true}  -- authoritative 404 / non-file, still current: caller marks missing
+//   {state}         -- present: caller applies the rebuilt media/image/raw state
+//   {error}         -- inconclusive probe (non-404 network/error): caller shows an error, not "missing"
+//   null            -- superseded by a newer render: keep the newer content
+async function resolveOpenMediaMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let info = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet.
+    info = await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`, {}, {quietStatuses: [404]});
+  } catch (error) {
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    if (Number(error?.status) === 404) return {missing: true};                  // authoritative absence
+    return {error};                                                             // inconclusive
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;    // newer render won
+  if (String(info?.kind || '') !== 'file') return {missing: true};              // path is not a file anymore
+  const built = await openFileStateFromDisk(path, info);                        // rebuild media/image/raw
+  return built.missing ? {missing: true} : built;
+}
+
 async function recoverOpenFileAfterMissing(path, entry = null) {
   const state = fileState.get(path);
   if (!state?.externalMissing) return false;
@@ -2192,7 +2275,39 @@ function markOpenFileExternalError(path, error) {
   renderOpenFilePath(path);
 }
 
+// One in-flight disk reload per open file. Every reload funnels through
+// replaceOpenFileStateFromDisk() -- the explicit reloadOpenFileFromDisk(), the files_changed push
+// refresh, and the visible-tab poll -- so this is the single place where two requests for one file
+// can collapse into one /api/fs/read.
+//
+// The duplicate was always there; it was hidden by accident. Before filesystem reads had their own
+// jobd lane, a read could not be dispatched while the explicit reload's directory batch held the
+// single shared interactive worker, so the explicit reload's read always went first and the push
+// refresh found nothing left to do. Once reads got a reserved lane the two ran concurrently and the
+// same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
+const openFileReloadFlights = new Map();
+
 async function replaceOpenFileStateFromDisk(path, entry = null) {
+  const flight = openFileReloadFlights.get(path);
+  if (flight) {
+    const joined = await flight;
+    // Only an entry-bearing caller knows which content it was told to fetch. If the shared reload
+    // did not reach that content, fall through and run exactly one more -- never assume the read
+    // somebody else started was new enough. An entry-less explicit reload has no such reference
+    // point and accepts the shared result, which is the same race any single read already has.
+    if (!entry || !fileEntryChanged(fileState.get(path), entry)) return joined;
+  }
+  const started = loadOpenFileStateFromDisk(path, entry);
+  openFileReloadFlights.set(path, started);
+  try {
+    return await started;
+  } finally {
+    // Only retire our own flight; a joiner that fell through has already replaced it.
+    if (openFileReloadFlights.get(path) === started) openFileReloadFlights.delete(path);
+  }
+}
+
+async function loadOpenFileStateFromDisk(path, entry = null) {
   const previous = fileState.get(path);
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);
@@ -2201,11 +2316,19 @@ async function replaceOpenFileStateFromDisk(path, entry = null) {
   });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
-    markOpenFileMissing(path);
-    return false;
+    // A directory-listing omission is not proof of absence -- confirm through the shared guard, which
+    // only reports missing on an authoritative exact-path 404 and fences it against a newer render.
+    const verdict = await resolveOpenFileMissingVerdict(path);
+    if (!verdict) return false;                        // inconclusive/superseded: keep editor content
+    if (verdict.missing) {
+      markOpenFileMissing(path);
+      return false;
+    }
+    loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
+  bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
@@ -2267,8 +2390,14 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   if (!entry) {
     if (fetched.missing) {
       if (state.externalMissing) return;
-      clearFileAutosaveTimer(path);
-      markOpenFileMissing(path);
+      // Same shared guard as the explicit reload lane: a directory omission alone must not mark an open
+      // editor missing; only an authoritative exact-path 404 (fenced against a newer render) does.
+      const verdict = await resolveOpenFileMissingVerdict(path);
+      if (verdict && verdict.missing) {
+        clearFileAutosaveTimer(path);
+        markOpenFileMissing(path);
+      }
+      // verdict null (inconclusive/superseded) or {state} (file present) -> keep the loaded editor content.
     } else {
       markOpenFileExternalError(path, fetched.error);
     }
@@ -2685,6 +2814,7 @@ function codeMirrorApiIsUsable(api) {
     && api?.highlightActiveLine
     && api?.search
     && api?.openSearchPanel
+    && api?.LanguageSupport
   );
 }
 
@@ -2733,8 +2863,10 @@ async function loadCodeMirrorApi() {
 }
 
 function codeMirrorMarkdownCodeLanguages(api) {
-  if (!api?.LanguageDescription) return null;
-  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
+  if (!api?.LanguageDescription || !api?.LanguageSupport) return null;
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (
+    mode && api.StreamLanguage ? new api.LanguageSupport(api.StreamLanguage.define(mode)) : null
+  ));
   const languageEntries = [
     {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
     {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},

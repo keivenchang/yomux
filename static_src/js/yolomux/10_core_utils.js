@@ -1,23 +1,223 @@
-const backendHealthState = {consecutiveFailures: 0};
+// The ONE topbar health indicator: one state object, one DOM node, one insertion point
+// (.topbar-right-tools). Two independent signals feed it:
+//   * this browser cannot reach the server at all (consecutive apiFetch transport failures), and
+//   * the server told us, over the pushed `backend_health_changed` event on the existing `core`
+//     client-event channel, that one of its own services is down or degraded.
+// It is push-fed on purpose. Nothing here polls /api/system-status: the whole point is that a dead
+// service becomes visible without the System panel being open.
 const backendHealthFailureThreshold = 3;
+// The observer already debounces its own transitions; this debounces the CLEAR in the browser. One
+// healthy revision after an outage is a sample, not a recovery, so the warning survives it.
+const backendHealthRecoveryRevisions = 2;
+// Bounded twice: we retain at most this many degraded resources, and we NAME at most one of them.
+// Six service names in a topbar chip is a wall nobody reads; "and 2 more" is the readable form.
+const backendHealthResourceLimit = 8;
+const backendHealthNamedResourceLimit = 1;
+// The states the observer publishes (yolomux_lib/backend_health/store.py BACKEND_HEALTH_STATES).
+// `starting` and `ready` are not failures and must never raise the indicator, or every page load
+// during startup shows a warning. Everything else is a failure at one of two severities.
+const backendHealthDownStates = Object.freeze(['down', 'upgrade_required']);
+const backendHealthDegradedStates = Object.freeze(['degraded', 'backoff', 'unknown']);
+// Precedence, highest first. A browser talking to nothing must not be described as "one service is
+// slow", and a service outage must not be hidden because the last request happened to succeed.
+const backendHealthSeverityRank = Object.freeze({'': 0, degraded: 1, down: 2, unresponsive: 3});
 
-function syncBackendHealthIndicator() {
-  if (!topbar) return;
-  let indicator = topbar.querySelector('[data-backend-health]');
-  const host = topbar.querySelector('.topbar-right-tools') || topbar;
-  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
-  if (!degraded) {
-    indicator?.remove();
-    return;
+const backendHealthState = {
+  consecutiveFailures: 0,
+  epoch: '',
+  revision: -1,
+  serviceSeverity: '',
+  resources: [],
+  resourceCount: 0,
+  healthyRevisions: 0,
+};
+
+function backendHealthStateSeverity(state) {
+  const value = String(state ?? '');
+  if (backendHealthDownStates.includes(value)) return 'down';
+  if (backendHealthDegradedStates.includes(value)) return 'degraded';
+  return '';
+}
+
+function backendHealthResourcesFromPayload(resources) {
+  if (!Array.isArray(resources)) return [];
+  const failing = [];
+  for (const entry of resources) {
+    if (!entry || typeof entry !== 'object') continue;
+    const severity = backendHealthStateSeverity(entry.state);
+    if (!severity) continue;
+    failing.push({
+      id: String(entry.id ?? ''),
+      // The server owns the human name. `id` is a process name (watchd, indexd) and is kept only for
+      // diagnostics — it must never reach the rendered text, which is why the renderer reads `label`
+      // and falls back to a generic translated noun rather than to `id`.
+      label: String(entry.label ?? '').trim(),
+      severity,
+      reasonCode: String(entry.reason_code ?? ''),
+    });
   }
+  // Worst first, so the one resource we name is the one that matters most.
+  failing.sort((left, right) => backendHealthSeverityRank[right.severity] - backendHealthSeverityRank[left.severity]);
+  return failing;
+}
+
+function backendHealthPayloadSeverity(overallState, resources) {
+  let severity = backendHealthStateSeverity(overallState);
+  for (const resource of resources) {
+    if (backendHealthSeverityRank[resource.severity] > backendHealthSeverityRank[severity]) severity = resource.severity;
+  }
+  return severity;
+}
+
+// Apply one `backend_health_changed` payload: {epoch, revision, overall_state, degraded_resources}.
+// Returns false for a stale or replayed revision so a reconnect replay cannot walk the state backwards.
+function applyBackendHealthPayload(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const revision = Number(source.revision);
+  if (!Number.isFinite(revision)) return false;
+  const epoch = String(source.epoch ?? '');
+  if (epoch === backendHealthState.epoch && revision <= backendHealthState.revision) return false;
+  if (epoch !== backendHealthState.epoch) {
+    // A new observer epoch restarts the revision counter, so a partial recovery count from the
+    // previous epoch means nothing here: start counting healthy revisions again.
+    backendHealthState.epoch = epoch;
+    backendHealthState.healthyRevisions = 0;
+  }
+  backendHealthState.revision = revision;
+  const resources = backendHealthResourcesFromPayload(source.degraded_resources);
+  const severity = backendHealthPayloadSeverity(source.overall_state, resources);
+  if (severity) {
+    backendHealthState.serviceSeverity = severity;
+    backendHealthState.resources = resources.slice(0, backendHealthResourceLimit);
+    backendHealthState.resourceCount = resources.length;
+    backendHealthState.healthyRevisions = 0;
+  } else {
+    backendHealthState.healthyRevisions += 1;
+    if (backendHealthState.healthyRevisions >= backendHealthRecoveryRevisions) {
+      backendHealthState.serviceSeverity = '';
+      backendHealthState.resources = [];
+      backendHealthState.resourceCount = 0;
+    }
+  }
+  syncBackendHealthIndicator();
+  return true;
+}
+
+// The rendered model, or null when there is nothing to show. This is where precedence lives:
+// `unresponsive` outranks `down` outranks `degraded`, and it is decided in exactly one place.
+function backendHealthIndicatorModel() {
+  if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
+    return {
+      severity: 'unresponsive',
+      text: `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`,
+      reasonCode: '',
+    };
+  }
+  const severity = backendHealthState.serviceSeverity;
+  if (severity !== 'down' && severity !== 'degraded') return null;
+  const named = backendHealthState.resources.find(resource => resource.label) || null;
+  const label = named ? named.label : t('backendHealth.service');
+  const count = Math.max(0, backendHealthState.resourceCount - backendHealthNamedResourceLimit);
+  let text;
+  if (severity === 'down') {
+    text = count > 0 ? t('backendHealth.down.multiple', {label, count}) : t('backendHealth.down.single', {label});
+  } else {
+    text = count > 0 ? t('backendHealth.degraded.multiple', {label, count}) : t('backendHealth.degraded.single', {label});
+  }
+  return {severity, text, reasonCode: named ? named.reasonCode : ''};
+}
+
+// The System view is the YO!stats/Debug pane's `system` sub-tab. This is the same pair of calls its
+// own tab button makes (85_debug_panel.js bindDebugPanel -> setDebugSubTab), not a second route in.
+async function openBackendHealthDetails() {
+  await selectSession(debugPaneItemId, {userInitiated: true});
+  setDebugSubTab('system');
+  return true;
+}
+
+function backendHealthIndicatorHost() {
+  if (!topbar) return null;
+  return topbar.querySelector('.topbar-right-tools') || topbar;
+}
+
+// One glyph for the fixed icon shell. It is a marker, never the message: the severity is carried by
+// the WORDS in the role=status label, so a monochrome or forced-colours theme still reads correctly.
+function backendHealthIndicatorGlyph(severity) {
+  return severity ? '⚠' : '';
+}
+
+// The permanently mounted, fixed-size backend-health control. It is built once by
+// createTopbarRightTools() and NEVER inserted or removed on a health transition: a change only
+// repaints it and rewrites its accessible sentence, so the topbar, #grid, and every xterm keep the
+// same geometry before, during, and after a warning. The full localized sentence lives in the
+// role=status live region AND on the control's aria-label/title; the whole control is the System
+// Details route, so there is no separate variable-width Details button to grow the row.
+function createBackendHealthIndicator() {
+  const indicator = makeButton({
+    id: 'backendHealthIndicator',
+    className: 'backend-health-indicator',
+    onClick: () => {
+      openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
+    },
+  });
+  const icon = document.createElement('span');
+  icon.className = 'backend-health-indicator-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const message = document.createElement('span');
+  message.className = 'backend-health-indicator-text';
+  message.setAttribute('role', 'status');
+  message.setAttribute('aria-live', 'polite');
+  indicator.append(icon, message);
+  applyBackendHealthIndicatorState(indicator, backendHealthIndicatorModel());
+  return indicator;
+}
+
+// Push one model (or null when healthy) into the existing control. Healthy is a state of the SAME
+// node -- an inert, empty, transparent icon shell that still occupies its fixed slot -- not the
+// node's absence, so recovery does not remove layout content.
+function applyBackendHealthIndicatorState(indicator, model) {
+  const severity = model ? model.severity : '';
+  indicator.dataset.backendHealth = severity;
+  if (model && model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
+  else delete indicator.dataset.backendHealthReason;
+  indicator.querySelector('.backend-health-indicator-icon').textContent = backendHealthIndicatorGlyph(severity);
+  // The severity is carried by the WORDS ("is not running" vs "is degraded"), not by the colour the
+  // data-backend-health token selects, so the warning survives a monochrome or high-contrast theme.
+  indicator.querySelector('.backend-health-indicator-text').textContent = model ? model.text : '';
+  if (model) {
+    indicator.disabled = false;
+    // The accessible NAME describes what activating the control does (open the System details); the
+    // live-region text above announces the STATE sentence, and the tooltip carries the full sentence.
+    indicator.setAttribute('aria-label', t('backendHealth.detailsAria'));
+    indicator.setAttribute('title', model.text);
+    indicator.removeAttribute('aria-hidden');
+  } else {
+    indicator.disabled = true;
+    indicator.removeAttribute('aria-label');
+    indicator.removeAttribute('title');
+    indicator.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
+  const model = backendHealthIndicatorModel();
+  // Look the existing node up across the whole topbar, not just the host: the control is normally
+  // built into .topbar-right-tools, but if that host is torn down and rebuilt -- fallback-mounting a
+  // control in the topbar while a detached one waits to be re-inserted -- there must still be exactly
+  // ONE. Keep the first in document order and collapse any extra so a rebuild cannot leave two owners.
+  const scope = topbar || host || document;
+  const existing = Array.from(scope.querySelectorAll('[data-backend-health]'));
+  let indicator = existing[0] || null;
+  for (let index = 1; index < existing.length; index += 1) existing[index].remove();
   if (!indicator) {
-    indicator = document.createElement('span');
-    indicator.className = 'backend-health-indicator';
-    indicator.dataset.backendHealth = 'unresponsive';
-    indicator.setAttribute('role', 'status');
+    // The control is missing only before the right-tools builder has run, or in the fallback where
+    // .topbar-right-tools was removed at runtime. Mount one and keep updating it in place thereafter.
+    if (!host) return null;
+    indicator = createBackendHealthIndicator();
     host.prepend(indicator);
   }
-  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+  applyBackendHealthIndicatorState(indicator, model);
+  return indicator;
 }
 
 function noteBackendHealthFailure() {
@@ -133,6 +333,8 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  const transportLifecycle = pageTransportLifecycle;
+  const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
@@ -141,6 +343,9 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
+  const quietStatuses = Array.isArray(internalOptions.quietStatuses)
+    ? new Set(internalOptions.quietStatuses.map(Number))
+    : null;
   const diagnosticProvenance = ['controlled_probe', 'confirmed_real'].includes(internalOptions.provenance)
     ? internalOptions.provenance
     : '';
@@ -192,12 +397,14 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
+    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
     if (timeoutError) noteTimeout();
-    else noteBackendHealthFailure();
+    else if (!retirementReason) noteBackendHealthFailure();
     if (recordDebug) {
       notePageLoadApiCompleted();
       recordApiDebugEvent(url, method, startedAt, {
         error,
+        ...(retirementReason ? {deliveryOutcome: 'retired', reason: retirementReason} : {deliveryOutcome: 'failed'}),
         requestBytes,
         requestId,
         provenance: diagnosticProvenance,
@@ -206,10 +413,12 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     cleanup();
     throw error;
   }
-  noteBackendHealthSuccess();
+  transportLifecycle.noteDelivery(transportToken); noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
-  if (recordDebug) {
+  // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
+  const suppressExpectedStatus = Boolean(quietStatuses && quietStatuses.has(Number(response.status)));
+  if (recordDebug && !suppressExpectedStatus) {
     debugEvent = recordApiDebugEvent(url, method, startedAt, {
       status: response.status,
       ok: response.ok,
@@ -469,6 +678,11 @@ function apiOperationTerminalData(record, payload = {}) {
 function recordApiOperationTerminalFailure(record, error, expected = {}) {
   if (error?.name !== 'ApiOperationTerminalError' || !expected.url) return;
   const status = Number(error.status);
+  // An expected terminal status (a controlled probe's own verdict, e.g. a deletion-confirmation 404) is
+  // not an API failure; suppress it. Any other status, and non-status transport errors, still record.
+  if (Array.isArray(expected.quietStatuses)
+    && Number.isSafeInteger(status)
+    && expected.quietStatuses.map(Number).includes(status)) return;
   recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
     ...(Number.isSafeInteger(status) && status >= 100 && status <= 599 ? {status, ok: false} : {error}),
     requestId: record.request?.id,
@@ -686,7 +900,7 @@ async function apiJsonResponse(response) {
   return payload;
 }
 
-async function apiFetchJson(url, options = {}) {
+async function apiFetchJson(url, options = {}, internalOptions = {}) {
   const lifecycle = typeof tmuxSessionLifecycleRequestLease === 'function'
     ? tmuxSessionLifecycleRequestLease(url, options)
     : {session: '', lease: null, blocked: false};
@@ -699,7 +913,7 @@ async function apiFetchJson(url, options = {}) {
     lifecycle.lease?.release?.();
   };
   try {
-    const result = await apiJsonResponse(await apiFetch(url, options));
+    const result = await apiJsonResponse(await apiFetch(url, options, internalOptions));
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
     }
@@ -714,6 +928,7 @@ async function apiFetchJson(url, options = {}) {
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
+      quietStatuses: internalOptions.quietStatuses,
     });
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
@@ -1186,6 +1401,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
+  for (const field of ['deliveryOutcome', 'reason']) if (result[field]) payload[field] = String(result[field]).slice(0, 64);
   return recordJsDebugEvent('api', payload);
 }
 
@@ -1194,14 +1410,14 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
     return;
   }
   if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -1231,12 +1447,19 @@ function diagnosticPacificWallTime(value) {
 
 function recordJsDebugEvent(type, payload = {}) {
   const timestampMs = Date.now();
+  // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
+  // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
+  // trusted monotonic identity this producer assigns. `wallTime` is NOT one of those fields: a
+  // browser-lifecycle failure records the Pacific wall time it observed the failure at, and the
+  // finalizer reports THAT time, not the later moment this event was retained -- so a caller
+  // wallTime is preserved and the producer only stamps its own when the caller supplied none.
+  const redacted = shareRedactDiagnosticValue(payload);
   const event = {
+    ...redacted,
     id: ++jsDebugEventSeq,
     ts: new Date(timestampMs).toISOString(),
-    wallTime: diagnosticPacificWallTime(timestampMs),
+    wallTime: String(redacted.wallTime || diagnosticPacificWallTime(timestampMs)),
     type: String(type || 'event'),
-    ...shareRedactDiagnosticValue(payload),
   };
   jsDebugEvents.push(event);
   if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
@@ -1250,7 +1473,7 @@ function recordJsDebugEvent(type, payload = {}) {
 function jsDebugFailureClassification(event) {
   const type = String(event?.type || '');
   if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
-  const apiFailure = type === 'api' && (
+  const apiFailure = type === 'api' && event?.deliveryOutcome !== 'retired' && (
     event?.ok === false
     || (Number.isFinite(event?.status) && event.status >= 400)
     || Boolean(event?.error)
@@ -2852,6 +3075,73 @@ function writeStoredFileExplorerIndexedDirs() {
   storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
 }
 
+// A synchronous SHA-256 over a string's UTF-8 bytes, returning the lowercase hex digest. The
+// search-progress bus keys every root by the server's opaque digest sha256(canonical_root_key)[:16]
+// (yolomux_lib/search/file_index.py::_root_scope_id): a filesystem path in a signal's payload would
+// disclose one client's directory to every other client on the globally-fanned-out bus, so the frame
+// carries only the digest. The browser recomputes the SAME digest from a snapshot's root_realpath to
+// correlate a path-free progress signal back to the root it searched. crypto.subtle.digest is async
+// and absent from the node test VM, so this is a self-contained synchronous implementation.
+const SHA256_ROUND_CONSTANTS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexOfString(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ''));
+  const length = bytes.length;
+  // Message padding: 0x80, then zeros to a 56-mod-64 boundary, then the 64-bit big-endian bit length.
+  const withPadding = new Uint8Array((((length + 8) >> 6) + 1) << 6);
+  withPadding.set(bytes);
+  withPadding[length] = 0x80;
+  const bitLength = length * 8;
+  const view = new DataView(withPadding.buffer);
+  view.setUint32(withPadding.length - 4, bitLength >>> 0, false);
+  view.setUint32(withPadding.length - 8, Math.floor(bitLength / 0x100000000), false);
+  const hash = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const words = new Uint32Array(64);
+  const rotr = (value, bits) => (value >>> bits) | (value << (32 - bits));
+  for (let offset = 0; offset < withPadding.length; offset += 64) {
+    for (let i = 0; i < 16; i += 1) words[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(words[i - 15], 7) ^ rotr(words[i - 15], 18) ^ (words[i - 15] >>> 3);
+      const s1 = rotr(words[i - 2], 17) ^ rotr(words[i - 2], 19) ^ (words[i - 2] >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_ROUND_CONSTANTS[i] + words[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0; hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0; hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0; hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0; hash[7] = (hash[7] + h) >>> 0;
+  }
+  return Array.from(hash, value => value.toString(16).padStart(8, '0')).join('');
+}
+
+// The 16-hex-char opaque root digest the search-progress bus uses (the first 16 hex chars of the
+// SHA-256 of the canonical root path). Correlates a path-free progress signal to a searched root.
+function fileSearchScopeId(realpath) {
+  const canonical = String(realpath ?? '').trim();
+  return canonical ? sha256HexOfString(canonical).slice(0, 16) : '';
+}
+
 function nestedSetting(source, path, fallback) {
   let current = source;
   for (const part of String(path || '').split('.')) {
@@ -3700,6 +3990,38 @@ function replaceHtmlPreservingScroll(element, html) {
   const scrollLeft = element.scrollLeft || 0;
   element.innerHTML = html;
   restoreElementScrollPosition(element, scrollTop, scrollLeft);
+}
+
+function reconcilePanelBody({body, html, anchors = [], replace = null, afterReplace = null} = {}) {
+  if (!body) return false;
+  const captured = anchors.map(anchor => ({
+    anchor,
+    value: typeof anchor.capture === 'function' ? anchor.capture(body) : undefined,
+  }));
+  if (typeof replace === 'function') replace(body, html);
+  else body.innerHTML = html;
+  for (const {anchor, value} of captured) anchor.restore?.(body, value);
+  afterReplace?.(body);
+  return true;
+}
+
+function elementScrollAnchor(selector, fallbackToBody = false) {
+  return {
+    capture(body) {
+      const element = body.querySelector?.(selector) || (fallbackToBody ? body : null);
+      return {scrollTop: element?.scrollTop || 0, scrollLeft: element?.scrollLeft || 0};
+    },
+    restore(body, value) {
+      restoreElementScrollPosition(body.querySelector?.(selector) || (fallbackToBody ? body : null), value?.scrollTop || 0, value?.scrollLeft || 0);
+    },
+  };
+}
+
+function keyedScrollAnchor(selector) {
+  return {
+    capture: body => captureKeyedScrollPositions(body, selector),
+    restore: (body, value) => restoreKeyedScrollPositions(body, selector, value),
+  };
 }
 
 function wsUrl(session) {
@@ -4741,7 +5063,8 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  setDomBuilderOptions(button, options);
+  const classNames = new Set(['btn-base', ...String(options.className || '').split(/\s+/).filter(Boolean)]);
+  setDomBuilderOptions(button, {...options, className: [...classNames].join(' ')});
   button.disabled = options.disabled === true;
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
@@ -4753,6 +5076,179 @@ function makeButton(options = {}) {
     if (typeof listener === 'function') button.addEventListener(type, listener);
   }
   return button;
+}
+
+const bindOnceRecords = new WeakMap();
+
+function bindOnce(root, key, installer) {
+  if (!root || key === undefined || key === null || typeof installer !== 'function') return null;
+  let records = bindOnceRecords.get(root);
+  if (!records) {
+    records = new Map();
+    bindOnceRecords.set(root, records);
+  }
+  const existing = records.get(key);
+  if (existing) return existing.dispose;
+  const uninstall = installer(root);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    if (records.get(key)?.dispose === dispose) records.delete(key);
+    if (records.size === 0) bindOnceRecords.delete(root);
+    if (typeof uninstall === 'function') uninstall();
+    else uninstall?.dispose?.();
+    return true;
+  };
+  records.set(key, {dispose});
+  return dispose;
+}
+
+function createLifecycleScope(options = {}) {
+  const resources = new Map();
+  let disposed = false;
+  const disposeResource = record => {
+    if (!record || record.disposed) return false;
+    record.disposed = true;
+    record.dispose?.(record.value);
+    return true;
+  };
+  const scope = {
+    current() {
+      return !disposed && (typeof options.isCurrent !== 'function' || options.isCurrent() === true);
+    },
+    value(key) {
+      return resources.get(key)?.value ?? null;
+    },
+    replace(key, value, dispose) {
+      const existing = resources.get(key);
+      if (existing?.value === value) return value;
+      if (existing) disposeResource(existing);
+      resources.delete(key);
+      if (value === null || value === undefined) return value;
+      if (disposed) {
+        disposeResource({value, dispose, disposed: false});
+        return value;
+      }
+      resources.set(key, {value, dispose, disposed: false});
+      return value;
+    },
+    release(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      return disposeResource(record);
+    },
+    relinquish(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      record.disposed = true;
+      return true;
+    },
+    ownEvent(key, target, type, listener, listenerOptions = undefined) {
+      target?.addEventListener?.(type, listener, listenerOptions);
+      return scope.replace(key, listener, () => target?.removeEventListener?.(type, listener, listenerOptions));
+    },
+    ownTimer(key, timer, clear = clearTimeout) {
+      return scope.replace(key, timer, value => clear(value));
+    },
+    ownObserver(key, observer) {
+      return scope.replace(key, observer, value => value?.disconnect?.());
+    },
+    ownStream(key, stream) {
+      return scope.replace(key, stream, value => value?.close?.());
+    },
+    dispose(reason = 'disposed') {
+      if (disposed) return false;
+      disposed = true;
+      for (const record of [...resources.values()].reverse()) disposeResource(record);
+      resources.clear();
+      options.onDispose?.(reason);
+      return true;
+    },
+    disposed() { return disposed; },
+  };
+  return Object.freeze(scope);
+}
+
+function createLatestResource(options = {}) {
+  let value = options.initial;
+  let target = null;
+  let request = null;
+  let error = null;
+  let lifecycleScope = createLifecycleScope();
+
+  const snapshot = () => Object.freeze({value, target, request, error, loading: request !== null});
+  const notify = (phase, context = null) => options.onState?.(snapshot(), Object.freeze({phase, context}));
+  const renewScope = reason => {
+    lifecycleScope.dispose(reason);
+    lifecycleScope = createLifecycleScope();
+    return lifecycleScope;
+  };
+  const assign = (nextValue, nextTarget = target) => {
+    target = nextTarget;
+    value = nextValue;
+    error = null;
+    return value;
+  };
+  const resource = {
+    snapshot,
+    read(nextTarget, context = null) {
+      if (request && Object.is(target, nextTarget)) return request;
+      const scope = renewScope('latest-resource-superseded');
+      target = nextTarget;
+      error = null;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      if (controller) scope.replace('request-controller', controller, value => value.abort());
+      let loaded;
+      try {
+        loaded = options.load(nextTarget, Object.freeze({context, signal: controller?.signal}));
+      } catch (failure) {
+        loaded = Promise.reject(failure);
+      }
+      const currentRequest = Promise.resolve(loaded)
+        .then(payload => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          const applied = options.apply(payload, Object.freeze({context, target: nextTarget, previous: value}));
+          if (applied !== undefined) assign(applied, nextTarget);
+          error = null;
+          notify('applied', context);
+          return typeof options.result === 'function' ? options.result(payload, applied) : value;
+        })
+        .catch(failure => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          error = failure;
+          notify('failed', context);
+          return typeof options.failureResult === 'function' ? options.failureResult(failure, value) : value;
+        })
+        .finally(() => {
+          if (!scope.current() || request !== currentRequest) return;
+          request = null;
+          scope.release('request-controller', controller);
+          notify('settled', context);
+        });
+      request = currentRequest;
+      notify('loading', context);
+      return currentRequest;
+    },
+    replace(nextValue, nextTarget = target, context = null) {
+      renewScope('latest-resource-replaced');
+      request = null;
+      assign(nextValue, nextTarget);
+      notify('replaced', context);
+      return value;
+    },
+    assign,
+    invalidate(context = null) {
+      renewScope('latest-resource-invalidated');
+      request = null;
+      error = null;
+      notify('invalidated', context);
+      return value;
+    },
+  };
+  return Object.freeze(resource);
 }
 
 function delegate(parent, type, selector, handler, options = {}) {

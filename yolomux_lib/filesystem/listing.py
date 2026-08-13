@@ -583,4 +583,4 @@ def watch_signature(raw_path: str, *, child_limit: int = 0) -> tuple[Any, ...]:
     except paths.FilesystemError as error:
         if error.status != 404:
             raise
-        return (str(paths._parsed_path(raw_path)), "missing")
+        return (str(paths.parsed_request_path(raw_path)), "missing")

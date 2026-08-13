@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 from pathlib import Path
 from typing import Any
@@ -18,9 +17,9 @@ from yolomux_lib.infra.common import TmuxPaneInfo
 from yolomux_lib.infra.host_partition import host_namespaced_path
 from yolomux_lib.observability.activity import ActivityLedger
 from yolomux_lib.workspace import metadata
+from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 
-HOST_IDENTITY_MODULE = "yolomux_lib.infra.host_identity"
 TARGET = "yo7771:0.0"
 SESSION = "yo7771"
 WINDOW = "0"
@@ -28,17 +27,15 @@ PANE = "0"
 
 
 def _host_identity(stable_host_id: str, display_hostname: str) -> Any:
-    module = importlib.import_module(HOST_IDENTITY_MODULE)
-    return module.HostIdentity(
+    return FixtureHostIdentityBuilder(
         stable_host_id=stable_host_id,
         display_hostname=display_hostname,
         boot_id=f"boot-{stable_host_id}",
         pid=4242,
-        process_start_identity="proc:5252",
         process_start_ticks=5252,
         instance_nonce=f"instance-{stable_host_id}",
         stable_host_id_source="gate fixture",
-    )
+    ).build()
 
 
 def _pane(tmp_path: Path) -> TmuxPaneInfo:

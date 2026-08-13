@@ -7,7 +7,6 @@ import threading
 import uuid
 import zipfile
 from http import HTTPStatus
-from http.client import HTTPConnection
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -21,10 +20,13 @@ from yolomux_lib import http_routes
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.app import FilesystemOperationHttpResponse
+from yolomux_lib.app import filesystem_operation_descriptor
 from yolomux_lib.infra import jobd
 from yolomux_lib.server import Handler
-from yolomux_lib.server import TmuxWebtermHTTPServer
 from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
+from tests.helpers.fixture_http_server import FixtureHttpServer
+from tests.helpers.fixture_http_server import request_fixture_http_header_list as request_header_list
+from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
 
 pytestmark = pytest.mark.socket
 
@@ -45,26 +47,6 @@ def active_auth_yaml() -> str:
     password: "guest"
     role: "readonly"
 """
-
-
-def request(port, method, path, body=None, headers=None):
-    conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request(method, path, body=body, headers=headers or {})
-    response = conn.getresponse()
-    data = response.read()
-    result = response.status, dict(response.getheaders()), data
-    conn.close()
-    return result
-
-
-def request_header_list(port, method, path, body=None, headers=None):
-    conn = HTTPConnection("127.0.0.1", port, timeout=5)
-    conn.request(method, path, body=body, headers=headers or {})
-    response = conn.getresponse()
-    data = response.read()
-    result = response.status, response.getheaders(), data
-    conn.close()
-    return result
 
 
 def request_operation_terminal(server, method, path, body=None, headers=None):
@@ -180,7 +162,9 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
                 route=route,
                 kind="filesystem_operation",
                 task="filesystem_operation",
-                payload={"op": operation, "path": path, "args": args or {}},
+                # Build the descriptor through the route's real owner: it carries this server's
+                # captured access policy, without which the shared worker refuses the operation.
+                payload=filesystem_operation_descriptor(operation, path, args or {}),
                 context={"operation": operation, "path": path},
             )
             return FilesystemOperationHttpResponse(payload, status)
@@ -190,7 +174,10 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
                 route="POST /api/fs/batch",
                 kind="fs_batch",
                 task="filesystem_batch",
-                payload=payload,
+                payload={
+                    **payload,
+                    filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
+                },
                 context={"request_count": len(payload.get("requests", []))},
             )
 
@@ -216,27 +203,22 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
         def filesystem_operation_relay(*, route, operation, path, args=None):
             del route
             try:
-                result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
-                    "op": operation,
-                    "path": path,
-                    "args": args or {},
-                }).encode("utf-8"))
+                result = jobd.run_registered_task_result(
+                    "filesystem_operation",
+                    json.dumps(filesystem_operation_descriptor(operation, path, args or {})).encode("utf-8"),
+                )
             except jobd.JobdFilesystemOperationFailure as exc:
                 return FilesystemOperationHttpResponse(exc.payload, HTTPStatus(exc.status))
             except filesystem.FilesystemError as exc:
                 return FilesystemOperationHttpResponse(exc.payload(path=path), HTTPStatus(exc.status))
             return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=result.body, product=result.product)
         app.filesystem_operation_relay = filesystem_operation_relay
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
+    runtime = FixtureHttpServer.start(app, tls_context=tls_context, label="login-auth fixture HTTP server")
+    return runtime.server, runtime.thread
 
 
 def stop_server(server, thread):
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
+    FixtureHttpServer(server, thread, "login-auth fixture HTTP server").close()
 
 
 def test_activity_summary_route_authenticates_then_returns_terminal_disabled_response(monkeypatch, tmp_path):

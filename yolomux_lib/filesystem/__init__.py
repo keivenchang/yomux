@@ -28,12 +28,24 @@ CONFIG_DIR = paths.CONFIG_DIR
 BINARY_SNIFF_BYTES = paths.BINARY_SNIFF_BYTES
 DEFAULT_FS_ROOTS = paths.DEFAULT_FS_ROOTS
 FilesystemError = paths.FilesystemError
+FilesystemAccessPolicy = paths.FilesystemAccessPolicy
+FS_ACCESS_POLICY_FIELD = paths.FS_ACCESS_POLICY_FIELD
+FS_ACCESS_POLICY_VERSION = paths.FS_ACCESS_POLICY_VERSION
 FS_ROOTS_ENV = paths.FS_ROOTS_ENV
+access_policy_descriptor = paths.access_policy_descriptor
+access_policy_from_descriptor = paths.access_policy_from_descriptor
+access_policy_refused = paths.access_policy_refused
+active_access_policy = paths.active_access_policy
+authorized_fs_roots = paths.authorized_fs_roots
+capture_access_policy = paths.capture_access_policy
+enforce_access_policy = paths.enforce_access_policy
 MAX_READ_BYTES = paths.MAX_READ_BYTES
 SECRET_DIR_COMPONENTS = paths.SECRET_DIR_COMPONENTS
 SECRET_DIR_SUFFIXES = paths.SECRET_DIR_SUFFIXES
 SECRET_FILE_NAMES = paths.SECRET_FILE_NAMES
 SECRET_FILE_SUFFIXES = paths.SECRET_FILE_SUFFIXES
+parsed_request_path = paths.parsed_request_path
+validate_request_path_lexical = paths.validate_request_path_lexical
 
 MAX_DIRECTORY_ENTRIES = listing.MAX_DIRECTORY_ENTRIES
 REPO_MARKERS = listing.REPO_MARKERS
@@ -117,7 +129,7 @@ _refs_requested = git_ops.refs_requested
 
 _mtime_matches_expected = io_ops._mtime_matches_expected
 _sniff_raw_mime = io_ops._sniff_raw_mime
-_validated_child_name = io_ops._validated_child_name
+validated_child_name = io_ops.validated_child_name
 
 
 def _sync_package_overrides() -> None:
@@ -161,11 +173,15 @@ def list_directory(
     watch_signature_child_limit: int = 0,
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return listing.list_directory(
+    result = listing.list_directory(
         raw_path,
         performance_details=performance_details,
         watch_signature_child_limit=watch_signature_child_limit,
     )
+    # Item 6: a directory the user is viewing in Finder is concrete visibility evidence -- promote its
+    # indexed root's frontier to user-visible-demand (debounced, non-blocking; never a second crawl).
+    search.promote_visible_path(raw_path)
+    return result
 
 
 def validated_batch_requests(payload: dict[str, Any]) -> list[Any]:
@@ -242,7 +258,18 @@ def filesystem_batch_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def filesystem_batch_result(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compute one typed, max-64 list/info product in the jobd worker process."""
+    """Compute one typed, max-64 list/info product under the ACCEPTING server's access policy.
+
+    A batch runs in a shared daemon, so it is authorized by the policy the payload carries, not by
+    the daemon's own environment.  A payload without a parsable policy is refused here rather than
+    executed with borrowed authority.
+    """
+    policy = paths.access_policy_from_descriptor(payload.get(paths.FS_ACCESS_POLICY_FIELD))
+    with paths.enforce_access_policy(policy):
+        return _filesystem_batch_result_authorized(payload)
+
+
+def _filesystem_batch_result_authorized(payload: dict[str, Any]) -> dict[str, Any]:
     requests = validated_batch_requests(payload)
     summary = filesystem_batch_request_summary(payload)
     responses = []
@@ -338,9 +365,15 @@ def watch_signature(raw_path: str, *, child_limit: int = 0) -> tuple[Any, ...]:
 
 
 @normalize_os_errors
-def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
+def search_files(
+    raw_root: str,
+    query: str = "",
+    limit: int | str | None = 400,
+    recursive: bool = False,
+    cursor: str | None = None,
+) -> dict[str, Any]:
     _sync_package_overrides()
-    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive)
+    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor)
 
 
 @normalize_os_errors
@@ -404,7 +437,10 @@ def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
 @normalize_os_errors
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     _sync_package_overrides()
-    return git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)
+    payload = git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)
+    # Item 6: a file open in the Differ is concrete visibility evidence for its indexed root.
+    search.promote_visible_path(raw_path)
+    return payload
 
 
 @normalize_os_errors
@@ -433,11 +469,30 @@ def read_file(raw_path: str) -> dict[str, Any]:
     return io_ops.read_file(raw_path)
 
 
+def _reindex_after_mutation(mutated_paths: list[Any], reason: str) -> list[str]:
+    """Route a successful YOLOmux file mutation into the ONE hot-path index owner (item 6).
+
+    A create/upsert/delete/rename/upload that changed the filesystem is concrete change evidence, so
+    it must reach the index in seconds instead of waiting for the 1800s safety TTL. It goes through
+    the same `search.reindex_roots_for_paths` owner watchd and the persistent indexer already use --
+    which coalesces by indexed root and either promotes the pending frontier or runs one bounded
+    subtree repair -- so `write`/`delete`/`mkdir`/upload stop bypassing the index. In an HTTP or jobd
+    process (not the elected owner) this only marks paths dirty and dispatches a bounded RPC; the
+    crawl runs in indexd, never on jobd's single interactive worker.
+    """
+    candidates = [str(path) for path in mutated_paths if path]
+    if not candidates:
+        return []
+    return search.reindex_roots_for_paths(candidates, reason=reason)
+
+
 @normalize_os_errors
 def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
     paths.invalidate_path_policy_caches()
+    # Covers editor saves too: an editor save reaches the filesystem through this one write funnel.
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-write")
     return payload
 
 
@@ -446,6 +501,7 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.delete_path(raw_path)
     paths.invalidate_path_policy_caches()
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-delete")
     return payload
 
 
@@ -454,7 +510,7 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.rename_path(raw_path, new_name)
     paths.invalidate_path_policy_caches()
-    payload["reindex_roots"] = search.reindex_roots_for_paths([payload["old_path"], payload["path"]], reason="fs-rename")
+    payload["reindex_roots"] = _reindex_after_mutation([payload["old_path"], payload["path"]], reason="fs-rename")
     return payload
 
 
@@ -463,6 +519,7 @@ def create_directory(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.create_directory(raw_path)
     paths.invalidate_path_policy_caches()
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-mkdir")
     return payload
 
 
@@ -499,7 +556,17 @@ __all__ = [
     "BINARY_SNIFF_BYTES",
     "DEFAULT_FS_ROOTS",
     "EXTENSIONLESS_TEXT_NAMES",
+    "FS_ACCESS_POLICY_FIELD",
+    "FS_ACCESS_POLICY_VERSION",
+    "FilesystemAccessPolicy",
     "FilesystemError",
+    "access_policy_descriptor",
+    "access_policy_from_descriptor",
+    "access_policy_refused",
+    "active_access_policy",
+    "authorized_fs_roots",
+    "capture_access_policy",
+    "enforce_access_policy",
     "FS_ZIP_MAX_BYTES",
     "FS_ROOTS_ENV",
     "IMAGE_EXTENSIONS",

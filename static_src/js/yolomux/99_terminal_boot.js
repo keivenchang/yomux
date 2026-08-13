@@ -1,142 +1,3 @@
-
-function paneFrameControlsHtml(session, options = {}) {
-  const role = paneRoleForSlot(options.slot || slotForItem(session));
-  const controlOptions = role.controls === 'minimize-only'
-    ? {...options, actions: false, details: false, popout: false, expand: false, close: false, minimize: true}
-    : options;
-  const disabled = controlOptions.disabled === true;
-  const unavailableLabel = controlOptions.unavailableLabel || itemLabel(session);
-  const unavailableTitle = t('tab.unavailableFor', {name: unavailableLabel});
-  const controls = [];
-  const add = spec => controls.push(toolbarButtonHtml({
-    className: ['tab', spec.className, spec.platformKind ? platformWindowControlClass(spec.platformKind) : '', spec.active ? 'active' : ''].filter(Boolean).join(' '),
-    dataset: disabled ? {} : spec.dataset,
-    disabled,
-    hidden: spec.hidden === true,
-    title: disabled ? unavailableTitle : spec.title,
-    ariaLabel: spec.label,
-    pressed: spec.pressed,
-    html: spec.html,
-  }));
-  const includeActions = controlOptions.actions ?? isTmuxSession(session);
-  const includeDetails = controlOptions.details === true;
-  const includeMinimize = controlOptions.minimize !== false
-    && (!narrowSingleColumnMode() || narrowPaneFrameActionTargetsTab(session));
-  const includeExpand = controlOptions.expand !== false;
-  const includePopout = controlOptions.popout === true;
-  if (includeActions) {
-    add({className: 'pane-actions', dataset: {paneActions: session}, title: t('common.sessionActions'), label: t('common.sessionActions'), html: '<span class="pane-actions-dots" aria-hidden="true">...</span>'});
-  }
-  if (includeDetails) {
-    const detailsLabel = t('pane.details.hide');
-    add({className: 'panel-detail-toggle pane-detail-toggle', platformKind: 'minimize', dataset: {detailToggle: session}, title: detailsLabel, label: detailsLabel, pressed: true, active: true});
-  }
-  if (includePopout) {
-    add({className: 'pane-popout', dataset: {panePopout: session}, title: t('tab.popout'), label: t('tab.popout')});
-  }
-  if (includeExpand) {
-    add({className: 'pane-expand', platformKind: 'zoom', dataset: {paneExpand: session}, title: t('pane.expand'), label: t('pane.expand'), hidden: !canPaneExpand(session)});
-  }
-  if (includeMinimize) {
-    add({className: 'pane-minimize', platformKind: 'minimize', dataset: {paneMinimize: session}, title: t('pane.minimize'), label: t('pane.minimize')});
-  }
-  if (controlOptions.close) {
-    const closeLabel = controlOptions.closeLabel || t('pane.closeTab');
-    const closeTitle = controlOptions.closeTitle || closeLabel;
-    add({className: ['pane-close', controlOptions.closeClass || ''].filter(Boolean).join(' '), platformKind: 'close', dataset: {paneClose: session}, title: closeTitle, label: closeLabel});
-  }
-  return controls.join('');
-}
-
-function paneFrameControlsGroupHtml(session, options = {}) {
-  const groupClass = options.groupClass ? ` ${options.groupClass}` : '';
-  return `<div class="tabs pane-frame-controls${groupClass}" role="tablist">${paneFrameControlsHtml(session, options)}</div>`;
-}
-
-function panelControlsHtml(session, options = {}) {
-  const disabled = options.disabled === true;
-  const unavailableLabel = options.unavailableLabel || itemLabel(session);
-  const disabledAttrs = label => disabled ? ` type="button" disabled title="${esc(t('tab.unavailableFor', {name: unavailableLabel}))}" aria-label="${esc(label)}"` : '';
-  const readonlyAttrs = label => ` type="button" disabled title="${esc(t('tab.adminRequiredFor', {name: label}))}" aria-label="${esc(label)}"`;
-  const tabAttrs = (name, label = '') => {
-    if (disabled) return disabledAttrs(label || name);
-    if (readOnlyMode && name === 'summary') return readonlyAttrs(t('brand.tab.summary'));
-    const labelAttrs = label ? ` title="${esc(label)}" aria-label="${esc(label)}"` : '';
-    return ` type="button" data-tab="${esc(session)}" data-tab-name="${name}"${labelAttrs}`;
-  };
-  const info = transcriptMetadataState.payload.sessions?.[session];
-  const terminalTitle = terminalTabTitle(session, info);
-  const terminalAttrs = disabled ? disabledAttrs(terminalTitle) : `${tabAttrs('terminal')} title="${esc(terminalTitle)}" aria-label="${esc(terminalTitle)}"`;
-  const terminalLabel = disabled ? t('tab.terminal.short') : terminalTabLabel(session, info);
-  const isFiles = typeof isFileSurfaceItem === 'function' ? isFileSurfaceItem(session) : isFileExplorerItem(session);
-  // Term is pressed ONLY when the terminal view is the active one — computed from the live view, not
-  // hardcoded, so a panel re-render (Dockview header refresh) doesn't re-press it after the user
-  // switched to transcript / YO!summary / events. activateTab also toggles it on click.
-  const terminalActive = panelActiveTabName(session) === 'terminal';
-  const terminalButtonHtml = `<button class="tab${terminalActive ? ' active' : ''} terminal-tab" ${terminalAttrs}>${esc(terminalLabel)}</button>`;
-  const frameHtml = isFiles
-    ? paneFrameControlsHtml(session, {
-      disabled,
-      actions: false,
-      minimize: false,
-      expand: false,
-      close: true,
-      closeTitle: t('finder.close', {name: fileExplorerLabel()}),
-      closeLabel: t('finder.close', {name: fileExplorerLabel()}),
-    })
-    : paneFrameControlsHtml(session, {
-      disabled,
-      actions: isTmuxSession(session),
-      details: true,
-      // In a one-column touch layout, X and minus remove only this selected tab. Showing them here
-      // makes the ordinary pane controls useful without offering a blank-the-last-pane action.
-      close: narrowPaneFrameActionTargetsTab(session),
-    });
-  return `<div class="tabs ${disabled ? 'disabled-panel-controls' : ''}" role="tablist">
-          ${terminalButtonHtml}
-          ${frameHtml}
-        </div>`;
-}
-
-function virtualPanelControlsHtml(session, options = {}) {
-  return `<div class="tabs virtual-panel-controls" role="tablist">
-          ${paneFrameControlsHtml(session, {actions: false, close: false, ...options})}
-        </div>`;
-}
-
-// A pane has exactly one frame-control owner. Dockview renders it in the common outer group header;
-// the fallback layout renders it inside panelFrameHtml(). Keeping that choice here prevents every
-// virtual panel from growing a second, independently hidden control row.
-function virtualPanelInnerControlsHtml(session, options = {}) {
-  return dockviewLayoutEnabled() ? '' : virtualPanelControlsHtml(session, options);
-}
-
-function relocalizeVirtualPanelChrome(panel, label = '') {
-  if (!panel) return false;
-  panel.querySelectorAll('.pane-tabs[role="tablist"]').forEach(tablist => tablist.setAttribute('aria-label', t('common.tabsLabel')));
-  panel.querySelectorAll('[data-pane-minimize]').forEach(button => {
-    button.title = t('pane.minimize');
-    button.setAttribute('aria-label', t('pane.minimize'));
-  });
-  panel.querySelectorAll('[data-pane-expand]').forEach(button => {
-    button.title = t('pane.expand');
-    button.setAttribute('aria-label', t('pane.expand'));
-  });
-  const labelNode = panel.querySelector('.panel-session-label .session-button-dir');
-  if (labelNode && label) labelNode.textContent = label;
-  if (typeof syncPanelDetailsToggleState === 'function') syncPanelDetailsToggleState(panel);
-  return true;
-}
-
-function panelActiveTabName(session) {
-  const activePane = document.getElementById(panelDomId(session))?.querySelector('.tab-pane.active');
-  const id = activePane?.id || '';
-  if (id === `transcript-pane-${session}`) return 'transcript';
-  if (id === `summary-pane-${session}`) return 'summary';
-  if (id === `events-pane-${session}`) return 'events';
-  return 'terminal';
-}
-
 const tmuxStatusModes = new Map();
 
 // Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
@@ -228,14 +89,14 @@ const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'sh
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade('mobile-accessory-actions').primary;
 // Esc renders alone in the top-left corner. Tab, Shift, and Ctrl fill the left utility column;
 // Ctrl anchors the bottom row before Alt/Cmd, and Copy/Paste stack beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);
+const terminalMobileAccessorySideActions = terminalRuntimeFacade('mobile-accessory-actions').side;
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = terminalRuntimeFacade('mobile-accessory-actions').dpad;
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -1053,13 +914,11 @@ async function cycleTmuxStatusMode(session) {
 }
 
 function createPanel(session) {
-  const panel = document.createElement('article');
-  panel.className = 'panel';
-  panel.id = panelDomId(session);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: session,
-    controlsHtml: panelControlsHtml(session),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    frame: {
+      controlsHtml: panelControlsHtml(session),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
@@ -1069,11 +928,11 @@ function createPanel(session) {
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>`,
-    bodyClass: 'tab-pane active',
-    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
-    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
-    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
-    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
+      bodyClass: 'tab-pane active',
+      bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+      bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+      toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
@@ -1093,10 +952,9 @@ function createPanel(session) {
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
       </div>`,
+    },
+    bind: bindPanelControls,
   });
-  bindPanelShell(panel, session);
-  bindPanelControls(panel, session);
-  return panel;
 }
 
 function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
@@ -1195,8 +1053,10 @@ function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusState.guard.invalidate();
   backgroundOwnerStatusState.payload = payload;
+  if (options.source !== 'request' && options.source !== 'resource-replace') {
+    backgroundOwnerStatusResource().replace(payload, 'background-owner-push', {...options, source: 'resource-replace'});
+  }
   backgroundOwnerStatusState.updatedAt = Date.now();
   backgroundOwnerStatusState.error = '';
   backgroundOwnerStatusState.loading = false;
@@ -1212,35 +1072,45 @@ function backgroundOwnerStatusIsFresh() {
     && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
 }
 
-async function refreshBackgroundOwnerStatus(options = {}) {
-  if (shareViewMode) return false;
+function syncBackgroundOwnerStatusResource(snapshot, event) {
+  backgroundOwnerStatusState.request = snapshot.request;
+  backgroundOwnerStatusState.loading = snapshot.loading && !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = snapshot.error ? userMessageSnapshot(snapshot.error) : '';
+  const options = event.context || {};
+  if (event.phase === 'loading' || event.phase === 'failed') {
+    if (options.render !== false) renderInfoPanel();
+    if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
+  }
+}
+
+function backgroundOwnerStatusResource() {
+  if (backgroundOwnerStatusState.resource) return backgroundOwnerStatusState.resource;
+  backgroundOwnerStatusState.resource = createLatestResource({
+    initial: backgroundOwnerStatusState.payload,
+    load: () => apiFetchJson('/api/background/status', {cache: 'no-store'}),
+    apply(payload, {context}) {
+      applyBackgroundOwnerStatusPayload(payload, {...(context || {}), source: 'request'});
+      return payload;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState: syncBackgroundOwnerStatusResource,
+  });
+  return backgroundOwnerStatusState.resource;
+}
+
+function refreshBackgroundOwnerStatus(options = {}) {
+  if (shareViewMode) return Promise.resolve(false);
   // Every consumer observes the same current snapshot. A reconnect may require a new request
   // after this settles, but must not discard and duplicate the request boot already owns.
   if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
-  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
-  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return Promise.resolve(true);
   backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
   backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      return applyBackgroundOwnerStatusPayload(payload, options);
-    } catch (error) {
-      if (!requestIsCurrent()) return false;
-      backgroundOwnerStatusState.error = userMessageSnapshot(error);
-      backgroundOwnerStatusState.loading = false;
-      if (options.render !== false) renderInfoPanel();
-      if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-      return false;
-    } finally {
-      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
-    }
-  })();
-  backgroundOwnerStatusState.request = request;
-  return request;
+  return backgroundOwnerStatusResource().read('background-owner-status', options);
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -5817,6 +5687,36 @@ function renderAutoApproveButton(session, payload) {
   updateTypingIndicator(session);
 }
 
+function tmuxSessionStreamLifecycleScope(scopes, session) {
+  scopes.get(session)?.dispose('replaced');
+  let scope = null;
+  const token = tmuxSessionLifecycleToken(session);
+  scope = createLifecycleScope({
+    isCurrent: () => scopes.get(session) === scope && tmuxSessionLifecycleTokenIsCurrent(token),
+    onDispose: () => {
+      tmuxSessionLifecycleReleaseScope(token, scope);
+      if (scopes.get(session) === scope) scopes.delete(session);
+    },
+  });
+  tmuxSessionLifecycleOwnScope(token, scope);
+  scopes.set(session, scope);
+  return {scope, token};
+}
+
+function ownTmuxSessionStream(scope, token, source) {
+  tmuxSessionLifecycleOwnSource(token?.name, source);
+  return scope.replace('stream', source, value => {
+    tmuxSessionLifecycleReleaseSource(token, value);
+    value?.close?.();
+  });
+}
+
+function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
+  const scope = scopes.get(session);
+  if (!scope || (expectedSource && scope.value('stream') !== expectedSource)) return false;
+  return scope.dispose('stopped');
+}
+
 function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
@@ -5833,10 +5733,9 @@ function startSummaryStream(session) {
   // plain paragraphs, then the model's markdown summary renders properly.
   let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
+  const {scope, token} = tmuxSessionStreamLifecycleScope(summaryLifecycleScopes, session);
   let source = null;
-  const streamIsCurrent = () => source
-    && summaryStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
+  const streamIsCurrent = () => source && scope.current() && scope.value('stream') === source;
   const renderSummary = () => {
     renderScheduled = false;
     if (!streamIsCurrent()) return;
@@ -5852,8 +5751,7 @@ function startSummaryStream(session) {
     }
   };
   source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
-  tmuxSessionLifecycleOwnSource(session, source);
-  summaryStreams.set(session, source);
+  ownTmuxSessionStream(scope, token, source);
   renderSummary();
   source.addEventListener('meta', event => {
     if (!streamIsCurrent()) return;
@@ -5904,11 +5802,7 @@ function startSummaryStream(session) {
 }
 
 function stopSummaryStream(session, expectedSource = null) {
-  const source = summaryStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  summaryStreams.delete(session);
+  stopTmuxSessionStreamScope(summaryLifecycleScopes, session, expectedSource);
 }
 
 function reloadIsSafe() {
@@ -6110,7 +6004,17 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'superseded_request', payload);
+  if (!requestIsCurrent()) {
+    // A superseded response still carries a true fact about the SERVER's build queue: which build
+    // will observe the request that produced it. That fact is not about whether THIS client request
+    // is still current, so discarding it with the payload is what left a forced read awaiting build
+    // zero -- a target every payload already satisfies -- whenever its apply lost the race against a
+    // concurrent refresh or a `transcripts_changed` push. Recording it here is safe without the
+    // epoch adoption above, because the recorder refuses an identity from any other epoch and never
+    // lowers the number.
+    noteSessionMetadataPendingIdentity(payload);
+    return noteSessionMetadataApply(false, 'superseded_request', payload);
+  }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(
@@ -6730,11 +6634,10 @@ function startTranscriptStream(session, options = {}) {
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const {scope, token: lifecycleToken} = tmuxSessionStreamLifecycleScope(transcriptLifecycleScopes, session);
   const source = new EventSource(url);
-  const lifecycleToken = tmuxSessionLifecycleOwnSource(session, source);
-  const streamIsCurrent = () => transcriptStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
-  transcriptStreams.set(session, source);
+  ownTmuxSessionStream(scope, lifecycleToken, source);
+  const streamIsCurrent = () => scope.current() && scope.value('stream') === source;
   source.addEventListener('reset', event => {
     if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
@@ -6751,28 +6654,28 @@ function startTranscriptStream(session, options = {}) {
   source.addEventListener('ping', () => {});
   source.onerror = () => {
     if (!streamIsCurrent()) return;
-    stopTranscriptStream(session, source);
+    scope.release('stream', source);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken) && pane?.classList.contains(CLS.active)) {
+    if (scope.current() && pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       const reconnectTimer = setTimeout(() => {
-        tmuxSessionLifecycleReleaseTimer(lifecycleToken, reconnectTimer);
-        if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+        scope.release('reconnect', reconnectTimer);
+        if (scope.current()
             && document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
       tmuxSessionLifecycleOwnTimer(lifecycleToken, reconnectTimer);
+      scope.replace('reconnect', reconnectTimer, timer => {
+        tmuxSessionLifecycleReleaseTimer(lifecycleToken, timer);
+        clearTimeout(timer);
+      });
     }
   };
 }
 
 function stopTranscriptStream(session, expectedSource = null) {
-  const source = transcriptStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  transcriptStreams.delete(session);
+  stopTmuxSessionStreamScope(transcriptLifecycleScopes, session, expectedSource);
 }
 
 function renderTranscriptItems(container, path, items, options = {}) {
@@ -6934,6 +6837,11 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
+  // /api/event is host-only (share_access=none); the server returns 403 for a share token, and a real
+  // 403 during teardown fails the strict browser server-log-ring gate. Gate every event producer
+  // (terminal_disconnected, state_changed, notifications, watched-PR, yoagent) at this one owner rather
+  // than per call site, so no share-reachable caller can leak a forbidden host-only request.
+  if (!clientCanUseUnscopedHostRequests()) return Promise.resolve(false);
   const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
   if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   return apiFetch('/api/event', {
@@ -7005,11 +6913,13 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  if (clientEventTransportState.resyncTimer) currentClientEventTransportLifecycleScope().release('resync', clientEventTransportState.resyncTimer);
   clientEventTransportState.resyncTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('resync', clientEventTransportState.resyncTimer);
     clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('resync', clientEventTransportState.resyncTimer);
 }
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
@@ -7492,8 +7402,9 @@ function clientPushEventSessionKey(payload = {}) {
 // so they cannot be mistaken for an EventSource type with no server producer.
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -7520,16 +7431,18 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
-    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    if (clientEventTransportState.frame) currentClientEventTransportLifecycleScope().release('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
   if (clientEventTransportState.frame) return;
   clientEventTransportState.frame = requestAnimationFrame(() => {
+    currentClientEventTransportLifecycleScope().relinquish('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
+  currentClientEventTransportLifecycleScope().replace('dispatch-frame', clientEventTransportState.frame, cancelAnimationFrame);
 }
 
 function flushQueuedClientPushEvents() {
@@ -7602,6 +7515,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
     applyAttentionAcknowledgementResponse(payload);
     return;
   }
+  if (type === 'backend_health_changed') {
+    // Push-only, deliberately: this is what makes a dead backend service visible in the topbar with
+    // no diagnostics panel open. Do NOT add a /api/system-status refetch here.
+    applyBackendHealthPayload(payload);
+    return;
+  }
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
@@ -7624,9 +7543,9 @@ function handleClientPushEventNowByType(type, payload = {}) {
       // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
       // immediately recreates the retired building-index poll and can race a newer generation.
       if (payload.root && !applied) refreshFileIndexStatus(payload.root);
-      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
-      }
+      // A completed search-index refresh is authoritative: re-issue the open palette query through the
+      // one re-query owner, forcing past any in-flight search so the new snapshot's rows win.
+      requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');
@@ -7724,6 +7643,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
   }
   if (type === 'roots_changed') {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    return;
+  }
+  if (type === 'search_progress') {
+    // A per-root crawl-advance signal (path-free {scope_id, generation, revision, coverage}). The
+    // open Quick Open palette streams the newly-committed matches by cursor instead of re-querying.
+    if (typeof handleFileSearchProgressSignal === 'function') handleFileSearchProgressSignal(payload);
   }
 }
 
@@ -7820,7 +7745,7 @@ function clientEventDemandSignature(descriptor) {
 function clearClientEventDisconnectEpisode(source, options = {}) {
   const episode = clientEventTransportState.disconnectEpisode;
   if (!episode || episode.source !== source) return false;
-  if (clientEventTransportState.disconnectTimer) clearTimeout(clientEventTransportState.disconnectTimer);
+  if (clientEventTransportState.disconnectTimer) currentClientEventTransportLifecycleScope().release('disconnect-episode', clientEventTransportState.disconnectTimer);
   clientEventTransportState.disconnectTimer = null;
   clientEventTransportState.disconnectEpisode = null;
   if (options.recovered === true && episode.reported === true) {
@@ -7846,6 +7771,7 @@ function scheduleClientEventDisconnectEpisode(source) {
   };
   clientEventTransportState.disconnectEpisode = episode;
   clientEventTransportState.disconnectTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('disconnect-episode', clientEventTransportState.disconnectTimer);
     clientEventTransportState.disconnectTimer = null;
     if ((source !== null && clientEventTransportState.source !== source)
         || (source === null && clientEventTransportState.source !== null)
@@ -7858,6 +7784,23 @@ function scheduleClientEventDisconnectEpisode(source) {
       diagnosticFailure: true,
     });
   }, clientEventDisconnectGraceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('disconnect-episode', clientEventTransportState.disconnectTimer);
+  return true;
+}
+
+function clearClientEventCandidateEpisode(source) {
+  const episode = clientEventTransportState.candidateEpisode;
+  if (!episode || (source !== undefined && episode.source !== source)) return false;
+  clientEventTransportState.candidateEpisode = null;
+  return true;
+}
+
+// Abandon a pre-ready CANDIDATE stream and its retry episode without touching the ACTIVE stream.
+function abandonClientEventCandidate(source) {
+  if (clientEventTransportState.replacementSource !== source) return false;
+  clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode(source);
+  if (!currentClientEventTransportLifecycleScope().release('candidate-stream', source)) source?.close?.();
   return true;
 }
 
@@ -7867,9 +7810,10 @@ function closeClientEventStream() {
   clientEventTransportState.source = null;
   const replacementSource = clientEventTransportState.replacementSource;
   clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode();
   clientEventTransportState.connected = false;
-  source?.close?.();
-  if (replacementSource !== source) replacementSource?.close?.();
+  if (!currentClientEventTransportLifecycleScope().release('active-stream', source)) source?.close?.();
+  if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
 
 function openClientEventStream(descriptor, options = {}) {
@@ -7903,9 +7847,19 @@ function openClientEventStream(descriptor, options = {}) {
   if (replacing) {
     const priorReplacement = clientEventTransportState.replacementSource;
     clientEventTransportState.replacementSource = source;
-    priorReplacement?.close?.();
+    // One bounded retry episode per candidate: opening a new candidate (whether the first for this
+    // demand or a corrected one for changed demand) starts a fresh episode.
+    clientEventTransportState.candidateEpisode = {
+      source,
+      demandSignature: String(options.demandSignature || ''),
+      attempts: 0,
+      startedAt: performance.now(),
+    };
+    if (!currentClientEventTransportLifecycleScope().release('candidate-stream', priorReplacement)) priorReplacement?.close?.();
+    currentClientEventTransportLifecycleScope().ownStream('candidate-stream', source);
   } else {
     clientEventTransportState.source = source;
+    currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
   }
   const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
@@ -7913,6 +7867,7 @@ function openClientEventStream(descriptor, options = {}) {
       const demandedSignature = String(options.demandSignature || '');
       if (demandedSignature && demandedSignature !== clientEventDemandSignature(clientEventDemandDescriptor())) {
         clientEventTransportState.replacementSource = null;
+        clearClientEventCandidateEpisode(source);
         source.close();
         syncClientEventDemand({immediate: true});
         return;
@@ -7920,7 +7875,10 @@ function openClientEventStream(descriptor, options = {}) {
       const previousSource = clientEventTransportState.source;
       clientEventTransportState.source = source;
       clientEventTransportState.replacementSource = null;
-      previousSource?.close?.();
+      // The candidate is now the ACTIVE stream; its bounded retry episode is over.
+      clearClientEventCandidateEpisode(source);
+      currentClientEventTransportLifecycleScope().relinquish('candidate-stream', source);
+      currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
     } else if (clientEventTransportState.source !== source) {
       return;
     }
@@ -7959,7 +7917,33 @@ function openClientEventStream(descriptor, options = {}) {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    if (clientEventTransportState.replacementSource === source) return;
+    if (clientEventTransportState.replacementSource === source) {
+      // A CANDIDATE that errors before it is ever ready must not be silently retried forever while the
+      // ACTIVE stream keeps claiming to serve demand it no longer covers. Bound the retry episode: the
+      // browser EventSource auto-reconnects the same URL, so tolerate a few transient errors, then
+      // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
+      const episode = clientEventTransportState.candidateEpisode;
+      if (!episode || episode.source !== source) return;
+      episode.attempts += 1;
+      if (episode.attempts < clientEventCandidateRetryLimit) return;
+      abandonClientEventCandidate(source);
+      // The active stream does not serve the new demand: demote it so consumers fall back to HTTP
+      // instead of trusting a stream that covers only the old channel set.
+      clientEventTransportState.connected = false;
+      clientEventTransportState.reconnectPending = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+      recordSseDebugEvent('client_events_candidate_failed', {
+        attempts: episode.attempts,
+        demandSignature: episode.demandSignature,
+        diagnosticFailure: true,
+      });
+      // Force demand to be re-driven (the signature was already advanced when this candidate opened),
+      // opening one corrected candidate, and schedule an HTTP resync so no channel is left stranded.
+      clientEventTransportState.demandSignature = '';
+      scheduleReconnectResync('candidate-failed');
+      syncClientEventDemand({immediate: true});
+      return;
+    }
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     clientEventTransportState.reconnectPending = true;
@@ -7983,6 +7967,7 @@ function openClientEventStream(descriptor, options = {}) {
 }
 
 function applyClientEventDemand() {
+  currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   clientEventTransportState.demandTimer = null;
   if (!clientEventTransportState.enabled) return false;
   const descriptor = clientEventDemandDescriptor();
@@ -8002,15 +7987,35 @@ function applyClientEventDemand() {
 
 function syncClientEventDemand(options = {}) {
   if (!clientEventTransportState.enabled) return false;
-  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (clientEventTransportState.demandTimer) currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   if (options.immediate === true) return applyClientEventDemand();
   clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('demand', clientEventTransportState.demandTimer);
   return true;
 }
 
 function installClientEventStream() {
   clientEventTransportState.enabled = true;
   return syncClientEventDemand({immediate: true});
+}
+
+function disposeClientEventTransportLifecycle(reason = 'disposed') {
+  clientEventTransportLifecycleScope?.dispose(reason);
+  clientEventTransportState.source = null;
+  clientEventTransportState.replacementSource = null;
+  clientEventTransportState.connected = false;
+  clientEventTransportState.disconnectTimer = null;
+  clientEventTransportState.disconnectEpisode = null;
+  clientEventTransportState.demandTimer = null;
+  clientEventTransportState.frame = 0;
+  clientEventTransportState.resyncTimer = null;
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', () => disposeClientEventTransportLifecycle('pagehide'));
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted === true && clientEventTransportState.enabled) syncClientEventDemand({immediate: true});
+  });
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
@@ -8163,6 +8168,18 @@ function handleFocusedTerminalCopyShortcut(event) {
   event.stopPropagation?.();
   return true;
 }
+
+registerTerminalRuntimeFacade('panel', {
+  createPanel,
+  panelControlsHtml,
+  relocalizeTerminalPanelChrome,
+});
+registerTerminalRuntimeFacade('transport', {
+  connectTerminalSocket,
+  installClientEventStream,
+  startSummaryStream,
+  startTranscriptStream,
+});
 
 if (refreshMeta) {
   refreshMetaButtonChrome();

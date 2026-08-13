@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from . import families, storage
+from . import browser_family, families, storage
 from .http import bound_client_id
 
 
@@ -70,8 +70,14 @@ def parse_browser_observations(
         )
         observed_at = _number(item["observed_at"], f"observations[{index}].observed_at")
         try:
-            payload = families.validate_payload("browser", item["payload"])
-        except families.FamilyValidationError as error:
+            # W2: validate raw shape -> sanitize any Mapping (redact + re-bound +
+            # endpoint-normalize) -> validate again, then persist the sanitized
+            # payload. Raw-invalid input never becomes valid; sanitized-invalid
+            # input fails closed before SQLite / browser-failure JSONL.
+            validated = families.validate_payload("browser", item["payload"])
+            sanitized = browser_family.sanitize_retained_payload(validated)
+            payload = families.validate_payload("browser", sanitized)
+        except (families.FamilyValidationError, browser_family.BrowserPayloadError) as error:
             raise BrowserObservationError(str(error)) from error
         observations.append(storage.Observation(
             event_id=bound_client_id(

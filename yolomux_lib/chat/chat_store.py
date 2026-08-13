@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Concurrent, durable storage for the global YO!chat room."""
+"""Concurrent, durable storage for one host's YO!chat room."""
 
 from __future__ import annotations
 
@@ -22,9 +22,18 @@ from ..atomic_file import file_lock
 from ..atomic_file import open_wal_database
 from ..atomic_file import open_wal_session
 from ..common import STATE_DIR
+from ..infra.host_partition import host_partitioned_state_dir
 
 
-CHAT_DATABASE_PATH = STATE_DIR / "yochat.sqlite3"
+CHAT_DATABASE_NAME = "yochat.sqlite3"
+
+
+def default_chat_database_path(state_dir: Path | None = None) -> Path:
+    """Keep this host's live chat WAL separate from the legacy shared file."""
+    return host_partitioned_state_dir(state_dir or STATE_DIR) / CHAT_DATABASE_NAME
+
+
+CHAT_DATABASE_PATH = default_chat_database_path()
 CHAT_HISTORY_FILE_VERSION = 1
 CHAT_HISTORY_FILE_SUFFIX = ".jsonl"
 CHAT_SCHEMA_VERSION = 3
