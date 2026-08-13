@@ -5,6 +5,9 @@ from __future__ import annotations
 import errno
 import traceback
 from collections.abc import Mapping
+from contextlib import contextmanager
+from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -35,14 +38,73 @@ class TransportFailure:
     client_elapsed_ms: float
 
 
-def local_service_failure_is_transient(response: Mapping[str, object]) -> bool:
+class DeferredTransportErrors:
+    """Operation-scoped owner for transport failures that may recover before its deadline."""
+
+    def __init__(self, client: "LocalServiceClient") -> None:
+        self.client = client
+        self.failure: TransportFailure | None = None
+
+    def capture(self, failure: TransportFailure) -> None:
+        self.failure = failure
+
+    def publish(self) -> None:
+        if self.failure is not None:
+            self.client._emit_transport_error(self.failure)
+            self.failure = None
+
+
+_DEFERRED_TRANSPORT_ERRORS: ContextVar[tuple[DeferredTransportErrors, ...]] = ContextVar(
+    "local_service_deferred_transport_errors",
+    default=(),
+)
+
+
+@contextmanager
+def defer_local_service_transport_errors(client: "LocalServiceClient"):
+    """Keep retryable poll diagnostics private until the operation owner publishes one."""
+
+    scope = DeferredTransportErrors(client)
+    token = _DEFERRED_TRANSPORT_ERRORS.set((*_DEFERRED_TRANSPORT_ERRORS.get(), scope))
+    try:
+        yield scope
+    finally:
+        _DEFERRED_TRANSPORT_ERRORS.reset(token)
+
+
+def deferred_transport_errors(client: object):
+    """Return a real deferral scope for typed clients and a no-op scope for test doubles."""
+
+    if isinstance(client, LocalServiceClient):
+        return defer_local_service_transport_errors(client)
+    return nullcontext(None)
+
+
+@dataclass(frozen=True)
+class LocalServicePollingCapabilities:
+    lifecycle_recovery: bool
+
+
+def local_service_polling_capabilities(client: object) -> LocalServicePollingCapabilities:
+    """Describe retry ownership without guessing from attributes on arbitrary client doubles."""
+
+    return LocalServicePollingCapabilities(lifecycle_recovery=isinstance(client, LocalServiceClient))
+
+
+def local_service_failure_is_transient(
+    response: Mapping[str, Any],
+    *,
+    capabilities: LocalServicePollingCapabilities | None = None,
+) -> bool:
     """Return whether a local-service failure is safe for a bounded retry."""
 
     if response.get("ok") is True or response.get("terminal") is True:
         return False
     transport_error = str(response.get("_transport_error") or "").strip().lower()
-    if transport_error in {"timeout", "absent", "refused"}:
+    if transport_error == "timeout":
         return True
+    if transport_error in {"absent", "refused"}:
+        return capabilities is None or capabilities.lifecycle_recovery
     error = str(response.get("error") or "").strip().lower()
     # A deadline breach is the same physical event as the `timeout` above -- the peer could not
     # answer in time -- so it must be retryable for the same reason.  Matching one hand-written
@@ -160,6 +222,13 @@ class LocalServiceClient:
             delivery=self._transport_error(exc),
         )
 
+    def _report_transport_error(self, failure: TransportFailure) -> None:
+        for scope in reversed(_DEFERRED_TRANSPORT_ERRORS.get()):
+            if scope.client is self:
+                scope.capture(failure)
+                return
+        self._emit_transport_error(failure)
+
     def request_with_binary(
         self,
         payload: dict[str, Any],
@@ -177,7 +246,7 @@ class LocalServiceClient:
         # cannot establish a serving socket.
         if response.get("_transport_error") not in {"absent", "refused"}:
             if error is not None:
-                self._emit_transport_error(error)
+                self._report_transport_error(error)
             return response, binary
         if not self.registry.ensure_started():
             if not self.registry.starts_allowed():
@@ -189,11 +258,11 @@ class LocalServiceClient:
                     "_transport_error": "stopped",
                 }, b""
             if error is not None:
-                self._emit_transport_error(error)
+                self._report_transport_error(error)
             return response, binary
         response, binary, retry_error = self._request_once(payload, timeout, request_binary, probe=probe)
         if retry_error is not None:
-            self._emit_transport_error(retry_error)
+            self._report_transport_error(retry_error)
         return response, binary
 
     def request(self, payload: dict[str, Any], timeout: float = 0.5, *, probe: bool = False) -> dict[str, Any]:

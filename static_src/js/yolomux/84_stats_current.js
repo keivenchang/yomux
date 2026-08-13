@@ -796,12 +796,12 @@
     let capabilitiesPromise = null;
     let startPromise = null;
     let controller = null;
-    let source = null;
+    let lifecycleScope = null;
     let streamEpoch = 0;
+    let streamTransportToken = 0;
     let running = false;
     let visible = true;
     let readFenceRecovery = null;
-    let readinessTimer = null;
     let readinessEpoch = 0;
     let healthy = false;
     let deliverySequence = 0;
@@ -809,39 +809,32 @@
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
     let lastDeliveryEpoch = 0;
-    let pageRetirementReason = '';
+    const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
+      && options.pageLifecycle !== undefined;
+    const transportLifecycle = options.pageTransportLifecycle || (
+      ownsPageTransportLifecycle
+        ? createPageTransportLifecycle(options.pageLifecycle)
+        : pageTransportLifecycle
+    );
+    streamTransportToken = transportLifecycle.begin();
 
-    // How the client knows it is unloading rather than failing.
-    //
-    // The browser aborts an open EventSource as part of unloading the document and fires
-    // the very same `error` event a dead server or a dropped network fires, with no
-    // payload to tell them apart. Measured against live 7771 (probe: authenticated page,
-    // stream open and healthy, `location.replace('about:blank')`): `beforeunload` ran at
-    // t+0ms, the EventSource `error` at t+6ms, `pagehide` at t+18ms, and
-    // `document.visibilityState` was still "visible" at both `beforeunload` and
-    // `pagehide`. So `beforeunload` is the earliest event that discriminates the two, and
-    // visibility does not discriminate them at all. Latch on `beforeunload` or `pagehide`,
-    // whichever the browser delivers first.
-    //
-    // The latch is cleared by anything that proves the document is still transporting: a
-    // `pageshow` (bfcache restore) or any stream delivery. A navigation another listener
-    // cancels therefore cannot leave a genuine mid-session failure permanently
-    // misclassified, and a genuine failure that has not been preceded by an unload signal
-    // is never reclassified at all.
-    const pageLifecycle = options.pageLifecycle === undefined
-      ? (typeof globalThis?.addEventListener === 'function' ? globalThis : null)
-      : options.pageLifecycle;
-    if (pageLifecycle && typeof pageLifecycle.addEventListener === 'function') {
-      for (const eventName of ['beforeunload', 'pagehide']) {
-        pageLifecycle.addEventListener(eventName, () => {
-          if (!pageRetirementReason) pageRetirementReason = `page_${eventName}`;
-        });
-      }
-      pageLifecycle.addEventListener('pageshow', () => { pageRetirementReason = ''; });
+    function ensureLifecycleScope() {
+      if (lifecycleScope?.current()) return lifecycleScope;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      transportLifecycle.start();
+      return scope;
     }
+    ensureLifecycleScope();
 
     function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
-      pageRetirementReason = '';
+      transportLifecycle.noteDelivery(streamTransportToken);
+      streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
       if (acceptedDelta) acceptedDeltaSequence = Math.min(Number.MAX_SAFE_INTEGER, acceptedDeltaSequence + 1);
       lastDeliveryKind = kind;
@@ -857,7 +850,7 @@
         running,
         visible,
         healthy,
-        streamOpen: source !== null,
+        streamOpen: lifecycleScope?.value('stream') !== null,
         streamEpoch,
         deliverySequence,
         acceptedDeltaSequence,
@@ -873,8 +866,7 @@
     }
 
     function clearReadinessTimer() {
-      if (readinessTimer !== null && typeof clock.clearTimeout === 'function') clock.clearTimeout(readinessTimer);
-      readinessTimer = null;
+      lifecycleScope?.release('readiness-timer');
     }
 
     function readinessMessage(error) {
@@ -891,11 +883,13 @@
     }
 
     function scheduleReadinessRetry() {
-      if (!running || !visible || readinessTimer !== null || typeof clock.setTimeout !== 'function') return;
-      readinessTimer = clock.setTimeout(() => {
-        readinessTimer = null;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
         void beginActivation().catch(() => {});
       }, readinessRetryMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
     }
 
     function handleReadinessFailure(error, epoch) {
@@ -960,13 +954,14 @@
 
     function closeStream() {
       streamEpoch += 1;
-      const closing = source;
-      source = null;
-      if (closing) closing.close();
+      for (const eventName of ['delta', 'ready', 'repair', 'unavailable', 'error']) {
+        lifecycleScope?.release(`stream-${eventName}`);
+      }
+      lifecycleScope?.release('stream');
     }
 
     function routeStreamFailure(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleTransportFailure();
     }
@@ -975,24 +970,25 @@
     // itself performs while unloading. A server-sent `unavailable` frame and a rejected
     // `delta`/`ready` frame are the server or the payload failing and stay failures.
     function routeStreamTransportError(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
-      if (!pageRetirementReason) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      const retirementReason = transportLifecycle.reasonSince(streamTransportToken);
+      if (!retirementReason) {
         routeStreamFailure(candidate, epoch);
         return;
       }
-      const reason = pageRetirementReason;
       closeStream();
-      controller.handleTransportRetirement(reason);
+      controller.handleTransportRetirement(retirementReason);
     }
 
     function routeStreamRepair(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleReconnect({requiresFullSnapshot: false});
     }
 
     function openStream() {
-      if (!running || !visible || source || !controller?.generation()) return;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('stream') || !controller?.generation()) return;
       const request = controller.deltaRequest();
       const url = exactUrl('/api/stats-stream', [
         ['range_seconds', request.range_seconds],
@@ -1010,9 +1006,10 @@
         return;
       }
       streamEpoch = epoch;
-      source = candidate;
-      candidate.addEventListener('delta', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      streamTransportToken = transportLifecycle.begin();
+      scope.ownStream('stream', candidate);
+      scope.ownEvent('stream-delta', candidate, 'delta', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           if (controller.acceptDelta(JSON.parse(event.data))) {
             recordStreamDelivery('delta', epoch, {acceptedDelta: true});
@@ -1021,8 +1018,8 @@
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('ready', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      scope.ownEvent('stream-ready', candidate, 'ready', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           const ready = JSON.parse(event.data);
           exactFields(ready, ['cache_generation', 'revision'], 'ready');
@@ -1041,9 +1038,9 @@
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('repair', () => routeStreamRepair(candidate, epoch));
-      candidate.addEventListener('unavailable', () => routeStreamFailure(candidate, epoch));
-      candidate.addEventListener('error', () => routeStreamTransportError(candidate, epoch));
+      scope.ownEvent('stream-repair', candidate, 'repair', () => routeStreamRepair(candidate, epoch));
+      scope.ownEvent('stream-unavailable', candidate, 'unavailable', () => routeStreamFailure(candidate, epoch));
+      scope.ownEvent('stream-error', candidate, 'error', () => routeStreamTransportError(candidate, epoch));
     }
 
     async function activate(epoch) {
@@ -1099,12 +1096,14 @@
       clearReadinessTimer();
       const timeout = typeof clock.setTimeout === 'function'
         ? new Promise((_resolve, reject) => {
-          readinessTimer = clock.setTimeout(() => {
-            readinessTimer = null;
+          const scope = ensureLifecycleScope();
+          const timer = clock.setTimeout(() => {
+            scope.release('readiness-timer', timer);
             const error = new Error(`current stats readiness timed out after ${readinessTimeoutMs}ms`);
             if (startPromise === null && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
             reject(error);
           }, readinessTimeoutMs);
+          scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
         })
         : null;
       const activation = Promise.resolve().then(() => activate(epoch));
@@ -1126,7 +1125,7 @@
     function start() {
       if (running) {
         if (startPromise) return startPromise;
-        if (controller || readinessTimer !== null) return Promise.resolve(controller);
+        if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
         return beginActivation();
       }
       running = true;
@@ -1171,7 +1170,7 @@
           controller.setVisible(visible);
           if (!running) controller.stop();
         }
-        if (visible && running && !controller && !startPromise && readinessTimer === null) {
+        if (visible && running && !controller && !startPromise && lifecycleScope?.value('readiness-timer') === null) {
           void beginActivation().catch(() => {});
         }
       },
@@ -1199,8 +1198,9 @@
       stop() {
         running = false;
         readinessEpoch += 1;
-        clearReadinessTimer();
-        closeStream();
+        streamEpoch += 1;
+        lifecycleScope?.dispose('stats-client-stop');
+        if (ownsPageTransportLifecycle) transportLifecycle.dispose('stats-client-stop');
         if (controller) controller.stop();
         startPromise = null;
       },

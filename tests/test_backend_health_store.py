@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.clock import FakeClock
+
 from yolomux_lib.backend_health import store as store_module
 from yolomux_lib.backend_health.store import AGGREGATE_COVERAGE_FULL
 from yolomux_lib.backend_health.store import AGGREGATE_COVERAGE_PARTIAL
@@ -64,20 +66,6 @@ PORT = 7771
 OTHER_PORT = 7772
 EPOCH_A = ("proc:98", 4242)
 EPOCH_B = ("proc:200", 5000)
-
-
-class FakeClock:
-    """One injected wall clock. Tests advance it explicitly; nothing here ever sleeps."""
-
-    def __init__(self, value: float = 1_700_000_000.0) -> None:
-        self.value = float(value)
-
-    def __call__(self) -> float:
-        return self.value
-
-    def advance(self, seconds: float) -> float:
-        self.value += float(seconds)
-        return self.value
 
 
 class FailingWriter:

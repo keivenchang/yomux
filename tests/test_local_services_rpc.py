@@ -18,9 +18,8 @@ from yolomux_lib.local_services.client import LocalServiceClient
 @pytest.fixture(autouse=True)
 def _isolated_local_service_traffic():
     """Every traffic assertion measures only its own requests."""
-    rpc.reset_local_service_traffic()
-    yield
-    rpc.reset_local_service_traffic()
+    with rpc.local_service_traffic_scope():
+        yield
 
 
 class FragmentedConnection:
@@ -767,6 +766,31 @@ def test_local_service_traffic_ledger_publishes_exact_count_total_and_max():
     assert work["client_latency_ms"] == {"count": 4, "total_ms": 11.0, "max_ms": 7.0, "avg_ms": 2.75}
     assert work["service_latency_ms"] == {"count": 4, "total_ms": 5.5, "max_ms": 3.5, "avg_ms": 1.375}
     assert ledger.snapshot()["schema_version"] == rpc.LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION
+
+
+def test_local_service_traffic_registry_is_injectable_without_touching_production_singleton():
+    injected = rpc.LocalServiceTrafficRegistry()
+    independent = rpc.LocalServiceTrafficRegistry()
+    rpc.local_service_traffic_ledger("isolated", registry=injected).record_failure(
+        rpc.LOCAL_SERVICE_TRAFFIC_WORK,
+        rpc.LOCAL_SERVICE_REASON_TRANSPORT,
+    )
+
+    assert rpc.local_service_traffic_snapshot(registry=injected)["isolated"]["work"]["errors"] == 1
+    assert rpc.local_service_traffic_snapshot(registry=independent) == {}
+
+
+def test_local_service_traffic_scope_owns_cross_thread_accounting_and_rejects_ambient_reset():
+    def record(index):
+        rpc.local_service_traffic_ledger("scoped").record_failure(
+            rpc.LOCAL_SERVICE_TRAFFIC_WORK,
+            f"failure-{index}",
+        )
+
+    with pytest.raises(RuntimeError, match="active scope"):
+        rpc.reset_local_service_traffic()
+    _fan_out(8, record, workers=4)
+    assert rpc.local_service_traffic_snapshot()["scoped"]["work"]["errors"] == 8
 
 
 def test_local_service_traffic_ledger_bounds_reason_vocabulary_without_losing_a_request():

@@ -1517,12 +1517,21 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
         assert "file-tree-row--changed-ancestor" in rows_by_path[path]["classes"], metrics
         assert rows_by_path[path]["background"] == "rgba(0, 0, 0, 0)", metrics
         assert rows_by_path[path]["nameWeight"] >= 700, metrics
-    hover_detail = browser.execute_script(
-        """
-        const row = document.querySelector('.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]');
-        row.__yolomuxRepoHoverController.openNow();
-        return document.getElementById('fileTreeRepoPopover')?.textContent || '';
-        """
+    hover_row = next(
+        row
+        for row in browser.find_elements(By.CSS_SELECTOR, '.file-tree-row[data-path="/home/test/dynamo/repo-a/src"]')
+        if row.is_displayed() and row.rect["width"] > 0 and row.rect["height"] > 0
+    )
+    browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", hover_row)
+    fast_pointer_actions(browser).move_to_element(hover_row).perform()
+    hover_detail = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const text = document.getElementById('fileTreeRepoPopover')?.textContent || '';
+            return text.includes('★') && text.includes('Modified by 1') ? text : '';
+            """
+        )
+        or False
     )
     assert "★" in hover_detail and "Modified by 1" in hover_detail, hover_detail
     assert metrics["fetchedPaths"] >= 1, metrics
@@ -1776,13 +1785,7 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         "loaded": True,
         "errors": [],
         "repos": [{"repo": "/home/test/dynamo/frontend-crates"}],
-        "files": [
-            {
-                "repo": "/home/test/dynamo/frontend-crates",
-                "path": "conformance/utils/tests/parity/reasoning/table.py",
-                "abs_path": path,
-            },
-        ],
+        "files": [{"repo": "/home/test/dynamo/frontend-crates", "path": "conformance/utils/tests/parity/reasoning/table.py", "abs_path": path}],
     }
     fs_entries = {
         "/home/test": [{"name": "dynamo", "kind": "dir"}],
@@ -1838,6 +1841,9 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
           fileVisible: tree.querySelector(`.file-tree-row[data-path="${path}"]`) !== null,
           fileCurrent: tree.querySelector(`.file-tree-row[data-path="${path}"]`)?.classList.contains('current-file') || false,
           expandedSet: Array.from(fileExplorerExpanded),
+          listedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch')
+            .flatMap(item => item.path === '/api/fs/list' ? [new URLSearchParams(item.search || '').get('path')]
+              : (item.body?.requests || []).filter(request => request.type === 'list').map(request => request.path)),
         };
         """
     )
@@ -1847,10 +1853,13 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
     assert metrics["mode"] == "sync", metrics
     assert metrics["plan"]["root"] == "/home/test", metrics
     assert metrics["plan"]["session"] == "2", metrics
-    assert metrics["plan"]["expandPaths"] == [path], metrics
+    parent = "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning"
+    assert metrics["plan"]["expandPaths"] == metrics["plan"]["affectedDirs"] == [parent], metrics
     assert metrics["fileVisible"] is True, metrics
     assert metrics["fileCurrent"] is True, metrics
+    assert path not in metrics["listedPaths"] and parent in metrics["listedPaths"], metrics
     assert "/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning" in metrics["expandedSet"], metrics
+
     collapsed = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];

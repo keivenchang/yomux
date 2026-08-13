@@ -778,26 +778,24 @@ function preferencesPanelHtml() {
     ${resetBlock}`;
 }
 function createPreferencesPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel preferences-panel';
-  panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: prefsItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel preferences-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>`,
-    bodyClass: 'preferences-body',
-    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+      bodyClass: 'preferences-body',
+      bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+    },
+    bind: bindPreferencesPanel,
   });
-  bindPanelShell(panel, prefsItemId);
-  bindPreferencesPanel(panel);
-  return panel;
 }
 
 function focusPreferencesSearch(panel = null, options = {}) {
@@ -849,19 +847,15 @@ function renderPreferencesPanels(options = {}) {
       const shouldKeepDom = activeControl && options.force !== true;
       // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
-      const prevScroll = scroller();
-      const scrollTop = prevScroll.scrollTop;
-      const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
-      }
-      if (options.focusSearch !== true) {
-        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
-        restore();
-        requestAnimationFrame(restore);
+        reconcilePanelBody({
+          body,
+          html: `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+          anchors: options.focusSearch === true ? [] : [elementScrollAnchor('.preferences-scroll', true)],
+        });
       }
     }
     bindPreferencesPanel(panel);
@@ -913,9 +907,10 @@ function autosizePreferenceTextareas(root) {
 }
 
 function bindPreferencesPanel(panel) {
-  if (!panel || panel.dataset.preferencesBound === 'true') return;
-  panel.dataset.preferencesBound = 'true';
-  panel.addEventListener('input', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'preferences-panel', () => {
+    const scope = createLifecycleScope();
+    scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
       preferencesSearchText = search.value || '';
@@ -942,7 +937,7 @@ function bindPreferencesPanel(panel) {
       if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
     }
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     const delivery = event.target.closest('[data-notification-delivery]');
     if (delivery && panel.contains(delivery)) {
       setNotificationDelivery(delivery.dataset.notificationDelivery, delivery.checked);
@@ -953,21 +948,21 @@ function bindPreferencesPanel(panel) {
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);
   });
-  panel.addEventListener('wheel', event => {
+    scope.ownEvent('wheel', panel, 'wheel', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('touchmove', event => {
+    scope.ownEvent('touchmove', panel, 'touchmove', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('scroll', event => {
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
   }, true);
-  panel.addEventListener('focusout', () => {
+    scope.ownEvent('focusout', panel, 'focusout', () => {
     setTimeout(() => {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  bindActionDispatcher(panel, {
+    const disposeActions = bindActionDispatcher(panel, {
     'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
@@ -1017,5 +1012,8 @@ function bindPreferencesPanel(panel) {
       scheduleShareUiStatePublish();
     },
     'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    return () => scope.dispose('preferences-panel-unbound');
   });
 }

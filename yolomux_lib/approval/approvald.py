@@ -20,11 +20,13 @@ from .auto_approve_worker import AutoApproveWorker
 from ..common import EVENT_LOG_PATH
 from ..observability.events import EventLog
 from ..local_services.client import LocalServiceClient
+from ..local_services.command_router import CommonDaemonActions
+from ..local_services.command_router import LocalServiceCommandRouter
+from ..local_service_projection import registry_runtime_row
 from ..local_services.rpc import LOCAL_RPC_VERSION
 from ..local_services.rpc import safe_socket_path
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
-from ..local_services.runtime import local_service_failure_text
 from ..local_services.runtime import LocalRpcServiceState
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -36,6 +38,15 @@ APPROVALD_PROTOCOL_VERSION = LOCAL_RPC_VERSION
 APPROVALD_DEFAULT_IDLE_SECONDS = 60.0
 APPROVALD_SOCKET_NAME = "approvald.sock"
 APPROVALD_STATUS_TARGET_LIMIT = 256
+
+APPROVALD_COMMAND_ROUTER = LocalServiceCommandRouter({
+    "ping": "_handle_ping", "status": "_handle_status", "profile": "_handle_profile",
+    "drain": "_handle_drain", "lease": "_handle_lease", "release": "_handle_release",
+    "start_worker": "_handle_start_worker", "status_target": "_handle_status_target",
+    "status_session": "_handle_status_session", "has_pending_prompt": "_handle_has_pending_prompt",
+    "alive": "_handle_alive", "stop_target": "_handle_stop_target", "stop_session": "_handle_stop_session",
+    "shutdown": "_handle_shutdown", "shutdown_if_idle": "_handle_shutdown_if_idle",
+})
 
 
 def default_socket_path() -> Path:
@@ -191,56 +202,70 @@ class PersistentApprovalService(LocalRpcServiceState):
             "generation": 0,
         }
 
-    def handle(self, request: dict[str, Any], _payload: bytes = b"") -> tuple[dict[str, Any], bytes]:
+    def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return CommonDaemonActions.ping("approvald", APPROVALD_PROTOCOL_VERSION, pid=os.getpid())
+
+    def _handle_status(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return CommonDaemonActions.status(self.status)
+
+    def _handle_profile(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return CommonDaemonActions.status(self.status, profile=True)
+
+    def _handle_drain(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return {"ok": True, "drained": True, "targets": len(self.records)}, b""
+
+    def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        response = acquire_client_lease(self.leases, request.get("client_pid"))
+        return {**response, "version": APPROVALD_PROTOCOL_VERSION}, b""
+
+    def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return release_client_lease(self.leases, request.get("lease_id")), b""
+
+    def _handle_start_worker(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return self._start_worker(request), b""
+
+    def _handle_status_target(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        target = str(request.get("target") or "")
+        self._prune()
+        return {"ok": True, "status": self._status_payload(target)}, b""
+
+    def _handle_status_session(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        session = str(request.get("session") or "")
+        self._prune()
+        statuses = [self._status_payload(target, record) for target, record in sorted(self.records.items()) if record.session == session]
+        return {"ok": True, "session": session, "statuses": statuses}, b""
+
+    def _handle_has_pending_prompt(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        record = self.records.get(str(request.get("target") or ""))
+        return {"ok": True, "pending": bool(record and record.worker.has_pending_prompt())}, b""
+
+    def _handle_alive(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        record = self.records.get(str(request.get("target") or ""))
+        return {"ok": True, "alive": bool(record and record.worker.alive())}, b""
+
+    def _handle_stop_target(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return self._stop_target(str(request.get("target") or "")), b""
+
+    def _handle_stop_session(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return self._stop_session(str(request.get("session") or "")), b""
+
+    def _handle_shutdown(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        for target in list(self.records):
+            self._stop_target(target)
+        self.stop_event.set()
+        return {"ok": True, "shutdown": True}, b""
+
+    def _handle_shutdown_if_idle(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        if self.leases or self.records:
+            return {"ok": True, "shutdown": False, "leases": len(self.leases), "targets": len(self.records)}, b""
+        self.stop_event.set()
+        return {"ok": True, "shutdown": True}, b""
+
+    def handle(self, request: dict[str, Any], payload: bytes = b"") -> tuple[dict[str, Any], bytes]:
         self.last_client_at = time.monotonic()
         action = str(request.get("action") or "")
-        if action == "ping":
-            return {"ok": True, "service": "approvald", "pid": os.getpid(), "version": APPROVALD_PROTOCOL_VERSION}, b""
-        if action == "status":
-            return self.status(), b""
-        if action == "profile":
-            return {"ok": True, "profile": self.status()}, b""
-        if action == "drain":
-            return {"ok": True, "drained": True, "targets": len(self.records)}, b""
-        if action == "lease":
-            response = acquire_client_lease(self.leases, request.get("client_pid"))
-            return {**response, "version": APPROVALD_PROTOCOL_VERSION}, b""
-        if action == "release":
-            return release_client_lease(self.leases, request.get("lease_id")), b""
-        if action == "start_worker":
-            return self._start_worker(request), b""
-        if action == "status_target":
-            target = str(request.get("target") or "")
-            self._prune()
-            return {"ok": True, "status": self._status_payload(target)}, b""
-        if action == "status_session":
-            session = str(request.get("session") or "")
-            self._prune()
-            statuses = [self._status_payload(target, record) for target, record in sorted(self.records.items()) if record.session == session]
-            return {"ok": True, "session": session, "statuses": statuses}, b""
-        if action == "has_pending_prompt":
-            target = str(request.get("target") or "")
-            record = self.records.get(target)
-            return {"ok": True, "pending": bool(record and record.worker.has_pending_prompt())}, b""
-        if action == "alive":
-            target = str(request.get("target") or "")
-            record = self.records.get(target)
-            return {"ok": True, "alive": bool(record and record.worker.alive())}, b""
-        if action == "stop_target":
-            return self._stop_target(str(request.get("target") or "")), b""
-        if action == "stop_session":
-            return self._stop_session(str(request.get("session") or "")), b""
-        if action == "shutdown":
-            for target in list(self.records):
-                self._stop_target(target)
-            self.stop_event.set()
-            return {"ok": True, "shutdown": True}, b""
-        if action == "shutdown_if_idle":
-            if self.leases or self.records:
-                return {"ok": True, "shutdown": False, "leases": len(self.leases), "targets": len(self.records)}, b""
-            self.stop_event.set()
-            return {"ok": True, "shutdown": True}, b""
-        return {"ok": False, "error": f"unknown action: {action}"}, b""
+        response = APPROVALD_COMMAND_ROUTER.dispatch(self, action, request, payload)
+        return response if response is not None else ({"ok": False, "error": f"unknown action: {action}"}, b"")
 
     def run(self) -> int:
         return run_local_rpc_service(
@@ -363,24 +388,18 @@ class ApprovalClient(LocalServiceClient):
         """
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        return {
-            "service": "approvald",
-            "pid": int(payload.get("pid") or 0),
+        return registry_runtime_row("approvald", self.registry, status, payload, fields_before_failure={
             "demand_started": True,
-            "started_at": float(payload.get("started_at") or 0.0),
-            "version": int(payload.get("version") or 0),
             "socket": str(payload.get("socket") or self.socket_path),
-            "healthy": bool(status.get("healthy")),
             "clients": int(payload.get("clients") or 0),
             "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
             "active_task": str(payload.get("active_task") or ""),
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "generation": int(payload.get("generation") or 0),
             "target_count": int(payload.get("target_count") or 0),
-            "last_failure": local_service_failure_text(status, payload),
+        }, fields_after_failure={
             "recurring_work": payload.get("recurring_work") if isinstance(payload.get("recurring_work"), dict) else {},
-            "resources": self.registry.resources(int(payload.get("pid") or 0)),
-        }
+        })
 
 
 def main(argv: list[str] | None = None) -> int:

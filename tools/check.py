@@ -39,6 +39,7 @@ import concurrent.futures
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -46,6 +47,7 @@ import platform
 import re
 import resource
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -73,7 +75,12 @@ from yolomux_lib.infra import worktree_writer
 from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
 from tools.test_catalog import NODE_LAYOUT_FILES
 from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner compatibility export
+from tools.test_catalog import focused_phase_target_args
 from tools.test_catalog import pytest_files
+from tools.test_plan import LANE_SPECS
+from tools.test_plan import StepId
+from tools.test_plan import resolved_lane_step_ids
+from tools.test_plan import validate_lane_specs
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from tools.tool_guard import tool_lock_owner_marker
 from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
@@ -104,6 +111,7 @@ CERTIFICATION_NODE_IDS = (
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
     "tests/test_chat_store.py::test_chat_store_operation_wall_latency_certification",
+    "tests/test_gate_stats_range.py::test_stats_24h_http_wall_latency_certification",
     "tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
 )
 CERTIFICATION_JUNIT_NAME = "certification-junit.xml"
@@ -140,6 +148,26 @@ class Lane:
     label: str
     steps: tuple[Step, ...]
     default: bool = False
+
+
+@dataclass(frozen=True)
+class BrowserCapabilityDiagnostic:
+    available: bool
+    component: str
+    detail: str
+
+    def refusal_text(self) -> str:
+        return f"BROWSER PREFLIGHT FAILED [{self.component}]: {self.detail}"
+
+    def json_text(self) -> str:
+        return json.dumps(
+            {
+                "available": self.available,
+                "component": self.component,
+                "detail": self.detail,
+            },
+            sort_keys=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -222,139 +250,129 @@ def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = F
     return args
 
 
-def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]:
+def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dict[StepId, Step]:
     nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
+    return {
+        StepId.PY_COMPILE: Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),
+        StepId.STATIC_BUILD: Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
+        StepId.TEXTSHAPE: Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
+        StepId.ARCHITECTURE_BUDGETS: Step("architecture budgets", ["python3", "tools/architecture_budgets.py"]),
+        StepId.LOCAL_SERVICE_TYPES: Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
+        StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yolomux.js", ["node", "--check", "static/yolomux.js"]),
+        StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
+        StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),
+        StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
+        StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
+        StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
+        StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),
+        StepId.PYTEST_UNIT: Step("pytest unit", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "not socket and not browser and not node_bridge", "-q"]),
+        StepId.PYTEST_SOCKET: Step("pytest socket", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "socket and not browser", "-q"]),
+        StepId.WHITESPACE: Step("git diff --check", ["git", "diff", "--check"]),
+    }
+
+
+def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]:
+    # Commands are built once and referenced through typed IDs. Focused aliases,
+    # prerequisites, and phase ownership therefore cannot drift into copies.
+    catalog = step_catalog(serial=serial, cpu_percent=cpu_percent)
+    validate_lane_specs(catalog)
     return [
         Lane(
-            "py-compile",
-            "py_compile",
-            (Step("py_compile", ["python3", "-m", "py_compile", *py_compile_files()]),),
-            True,
-        ),
-        Lane(
-            "static",
-            "static source checks",
-            (
-                Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
-                Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
-            ),
-            True,
-        ),
-        Lane(
-            "node-syntax",
-            "node syntax",
-            (
-                Step("node --check static/yolomux.js", ["node", "--check", "static/yolomux.js"]),
-                Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
-            ),
-            True,
-        ),
-        Lane(
-            "node-layout",
-            "node layout suite",
-            (Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),),
-            True,
-        ),
-        Lane(
-            "pytest",
-            "pytest non-browser",
-            # Exclude node_bridge: test_node_suite.py shells out to `node tests/layout_url.test.js`,
-            # the exact command the always-on node-layout lane already runs. Without this, the gate
-            # runs that ~20s node suite twice concurrently (it was the single slowest pytest item)
-            # and the two node processes thrash the cores the browser workers need. The node-layout
-            # lane keeps node coverage in the default gate; a bare `python3 -m pytest tests` still
-            # runs the bridge for anyone not going through check.py.
-            # Exclude e2e too: end-to-end tests launch real tmux + mock agents + a TmuxWebtermApp and are
-            # an order of magnitude slower; they run as their own parallel `pytest-e2e` lane (below) so a
-            # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
-            # Exclude browser too: Selenium tests are a separate `pytest-browser` lane so browser-only
-            # script errors and timing flakes do not hide inside the generic pytest lane.
-            (Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),),
-            True,
-        ),
-        Lane(
-            "pytest-boot",
-            "pytest boot smoke",
-            (Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),),
-        ),
-        Lane(
-            "pytest-browser",
-            "pytest browser",
-            (
-                Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
-                # Browser durations vary enough that xdist's initial load assignment leaves a long
-                # tail even with valid slow-first hints. Two same-code A/B pairs made work stealing
-                # repeatably faster, while boot smoke stays serial and separate above. Local visual
-                # goldens compare rendered pixels against reviewed machine baselines, so they run in
-                # a separate serial step: parallel Chrome font/compositor pressure can otherwise add
-                # enough non-product raster variation to cross the RMS threshold.
-                Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
-                Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
-            ),
-            True,
-        ),
-        Lane(
-            "pytest-browser-behavior",
-            "pytest browser behavior",
-            (
-                Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
-            ),
-        ),
-        Lane(
-            "pytest-e2e",
-            "pytest e2e",
-            # End-to-end auto-approve etc.: real tmux + claude.py/codex.py --mock + AutoApproveWorker. Keep this pool
-            # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
-            # unit pools are also running, which slows the whole default gate down and makes flakes harder
-            # to diagnose.
-            (Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),),
-            True,
-        ),
-        Lane(
-            "pytest-unit",
-            "pytest unit",
-            (
-                Step(
-                    "pytest unit",
-                    [
-                        "python3",
-                        "-m",
-                        "pytest",
-                        "tests",
-                        "--ignore=tests/test_browser_layout.py",
-                        "-m",
-                        "not socket and not browser and not node_bridge",
-                        "-q",
-                    ],
-                ),
-            ),
-        ),
-        Lane(
-            "pytest-socket",
-            "pytest socket",
-            (
-                Step(
-                    "pytest socket",
-                    [
-                        "python3",
-                        "-m",
-                        "pytest",
-                        "tests",
-                        "--ignore=tests/test_browser_layout.py",
-                        "-m",
-                        "socket and not browser",
-                        "-q",
-                    ],
-                ),
-            ),
-        ),
-        Lane(
-            "whitespace",
-            "git diff --check",
-            (Step("git diff --check", ["git", "diff", "--check"]),),
-            True,
-        ),
+            spec.name,
+            spec.label,
+            tuple(catalog[step_id] for step_id in resolved_lane_step_ids(spec)),
+            spec.default,
+        )
+        for spec in LANE_SPECS
     ]
+
+
+def selected_needs_browser(selected: list[Lane]) -> bool:
+    browser_lanes = {
+        spec.name
+        for spec in LANE_SPECS
+        if set(spec.phases) & {"browser", "golden"}
+    }
+    return any(lane.name in browser_lanes for lane in selected)
+
+
+def ambient_browser_capability_preflight() -> BrowserCapabilityDiagnostic:
+    """Resolve browser gate prerequisites in this process environment.
+
+    This intentionally performs no install or download. A requested browser
+    lane must either have all three ambient capabilities or fail before pytest,
+    where importorskip and fixture skips could otherwise turn absence green.
+    """
+
+    if importlib.util.find_spec("selenium") is None:
+        return BrowserCapabilityDiagnostic(False, "dependency", "Python package 'selenium' is unavailable")
+
+    browser_candidates = (
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+    )
+    browser = next(
+        (Path(candidate) for candidate in browser_candidates if candidate is not None and Path(candidate).is_file()),
+        None,
+    )
+    if browser is None:
+        return BrowserCapabilityDiagnostic(False, "browser", "Chrome or Chromium executable is unavailable")
+
+    driver = shutil.which("chromedriver")
+    if driver is None:
+        selenium_cache = Path.home() / ".cache" / "selenium" / "chromedriver"
+        driver = next(
+            (str(path) for path in sorted(selenium_cache.glob("**/chromedriver"), reverse=True) if path.is_file() and os.access(path, os.X_OK)),
+            None,
+        )
+    if driver is None:
+        return BrowserCapabilityDiagnostic(
+            False,
+            "driver",
+            "chromedriver is unavailable on PATH and in the Selenium cache; no download was attempted",
+        )
+    return BrowserCapabilityDiagnostic(True, "ready", f"selenium, {browser}, and {driver}")
+
+
+def browser_capability_preflight() -> BrowserCapabilityDiagnostic:
+    """Resolve prerequisites in the environment which will execute pytest."""
+
+    container_available, _reason = docker_image.container_available(REPO_ROOT)
+    if not container_available:
+        return ambient_browser_capability_preflight()
+
+    probe = subprocess.run(
+        [
+            str(REPO_ROOT / "docker" / "run-tests.sh"),
+            "--",
+            "python3",
+            "-c",
+            (
+                "from tools.check import ambient_browser_capability_preflight; "
+                "print(ambient_browser_capability_preflight().json_text())"
+            ),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or f"probe exited {probe.returncode}").strip().splitlines()[-1]
+        return BrowserCapabilityDiagnostic(False, "environment", f"isolated test environment probe failed: {detail}")
+    try:
+        payload = json.loads(probe.stdout.strip().splitlines()[-1])
+        return BrowserCapabilityDiagnostic(
+            bool(payload["available"]),
+            str(payload["component"]),
+            str(payload["detail"]),
+        )
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        return BrowserCapabilityDiagnostic(False, "environment", f"isolated test environment returned an invalid diagnostic: {error}")
 
 
 def command_text(args: list[str]) -> str:
@@ -1199,6 +1217,12 @@ def main(argv: list[str] | None = None) -> int:
     if not selected and not args.certification_only:
         print("no lanes selected", file=sys.stderr)
         return 2
+
+    if selected_needs_browser(selected):
+        browser_capability = browser_capability_preflight()
+        if not browser_capability.available:
+            print(browser_capability.refusal_text(), file=sys.stderr, flush=True)
+            return EXIT_LANE_FAILED
 
     # The exclusive phase belongs to the canonical command. A focused --lane run is deliberately
     # not a certification, and says so, rather than exiting 0 as if it had certified.

@@ -35,8 +35,8 @@ from typing import Any
 
 import pytest
 
-from test_backend_health_observer import FakeService
-from test_backend_health_observer import Harness
+from tests.helpers.backend_health_scenarios import FakeService
+from tests.helpers.backend_health_scenarios import RecoveryHarness
 
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_RECOVERY_ARMING_SECONDS
@@ -128,30 +128,6 @@ class TrapControl:
         # Only reached for attributes this class does not define, i.e. everything but `retry`.
         self.__dict__.setdefault("forbidden", []).append(name)
         raise AssertionError(f"recovery touched a non-retry control attribute: {name}")
-
-
-class RecoveryHarness(Harness):
-    """`Harness` plus a monotonic tick, so backoff boundaries can be crossed without sleeping."""
-
-    def __init__(self, tmp_path: Path, control: Any = None, **kwargs: Any) -> None:
-        kwargs.setdefault("recovery_arming_seconds", 0.0)
-        super().__init__(tmp_path, recovery_control=control, **kwargs)
-        self.control = control
-
-    def tick(self, count: int = 1, seconds: float = BACKEND_HEALTH_OBSERVE_SECONDS):
-        """Advance BOTH clocks by one observation interval and observe."""
-
-        result = None
-        for _ in range(count):
-            self.wall.advance(seconds)
-            self.monotonic.advance(seconds)
-            result = self.observer.observe_once()
-        return result
-
-    def outcome(self, resource: str) -> str:
-        document = self.store.document()
-        current = ((document.get("resources") or {}).get(resource) or {}).get("current") or {}
-        return str(current.get("recovery_outcome") or "")
 
 
 @pytest.fixture

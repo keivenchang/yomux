@@ -12,7 +12,7 @@ const {
   TestFormData,
   assertNoStandalonePrBadge,
   assertSingleCiBadge,
-  deferredFetch,
+  deferredFetch, apiTransportRetirementScenario,
   settingsOverride,
   loadYolomux,
   fileExplorerClosedOptions,
@@ -77,7 +77,7 @@ function summarizedHangingShard(closeOnSignal) {
   return {child, signals};
 }
 
-async function runLayoutAsyncSuite() {
+async function runLayoutAsyncSuite() { await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
   await testAsync('share viewers retain local diagnostics without scheduling unscoped host requests', async () => {
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-diagnostic-capability', mode: 'ro', session: '1', sessions: ['1']},
@@ -312,6 +312,7 @@ async function runLayoutAsyncSuite() {
     assert.equal(new URL(replacementSource.url, 'https://yolomux.test').searchParams.get('operations'), 'op-shared-operation');
     replacementSource.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
     assert.equal(initialSource.readyState, 2, 'the old stream closes only after the replacement subscriber is serving');
+    assert.equal(initialSource.closeCount, 1, 'candidate promotion disposes the prior active stream exactly once');
     assert.equal(api.clientEventTransportStateForTest().source, replacementSource);
     assert.equal(api.apiOperationStateForTest().pending, 1);
 
@@ -330,6 +331,22 @@ async function runLayoutAsyncSuite() {
 
     assert.equal(api.apiOperationStateForTest().pending, 0, 'the shared operation event settles the registered receipt');
     assert.equal(api.clientEventTransportStateForTest().source, replacementSource, 'settling a receipt does not reconnect the shared stream solely to remove a replay fence');
+  });
+
+  test('client-event pagehide disposes active and candidate streams exactly once and bfcache resumes demand', () => {
+    const api = loadYolomux('', ['1']);
+    api.installClientEventStreamForTest();
+    const active = api.clientEventTransportStateForTest().source;
+    api.setEventLogTabActiveForTest('1', true);
+    api.syncClientEventDemandForTest({immediate: true});
+    const candidate = api.clientEventTransportStateForTest().replacementSource;
+    for (const listener of api.windowListenersForTest('pagehide')) listener({type: 'pagehide', persisted: true});
+    assert.equal(active.closeCount, 1, 'pagehide closes the active stream once');
+    assert.equal(candidate.closeCount, 1, 'pagehide closes the candidate stream once');
+    assert.equal(api.clientEventTransportStateForTest().source, null);
+    for (const listener of api.windowListenersForTest('pageshow')) listener({type: 'pageshow', persisted: true});
+    const resumed = api.clientEventTransportStateForTest().source;
+    assert.ok(resumed && resumed !== active && resumed !== candidate, 'bfcache pageshow opens one fresh demanded stream');
   });
 
   await testAsync('operation terminals acknowledge browser consumption only after completion and in one batch', async () => {
@@ -1000,6 +1017,8 @@ async function runLayoutAsyncSuite() {
     api.startTranscriptStreamForTest('1');
     const newSummary = api.summaryStreamForTest('1');
     const newTranscript = api.transcriptStreamForTest('1');
+    assert.equal(oldSummary.closeCount, 1, 'replacing a retired summary closes its source exactly once');
+    assert.equal(oldTranscript.closeCount, 1, 'the transcript error releases its source exactly once');
     oldSummary.listeners.get('delta')[0]({data: JSON.stringify({text: 'stale summary bytes'})});
     oldSummary.onerror?.();
     oldTranscript.listeners.get('items')[0]({data: JSON.stringify({items: [{role: 'user', content: 'stale transcript bytes'}]})});
@@ -1010,6 +1029,90 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.testElementForId('summary-1').innerHTML.includes('stale summary bytes'), false);
     assert.equal(api.testElementForId('transcript-1').innerHTML.includes('stale transcript bytes'), false);
     assert.equal(api.tmuxSessionLifecycleRecordForTest('1').sources, 2, 'the replacement generation owns exactly its summary and transcript streams');
+    api.stopSummaryStreamForTest('1', oldSummary);
+    api.stopTranscriptStreamForTest('1', oldTranscript);
+    assert.equal(api.summaryStreamForTest('1'), newSummary, 'expected-source stop cannot dispose a replacement summary scope');
+    assert.equal(api.transcriptStreamForTest('1'), newTranscript, 'expected-source stop cannot dispose a replacement transcript scope');
+    api.stopSummaryStreamForTest('1', newSummary);
+    api.stopSummaryStreamForTest('1', newSummary);
+    api.stopTranscriptStreamForTest('1', newTranscript);
+    api.stopTranscriptStreamForTest('1', newTranscript);
+    assert.equal(newSummary.closeCount, 1, 'summary scope disposal is idempotent');
+    assert.equal(newTranscript.closeCount, 1, 'transcript scope disposal is idempotent');
+  });
+
+  await testAsync('chat lifecycle disposal aborts requests and suppresses owned timers', async () => {
+    let nextTimer = 1;
+    const timers = new Map();
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback) {
+        const timer = nextTimer;
+        nextTimer += 1;
+        timers.set(timer, callback);
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); },
+    });
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({ok: true})));
+    api.chatRequestOptionsForTest();
+    api.replaceChatTypingForTest([{username: 'alice', expires_at_utc: (Date.now() / 1000) + 60}]);
+    const before = api.chatLifecycleStateForTest();
+    assert.equal(before.active, true);
+    assert.equal(before.requestController.signal.aborted, false);
+    assert.notEqual(before.typingExpiryTimer, null);
+    const lateTypingExpiry = timers.get(before.typingExpiryTimer);
+    api.clearChatLifecycleForTest({destroy: true});
+    assert.equal(before.requestController.signal.aborted, true, 'chat destroy aborts the shared request controller');
+    assert.equal(api.chatLifecycleStateForTest().active, false, 'chat destroy retires the whole resource scope');
+    assert.equal(timers.has(before.typingExpiryTimer), false, 'chat destroy clears the owned typing expiry');
+    lateTypingExpiry();
+    assert.equal(api.chatLifecycleStateForTest().active, false, 'a late retired timer cannot recreate chat lifecycle work');
+  });
+
+  test('lifecycle scope disposes replacement and late resources exactly once', () => {
+    const api = loadYolomux('', ['1']);
+    const disposed = [];
+    const scope = api.createLifecycleScopeForTest();
+    const first = {name: 'first'};
+    const replacement = {name: 'replacement'};
+    scope.replace('resource', first, value => disposed.push(value.name));
+    scope.replace('resource', replacement, value => disposed.push(value.name));
+    assert.deepStrictEqual(disposed, ['first'], 'replacement disposes the previous owner immediately');
+    assert.equal(scope.dispose('test'), true);
+    assert.equal(scope.dispose('again'), false, 'scope disposal is idempotent');
+    assert.deepStrictEqual(disposed, ['first', 'replacement']);
+    scope.replace('resource', {name: 'late'}, value => disposed.push(value.name));
+    assert.deepStrictEqual(disposed, ['first', 'replacement', 'late'], 'registration after disposal cannot leak a resource');
+  });
+
+  await testAsync('latest resource owns dedupe, latest-wins, last-good failure, and state order', async () => {
+    const api = loadYolomux('', ['1']);
+    const pending = [];
+    const phases = [];
+    const resource = api.createLatestResourceForTest({
+      initial: {marker: 'initial'},
+      load(target) {
+        const request = deferredFetch();
+        pending.push({...request, target});
+        return request.promise;
+      },
+      apply(payload) { return payload; },
+      onState(_state, event) { phases.push(event.phase); },
+    });
+    const old = resource.read('old');
+    assert.strictEqual(resource.read('old'), old, 'the same target shares one in-flight request');
+    const newer = resource.read('new');
+    pending[1].resolve({marker: 'new'});
+    await newer;
+    pending[0].resolve({marker: 'old'});
+    await old;
+    assert.equal(resource.snapshot().value.marker, 'new', 'a delayed old response cannot replace the newer target');
+    const failed = resource.read('failed');
+    pending[2].reject(new Error('offline'));
+    await failed;
+    assert.equal(resource.snapshot().value.marker, 'new', 'a current failure preserves the last good value');
+    assert.equal(resource.snapshot().error.message, 'offline', 'the current failure remains typed for the consumer');
+    assert.deepStrictEqual(phases, ['loading', 'loading', 'applied', 'settled', 'loading', 'failed', 'settled'], 'render-facing state order is deterministic and stale work is silent');
   });
 
   await testAsync('retired terminal generation owns delayed resize scroll and blank refresh side effects', async () => {
@@ -1459,6 +1562,44 @@ async function runLayoutAsyncSuite() {
     await fourth;
     assert.ok(api.backgroundOwnerStatusStateForTest().error, 'the current request records its failure');
     assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
+  });
+
+  await testAsync('background-owner refresh keeps one Promise return contract on fresh fast paths', async () => {
+    const api = loadYolomux();
+    api.setBackgroundOwnerStatusPayloadForTest({marker: 'fresh'});
+    const refresh = api.refreshBackgroundOwnerStatusForTest({preferFresh: true, render: false});
+    assert.equal(typeof refresh?.then, 'function', 'ready-channel repair may always attach catch to a background-owner refresh');
+    assert.equal(await refresh, true, 'the fresh fast path preserves its fulfilled result');
+  });
+
+  test('panel-body reconciliation restores named anchors before one afterReplace hook', () => {
+    const api = loadYolomux();
+    const order = [];
+    const oldScroller = {scrollTop: 31, scrollLeft: 7};
+    const newScroller = {scrollTop: 0, scrollLeft: 0};
+    const body = {
+      innerHTML: '',
+      querySelector(selector) {
+        if (selector !== '.scroll') return null;
+        return this.innerHTML ? newScroller : oldScroller;
+      },
+    };
+    const anchor = api.elementScrollAnchor('.scroll');
+    const restored = anchor.restore;
+    anchor.restore = (root, value) => {
+      order.push('restore');
+      restored(root, value);
+    };
+    assert.equal(api.reconcilePanelBody({
+      body,
+      html: '<div class="scroll"></div>',
+      anchors: [anchor],
+      afterReplace() { order.push('after'); },
+    }), true);
+    assert.deepEqual(order, ['restore', 'after']);
+    assert.equal(body.innerHTML, '<div class="scroll"></div>');
+    assert.equal(newScroller.scrollTop, 31);
+    assert.equal(newScroller.scrollLeft, 7);
   });
 
   test('search-index lifecycle generations reject a delayed older status response', () => {
@@ -3286,6 +3427,37 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.yoagentConversationStateForTest().loading, false, 'conversation loading settles after stale cleanup');
   });
 
+  await testAsync('YO!agent read resources dedupe same targets and preserve consumer error policy', async () => {
+    const pendingJobs = [];
+    const pendingConversation = [];
+    const api = loadYolomux();
+    api.setFetchForTest(url => {
+      const request = deferredFetch();
+      if (String(url) === '/api/yoagent/jobs') pendingJobs.push(request);
+      else if (String(url) === '/api/yoagent/conversation') pendingConversation.push(request);
+      else throw new Error(`unexpected URL ${url}`);
+      return request.promise;
+    });
+
+    const jobs = api.loadYoagentJobsForTest({silent: true});
+    assert.strictEqual(api.loadYoagentJobsForTest({silent: true}), jobs, 'same-target jobs reads share one request');
+    pendingJobs[0].resolve(jsonResponse({jobs: [{id: 'last-good-job'}]}));
+    assert.equal(await jobs, true, 'jobs retain their boolean success result');
+    const failedJobs = api.loadYoagentJobsForTest({force: true, silent: true});
+    pendingJobs[1].reject(new Error('jobs offline'));
+    assert.equal(await failedJobs, false, 'silent jobs errors remain swallowed as false');
+    assert.equal(api.yoagentJobsStateForTest().items[0].id, 'last-good-job', 'jobs failure preserves last good data');
+
+    const conversation = api.loadYoagentConversationForTest({silent: true, render: false});
+    assert.strictEqual(api.loadYoagentConversationForTest({silent: true, render: false}), conversation, 'same-target conversation reads share one request');
+    pendingConversation[0].resolve(jsonResponse({messages: [{content: 'last-good-conversation'}], pending_waits: []}));
+    assert.equal(await conversation, true, 'conversation retains its boolean apply result');
+    const failedConversation = api.loadYoagentConversationForTest({force: true, silent: true, render: false});
+    pendingConversation[1].reject(new Error('conversation offline'));
+    assert.equal(await failedConversation, false, 'silent conversation errors remain swallowed as false');
+    assert.equal(api.yoagentConversationStateForTest().messages[0].content, 'last-good-conversation', 'conversation failure preserves last good data');
+  });
+
   test('data request records keep retired parallel globals absent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     assert.equal(/\btranscriptMeta\b/.test(source), false, 'transcriptMeta remains retired');
@@ -3301,6 +3473,8 @@ async function runLayoutAsyncSuite() {
     for (const owner of ['transcriptMetadataState', 'searchHistoryState', 'runHistoryState', 'yoagentConversationState', 'yoagentJobsState']) {
       assert.ok(source.includes(`const ${owner} = {`), `${owner} is the one owner`);
     }
+    assert.equal(source.includes('yoagentConversationState.guard'), false, 'conversation has no parallel generation guard');
+    assert.equal(source.includes('yoagentJobsState.guard'), false, 'jobs has no parallel generation guard');
   });
 
   await testAsync('Finder Sync record cancels stale root work and resets manual ownership atomically', async () => {
@@ -3587,6 +3761,27 @@ async function runLayoutAsyncSuite() {
     await flushAsyncWork();
     await flushAsyncWork();
     assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/same.txt"]'), row, 'an unchanged signature skips reconciliation and preserves DOM identity');
+  });
+
+  test('tree-row patch preserves normalized Finder file and Differ directory contracts in place', () => {
+    const api = loadYolomux('', ['1']);
+    const finder = api.testElementForId('tree-row-finder-contract');
+    const file = {name: 'file.md', kind: 'file', size: 12, mtime: 100};
+    api.renderTreeChildrenForTest(finder, '/repo', [file]);
+    const finderRow = finder.querySelector('.file-tree-row[data-path="/repo/file.md"]');
+    const finderContract = api.treeRowContractForTest(finderRow);
+    api.renderTreeChildrenForTest(finder, '/repo', [{...file}]);
+    assert.strictEqual(finder.querySelector('.file-tree-row[data-path="/repo/file.md"]'), finderRow, 'Finder patches the existing file row');
+    assert.deepStrictEqual(canonical(api.treeRowContractForTest(finderRow)), canonical(finderContract), 'Finder file DOM/dataset/classes/ARIA/column order are stable');
+
+    const differ = api.testElementForId('tree-row-differ-contract');
+    const directory = {name: 'src', kind: 'dir', mtime: 200};
+    api.renderTreeChildrenForTest(differ, '/repo', [directory], 0, [['/repo/src', []]], {differMode: true, repoForDiffer: '/repo'});
+    const differRow = differ.querySelector('.file-tree-row[data-path="/repo/src"]');
+    const differContract = api.treeRowContractForTest(differRow);
+    api.renderTreeChildrenForTest(differ, '/repo', [{...directory}], 0, [['/repo/src', []]], {differMode: true, repoForDiffer: '/repo'});
+    assert.strictEqual(differ.querySelector('.file-tree-row[data-path="/repo/src"]'), differRow, 'Differ patches the existing directory row');
+    assert.deepStrictEqual(canonical(api.treeRowContractForTest(differRow)), canonical(differContract), 'Differ directory DOM/dataset/classes/ARIA/column order are stable');
   });
 
   await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {

@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from test_backend_health_observer import Harness
+from tests.helpers.backend_health_scenarios import BackendHealthHarness as Harness
 
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_EVENT

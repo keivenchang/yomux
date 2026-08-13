@@ -87,6 +87,15 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
         for node in handler_class.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
+    adapter_methods = {
+        class_node.name: {
+            node.name: node
+            for node in class_node.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        for class_node in server_tree.body
+        if isinstance(class_node, ast.ClassDef) and class_node.name.endswith("Adapter")
+    }
     parent_writers = {
         "write_app_result",
         "write_int_query_app_result",
@@ -113,7 +122,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
         key = (kind, name)
         if key in seen:
             return set(), set()
-        functions = route_functions if kind == "route" else handler_methods
+        functions = route_functions if kind == "route" else handler_methods if kind == "handler" else adapter_methods[kind]
         function = functions.get(name)
         if function is None:
             return set(), set()
@@ -136,6 +145,16 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
                     nested_parents, nested_bypasses = response_paths("handler", called, next_seen)
                     parents.update(nested_parents)
                     bypasses.update(nested_bypasses)
+            elif (
+                kind != "route"
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in adapter_methods
+                and call.func.attr in adapter_methods[call.func.value.id]
+            ):
+                nested_parents, nested_bypasses = response_paths(call.func.value.id, call.func.attr, next_seen)
+                parents.update(nested_parents)
+                bypasses.update(nested_bypasses)
             elif kind == "route" and isinstance(call.func, ast.Name) and call.func.id in route_functions:
                 nested_parents, nested_bypasses = response_paths("route", call.func.id, next_seen)
                 parents.update(nested_parents)
@@ -197,7 +216,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_write_json_representation"
             for node in ast.walk(function)
-        ):
+        ) and function.name != "_write_json_representation":
             representation_callers.append(function.name)
     assert representation_callers == ["write_api_response"], (
         "JSON representation bypasses write_api_response: "
@@ -215,7 +234,7 @@ def _assert_registry_uses_response_parent(route_source: str, server_source: str)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "_write_bodyless_api_response"
             for node in ast.walk(function)
-        ):
+        ) and function.name != "_write_bodyless_api_response":
             bodyless_callers.append(function.name)
     assert bodyless_callers == ["write_api_response"], (
         "Bodyless API representation bypasses write_api_response: "

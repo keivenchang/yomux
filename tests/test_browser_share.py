@@ -7,6 +7,8 @@ from tests.browser_helpers.share_test_helpers import verify_share_token as build
 from yolomux_lib.client_events import ClientEventBroker
 from yolomux_lib import filesystem
 from yolomux_lib.app import FilesystemOperationHttpResponse
+from tests.helpers.journey_phases import GENERATED_SHARE_PHASES
+from tests.helpers.journey_phases import JourneySentinel
 
 def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
     page = tmp_path / "share-viewer-banner-grid.html"
@@ -2013,6 +2015,8 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
 
 @pytest.mark.parametrize("matrix_section", ("chrome", "finder", "resilience", "popovers"))
 def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, monkeypatch, tmp_path, matrix_section):
+    journey = JourneySentinel(GENERATED_SHARE_PHASES[matrix_section])
+    journey.enter("shared-host-viewer-setup")
     repo_root = tmp_path / "share-matrix-repo"
     (repo_root / "src").mkdir(parents=True)
     (repo_root / "docs").mkdir()
@@ -2641,11 +2645,13 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         viewer.get(share_debug_url(created["url"]))
         WebDriverWait(viewer, 10).until(lambda driver: driver.execute_script("return document.readyState === 'complete';"))
         viewer.execute_script("window.__shareMatrixViewerStartedAt = performance.now();")
+        journey.enter("initial-replay-and-socket-sentinel")
         host_phase("initial")
         initial_metrics = wait_viewer_phase("initial", timeout=20)
         assert initial_metrics["status"] == "mirrored"
         assert_terminal_health(initial_metrics)
 
+        journey.enter(f"{matrix_section}-surface-matrix")
         if matrix_section == "chrome":
             for menu_id in ["file", "view", "tmux", "tabs", "help"]:
                 host = host_phase("menu", menu_id)
@@ -2828,6 +2834,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             assert "2 ahead" in repo["repoPopoverText"], repo
             assert "3 dirty" in repo["repoPopoverText"], repo
 
+        journey.enter("complete-manifest")
         final_metrics = viewer_state()
         max_expected_keyframe_requests = int(final_metrics["elapsedMs"] // 10000) + 1
         assert final_metrics["status"] == "mirrored", final_metrics
@@ -2839,6 +2846,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         # The initial replay assertion above already proves its terminal placeholder/socket contract.
         if matrix_section != "chrome":
             assert_terminal_health(final_metrics)
+        journey.manifest()
     finally:
         try:
             stop_browser_share_server(
@@ -3160,7 +3168,7 @@ def test_share_replay_popups_menus_and_modals_use_normal_dom_replay(browser, tmp
               tab: staleText.includes('P4.3 tab popover row'),
               modal: staleText.includes('P4.3 YO!share modal row'),
             },
-            sequence: shareReplayLastSequence,
+            sequence: shareReplayState.lastSequence,
             status: shareReplayShellState.status,
             popupMirrorLayer: Boolean(document.querySelector('.share-popup-mirror-layer')),
           });
@@ -3398,8 +3406,8 @@ def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser,
             mounted,
             moved,
             status: shareReplayShellState.status,
-            dropped: shareReplayDroppedFrames,
-            requests: shareReplayKeyframeRequestCount,
+            dropped: shareReplayState.droppedFrames,
+            requests: shareReplayState.keyframeRequests,
             sameTerm: afterMoveItem?.term === firstTerm,
             sameElement: afterMoveItem?.term?.element === firstElement,
             currentContainerTestId: afterMoveItem?.container?.closest('[data-testid]')?.dataset?.testid || '',
@@ -3639,7 +3647,7 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
             writes.push(text);
             return originalWrite(data);
           };
-          const beforeRequests = shareReplayKeyframeRequestCount;
+          const beforeRequests = shareReplayState.keyframeRequests;
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 5, baseSequence: 99, sequence: 100, payload: {pointer: {x: 32, y: 48, visible: true}}});
           handleShareViewSocketMessage('6', item, JSON.stringify({ch: 'term', pane: '6', data: btoa('terminal keeps streaming')}));
           await frame();
@@ -3648,8 +3656,8 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
             mounted,
             status: shareReplayShellState.status,
             statusText: status?.textContent || '',
-            requestDelta: shareReplayKeyframeRequestCount - beforeRequests,
-            dropped: shareReplayDroppedFrames,
+            requestDelta: shareReplayState.keyframeRequests - beforeRequests,
+            dropped: shareReplayState.droppedFrames,
             writes,
             rows: item.term.rows,
             cols: item.term.cols,
@@ -3731,22 +3739,22 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 7, sequence: 10, payload: keyframe});
           await frame();
           const target = document.querySelector('[data-testid="delta-target"]');
-          const initialState = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, text: target.textContent};
+          const initialState = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, text: target.textContent};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 10, sequence: 11, payload: {mutations: [{kind: 'characterData', target: 2, text: 'two'}]}});
           await frame();
-          const afterGood = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, text: target.textContent, status: shareReplayShellState.status};
+          const afterGood = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, text: target.textContent, status: shareReplayShellState.status};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 6, baseSequence: 11, sequence: 12, payload: {mutations: [{kind: 'characterData', target: 2, text: 'stale'}]}});
           await frame();
-          const afterStale = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, stale: shareReplayStaleFrames, inFlight: shareReplayKeyframeInFlight, backoffMs: shareReplayKeyframeBackoffMs, text: target.textContent, status: shareReplayShellState.status};
+          const afterStale = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, suppressed: shareReplayState.keyframeRequestsSuppressed, stale: shareReplayState.staleFrames, inFlight: shareReplayState.keyframeRequest.inFlight, backoffMs: shareReplayState.keyframeRequest.backoffMs, text: target.textContent, status: shareReplayShellState.status};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 10, sequence: 13, payload: {mutations: [{kind: 'characterData', target: 2, text: 'gap'}]}});
           await frame();
-          const afterGap = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, text: target.textContent, status: shareReplayShellState.status};
+          const afterGap = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, suppressed: shareReplayState.keyframeRequestsSuppressed, dropped: shareReplayState.droppedFrames, text: target.textContent, status: shareReplayShellState.status};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 13, sequence: 14, payload: {mutations: [{kind: 'characterData', target: 999, text: 'unknown'}]}});
           await frame();
-          const afterUnknown = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, stale: shareReplayStaleFrames, text: target.textContent, status: shareReplayShellState.status};
+          const afterUnknown = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, suppressed: shareReplayState.keyframeRequestsSuppressed, dropped: shareReplayState.droppedFrames, stale: shareReplayState.staleFrames, text: target.textContent, status: shareReplayShellState.status};
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 7, baseSequence: 14, sequence: 15, payload: {digest: 'sha256:not-current-dom', mutations: [{kind: 'characterData', target: 2, text: 'digest mismatch'}]}});
           await frame();
-          const afterDigest = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, dropped: shareReplayDroppedFrames, stale: shareReplayStaleFrames, text: target.textContent, status: shareReplayShellState.status};
+          const afterDigest = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, suppressed: shareReplayState.keyframeRequestsSuppressed, dropped: shareReplayState.droppedFrames, stale: shareReplayState.staleFrames, text: target.textContent, status: shareReplayShellState.status};
           const repairKeyframe = {
             digest: 'sha256:repair-keyframe',
             viewport: {width: 1200, height: 700},
@@ -3763,7 +3771,7 @@ def test_share_replay_shell_applies_only_contiguous_deltas(browser, tmp_path):
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 7, sequence: 16, payload: repairKeyframe});
           await frame();
           const repairedTarget = document.querySelector('[data-testid="delta-target"]');
-          const afterRepair = {epoch: shareReplayCurrentEpoch, sequence: shareReplayLastSequence, requests: shareReplayKeyframeRequestCount, suppressed: shareReplayKeyframeRequestSuppressedCount, inFlight: shareReplayKeyframeInFlight, backoffMs: shareReplayKeyframeBackoffMs, text: repairedTarget?.textContent || '', status: shareReplayShellState.status};
+          const afterRepair = {epoch: shareReplayState.currentEpoch, sequence: shareReplayState.lastSequence, requests: shareReplayState.keyframeRequests, suppressed: shareReplayState.keyframeRequestsSuppressed, inFlight: shareReplayState.keyframeRequest.inFlight, backoffMs: shareReplayState.keyframeRequest.backoffMs, text: repairedTarget?.textContent || '', status: shareReplayShellState.status};
           done({initialState, afterGood, afterStale, afterGap, afterUnknown, afterDigest, afterRepair});
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -3891,29 +3899,29 @@ def test_share_replay_shell_ignores_interleaved_semantic_finder_frames(browser, 
             text: document.querySelector('[data-testid="finder-replay"]')?.textContent || '',
             finderPanels: document.querySelectorAll('[data-testid="finder-replay"]').length,
             status: shareReplayShellState.status,
-            requests: shareReplayKeyframeRequestCount,
-            dropped: shareReplayDroppedFrames,
+            requests: shareReplayState.keyframeRequests,
+            dropped: shareReplayState.droppedFrames,
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domKeyframe, sender: 'host', epoch: 3, sequence: 2, payload: keyframe('Finder still one pane', 3)});
           await frame();
           const afterKeyframe = {
             text: document.querySelector('[data-testid="finder-replay"]')?.textContent || '',
             finderPanels: document.querySelectorAll('[data-testid="finder-replay"]').length,
-            epoch: shareReplayCurrentEpoch,
-            sequence: shareReplayLastSequence,
+            epoch: shareReplayState.currentEpoch,
+            sequence: shareReplayState.lastSequence,
             status: shareReplayShellState.status,
-            requests: shareReplayKeyframeRequestCount,
+            requests: shareReplayState.keyframeRequests,
           };
           applyShareUiMessage({ch: 'ui', type: shareMirrorProtocol.frames.domDelta, sender: 'host', epoch: 3, baseSequence: 2, sequence: 3, payload: {mutations: [{kind: 'characterData', target: 3, text: 'Finder delta one pane'}]}});
           await frame();
           const afterDelta = {
             text: document.querySelector('[data-testid="finder-replay"]')?.textContent || '',
             finderPanels: document.querySelectorAll('[data-testid="finder-replay"]').length,
-            epoch: shareReplayCurrentEpoch,
-            sequence: shareReplayLastSequence,
+            epoch: shareReplayState.currentEpoch,
+            sequence: shareReplayState.lastSequence,
             status: shareReplayShellState.status,
-            requests: shareReplayKeyframeRequestCount,
-            dropped: shareReplayDroppedFrames,
+            requests: shareReplayState.keyframeRequests,
+            dropped: shareReplayState.droppedFrames,
           };
           done({afterSemantic, afterKeyframe, afterDelta});
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
@@ -4035,7 +4043,7 @@ def test_share_replay_shell_applies_scroll_and_pointer_deltas(browser, tmp_path)
               prefsTop: prefs.scrollTop,
               prefsLeft: prefs.scrollLeft,
             },
-            sequence: shareReplayLastSequence,
+            sequence: shareReplayState.lastSequence,
             status: shareReplayShellState.status,
             ghostExists: Boolean(ghost),
             ghostSender: ghost?.dataset?.shareSender || '',

@@ -19,6 +19,8 @@ from yolomux_lib.infra.background_owner import BackgroundOwnerRegistry
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.server_lease import acquire_server_port_lease
+from tests.helpers.local_service_records import FixtureHostIdentityBuilder
+from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 
 
 FIXTURE_PID = 4242
@@ -35,21 +37,21 @@ def _host_identity(
     boot_id: str | None = None,
     instance_nonce: str | None = None,
 ) -> Any:
-    module = importlib.import_module(HOST_IDENTITY_MODULE)
-    return module.HostIdentity(
+    return FixtureHostIdentityBuilder(
         stable_host_id=f"fixture-{name}",
         display_hostname=f"fixture-{name}.example",
         boot_id=boot_id or f"00000000-0000-0000-0000-00000000000{name[-1]}",
         pid=FIXTURE_PID,
-        process_start_identity=f"proc:{FIXTURE_PROCESS_START_TICKS}",
         process_start_ticks=FIXTURE_PROCESS_START_TICKS,
         instance_nonce=instance_nonce or f"fixture-{name}-instance",
         stable_host_id_source="gate fixture",
-    )
+    ).build()
 
 
 def _process_record(identity: Any, **fields: Any) -> dict[str, Any]:
-    return {**identity.process_record_fields(), **fields}
+    pid = int(fields.pop("pid", identity.pid))
+    ticks = fields.pop("process_start_ticks", None)
+    return FixtureProcessRecordBuilder(pid=pid, identity=identity, process_start_ticks=ticks, fields=fields).build()
 
 
 def _read_json(path: Path) -> dict[str, Any]:

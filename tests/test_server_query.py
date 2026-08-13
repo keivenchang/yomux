@@ -1638,14 +1638,14 @@ def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
 
 
 def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
-    app_start_body = inspect.getsource(app_module.TmuxWebtermApp.start_client_event_watcher)
-    app_event_body = inspect.getsource(app_module.TmuxWebtermApp.handle_tmux_signal_event)
+    app_start_body = inspect.getsource(app_module.WatchBridge.start_client_event_watcher)
+    app_event_body = inspect.getsource(app_module.WatchBridge.handle_tmux_signal_event)
     stream_body = inspect.getsource(server_module.Handler.stream_client_events)
     server_init_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.__init__)
     server_close_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.server_close)
 
-    assert "self.start_tmux_signal_event_watcher()" in app_start_body
-    assert "self.tmux_signal_cache.clear()" in app_event_body
+    assert "app.start_tmux_signal_event_watcher()" in app_start_body
+    assert "app.tmux_signal_cache.clear()" in app_event_body
     assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
     assert "record.tmux_signal_refresh_at" in app_event_body
     assert "record.wake_event.set()" in app_event_body

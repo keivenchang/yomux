@@ -50,7 +50,7 @@ from tests.gate_harness import release_fixture_client_event_demand
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import repeat
 from tests.gate_harness import run_when_browser_ready
-from tests.test_gate_tmux import _send_native_key
+from tests.helpers.browser_contracts import send_native_key as _send_native_key
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from tests.tmux_runtime import run_isolated_tmux
 

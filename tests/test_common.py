@@ -46,7 +46,9 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
         functions = {
             node.name: ast.get_source_segment(source, node) or ""
             for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in names
+            and "start_thread_with_rollback(" in (ast.get_source_segment(source, node) or "")
         }
         assert set(functions) == names
         for name, function_source in functions.items():

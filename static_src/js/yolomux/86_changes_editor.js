@@ -2780,13 +2780,6 @@ function setEditorPreviewFontSize(value) {
 // they may coexist in separate panes without a global mode switch rebuilding one another.
 function createFileExplorerPanel(item = finderItemId) {
   const view = fileExplorerViewForItem(item) || 'finder';
-  const panel = document.createElement('article');
-  panel.className = `panel file-explorer-panel file-explorer-${view}`;
-  panel.id = panelDomId(item);
-  panel.dataset.panelItem = item;
-  // Refresh paths select panels by their fixed view. Keep this identity alongside the
-  // item identity so Finder, Differ, and Tabber can coexist without global-mode drift.
-  panel.dataset.fileExplorerView = view;
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
@@ -2812,18 +2805,21 @@ function createFileExplorerPanel(item = finderItemId) {
             </span>
           </div>
         </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession(), 'differ')}</div></div>` : '';
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-explorer-head',
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    headAfterTabsHtml: finderToolbarHtml,
-    bodyClass: 'file-explorer-pane',
-    bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+    className: `panel file-explorer-panel file-explorer-${view}`,
+    dataset: {panelItem: item, fileExplorerView: view},
+    frame: {
+      headClass: 'file-explorer-head',
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      headAfterTabsHtml: finderToolbarHtml,
+      bodyClass: 'file-explorer-pane',
+      bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
         <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
+    },
+    bind: bindChangesPanel,
   });
-  bindPanelShell(panel, item);
-  bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
@@ -3319,14 +3315,13 @@ function relocalizeFileEditorPanel(panel, item) {
 
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel file-editor-panel';
-  panel.dataset.filePath = path;
-  panel.dataset.layoutItem = item;
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-editor-panel-head',
-    controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
+    className: 'panel file-editor-panel',
+    dataset: {filePath: path, layoutItem: item},
+    frame: {
+      headClass: 'file-editor-panel-head',
+      controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -3338,9 +3333,9 @@ function createFileEditorPanel(item) {
             closeLabel: t('editor.closePane'),
           })}
         </div>`,
-    afterHeadHtml: fileEditorToolbarHtml(item),
-    bodyClass: 'file-editor-panel-body',
-    bodyHtml: `<div class="file-editor-content">
+      afterHeadHtml: fileEditorToolbarHtml(item),
+      bodyClass: 'file-editor-panel-body',
+      bodyHtml: `<div class="file-editor-content">
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
@@ -3355,8 +3350,8 @@ function createFileEditorPanel(item) {
           <div class="file-editor-image-panel" hidden></div>
         </div>
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>`,
+    },
   });
-  bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;

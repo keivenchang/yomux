@@ -1903,8 +1903,13 @@ const done = arguments[arguments.length - 1];
   // the frames this test records; the warning case injects its own through it.
   const recordStatsDiagnostic = window.recordJsDebugStatsDiagnostic;
   window.recordJsDebugStatsDiagnostic = () => {};
+  // Own the complete retained window. Filling only the unused slots leaves live API/SSE
+  // events in the ring; those events can still receive response-byte or phase-timing
+  // enrichment after the atomic snapshot, which is a real same-id mutation but unrelated
+  // to the immutable ring-eviction lifecycle this fixture is meant to exercise.
+  jsDebugEvents.splice(0, jsDebugEvents.length);
   while (jsDebugEvents.length < jsDebugEventLimit) {
-    recordJsDebugEvent('long_task', {durationMs: 1});
+    recordJsDebugEvent('long_task', {durationMs: 1, testTag: 'retirement-owned-saturation'});
   }
   window.addEventListener('pagehide', () => {
     recordJsDebugEvent('long_task', {durationMs: 2});
@@ -1917,6 +1922,7 @@ const done = arguments[arguments.length - 1];
     length: jsDebugEvents.length,
     firstId: jsDebugEvents[0].id,
     lastId: jsDebugEvents[jsDebugEvents.length - 1].id,
+    ownedEvents: jsDebugEvents.filter(event => event.type === 'long_task' && event.testTag === 'retirement-owned-saturation').length,
     stats: window.jsDebugCurrentStatsStreamEvidence(),
     projection: jsDebugCurrentObservationReceiptProjection(),
   });
@@ -1940,6 +1946,7 @@ def test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retireme
     setup = browser.execute_async_script(SATURATED_RING_SETUP_SCRIPT, False)
     assert setup.get("error") is None, setup
     assert setup["length"] == setup["limit"], setup
+    assert setup["ownedEvents"] == setup["limit"], setup
     assert setup["lastId"] - setup["firstId"] + 1 == setup["limit"], setup
     # Inject a deterministic pre-atomic shift, then ONE deliberate benign interleaving event.
     # The shift models the load this test exists to tolerate; the interleaving models a single
@@ -2204,6 +2211,7 @@ def test_atomic_finalizer_rejects_warning_recorded_during_saturated_ring_retirem
     setup = browser.execute_async_script(SATURATED_RING_SETUP_SCRIPT, True)
     assert setup.get("error") is None, setup
     assert setup["length"] == setup["limit"], setup
+    assert setup["ownedEvents"] == setup["limit"], setup
     baseline_projection = soak.validate_negative_probe_baseline(setup["projection"])
     browser.get_log("browser")
 

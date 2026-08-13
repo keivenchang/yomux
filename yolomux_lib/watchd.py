@@ -32,6 +32,8 @@ from .background_owner import pid_is_alive
 from .host_identity import process_start_identity
 from .infra import common
 from .local_services.rpc import safe_socket_path
+from .local_services.command_router import CommonDaemonActions
+from .local_services.command_router import LocalServiceCommandRouter
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import acquire_client_lease
@@ -68,6 +70,12 @@ WATCHD_STEP_MS = 50
 WATCHD_RUST_TIMEOUT_MS = 1_000
 WATCHD_SNAPSHOT_QUEUE_LIMIT = 64
 WATCHD_SNAPSHOT_RETENTION_SECONDS = 120.0
+WATCHD_COMMAND_ROUTER = LocalServiceCommandRouter({
+    action: f"_handle_{action}" for action in (
+        "ping", "status", "snapshot", "snapshot_product", "lease", "release", "upsert",
+        "remove", "wait_revision", "shutdown", "shutdown_if_idle",
+    )
+})
 # Registering a recursive native watch is one uninterruptible call that holds
 # the interpreter lock for its whole duration, so no handler thread in this
 # process can answer while it runs. Measured on a 63-root ~/dev configuration it
@@ -1516,149 +1524,122 @@ class PersistentWatchService:
             }
 
     def handle(self, request: dict[str, Any], request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        del request_binary
         self.last_client_at = time.monotonic()
         try:
             request = validate_request(request)
         except WatchProtocolError as error:
             return {"ok": False, "error": str(error), "required_protocol_version": WATCHD_PROTOCOL_VERSION}, b""
-        action = str(request["action"])
-        if action == "ping":
-            return {"ok": True, "service": WATCHD_SERVICE_NAME, "pid": os.getpid(), "version": WATCHD_PROTOCOL_VERSION, "code_revision": WATCHD_CODE_REVISION, "build_revision": 1}, b""
-        if action == "status":
-            return self.status(), b""
-        if action == "snapshot":
-            return self.snapshot(str(request.get("since") or ""), bool(request.get("force_full")))
-        if action == "snapshot_product":
-            return self.snapshot_product(str(request["producer_id"]), float(request.get("timeout_seconds") or 0.0))
-        if action == "lease":
-            with self.lock:
-                response = acquire_client_lease(
-                    self.leases,
-                    request.get("client_pid"),
-                    request.get("lease_id"),
-                    start_identity_reader=process_start_identity,
-                    pid_probe=pid_is_alive,
-                )
+        response = WATCHD_COMMAND_ROUTER.dispatch(self, str(request["action"]), request, request_binary)
+        return response if response is not None else ({"ok": False, "error": "unknown watch action"}, b"")
+
+    def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return CommonDaemonActions.ping(WATCHD_SERVICE_NAME, WATCHD_PROTOCOL_VERSION, pid=os.getpid(), code_revision=WATCHD_CODE_REVISION, build_revision=1)
+
+    def _handle_status(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return CommonDaemonActions.status(self.status)
+
+    def _handle_snapshot(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return self.snapshot(str(request.get("since") or ""), bool(request.get("force_full")))
+
+    def _handle_snapshot_product(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return self.snapshot_product(str(request["producer_id"]), float(request.get("timeout_seconds") or 0.0))
+
+    def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        with self.lock:
+            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), start_identity_reader=process_start_identity, pid_probe=pid_is_alive)
+            self.lock.notify_all()
+        return {**response, "version": WATCHD_PROTOCOL_VERSION, "epoch": self.epoch, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
+
+    def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        with self.lock:
+            return self._release_locked(str(request.get("lease_id") or "")), b""
+
+    def _handle_upsert(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        descriptor = validate_descriptor(request.get("descriptor"))
+        key = (str(request["lease_id"]), str(request["descriptor_id"]))
+        with self.lock:
+            if key[0] not in self.leases:
+                return {"ok": False, "error": "unknown lease", "error_code": "unknown_lease"}, b""
+            reaped = self._reap_locked()
+            previous = self.descriptors.get(key)
+            if previous is not None and descriptor.descriptor_generation < previous.descriptor_generation:
+                if reaped:
+                    self._refresh_configuration_locked()
+                return {"ok": False, "error": "stale descriptor generation", "error_code": "stale_generation", "watch_generation": self.watch_generation}, b""
+            proposed_descriptors = dict(self.descriptors)
+            proposed_descriptors[key] = descriptor
+            proposed = effective_configuration(list(proposed_descriptors.values()))
+            native_registration_count = len(proposed.shallow_registration_paths())
+            if native_registration_count > WATCHD_MAX_NATIVE_REGISTRATIONS:
+                if reaped:
+                    self._refresh_configuration_locked()
+                return {"ok": False, "error": "native registration capacity exceeded", "error_code": "native_capacity_exceeded", "native_registration_paths": native_registration_count, "native_registration_limit": WATCHD_MAX_NATIVE_REGISTRATIONS, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
+            stable_unchanged = previous is not None and descriptor.stable_payload() == previous.stable_payload()
+            self.descriptors[key] = descriptor
+            changed = self._refresh_configuration_locked(proposed)
+            return {"ok": True, "changed": changed, "descriptor_unchanged": stable_unchanged, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation, "epoch": self.epoch}, b""
+
+    def _handle_remove(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        key = (str(request["lease_id"]), str(request["descriptor_id"]))
+        with self.lock:
+            removed = self.descriptors.pop(key, None) is not None
+            changed = self._refresh_configuration_locked() if removed else False
+            return {"ok": True, "removed": removed, "changed": changed, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
+
+    def _handle_wait_revision(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        after = int(request.get("after_revision") or 0)
+        epoch = str(request.get("epoch") or "")
+        timeout = float(request.get("timeout_seconds") or 0.0)
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            if self.native_build_active:
+                return self._native_build_payload_locked(), b""
+            reset_reason = "epoch_changed" if epoch and epoch != self.epoch else ""
+            self.long_poll_waiters += 1
+            try:
+                while not reset_reason and not self.native_build_active and epoch == self.epoch and self.revision == after and timeout > 0 and not self.stop_event.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.lock.wait(remaining)
+            finally:
+                self.long_poll_waiters -= 1
                 self.lock.notify_all()
-            return {**response, "version": WATCHD_PROTOCOL_VERSION, "epoch": self.epoch, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
-        if action == "release":
-            with self.lock:
-                return self._release_locked(str(request.get("lease_id") or "")), b""
-        if action == "upsert":
-            descriptor = validate_descriptor(request.get("descriptor"))
-            key = (str(request["lease_id"]), str(request["descriptor_id"]))
-            with self.lock:
-                if key[0] not in self.leases:
-                    return {"ok": False, "error": "unknown lease", "error_code": "unknown_lease"}, b""
-                # Reap expired descriptors and orphaned-lease descriptors (no liveness
-                # I/O) BEFORE the stale-generation check and the cap proposal, so an
-                # expired descriptor's native registrations never consume the cap a
-                # valid within-cap upsert needs. If the reap changed the committed set
-                # but the upsert is then REJECTED (stale generation or cap), still
-                # commit the reap so the freed capacity is not silently discarded.
-                reaped = self._reap_locked()
-                previous = self.descriptors.get(key)
-                if previous is not None and descriptor.descriptor_generation < previous.descriptor_generation:
-                    if reaped:
-                        self._refresh_configuration_locked()
-                    return {"ok": False, "error": "stale descriptor generation", "error_code": "stale_generation", "watch_generation": self.watch_generation}, b""
-                # Enforce the daemon-wide native-registration cap at this PROPOSED-configuration
-                # boundary, on the effective UNION handed to watchfiles_watch -- not per field.
-                # An upsert that would cross it is REJECTED atomically: self.descriptors is not
-                # mutated, so the last-good descriptor/configuration/generation/worker are
-                # preserved and paths are never silently truncated. Deduplicated parents count
-                # once (the union is a set), and an expired/removed descriptor frees capacity on
-                # its next refresh.
-                proposed_descriptors = dict(self.descriptors)
-                proposed_descriptors[key] = descriptor
-                proposed = effective_configuration(list(proposed_descriptors.values()))
-                native_registration_count = len(proposed.shallow_registration_paths())
-                if native_registration_count > WATCHD_MAX_NATIVE_REGISTRATIONS:
-                    if reaped:
-                        self._refresh_configuration_locked()
-                    return {
-                        "ok": False,
-                        "error": "native registration capacity exceeded",
-                        "error_code": "native_capacity_exceeded",
-                        "native_registration_paths": native_registration_count,
-                        "native_registration_limit": WATCHD_MAX_NATIVE_REGISTRATIONS,
-                        "watch_generation": self.watch_generation,
-                        "active_watch_generation": self.active_watch_generation,
-                    }, b""
-                stable_unchanged = previous is not None and descriptor.stable_payload() == previous.stable_payload()
-                self.descriptors[key] = descriptor
-                changed = self._refresh_configuration_locked(proposed)
-                return {"ok": True, "changed": changed, "descriptor_unchanged": stable_unchanged, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation, "epoch": self.epoch}, b""
-        if action == "remove":
-            key = (str(request["lease_id"]), str(request["descriptor_id"]))
-            with self.lock:
-                removed = self.descriptors.pop(key, None) is not None
-                changed = self._refresh_configuration_locked() if removed else False
-                return {"ok": True, "removed": removed, "changed": changed, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
-        if action == "wait_revision":
-            after = int(request.get("after_revision") or 0)
-            epoch = str(request.get("epoch") or "")
-            timeout = float(request.get("timeout_seconds") or 0.0)
-            deadline = time.monotonic() + timeout
-            with self.lock:
-                if self.native_build_active:
-                    return self._native_build_payload_locked(), b""
-                reset_reason = "epoch_changed" if epoch and epoch != self.epoch else ""
-                self.long_poll_waiters += 1
-                try:
-                    while not reset_reason and not self.native_build_active and epoch == self.epoch and self.revision == after and timeout > 0 and not self.stop_event.is_set():
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            break
-                        self.lock.wait(remaining)
-                finally:
-                    self.long_poll_waiters -= 1
-                    self.lock.notify_all()
-                if self.native_build_active:
-                    return self._native_build_payload_locked(), b""
-                payload: dict[str, Any] = {}
-                current_revision = self.revision
-                if not epoch:
-                    payload = self._snapshot_payload_locked()
-                elif not reset_reason and after > self.revision:
-                    reset_reason = "cursor_ahead"
-                elif not reset_reason and self.revision > after:
-                    retained = self._retained_revision_after_locked(after)
-                    if retained is None:
-                        reset_reason = "history_expired"
-                    else:
-                        payload = retained
-            if reset_reason:
-                # Gap recovery owes the client exact signatures, and that scan must
-                # never run under the condition unrelated handlers wait on.
-                payload = self._reset_payload()
-                current_revision = int(payload["revision"])
-            return {
-                "ok": True,
-                "epoch": self.epoch,
-                "current_revision": current_revision,
-                "changed": bool(payload),
-                "reset": bool(reset_reason),
-                "reset_reason": reset_reason,
-                "revision": payload,
-            }, b""
-        if action == "shutdown":
-            self.stop_event.set()
-            self.native_stop_event.set()
-            self.snapshot_stop_event.set()
-            with self.lock:
-                self.lock.notify_all()
-            return {"ok": True, "shutdown": True}, b""
-        if action == "shutdown_if_idle":
-            with self.lock:
-                if self.leases:
-                    return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
-            self.stop_event.set()
-            self.native_stop_event.set()
-            self.snapshot_stop_event.set()
-            return {"ok": True, "shutdown": True}, b""
-        return {"ok": False, "error": "unknown watch action"}, b""
+            if self.native_build_active:
+                return self._native_build_payload_locked(), b""
+            payload: dict[str, Any] = {}
+            current_revision = self.revision
+            if not epoch:
+                payload = self._snapshot_payload_locked()
+            elif not reset_reason and after > self.revision:
+                reset_reason = "cursor_ahead"
+            elif not reset_reason and self.revision > after:
+                retained = self._retained_revision_after_locked(after)
+                if retained is None:
+                    reset_reason = "history_expired"
+                else:
+                    payload = retained
+        if reset_reason:
+            payload = self._reset_payload()
+            current_revision = int(payload["revision"])
+        return {"ok": True, "epoch": self.epoch, "current_revision": current_revision, "changed": bool(payload), "reset": bool(reset_reason), "reset_reason": reset_reason, "revision": payload}, b""
+
+    def _handle_shutdown(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        self.stop_event.set()
+        self.native_stop_event.set()
+        self.snapshot_stop_event.set()
+        with self.lock:
+            self.lock.notify_all()
+        return {"ok": True, "shutdown": True}, b""
+
+    def _handle_shutdown_if_idle(self, request: dict[str, Any], body: bytes) -> tuple[dict[str, Any], bytes]:
+        with self.lock:
+            if self.leases:
+                return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
+        self.stop_event.set()
+        self.native_stop_event.set()
+        self.snapshot_stop_event.set()
+        return {"ok": True, "shutdown": True}, b""
 
     def run(self) -> int:
         self.start_watcher()

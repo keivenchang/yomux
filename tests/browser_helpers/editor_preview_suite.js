@@ -897,10 +897,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('touch terminals provide one shared smart-key transport accessory', () => {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {coarsePointer: true});
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const facadeSource = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
-    assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tmux-prefix', 'backspace', 'more'\]\)[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['tab', 'shift', 'ctrl'\]\)[\s\S]*terminalMobileAccessoryDpadActions = Object\.freeze\([^\n]*'copy', 'command-v'[^\n]*'alt'/.test(source), 'the primary page keeps Esc above Tab, stacks Paste directly below Copy, and keeps Ctrl, Alt, then the platform Meta key across the bottom-left row');
+    assert.ok(/terminalMobileAccessoryActionFamilies = Object\.freeze\(\{[\s\S]*primary: Object\.freeze\(\['tmux-prefix', 'backspace', 'more'\]\)[\s\S]*side: Object\.freeze\(\['tab', 'shift', 'ctrl'\]\)[\s\S]*dpad: Object\.freeze\([^\n]*'copy', 'command-v'[^\n]*'alt'/.test(facadeSource) && /terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.primary[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.side[\s\S]*terminalMobileAccessoryDpadActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.dpad/.test(source), 'the primary page keeps Esc above Tab, stacks Paste directly below Copy, and keeps Ctrl, Alt, then the platform Meta key across the bottom-left row');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && /const terminalMobileAccessoryMoreActions = Object\.freeze\(\['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'\]\);/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'the More page reuses shared command/navigation definitions while the primary D-pad retains Paste');
     assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
     assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*routeTerminalScrollLines\(session, term, container, signedLines, \{source: 'page-key'\}\)[\s\S]*action === 'tmux-scroll-up' \? '\\x1b\[5~' : '\\x1b\[6~'[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; palette PgUp/PgDn use the shared page-key router and send native bytes only when a non-mouse alternate app owns paging');
@@ -1039,7 +1040,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest('1').includes('data-terminal-mobile-toggle="1"'), 'mobile=1 forces the shared coarse-pointer keyboard path on desktop browsers');
     assert.equal(desktopMobileOverrideApi.mobileSinglePaneModeForTest(), false, 'mobile=1 alone does not fake a narrow phone viewport or collapse desktop panes');
     assert.ok(/function browserUsesCoarsePointer\(\)[\s\S]*urlFlagEnabled\('mobile'\)[\s\S]*matchMedia\('\(pointer: coarse\)'/.test(bootstrapSource), 'mobile=1 is owned by the shared coarse-pointer predicate before media-query detection');
-    assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while Tab stays directly below Esc');
+    assert.ok(facadeSource.includes("primary: Object.freeze(['tmux-prefix', 'backspace', 'more'])") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && facadeSource.includes("side: Object.freeze(['tab', 'shift', 'ctrl'])") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while Tab stays directly below Esc');
     const macKeyboardHtml = loadYolomux('?mobile=1&platform=mac', ['1'], 'http:', 'Linux x86_64').terminalMobileAccessoryHtmlForTest('1');
     const pcKeyboardHtml = loadYolomux('?mobile=1&platform=pc', ['1'], 'http:', 'MacIntel').terminalMobileAccessoryHtmlForTest('1');
     assert.ok(macKeyboardHtml.includes('>⌥</button>') && macKeyboardHtml.includes('>⌘</button>') && macKeyboardHtml.includes('>⌘C</button>') && macKeyboardHtml.includes('>⌘V</button>') && macKeyboardHtml.includes('>⌘P</button>'), 'platform=mac renders Option and Command symbols for modifiers and app actions');
@@ -7138,17 +7139,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.equal(source.includes('row.className = `file-tree-row kind-${entry.kind}`'), false, 'Finder row refresh does not drop and re-add symlink/indexed classes');
     assert.ok(source.includes('function buildFileTreeRowState('), 'RA4: row render state has a named builder');
-    assert.ok(source.includes('function applyFileTreeRowDataset('), 'RA4: row dataset/class work has a named applier');
     assert.ok(source.includes('function bindFinderRowHandlers('), 'RA4: Finder handlers have a named binder');
-    assert.ok(source.includes('function bindDifferRowData('), 'RA4: Differ row data has a named binder');
-    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*applyFileTreeRowDataset[\s\S]*applyFileTreeRowDerivedState[\s\S]*applyFileExplorerSessionHighlightRow[\s\S]*bindDifferRowData[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow is the short dispatcher over the row helpers');
-    assert.ok(source.includes('syncFileTreeRowKindClass(row, entry.kind)'), 'Finder row kind classes update through stable toggles');
+    assert.ok(/function updateFileTreeRow\([\s\S]*buildFileTreeRowState[\s\S]*patchTreeRow\(row, fileTreeRowViewModel\(rowState\)\)[\s\S]*applyFileExplorerSessionHighlightRow[\s\S]*bindFinderRowHandlers/.test(source), 'RA4: updateFileTreeRow dispatches normalized state through the shared patch seam before projections and adapter actions');
+    assert.ok(source.includes('syncFileTreeRowKindClass(row, model.kind)'), 'the shared row patch updates kind classes through stable toggles');
     assert.ok(/function fileExplorerSyncTargetDirs\(plan\)[\s\S]*pathIsInsideDirectory\(path, root\)/.test(source)
       && !/function fileExplorerSyncTargetDirs\(plan\)[\s\S]{0,500}dirs\.filter\(path => !dirs\.some/.test(source), 'Finder Sync stars every affected directory under the visible root instead of pruning ancestors');
     assert.ok(source.includes("marker.className = 'file-tree-sync-target'")
       && /function applyFileExplorerSessionHighlightRow\([\s\S]*updateFileTreeSyncTargetMarker\(row, isSyncTarget, sets\.syncTargetTitle/.test(source), 'Finder Sync star is a real row marker with localized title updates');
-    assert.ok(source.includes("row.classList.toggle('is-symlink', entry.is_symlink === true)"), 'rows flag symlinks');
-    assert.ok(source.includes("row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken')"), 'rows flag broken symlinks');
+    assert.ok(source.includes("'is-symlink': entry.is_symlink === true"), 'the Finder view model flags symlinks');
+    assert.ok(source.includes("'symlink-broken': entry.kind === 'symlink-broken'"), 'the Finder view model flags broken symlinks');
     assert.ok(/entry\.is_symlink === true && entry\.symlink_target[\s\S]{0,160}→ \$\{entry\.symlink_target\}/.test(source), 'a symlink row title shows name → target');
     // The target renders INLINE in the row name ("name → target"), rel or abs as stored.
     const api = loadYolomux();
@@ -7424,7 +7423,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/openFileInEditor\(resolved, basenameOf\(resolved\), \{[\s\S]*?viewMode: editorPreviewModeAvailable\(resolved\) \? 'preview' : 'edit'/.test(src), '#133: preview-capable file links open in preview (md/html), else edit');
     assert.ok(/t\('preview\.openFailed'/.test(src), "#133: a failed open surfaces a toast");
     // The handler is wired ONLY to the file-editor preview (path provided), not to yoagent bodies.
-    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context: previewContext\}\)/.test(src), '#133: the file-editor preview threads the owning path and preview context; yoagent bodies pass no path');
+    assert.ok(/renderMarkdownPreviewInto\(container, text, path, \{context\}\)/.test(src), '#133: the file-editor preview strategy threads the owning path and preview context; yoagent bodies pass no path');
   });
 
   test('theme preference radios localize and select one value', () => {
@@ -7789,8 +7788,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/layoutRenderCanUseCheap\(renderRequest\)[\s\S]*?syncActivePanelsInPlace\(previousActive\)/.test(schedulerBody), '#same-shape changes take the in-place branch and carries its prior visibility set');
     assert.ok(/renderSessionButtons\(\);\s*renderPanels\(previousActive/.test(schedulerBody), '#shape changes still fall through to the full rebuild');
     assert.ok(layoutSrc.includes('function syncActivePanelsInPlace'), '#the in-place panel swap exists');
-    // fix 6: the markdown preview render is guarded by a path+content signature.
-    assert.ok(/container\._previewPath !== path \|\| container\._previewText !== text/.test(layoutSrc), '#fix 6: renderEditorPreviewPane skips re-rendering unchanged markdown');
+    // The registry-owned markdown signature guards the expensive preview render.
+    assert.ok(/function markdownPreviewStrategySignature/.test(layoutSrc) && /function renderPreviewDescriptor/.test(layoutSrc), '#fix 6: registry strategy skips re-rendering unchanged markdown');
+  });
+
+  test('preview registry owns every rendering strategy and structured parser', () => {
+    const api = loadYolomux('', ['1']);
+    assert.ok(api.PREVIEW_RENDERERS.length > 0, 'preview registry is populated');
+    for (const renderer of api.PREVIEW_RENDERERS) {
+      assert.equal(typeof renderer.render, 'function', `${renderer.id} owns its render strategy`);
+      assert.equal(typeof renderer.cleanup, 'function', `${renderer.id} owns its cleanup strategy`);
+      assert.ok(Array.isArray(renderer.surfaceClasses), `${renderer.id} owns its surface classes`);
+    }
+    assert.equal(typeof api.previewRendererForPath('/tmp/config.json').parse, 'function', 'structured preview owns its parse strategy');
+    assert.equal(typeof api.previewRendererForPath('/tmp/table.tsv').parse, 'function', 'delimited preview owns its parse strategy');
+    const source = fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8');
+    const dispatch = source.slice(source.indexOf('function renderEditorPreviewPane'), source.indexOf('\n}', source.indexOf('function renderEditorPreviewPane')) + 2);
+    assert.ok(dispatch.includes('renderPreviewDescriptor(renderer'), 'editor preview routes through the registry descriptor');
+    assert.equal(/previewKind\s*===|render(?:Html|RawImage|Pdf|Structured|Table|NativeMedia|Unsupported|EditorCode)PreviewInto/.test(dispatch), false, 'editor preview has no parallel kind switch');
   });
 
   test('i18n catalogs interpolate fallback and relocalize UI', () => {
@@ -8510,7 +8525,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(chat.includes("if (event.target.matches('[data-chat-input]')) setChatTyping(false);"), 'composer blur always clears typing, even when a draft remains');
     assert.ok(chat.includes('new IntersectionObserver(entries =>'), 'older history paging uses one gated sentry observer');
     assert.ok(chat.includes('if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;'), 'the sentry never transfers old bodies before explicit upward paging intent');
-    assert.ok(chat.includes('chatState.requestController?.abort?.();'), 'panel teardown aborts stale read/search requests');
+    assert.ok(chat.includes("scope.replace('request-controller', controller, value => value.abort());") && chat.includes("chatState.lifecycleScope?.dispose('chat-destroy');"), 'panel teardown disposes the shared owner and aborts stale read/search requests');
     assert.ok(chat.includes('const timelineBody = `${chatIntroductionHtml()}${messages.map('), 'the non-persisted YOLOmux introduction remains first even when the initial view contains messages');
     assert.ok(chat.includes('function chatTypingParticipantNames()') && chat.includes('if (chatTypingParticipantNames().length) tones.push(STATE_KEY.working)'), 'human and YO!agent leases share one typing-presence and status owner');
     assert.ok(chat.includes('renderConversationMessageMarkdown(panel);'), 'YO!chat routes YO!agent bodies through the same sanitized Markdown pass as YO!agent');

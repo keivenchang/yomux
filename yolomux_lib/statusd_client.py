@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from .infra import common
+from .local_service_projection import registry_runtime_row
 from .local_services.client import LocalServiceClient
 from .local_services.rpc import safe_socket_path
-from .local_services.runtime import local_service_failure_text
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import STATUSD_CODE_REVISION
@@ -129,14 +129,9 @@ class StatusClient(LocalServiceClient):
         runtime = self.registry.status()
         payload = runtime.get("status") if isinstance(runtime.get("status"), dict) else {}
         pid = int(payload.get("pid") or 0)
-        return {
-            "service": STATUSD_SERVICE_NAME,
-            "pid": pid,
+        return registry_runtime_row(STATUSD_SERVICE_NAME, self.registry, runtime, payload, fields_before_failure={
             "demand_started": True,
-            "started_at": float(payload.get("started_at") or 0.0),
-            "version": int(payload.get("version") or 0),
             "socket": str(payload.get("socket") or self.socket_path),
-            "healthy": bool(runtime.get("healthy")),
             "clients": int(payload.get("clients") or 0),
             "queues": {"depth": int(payload.get("queue_depth") or 0)},
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
@@ -144,6 +139,4 @@ class StatusClient(LocalServiceClient):
             "build_count": int(payload.get("build_count") or 0),
             "encode_count": int(payload.get("encode_count") or 0),
             "invalidation_reason": str(payload.get("invalidation_reason") or ""),
-            "last_failure": local_service_failure_text(runtime, payload),
-            "resources": self.registry.resources(pid),
-        }
+        })

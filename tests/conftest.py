@@ -35,6 +35,9 @@ os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
 from yolomux_lib import app as app_module
 from yolomux_lib import file_index
 from yolomux_lib import statusd_protocol
+from tools.test_plan import automatic_test_markers
+from tools.test_plan import SLOWEST_FIRST_TESTS
+from tools.test_plan import test_node_sort_key
 
 
 @pytest.fixture
@@ -48,16 +51,6 @@ def legacy_activity_summary_enabled(monkeypatch):
     )
 
 
-SLOWEST_FIRST_TESTS = (
-    "tests/test_browser_share.py::test_generated_share_link_mirrors_interactive_ui_surface_matrix",
-    "tests/test_browser_dockview.py::test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid",
-    "tests/test_browser_dockview.py::test_differ_reopen_keeps_dragged_file_tab_home",
-    "tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",
-    "tests/test_browser_dockview.py::test_dockview_yellow_window_ball_click_switches_and_acknowledges",
-    "tests/test_node_suite.py::test_node_layout_suite_passes",
-)
-
-SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
 NONBROWSER_TEST_TIMEOUT_SECONDS = 180
 BROWSER_TEST_TIMEOUT_SECONDS = 300
 E2E_TEST_TIMEOUT_SECONDS = 600
@@ -68,10 +61,6 @@ _SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pyt
 
 def _test_path(item) -> Path:
     return Path(str(getattr(item, "path", getattr(item, "fspath", ""))))
-
-
-def _automatic_test_markers(path: Path) -> tuple[str, ...]:
-    return ("browser", "socket") if path.name.startswith("test_browser_") else ()
 
 
 def _test_path_imports_selenium(path: Path) -> bool:
@@ -149,37 +138,14 @@ def local_socket_capability() -> tuple[bool, str]:
     return _SOCKET_AVAILABILITY
 
 
-def reset_file_index_background_hooks():
-    """Clear every process-global producer `file_index` fans a background write through.
-
-    `app.TmuxWebtermApp.__init__` wires all of these to bound methods of one App; in production one
-    process owns exactly one App for its lifetime, so nothing clears them there. Under pytest a single
-    worker constructs many Apps, so a hook left pointing at a torn-down App fires from a later test's
-    background crawl and writes/chmods that App's host-state dir -- the cross-test PermissionError this
-    resets. The search-progress notifier is the same shape as the other five and MUST be cleared with
-    them; leaving it out let a coalesced `notify_search_progress` (its daemon Timer, too) reach the
-    shared background-client-events bus after its owning test was gone. One list, cleared identically
-    at setup and teardown, so no producer can drift back in unbalanced.
-    """
-    file_index.set_background_owner_checker(None)
-    file_index.set_background_owner_refresh_requester(None)
-    file_index.set_background_index_search_requester(None)
-    file_index.set_background_owner_bytes_recorder(None)
-    file_index.set_background_owner_done_notifier(None)
-    file_index.set_search_progress_notifier(None)
-    file_index._reset_search_progress_coalescing()
-    file_index.clear_memory_indexes()
-
-
 @pytest.fixture(autouse=True)
 def isolated_file_index_background_hooks(monkeypatch):
     # The real indexer is intentionally detached and persistent. Test cases
     # use a temporary state directory that pytest removes at process exit, so
     # never leave a detached child pointed at that vanished state behind.
     monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
-    reset_file_index_background_hooks()
-    yield
-    reset_file_index_background_hooks()
+    with file_index.FileIndexTestScope():
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +163,7 @@ def reset_worker_reused_browser(request):
 def pytest_collection_modifyitems(config, items):
     for item in items:
         path = _test_path(item)
-        for marker_name in _automatic_test_markers(path):
+        for marker_name in automatic_test_markers(path):
             item.add_marker(getattr(pytest.mark, marker_name))
 
     selenium_paths = {_test_path(item) for item in items if _test_path_imports_selenium(_test_path(item))}
@@ -226,15 +192,7 @@ def pytest_collection_modifyitems(config, items):
 
     indexed = list(enumerate(items))
 
-    def sort_key(pair):
-        original_index, item = pair
-        base_nodeid = item.nodeid.split("[", 1)[0]
-        rank = SLOWEST_FIRST_RANK.get(item.nodeid, SLOWEST_FIRST_RANK.get(base_nodeid))
-        if rank is None:
-            return (1, original_index)
-        return (0, rank, original_index)
-
-    indexed.sort(key=sort_key)
+    indexed.sort(key=lambda pair: test_node_sort_key(pair[1].nodeid, pair[0]))
     items[:] = [item for _original_index, item in indexed]
 
 

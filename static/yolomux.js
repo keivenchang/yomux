@@ -227,15 +227,45 @@ let shareReplayDeltaFramePending = false;
 let shareReplayMutationPublisherPaused = false;
 let shareReplayLastDeltaBatch = null;
 let shareReplayLastReplayError = null;
-let shareReplayCurrentEpoch = 0;
-let shareReplayLastSequence = 0;
-let shareReplayDroppedFrames = 0;
-let shareReplayStaleFrames = 0;
-let shareReplayKeyframeRequestCount = 0;
-let shareReplayKeyframeRequestSuppressedCount = 0;
-let shareReplayKeyframeLastRequestAt = 0;
-let shareReplayKeyframeBackoffMs = 0;
-let shareReplayKeyframeInFlight = false;
+class ShareReplayState {
+  constructor() {
+    this.sequence = {epoch: 0, last: 0, dropped: 0, stale: 0};
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+
+  sequenceSnapshot() { return {...this.sequence}; }
+  keyframeRequestSnapshot() { return {...this.keyframeRequest}; }
+  get currentEpoch() { return this.sequence.epoch; }
+  get lastSequence() { return this.sequence.last; }
+  get droppedFrames() { return this.sequence.dropped; }
+  get staleFrames() { return this.sequence.stale; }
+  get keyframeRequests() { return this.keyframeRequest.count; }
+  get keyframeRequestsSuppressed() { return this.keyframeRequest.suppressed; }
+  acceptSequence(epoch, sequence) {
+    this.sequence.epoch = Math.max(0, Math.round(Number(epoch) || 0));
+    this.sequence.last = Math.max(0, Math.round(Number(sequence) || 0));
+  }
+  recordDroppedFrame() { this.sequence.dropped += 1; }
+  recordStaleFrame() { this.sequence.stale += 1; }
+  resetKeyframeRequest() {
+    this.keyframeRequest.inFlight = false;
+    this.keyframeRequest.backoffMs = 0;
+  }
+  suppressKeyframeRequest() { this.keyframeRequest.suppressed += 1; }
+  beginKeyframeRequest(now, backoffMs) {
+    this.keyframeRequest.count += 1;
+    this.keyframeRequest.lastAt = now;
+    this.keyframeRequest.backoffMs = backoffMs;
+    this.keyframeRequest.inFlight = true;
+  }
+  resetViewerSequence(epoch = 0, sequence = 0) {
+    this.acceptSequence(epoch, sequence);
+    this.sequence.dropped = 0;
+    this.sequence.stale = 0;
+    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
+  }
+}
+const shareReplayState = new ShareReplayState();
 let shareReplayHostKeyframeTimer = null;
 let shareReplayHostKeyframePendingReason = '';
 let shareReplayHostLastKeyframeAt = 0;
@@ -437,10 +467,19 @@ const EDITOR_SCHEMES = {
   },
 };
 const EDITOR_SCHEME_IDS = Object.keys(EDITOR_SCHEMES);
+function previewRendererStrategy(specification) {
+  return Object.freeze({
+    surfaceClasses: [],
+    cleanup: cleanupStandardPreviewStrategy,
+    signature: null,
+    parse: null,
+    ...specification,
+  });
+}
 const PREVIEW_RENDERERS = Object.freeze([
-  {id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown'},
-  {id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true},
-  {id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -451,11 +490,20 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ico': 'image/x-icon',
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
-  }},
-  {id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, mimeByExtension: {'.pdf': 'application/pdf'}},
-  {id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid'},
-  {id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json'},
-  {id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', languageByExtension: {
+  }}),
+  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
+  previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
+  previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
+  previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
+    '.json': parseJsonStructuredPreviewStrategy,
+    '.geojson': parseGeoJsonStructuredPreviewStrategy,
+    '.ipynb': parseNotebookStructuredPreviewStrategy,
+    '.toml': parseTomlStructuredPreviewStrategy,
+    '.xml': parseXmlStructuredPreviewStrategy,
+    '.drawio': parseDrawioStructuredPreviewStrategy,
+    '.dio': parseDrawioStructuredPreviewStrategy,
+    '.excalidraw': parseExcalidrawStructuredPreviewStrategy,
+  }, render: renderStructuredPreviewStrategy, languageByExtension: {
     '.json': 'json',
     '.geojson': 'json',
     '.ipynb': 'json',
@@ -472,9 +520,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.env': 'ini',
     '.properties': 'ini',
     '.props': 'ini',
-  }},
-  {id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text'},
-  {id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text', surfaceClasses: ['data-preview-body'], parse: parseDelimitedPreviewStrategy, delimiterByExtension: {'.csv': ',', '.tsv': '\t'}, render: renderDelimitedPreviewStrategy}),
+  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp3': 'audio/mpeg',
     '.wav': 'audio/wav',
     '.ogg': 'audio/ogg',
@@ -483,8 +531,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.m4a': 'audio/mp4',
     '.aac': 'audio/aac',
     '.opus': 'audio/opus',
-  }},
-  {id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp4': 'video/mp4',
     '.m4v': 'video/mp4',
     '.webm': 'video/webm',
@@ -492,10 +540,10 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.mkv': 'video/x-matroska',
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
-  }},
+  }}),
   // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
   // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  {id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', languageByExtension: {
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -511,30 +559,30 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.plantuml': 'text',
     '.srt': 'text',
     '.vtt': 'text',
-  }},
-  {id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-image', kind: 'unsupported', extensions: ['.tif', '.tiff', '.heic', '.heif'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.image', mimeByExtension: {
     '.tif': 'image/tiff',
     '.tiff': 'image/tiff',
     '.heic': 'image/heic',
     '.heif': 'image/heif',
-  }},
-  {id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-document', kind: 'unsupported', extensions: ['.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.document', mimeByExtension: {
     '.doc': 'application/msword',
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.ppt': 'application/vnd.ms-powerpoint',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.xls': 'application/vnd.ms-excel',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  }},
-  {id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-data', kind: 'unsupported', extensions: ['.sqlite', '.sqlite3', '.db', '.parquet', '.arrow', '.feather'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.data', mimeByExtension: {
     '.sqlite': 'application/vnd.sqlite3',
     '.sqlite3': 'application/vnd.sqlite3',
     '.db': 'application/vnd.sqlite3',
     '.parquet': 'application/vnd.apache.parquet',
     '.arrow': 'application/vnd.apache.arrow.file',
     '.feather': 'application/vnd.apache.arrow.file',
-  }},
-  {id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
+  }}),
+  previewRendererStrategy({id: 'unsupported-archive', kind: 'unsupported', extensions: ['.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar'], textBacked: false, defaultMode: 'preview', raw: true, render: renderUnsupportedPreviewStrategy, fallbackTitleKey: 'preview.unsupported.archive', mimeByExtension: {
     '.zip': 'application/zip',
     '.tar': 'application/x-tar',
     '.gz': 'application/gzip',
@@ -543,8 +591,8 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.xz': 'application/x-xz',
     '.7z': 'application/x-7z-compressed',
     '.rar': 'application/vnd.rar',
-  }},
-  {id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview'},
+  }}),
+  previewRendererStrategy({id: 'unsupported', kind: 'unsupported', extensions: [], textBacked: false, defaultMode: 'preview', render: renderUnsupportedPreviewStrategy}),
 ]);
 const PREVIEW_RENDERER_BY_ID = new Map(PREVIEW_RENDERERS.map(renderer => [renderer.id, renderer]));
 const PREVIEW_RENDERER_BY_EXTENSION = new Map();
@@ -826,8 +874,8 @@ let tmuxSessionMutationSerial = 0;
 let tmuxSessionMutationCurrent = null;
 const panelNodes = new Map();
 const resizeObservers = new Map();
-const transcriptStreams = new Map();
-const summaryStreams = new Map();
+const transcriptLifecycleScopes = new Map();
+const summaryLifecycleScopes = new Map();
 const autoApproveStates = new Map();
 const attentionAcknowledgementRecords = new Map();
 const attentionAcknowledgementRecordLimit = 1024;
@@ -1905,7 +1953,7 @@ const backgroundOwnerStatusState = {
   error: '',
   request: null,
   updatedAt: 0,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentStartupState = {
   activityPayload: null,
@@ -1924,13 +1972,13 @@ const yoagentConversationState = {
   displayPath: '',
   streamingMessages: new Map(),
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentJobsState = {
   items: [],
   loading: false,
   request: null,
-  guard: makeGenerationGuard(),
+  resource: null,
 };
 const yoagentChatState = {
   busy: false,
@@ -2046,9 +2094,30 @@ let pendingPreferencesRender = false;
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let pendingLayoutRenderFrame = 0;
-let layoutMutationGeneration = 0;
-let layoutMutationCompletedGeneration = 0;
-let pendingLayoutMutationGeneration = 0;
+class RuntimeState {
+  constructor() {
+    this.layoutMutation = {generation: 0, completed: 0, pending: 0};
+  }
+
+  layoutMutationSnapshot() { return {...this.layoutMutation}; }
+  get layoutMutationGeneration() { return this.layoutMutation.generation; }
+  get layoutMutationCompletedGeneration() { return this.layoutMutation.completed; }
+  get pendingLayoutMutationGeneration() { return this.layoutMutation.pending; }
+  beginLayoutMutation() {
+    this.layoutMutation.generation += 1;
+    this.layoutMutation.pending = this.layoutMutation.generation;
+    return this.layoutMutation.generation;
+  }
+  consumePendingLayoutMutation(generation) {
+    if (generation === this.layoutMutation.pending) this.layoutMutation.pending = 0;
+  }
+  completeLayoutMutation(generation) {
+    if (!Number.isSafeInteger(generation) || generation <= this.layoutMutation.completed) return false;
+    this.layoutMutation.completed = generation;
+    return true;
+  }
+}
+const runtimeState = new RuntimeState();
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 // one global editor navigation history (Popular IDE-style back/forward through visited files).
@@ -2073,8 +2142,23 @@ let fileExplorerPathError = '';
 let fileExplorerLastListError = null;
 let fileImagePreviewPopover = null;
 let fileImagePreviewController = null;
-let fileExplorerInteractionGeneration = 0;
-let fileExplorerOpenGeneration = 0;
+class FileWorkspaceState {
+  constructor() {
+    this.generations = {interaction: 0, open: 0};
+  }
+
+  beginOpen() { this.generations.open += 1; return this.generations.open; }
+  get fileExplorerOpenGeneration() { return this.generations.open; }
+  get fileExplorerInteractionGeneration() { return this.generations.interaction; }
+  openIsCurrent(generation) { return generation === this.generations.open; }
+  interactionGeneration() { return this.generations.interaction; }
+  interactionIsCurrent(generation) { return generation === this.generations.interaction; }
+  invalidateInteraction({invalidateOpen = true} = {}) {
+    this.generations.interaction += 1;
+    if (invalidateOpen) this.generations.open += 1;
+  }
+}
+const fileWorkspaceState = new FileWorkspaceState();
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
@@ -2495,6 +2579,53 @@ function rerenderDateTimeFormatSurfaces() {
   if (typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs();
   if (typeof renderFileExplorerChangesPanels === 'function') renderFileExplorerChangesPanels({force: true});
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+
+function createPageTransportLifecycle(pageLifecycle = null) {
+  let lifecycleScope = null;
+  let retirementReason = '';
+  let transportGeneration = 0;
+  let retirementGeneration = -1;
+  const owner = {
+    start() {
+      if (lifecycleScope?.current()) return owner;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      if (!pageLifecycle || typeof pageLifecycle.addEventListener !== 'function') return owner;
+      for (const eventName of ['beforeunload', 'pagehide']) {
+        scope.ownEvent(`page-${eventName}`, pageLifecycle, eventName, () => {
+          if (retirementReason && transportGeneration <= retirementGeneration) return;
+          retirementReason = `page_${eventName}`;
+          retirementGeneration = transportGeneration;
+        });
+      }
+      scope.ownEvent('page-pageshow', pageLifecycle, 'pageshow', () => { retirementReason = ''; });
+      return owner;
+    },
+    begin() { return transportGeneration; },
+    noteDelivery(startGeneration = null) {
+      if (retirementReason && Number(startGeneration) <= retirementGeneration) {
+        transportGeneration = retirementGeneration + 1;
+      }
+    },
+    reasonSince(startGeneration) {
+      return retirementReason && Number(startGeneration) <= retirementGeneration ? retirementReason : '';
+    },
+    dispose(reason = 'page-transport-lifecycle-stop') {
+      retirementReason = '';
+      return lifecycleScope?.dispose(reason) || false;
+    },
+  };
+  return Object.freeze(owner);
+}
+
+const pageTransportLifecycle = createPageTransportLifecycle(globalThis.window || globalThis).start();
 // The ONE topbar health indicator: one state object, one DOM node, one insertion point
 // (.topbar-right-tools). Two independent signals feed it:
 //   * this browser cannot reach the server at all (consecutive apiFetch transport failures), and
@@ -2830,6 +2961,8 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  const transportLifecycle = pageTransportLifecycle;
+  const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
@@ -2838,11 +2971,6 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
-  // Some internal probes have an EXPECTED non-2xx outcome (e.g. an open-editor deletion-confirmation
-  // read that a genuine 404 answers). Recording that expected status as a jsDebug API failure is a false
-  // positive the strict browser error gate flags. quietStatuses suppresses the debug event ONLY for those
-  // exact expected response statuses; every other status, and any thrown transport/network error, still
-  // records loud, so genuine failures never go silent.
   const quietStatuses = Array.isArray(internalOptions.quietStatuses)
     ? new Set(internalOptions.quietStatuses.map(Number))
     : null;
@@ -2897,12 +3025,14 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
+    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
     if (timeoutError) noteTimeout();
-    else noteBackendHealthFailure();
+    else if (!retirementReason) noteBackendHealthFailure();
     if (recordDebug) {
       notePageLoadApiCompleted();
       recordApiDebugEvent(url, method, startedAt, {
         error,
+        ...(retirementReason ? {deliveryOutcome: 'retired', reason: retirementReason} : {deliveryOutcome: 'failed'}),
         requestBytes,
         requestId,
         provenance: diagnosticProvenance,
@@ -2911,7 +3041,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     cleanup();
     throw error;
   }
-  noteBackendHealthSuccess();
+  transportLifecycle.noteDelivery(transportToken); noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
   // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
@@ -3899,6 +4029,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
+  for (const field of ['deliveryOutcome', 'reason']) if (result[field]) payload[field] = String(result[field]).slice(0, 64);
   return recordJsDebugEvent('api', payload);
 }
 
@@ -3970,7 +4101,7 @@ function recordJsDebugEvent(type, payload = {}) {
 function jsDebugFailureClassification(event) {
   const type = String(event?.type || '');
   if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
-  const apiFailure = type === 'api' && (
+  const apiFailure = type === 'api' && event?.deliveryOutcome !== 'retired' && (
     event?.ok === false
     || (Number.isFinite(event?.status) && event.status >= 400)
     || Boolean(event?.error)
@@ -6489,6 +6620,38 @@ function replaceHtmlPreservingScroll(element, html) {
   restoreElementScrollPosition(element, scrollTop, scrollLeft);
 }
 
+function reconcilePanelBody({body, html, anchors = [], replace = null, afterReplace = null} = {}) {
+  if (!body) return false;
+  const captured = anchors.map(anchor => ({
+    anchor,
+    value: typeof anchor.capture === 'function' ? anchor.capture(body) : undefined,
+  }));
+  if (typeof replace === 'function') replace(body, html);
+  else body.innerHTML = html;
+  for (const {anchor, value} of captured) anchor.restore?.(body, value);
+  afterReplace?.(body);
+  return true;
+}
+
+function elementScrollAnchor(selector, fallbackToBody = false) {
+  return {
+    capture(body) {
+      const element = body.querySelector?.(selector) || (fallbackToBody ? body : null);
+      return {scrollTop: element?.scrollTop || 0, scrollLeft: element?.scrollLeft || 0};
+    },
+    restore(body, value) {
+      restoreElementScrollPosition(body.querySelector?.(selector) || (fallbackToBody ? body : null), value?.scrollTop || 0, value?.scrollLeft || 0);
+    },
+  };
+}
+
+function keyedScrollAnchor(selector) {
+  return {
+    capture: body => captureKeyedScrollPositions(body, selector),
+    restore: (body, value) => restoreKeyedScrollPositions(body, selector, value),
+  };
+}
+
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (shareViewMode) {
@@ -7528,7 +7691,8 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  setDomBuilderOptions(button, options);
+  const classNames = new Set(['btn-base', ...String(options.className || '').split(/\s+/).filter(Boolean)]);
+  setDomBuilderOptions(button, {...options, className: [...classNames].join(' ')});
   button.disabled = options.disabled === true;
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
@@ -7540,6 +7704,179 @@ function makeButton(options = {}) {
     if (typeof listener === 'function') button.addEventListener(type, listener);
   }
   return button;
+}
+
+const bindOnceRecords = new WeakMap();
+
+function bindOnce(root, key, installer) {
+  if (!root || key === undefined || key === null || typeof installer !== 'function') return null;
+  let records = bindOnceRecords.get(root);
+  if (!records) {
+    records = new Map();
+    bindOnceRecords.set(root, records);
+  }
+  const existing = records.get(key);
+  if (existing) return existing.dispose;
+  const uninstall = installer(root);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return false;
+    disposed = true;
+    if (records.get(key)?.dispose === dispose) records.delete(key);
+    if (records.size === 0) bindOnceRecords.delete(root);
+    if (typeof uninstall === 'function') uninstall();
+    else uninstall?.dispose?.();
+    return true;
+  };
+  records.set(key, {dispose});
+  return dispose;
+}
+
+function createLifecycleScope(options = {}) {
+  const resources = new Map();
+  let disposed = false;
+  const disposeResource = record => {
+    if (!record || record.disposed) return false;
+    record.disposed = true;
+    record.dispose?.(record.value);
+    return true;
+  };
+  const scope = {
+    current() {
+      return !disposed && (typeof options.isCurrent !== 'function' || options.isCurrent() === true);
+    },
+    value(key) {
+      return resources.get(key)?.value ?? null;
+    },
+    replace(key, value, dispose) {
+      const existing = resources.get(key);
+      if (existing?.value === value) return value;
+      if (existing) disposeResource(existing);
+      resources.delete(key);
+      if (value === null || value === undefined) return value;
+      if (disposed) {
+        disposeResource({value, dispose, disposed: false});
+        return value;
+      }
+      resources.set(key, {value, dispose, disposed: false});
+      return value;
+    },
+    release(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      return disposeResource(record);
+    },
+    relinquish(key, value = undefined) {
+      const record = resources.get(key);
+      if (!record || (value !== undefined && record.value !== value)) return false;
+      resources.delete(key);
+      record.disposed = true;
+      return true;
+    },
+    ownEvent(key, target, type, listener, listenerOptions = undefined) {
+      target?.addEventListener?.(type, listener, listenerOptions);
+      return scope.replace(key, listener, () => target?.removeEventListener?.(type, listener, listenerOptions));
+    },
+    ownTimer(key, timer, clear = clearTimeout) {
+      return scope.replace(key, timer, value => clear(value));
+    },
+    ownObserver(key, observer) {
+      return scope.replace(key, observer, value => value?.disconnect?.());
+    },
+    ownStream(key, stream) {
+      return scope.replace(key, stream, value => value?.close?.());
+    },
+    dispose(reason = 'disposed') {
+      if (disposed) return false;
+      disposed = true;
+      for (const record of [...resources.values()].reverse()) disposeResource(record);
+      resources.clear();
+      options.onDispose?.(reason);
+      return true;
+    },
+    disposed() { return disposed; },
+  };
+  return Object.freeze(scope);
+}
+
+function createLatestResource(options = {}) {
+  let value = options.initial;
+  let target = null;
+  let request = null;
+  let error = null;
+  let lifecycleScope = createLifecycleScope();
+
+  const snapshot = () => Object.freeze({value, target, request, error, loading: request !== null});
+  const notify = (phase, context = null) => options.onState?.(snapshot(), Object.freeze({phase, context}));
+  const renewScope = reason => {
+    lifecycleScope.dispose(reason);
+    lifecycleScope = createLifecycleScope();
+    return lifecycleScope;
+  };
+  const assign = (nextValue, nextTarget = target) => {
+    target = nextTarget;
+    value = nextValue;
+    error = null;
+    return value;
+  };
+  const resource = {
+    snapshot,
+    read(nextTarget, context = null) {
+      if (request && Object.is(target, nextTarget)) return request;
+      const scope = renewScope('latest-resource-superseded');
+      target = nextTarget;
+      error = null;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      if (controller) scope.replace('request-controller', controller, value => value.abort());
+      let loaded;
+      try {
+        loaded = options.load(nextTarget, Object.freeze({context, signal: controller?.signal}));
+      } catch (failure) {
+        loaded = Promise.reject(failure);
+      }
+      const currentRequest = Promise.resolve(loaded)
+        .then(payload => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          const applied = options.apply(payload, Object.freeze({context, target: nextTarget, previous: value}));
+          if (applied !== undefined) assign(applied, nextTarget);
+          error = null;
+          notify('applied', context);
+          return typeof options.result === 'function' ? options.result(payload, applied) : value;
+        })
+        .catch(failure => {
+          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
+          error = failure;
+          notify('failed', context);
+          return typeof options.failureResult === 'function' ? options.failureResult(failure, value) : value;
+        })
+        .finally(() => {
+          if (!scope.current() || request !== currentRequest) return;
+          request = null;
+          scope.release('request-controller', controller);
+          notify('settled', context);
+        });
+      request = currentRequest;
+      notify('loading', context);
+      return currentRequest;
+    },
+    replace(nextValue, nextTarget = target, context = null) {
+      renewScope('latest-resource-replaced');
+      request = null;
+      assign(nextValue, nextTarget);
+      notify('replaced', context);
+      return value;
+    },
+    assign,
+    invalidate(context = null) {
+      renewScope('latest-resource-invalidated');
+      request = null;
+      error = null;
+      notify('invalidated', context);
+      return value;
+    },
+  };
+  return Object.freeze(resource);
 }
 
 function delegate(parent, type, selector, handler, options = {}) {
@@ -10637,6 +10974,7 @@ function newTmuxSessionLifecycleRecord(session, phase = 'stable', topologyEpoch 
     pendingUntil: tmuxSessionLifecyclePendingPhases.has(phase) ? Date.now() + pendingTmuxSessionGraceMs : 0,
     requestLeases: new Set(),
     controllers: new Set(),
+    lifecycleScopes: new Set(),
     sources: new Set(),
     timers: new Set(),
     consumerDetachments: 0,
@@ -10679,6 +11017,15 @@ function tmuxSessionLifecycleOwnSource(session, source) {
   return token;
 }
 
+function tmuxSessionLifecycleOwnScope(token, scope) {
+  if (token?.record && scope) token.record.lifecycleScopes.add(scope);
+  return scope;
+}
+
+function tmuxSessionLifecycleReleaseScope(token, scope) {
+  token?.record?.lifecycleScopes?.delete(scope);
+}
+
 function tmuxSessionLifecycleReleaseSource(token, source) {
   token?.record?.sources?.delete(source);
   if (source?._tmuxSessionLifecycleToken === token) delete source._tmuxSessionLifecycleToken;
@@ -10703,6 +11050,8 @@ function retireTmuxSessionLifecycleRecord(record) {
   record.pendingUntil = 0;
   for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
   record.controllers.clear();
+  for (const scope of record.lifecycleScopes) scope.dispose?.('session-retired');
+  record.lifecycleScopes.clear();
   for (const source of record.sources) source.close?.();
   record.sources.clear();
   for (const timer of record.timers) clearTimeout(timer);
@@ -15427,8 +15776,8 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  const completionGeneration = Number(options.completionGeneration || pendingLayoutMutationGeneration) || 0;
-  if (completionGeneration === pendingLayoutMutationGeneration) pendingLayoutMutationGeneration = 0;
+  const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
+  runtimeState.consumePendingLayoutMutation(completionGeneration);
   if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
@@ -15459,15 +15808,15 @@ function applyLayoutSlots(nextSlots, options = {}) {
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
   });
-  for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  if (!dockviewLayoutActive()) {
+    for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  }
   scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
-  renderAutoApproveButtons();
-  updatePanelInactiveOverlays();
   const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
@@ -15496,17 +15845,31 @@ function layoutRenderRequest(request = {}) {
 
 function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= layoutMutationCompletedGeneration) return;
-  layoutMutationCompletedGeneration = generation;
+  if (!runtimeState.completeLayoutMutation(generation)) return;
   window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+}
+
+function waitForLayoutMutationCompletion(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0
+      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+    return Promise.resolve(generation);
+  }
+  return new Promise(resolve => {
+    const complete = event => {
+      if (Number(event?.detail?.generation || 0) < generation) return;
+      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      resolve(generation);
+    };
+    window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
 }
 
 function beginLayoutMutationCompletion(state = null) {
   if (Number.isSafeInteger(state?.completionGeneration) && state.completionGeneration > 0) {
     return state.completionGeneration;
   }
-  const generation = ++layoutMutationGeneration;
-  pendingLayoutMutationGeneration = generation;
+  const generation = runtimeState.beginLayoutMutation();
   if (state) state.completionGeneration = generation;
   return generation;
 }
@@ -15541,6 +15904,7 @@ function performLayoutRender(request = {}) {
     if (!dockviewLayoutActive()) {
       renderPaneTabStrips();
       syncPanelVisibility(previousActive);
+      renderAutoApproveButtons();
     }
     completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;
@@ -18937,8 +19301,8 @@ async function openFileExplorerAt(path, options = {}) {
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
-  const openGeneration = ++fileExplorerOpenGeneration;
-  const openStillCurrent = () => openGeneration === fileExplorerOpenGeneration;
+  const openGeneration = fileWorkspaceState.beginOpen();
+  const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
@@ -20348,7 +20712,7 @@ function fileExplorerSyncPlanForFile(path) {
     root = normalizedHome;
   }
   const session = typeof sessionForFileRepo === 'function' ? sessionForFileRepo(target) : '';
-  const expandPaths = root && target !== root && pathIsInsideDirectory(target, root) ? [target] : [];
+  const expandPaths = root && targetDir !== root && pathIsInsideDirectory(targetDir, root) ? [targetDir] : [];
   return {
     session,
     root,
@@ -20894,9 +21258,9 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
     && fileExplorerSyncState.inFlightSignature !== syncSignature
     && (explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))
   ) {
-    const interactionGeneration = fileExplorerInteractionGeneration;
+    const interactionGeneration = fileWorkspaceState.interactionGeneration();
     requestAnimationFrame(() => {
-      if (interactionGeneration !== fileExplorerInteractionGeneration) return;
+      if (!fileWorkspaceState.interactionIsCurrent(interactionGeneration)) return;
       const syncPromise = fileSyncPath
         ? syncFileExplorerRootToActiveFile(fileSyncPath, {force: explicit})
         : syncFileExplorerRootToActiveTmux(syncItem, {force: explicit});
@@ -20918,8 +21282,7 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
 }
 
 function cancelPendingFileExplorerActiveSync(options = {}) {
-  fileExplorerInteractionGeneration += 1;
-  if (options.invalidateOpen !== false) fileExplorerOpenGeneration += 1;
+  fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
   fileExplorerSyncState.generation += 1;
   fileExplorerSyncState.inFlightSignature = '';
   resetFileExplorerAppliedSyncPlan();
@@ -20937,7 +21300,7 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
-  forgetFileExplorerSyncManualCollapse(path);
+  forgetFileExplorerSyncManualCollapse(dirnameOf(path));
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
 
@@ -22006,42 +22369,6 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   };
 }
 
-function applyFileTreeRowDataset(row, state) {
-  const {entry, fullPath} = state;
-  syncFileTreeRowKindClass(row, entry.kind);
-  row.classList.toggle('compact', state.compact);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'isRepo', entry.is_repo === true ? 'true' : 'false');
-  setRowDataset(row, 'isSymlink', entry.is_symlink === true ? 'true' : 'false');
-  setRowDataset(row, 'symlinkTarget', entry.symlink_target || '');
-  setRowDataset(row, 'indexed', state.indexedDirectory ? 'true' : 'false');
-  setRowDataset(row, 'indexExcluded', state.indexExcludedEntry ? 'true' : 'false');
-  setRowDataset(row, 'tabberType', '');
-  setRowDataset(row, 'tabberSession', '');
-  setRowDataset(row, 'tabberWindow', '');
-  setRowDataset(row, 'tabberRepoRoot', '');
-  setRowDataset(row, 'tabberItem', '');
-  setRowDataset(row, 'tabberBranch', '');
-  if (row.style.paddingLeft !== state.paddingLeft) row.style.paddingLeft = state.paddingLeft;
-  setTreeItemAria(row, {selected: state.selected, expandable: entry.kind === 'dir', expanded: state.expanded});
-  row.draggable = entry.kind === 'file' || entry.kind === 'dir';
-  row.classList.toggle(CLS.selected, state.selected);
-  row.classList.toggle('expanded', state.expanded);
-  row.classList.toggle(CLS.collapsed, entry.kind === 'dir' && !state.expanded);
-  row.classList.toggle('loading-children', state.pendingExpansion);
-  row.classList.toggle('is-repo', entry.kind === 'dir' && entry.is_repo === true);
-  row.classList.toggle('indexed-directory', state.indexedDirectory);
-  row.classList.toggle('index-excluded-entry', state.indexExcludedEntry);
-  row.classList.toggle('indexed-descendant-directory', state.indexedDescendantDirectory);
-  applySessionHighlightRowClass(row, state.sessionHighlightClass);
-  // flag symlinks so the icon gets an arrow-badge overlay (target-type icon is kept); a broken
-  // link gets a red badge + struck-through name. The backend sets is_symlink + kind=symlink-broken.
-  row.classList.toggle('is-symlink', entry.is_symlink === true);
-  row.classList.toggle('symlink-broken', entry.kind === 'symlink-broken');
-}
-
 function bindFinderRowHandlers(row, state) {
   const {entry, fullPath, differMode} = state;
   if (!differMode && entry.kind === 'dir' && (entry.is_repo === true || Boolean(row.dataset.syncTargetTitle))) {
@@ -22149,23 +22476,111 @@ function bindFinderRowHandlers(row, state) {
   };
 }
 
-function bindDifferRowData(row, state) {
-  const {entry, fullPath, differMode, changedFile, changedFileStatus} = state;
-  // Set data attributes so Differ event delegation (click/drag/contextmenu) can find these rows
-  setRowDataset(row, 'openChangeFile', changedFile?.abs_path || '');
-  setRowDataset(row, 'openChangeSession', changedFile?.abs_path ? (changedFile.session || '') : '');
-  setRowDataset(row, 'openChangeStatus', changedFile?.abs_path ? changedFileStatus : '');
-  setRowDataset(row, 'changeRel', changedFile?.abs_path ? (changedFile.path || '') : '');
-  setRowDataset(row, 'openChangeRepo', changedFile?.abs_path ? (changedFile.repo || '') : '');
-  setRowDataset(row, 'changeSize', changedFile?.abs_path && changedFile.size !== null && changedFile.size !== undefined ? changedFile.size : '');
-  if (differMode && entry.kind === 'dir') {
-    setRowDataset(row, 'changesFolderToggle', fullPath);
-    setRowDataset(row, 'openChangeDirectory', fullPath);
-    setRowDataset(row, 'changeRel', state.relDir);
-  } else if (!differMode) {
-    setRowDataset(row, 'changesFolderToggle', '');
-    setRowDataset(row, 'openChangeDirectory', '');
-  }
+function TreeRowViewModel(options = {}) {
+  return Object.freeze({
+    path: String(options.path || ''),
+    kind: String(options.kind || ''),
+    name: String(options.name || ''),
+    paddingLeft: String(options.paddingLeft || ''),
+    dataset: Object.freeze({...options.dataset}),
+    classes: Object.freeze({...options.classes}),
+    selected: options.selected === true,
+    expandable: options.expandable === true,
+    expanded: options.expanded === true,
+    current: options.current === true,
+    draggable: options.draggable === true,
+    icon: String(options.icon || ''),
+    label: String(options.label || ''),
+    content: Object.freeze({...options.content}),
+    gitClass: String(options.gitClass || ''),
+    sessionHighlightClass: String(options.sessionHighlightClass || ''),
+    recencyEntry: options.recencyEntry || null,
+    recencyOptions: Object.freeze({...options.recencyOptions}),
+  });
+}
+
+const TREE_ROW_MANAGED_CLASSES = Object.freeze([
+  'compact', CLS.selected, 'expanded', CLS.collapsed, 'loading-children', 'is-repo',
+  'indexed-directory', 'index-excluded-entry', 'indexed-descendant-directory', 'is-symlink',
+  'symlink-broken', 'new-entry', 'current-file', 'current-directory', 'repo-non-main',
+  'file-tree-row--changed-ancestor', 'tabber-row', 'tabber-active-window',
+  'tabber-active-session', 'tabber-status-long',
+]);
+
+function patchTreeRow(row, model) {
+  syncFileTreeRowKindClass(row, model.kind);
+  for (const [key, value] of Object.entries(model.dataset)) setRowDataset(row, key, value);
+  if (row.style.paddingLeft !== model.paddingLeft) row.style.paddingLeft = model.paddingLeft;
+  setTreeItemAria(row, {selected: model.selected, expandable: model.expandable, expanded: model.expanded});
+  row.draggable = model.draggable;
+  for (const className of TREE_ROW_MANAGED_CLASSES) row.classList.toggle(className, model.classes[className] === true);
+  if (model.current) row.setAttribute('aria-current', 'true');
+  else row.removeAttribute('aria-current');
+  applyGitStatusRowClass(row, model.gitClass);
+  applySessionHighlightRowClass(row, model.sessionHighlightClass);
+  updateFileTreeRowContents(row, model.icon, model.label, model.content);
+  if (model.recencyEntry) applyFileTreeRowRecency(row, model.recencyEntry, model.recencyOptions);
+  return row;
+}
+
+function fileTreeRowViewModel(state) {
+  const {entry, fullPath, derivedState} = state;
+  const differData = state.differMode && entry.kind === 'dir'
+    ? {changesFolderToggle: fullPath, openChangeDirectory: fullPath, changeRel: state.relDir}
+    : {changesFolderToggle: '', openChangeDirectory: '', changeRel: derivedState.changedFile?.abs_path ? (derivedState.changedFile.path || '') : ''};
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: state.paddingLeft,
+    selected: state.selected,
+    expandable: entry.kind === 'dir',
+    expanded: state.expanded,
+    current: state.currentFile || state.currentDirectoryRow,
+    draggable: entry.kind === 'file' || entry.kind === 'dir',
+    icon: derivedState.icon,
+    label: derivedState.displayName.text,
+    content: derivedState.contentOptions,
+    gitClass: derivedState.gitClass,
+    sessionHighlightClass: state.sessionHighlightClass,
+    recencyEntry: entry,
+    recencyOptions: {...state.options, differMode: state.differMode},
+    dataset: {
+      path: fullPath,
+      kind: entry.kind,
+      name: entry.name,
+      isRepo: entry.is_repo === true ? 'true' : 'false',
+      isSymlink: entry.is_symlink === true ? 'true' : 'false',
+      symlinkTarget: entry.symlink_target || '',
+      indexed: state.indexedDirectory ? 'true' : 'false',
+      indexExcluded: state.indexExcludedEntry ? 'true' : 'false',
+      tabberType: '', tabberSession: '', tabberWindow: '', tabberRepoRoot: '', tabberItem: '', tabberBranch: '',
+      openChangeFile: derivedState.changedFile?.abs_path || '',
+      openChangeSession: derivedState.changedFile?.abs_path ? (derivedState.changedFile.session || '') : '',
+      openChangeStatus: derivedState.changedFile?.abs_path ? derivedState.changedFileStatus : '',
+      openChangeRepo: derivedState.changedFile?.abs_path ? (derivedState.changedFile.repo || '') : '',
+      changeSize: derivedState.changedFile?.abs_path && derivedState.changedFile.size !== null && derivedState.changedFile.size !== undefined ? derivedState.changedFile.size : '',
+      ...differData,
+    },
+    classes: {
+      compact: state.compact,
+      [CLS.selected]: state.selected,
+      expanded: state.expanded,
+      [CLS.collapsed]: entry.kind === 'dir' && !state.expanded,
+      'loading-children': state.pendingExpansion,
+      'is-repo': entry.kind === 'dir' && entry.is_repo === true,
+      'indexed-directory': state.indexedDirectory,
+      'index-excluded-entry': state.indexExcludedEntry,
+      'indexed-descendant-directory': state.indexedDescendantDirectory,
+      'is-symlink': entry.is_symlink === true,
+      'symlink-broken': entry.kind === 'symlink-broken',
+      'new-entry': state.newEntry,
+      'current-file': state.currentFile,
+      'current-directory': state.currentDirectoryRow,
+      'repo-non-main': derivedState.repoNonMain === true,
+      'file-tree-row--changed-ancestor': Boolean(derivedState.changedAncestor?.count),
+    },
+  });
 }
 
 function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
@@ -22175,11 +22590,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   // .file-tree-row DOM, with all display values precomputed in the entry as data — B3's mode:'tabber'.
   if (options.mode === 'tabber') return updateTabberRow(row, fullPath, entry, depth, options);
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
-  applyFileTreeRowDataset(row, rowState);
-  applyFileTreeRowDerivedState(row, rowState.derivedState);
+  patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  applyFileTreeRowRecency(row, entry, {...options, differMode: rowState.differMode});
-  bindDifferRowData(row, rowState);
   bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
@@ -23952,49 +24364,14 @@ function bindTabberRowDragSource(row) {
 }
 
 // Shared-pipeline row updater for Tabber nodes (same .file-tree-row DOM + updateFileTreeRowContents).
-function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+function tabberTreeRowViewModel(row, fullPath, entry, depth, options = {}) {
   const data = entry.tabber || {};
   const expandable = entry.kind === 'dir';
   const collapsedSet = options.collapsedSet instanceof Set ? options.collapsedSet : fileExplorerTabberCollapsed;
   const expanded = expandable && !collapsedSet.has(fullPath);
-  syncFileTreeRowKindClass(row, entry.kind);
-  setRowDataset(row, 'path', fullPath);
-  setRowDataset(row, 'kind', entry.kind);
-  setRowDataset(row, 'name', entry.name);
-  setRowDataset(row, 'tabberType', data.type || '');
-  setRowDataset(row, 'tabberSession', data.session || '');
-  setRowDataset(row, 'tabberWindow', data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '');
-  setRowDataset(row, 'tabberRepoRoot', data.repoRoot || '');
-  setRowDataset(row, 'tabberItem', data.item || '');
-  setRowDataset(row, 'tabberBranch', data.branchText || '');
-  setRowDataset(row, 'paneTab', tabberRowDragItem(row));
-  setRowDataset(row, 'openChangeFile', '');
-  setRowDataset(row, 'openChangeSession', '');
-  setRowDataset(row, 'openChangeStatus', '');
-  setRowDataset(row, 'openChangeRepo', '');
-  setRowDataset(row, 'openChangeDirectory', '');
-  setRowDataset(row, 'changesFolderToggle', '');
-  setRowDataset(row, 'changeRel', '');
-  setRowDataset(row, 'changeSize', '');
-  const paddingLeft = fileTreeRowPadding(depth);
-  if (row.style.paddingLeft !== paddingLeft) row.style.paddingLeft = paddingLeft;
   const selected = tabberTreeSelectedPaths.has(fullPath);
   const current = data.current === true;
-  setTreeItemAria(row, {selected, expandable, expanded});
-  row.draggable = tabberRowIsTabDragSource(row);
-  row.classList.toggle(CLS.selected, selected);
-  row.classList.toggle('expanded', expanded);
-  row.classList.toggle(CLS.collapsed, expandable && !expanded);
-  row.classList.add('tabber-row');
-  row.classList.toggle('tabber-active-window', data.type === 'window' && data.active === true);
-  row.classList.toggle('tabber-active-session', data.type === 'session' && data.active === true);
   const agentState = String(data.agentStatus?.state || STATE_KEY.idle);
-  row.classList.toggle('tabber-status-long', data.type === 'window'
-    && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)));
-  row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
-  row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
-  if (current || (data.type === 'session' && data.active === true)) row.setAttribute('aria-current', 'true');
-  else row.removeAttribute('aria-current');
   const icon = expandable ? disclosureTriangleGlyph(expanded) : (data.icon || '');
   const rawLabel = data.label || entry.name;
   const label = compactHomePath(rawLabel);
@@ -24019,16 +24396,57 @@ function updateTabberRow(row, fullPath, entry, depth, options = {}) {
     : data.type === 'loading'
       ? `<span class="tabber-loading-label">${esc(data.label || stripTrailingEllipsisText(t('common.loading')))}</span>${movingEllipsisHtml('tabber-loading-dots')}`
     : '';
-  updateFileTreeRowContents(row, icon, label, {
-    iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
-    disclosureExpanded: expandable ? expanded : undefined,
-    nameHtml,
-    dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
-    dateHtml: data.dateHtml || '',
+  const paneTab = data.type === 'session' ? (data.session || '') : (data.type === 'tab' ? (data.item || '') : '');
+  return TreeRowViewModel({
+    path: fullPath,
+    kind: entry.kind,
+    name: entry.name,
+    paddingLeft: fileTreeRowPadding(depth),
+    selected,
+    expandable,
+    expanded,
+    current: current || (data.type === 'session' && data.active === true),
+    draggable: Boolean(paneTab && isLayoutItem(paneTab) && !isFileExplorerItem(paneTab)),
+    icon,
+    label,
+    content: {
+      iconClass: ['tabber-icon', expandable ? 'ui-disclosure-triangle' : ''].filter(Boolean).join(' '),
+      disclosureExpanded: expandable ? expanded : undefined,
+      nameHtml,
+      dateText: data.type === 'session' ? '' : (data.dateText || (entry.mtime ? fileTreeMtimeText(entry, {view: 'tabber'}) : '')),
+      dateHtml: data.dateHtml || '',
+    },
+    recencyEntry: entry,
+    recencyOptions: options,
+    dataset: {
+      path: fullPath, kind: entry.kind, name: entry.name,
+      isRepo: '', isSymlink: '', symlinkTarget: '', indexed: '', indexExcluded: '',
+      tabberType: data.type || '', tabberSession: data.session || '',
+      tabberWindow: data.windowIndex !== null && data.windowIndex !== undefined ? data.windowIndex : '',
+      tabberRepoRoot: data.repoRoot || '', tabberItem: data.item || '', tabberBranch: data.branchText || '', paneTab,
+      openChangeFile: '', openChangeSession: '', openChangeStatus: '', openChangeRepo: '',
+      openChangeDirectory: '', changesFolderToggle: '', changeRel: '', changeSize: '',
+    },
+    classes: {
+      [CLS.selected]: selected,
+      expanded,
+      [CLS.collapsed]: expandable && !expanded,
+      'tabber-row': true,
+      'tabber-active-window': data.type === 'window' && data.active === true,
+      'tabber-active-session': data.type === 'session' && data.active === true,
+      'tabber-status-long': data.type === 'window' && (agentWindowIsWorkingState(agentState) || agentWindowIsAttentionState(agentState)),
+      'current-file': current && entry.kind !== 'dir',
+      'current-directory': current && entry.kind === 'dir',
+    },
   });
+}
+
+function updateTabberRow(row, fullPath, entry, depth, options = {}) {
+  const data = entry.tabber || {};
+  const model = tabberTreeRowViewModel(row, fullPath, entry, depth, options);
+  patchTreeRow(row, model);
   if (data.type === 'session' && data.session) bindTabberSessionChrome(row, data.session);
   if (tabberRowIsTabDragSource(row)) bindTabberRowDragSource(row);
-  applyFileTreeRowRecency(row, entry, options);
   // Tabber rows use delegation (bindTabberPanel) like the Differ; clear any stale Finder per-row handlers.
   clearFileTreeRowHandlers(row);
   return fullPath;
@@ -27136,6 +27554,7 @@ function codeMirrorApiIsUsable(api) {
     && api?.highlightActiveLine
     && api?.search
     && api?.openSearchPanel
+    && api?.LanguageSupport
   );
 }
 
@@ -27184,8 +27603,10 @@ async function loadCodeMirrorApi() {
 }
 
 function codeMirrorMarkdownCodeLanguages(api) {
-  if (!api?.LanguageDescription) return null;
-  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
+  if (!api?.LanguageDescription || !api?.LanguageSupport) return null;
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (
+    mode && api.StreamLanguage ? new api.LanguageSupport(api.StreamLanguage.define(mode)) : null
+  ));
   const languageEntries = [
     {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
     {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},
@@ -33218,7 +33639,7 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
     : splitNode(direction, newNode, root, splitPct));
-  const pointerReleaseMutation = dockviewLayoutActive() && pendingLayoutMutationGeneration > 0;
+  const pointerReleaseMutation = dockviewLayoutActive() && runtimeState.layoutMutationSnapshot().pending > 0;
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
@@ -34381,7 +34802,7 @@ function replaceSessionMetadata(oldSession, newSession) {
   }
 }
 
-function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
+function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
   clearPendingTmuxSession(oldSession);
   markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
@@ -34392,7 +34813,11 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {
+    focusSession: newSession,
+    prune: false,
+    completionGeneration: options.completionGeneration,
+  });
   renderUploadResult(newSession);
 }
 
@@ -34494,8 +34919,12 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
-        replaceTmuxSessionInClient(session, renamed, payload.sessions);
-        await ensureTerminalRunning(renamed);
+        const layoutGeneration = beginLayoutMutationCompletion();
+        replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
+        await Promise.all([
+          waitForLayoutMutationCompletion(layoutGeneration),
+          ensureTerminalRunning(renamed),
+        ]);
       },
     );
     if (!mutation.committed) return false;
@@ -36375,6 +36804,7 @@ const dockviewLayoutState = {
   applyingFromLayout: false,
   adoptingFromDockview: false,
   syncQueued: false,
+  syncQueuedLayoutSignature: '',
   hostLayoutFrame: 0,
   pendingLoadFrame: 0,
   pendingCompletionFrame: 0,
@@ -38043,16 +38473,34 @@ function queueDockviewLayoutAdoption() {
   if (dockviewLayoutState.applyingFromLayout || dockviewLayoutState.adoptingFromDockview) return;
   if (dockviewLayoutState.syncQueued) return;
   dockviewLayoutState.syncQueued = true;
+  dockviewLayoutState.syncQueuedLayoutSignature = layoutSlotsExactSignature(layoutSlots);
   queueMicrotask(adoptDockviewLayout);
 }
 
 function adoptDockviewLayout() {
   dockviewLayoutState.syncQueued = false;
+  const queuedLayoutSignature = dockviewLayoutState.syncQueuedLayoutSignature;
+  dockviewLayoutState.syncQueuedLayoutSignature = '';
   const api = dockviewLayoutState.api;
   if (!api || dockviewLayoutState.applyingFromLayout) return;
   if (!dockviewLayoutAdoptionAllowed()) return;
   if (!dockviewHostCanAdoptLayout()) return;
+  if (queuedLayoutSignature && queuedLayoutSignature !== layoutSlotsExactSignature(layoutSlots)) {
+    // A server/app mutation won while this vendor callback was queued. Reassert that newer layout;
+    // adopting the stale Dockview snapshot would make a renamed or newly created tab inactive.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   let next = layoutSlotsFromDockviewJson(api.toJSON());
+  const missingPendingSessions = pendingTmuxSessionNames()
+    .filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
+  if (missingPendingSessions.length) {
+    // A Dockview callback may observe an intermediate vendor snapshot after the app has already
+    // committed a rename/create. Reassert the exact app layout instead of inventing placement for
+    // the omitted pending terminal; stable user-owned removals still adopt normally.
+    dockviewLoadLayout(layoutSlots);
+    return;
+  }
   const missingSurfaces = layoutFileSurfaceItems().filter(item => itemInLayout(item, layoutSlots) && !itemInLayout(item, next));
   if (missingSurfaces.length) {
     next = layoutWithSidePaneItems(next, missingSurfaces, {side: paneSideLeft});
@@ -38061,8 +38509,10 @@ function adoptDockviewLayout() {
   if (!layoutHasRestorableContent(next)) return;
   const nextSignature = layoutSlotsSignature(next);
   if (nextSignature === layoutSlotsSignature(layoutSlots)) {
+    // fromJSON creates tab renderers while applyingFromLayout is true, so their first render
+    // deliberately leaves the shell empty. The queued adoption is the first callback after that
+    // guard clears: populate tab chrome here without repeating mounted-panel reconciliation.
     dockviewRefreshTabs();
-    dockviewSyncMountedPanels();
     return;
   }
   dockviewLayoutState.lastAppliedLayoutSignature = nextSignature;
@@ -38270,13 +38720,11 @@ function dockviewSlotForGroupId(groupId, usedSlots = new Set()) {
 
 function dockviewEnsureMountedTerminal(item, panel) {
   if (!isTmuxSession(item)) return;
-  queueMicrotask(() => {
-    if (!panel?.isConnected || !itemInLayout(item)) return;
-    const slot = slotForItem(item);
-    if (slot && activeItemForSide(slot) !== item) return;
-    if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
-    if (typeof scheduleFit === 'function') scheduleFit(item);
-  });
+  if (!panel?.isConnected || !itemInLayout(item)) return;
+  const slot = slotForItem(item);
+  if (slot && activeItemForSide(slot) !== item) return;
+  if (typeof ensureTerminalRunning === 'function') void ensureTerminalRunning(item);
+  if (typeof scheduleFit === 'function') scheduleFit(item);
 }
 
 function createDockviewPanelRenderer() {
@@ -38294,10 +38742,10 @@ function createDockviewPanelRenderer() {
     }
     if (!isLayoutItem(item)) return;
     panel = getOrCreatePanel(item);
-    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
-    updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
     if (dockviewLayoutState.applyingFromLayout) return;
+    const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
+    updatePanelSlot(panel, item, slot);
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
     dockviewEnsureMountedTerminal(item, panel);
@@ -38317,10 +38765,8 @@ function createDockviewPanelRenderer() {
     onHide: pool,
     dispose: pool,
     layout: () => {
-      if (isTmuxSession(item)) {
-        dockviewEnsureMountedTerminal(item, panel);
-        scheduleFit(item);
-      }
+      if (dockviewLayoutState.applyingFromLayout || !isTmuxSession(item)) return;
+      dockviewEnsureMountedTerminal(item, panel);
     },
   };
 }
@@ -38819,6 +39265,16 @@ function toolbarButtonHtml(options = {}) {
   return domBuilderElementHtml(createToolbarButton(options));
 }
 
+function panelDetailCloseButtonHtml(item) {
+  const label = t('pane.details.hide');
+  return toolbarButtonHtml({
+    className: 'panel-detail-close',
+    dataset: {detailToggle: item},
+    title: label,
+    ariaLabel: label,
+  });
+}
+
 function actionRowHtml(options = {}) {
   return domBuilderElementHtml(createActionRow(options));
 }
@@ -38828,7 +39284,9 @@ function segmentedControlHtml(options = {}) {
 }
 
 function bindActionDispatcher(parent, handlers = {}, options = {}) {
-  return delegate(parent, options.type || 'click', options.selector || '[data-action]', async (event, target) => {
+  const type = options.type || 'click';
+  const listenerOptions = options.listenerOptions || {};
+  const listener = delegate(parent, type, options.selector || '[data-action]', async (event, target) => {
     const action = target?.dataset?.action || '';
     const handler = handlers[action];
     if (!handler || options.ignore?.(event, target) === true) return;
@@ -38836,7 +39294,8 @@ function bindActionDispatcher(parent, handlers = {}, options = {}) {
     if (options.stopPropagation !== false) event.stopPropagation();
     if (options.skipDisabled !== false && (target.disabled || target.hidden)) return;
     await handler(event, target, action);
-  }, options.listenerOptions || {});
+  }, listenerOptions);
+  return listener ? () => parent.removeEventListener(type, listener, listenerOptions) : null;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -39521,6 +39980,17 @@ function panelFrameHtml({item, headClass = '', controlsHtml = '', headAfterTabsH
   ${afterBodyHtml}`;
 }
 
+function createFramedPanel({item, className = 'panel', dataset = {}, frame = {}, bind = null} = {}) {
+  const panel = document.createElement('article');
+  panel.className = className;
+  panel.id = panelDomId(item);
+  for (const [key, value] of Object.entries(dataset)) panel.dataset[key] = String(value ?? '');
+  panel.innerHTML = panelFrameHtml({item, ...frame});
+  bindPanelShell(panel, item);
+  if (typeof bind === 'function') bind(panel, item);
+  return panel;
+}
+
 function paneTabDragSourceItem(itemOrGetter, event) {
   return typeof itemOrGetter === 'function' ? String(itemOrGetter(event) || '') : String(itemOrGetter || '');
 }
@@ -39531,25 +40001,32 @@ function paneTabDragSourceSlot(item, sourceSlotOrGetter, event) {
 }
 
 function bindPaneTabNativeDragSource(tab, itemOrGetter, sourceSlotOrGetter = null, options = {}) {
-  if (!tab || tab.__yolomuxPaneTabNativeDragBound) return;
-  tab.__yolomuxPaneTabNativeDragBound = true;
-  tab.draggable = true;
-  tab.addEventListener('dragstart', event => {
-    if (options.ignore?.(event) === true) {
-      event.preventDefault?.();
-      return;
-    }
-    const item = paneTabDragSourceItem(itemOrGetter, event);
-    if (!isLayoutItem(item)) {
-      event.preventDefault?.();
-      return;
-    }
-    event.stopPropagation();
-    startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
-      dragImage: options.dragImage,
-    });
+  if (!tab) return;
+  bindOnce(tab, 'pane-tab-native-drag', () => {
+    tab.draggable = true;
+    const dragstart = event => {
+      if (options.ignore?.(event) === true) {
+        event.preventDefault?.();
+        return;
+      }
+      const item = paneTabDragSourceItem(itemOrGetter, event);
+      if (!isLayoutItem(item)) {
+        event.preventDefault?.();
+        return;
+      }
+      event.stopPropagation();
+      startSessionDrag(event, item, paneTabDragSourceSlot(item, sourceSlotOrGetter, event), {
+        dragImage: options.dragImage,
+      });
+    };
+    tab.addEventListener('dragstart', dragstart);
+    tab.addEventListener('dragend', endSessionDrag);
+    return () => {
+      tab.draggable = false;
+      tab.removeEventListener('dragstart', dragstart);
+      tab.removeEventListener('dragend', endSessionDrag);
+    };
   });
-  tab.addEventListener('dragend', endSessionDrag);
 }
 
 function createPaneTab(side, item, displayContext = {}) {
@@ -40268,31 +40745,32 @@ function eventTargetIsTerminalFocusSurface(target) {
 }
 
 function bindPaneFrameControls(panel, session) {
-  if (!panel || panel.dataset.frameControlsBound === 'true') return;
-  panel.dataset.frameControlsBound = 'true';
-  panel.addEventListener('click', async event => {
-    const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
-    if (!button || !panel.contains(button)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation?.();
-    if (button.dataset.paneActions !== undefined) {
-      const rect = button.getBoundingClientRect();
-      showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
-      return;
-    }
-    if (button.dataset.paneMinimize !== undefined) {
-      minimizePaneFromLayout(button.dataset.paneMinimize || session);
-      return;
-    }
-    if (button.dataset.paneExpand !== undefined) {
-      expandPaneFromLayout(button.dataset.paneExpand || session);
-      return;
-    }
-    if (button.dataset.paneClose !== undefined) {
-      closePaneFrameItem(button.dataset.paneClose || session);
-    }
-  }, true);
+  if (!panel) return null;
+  return bindOnce(panel, 'pane-frame-controls', () => {
+    const handleClick = async event => {
+      const button = event.target.closest('[data-pane-actions], [data-pane-minimize], [data-pane-expand], [data-pane-close]');
+      if (!button || !panel.contains(button)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+      if (button.dataset.paneActions !== undefined) {
+        const rect = button.getBoundingClientRect();
+        showSessionContextMenu(button.dataset.paneActions || session, rect.left, rect.bottom + 4);
+        return;
+      }
+      if (button.dataset.paneMinimize !== undefined) {
+        minimizePaneFromLayout(button.dataset.paneMinimize || session);
+        return;
+      }
+      if (button.dataset.paneExpand !== undefined) {
+        expandPaneFromLayout(button.dataset.paneExpand || session);
+        return;
+      }
+      if (button.dataset.paneClose !== undefined) closePaneFrameItem(button.dataset.paneClose || session);
+    };
+    panel.addEventListener('click', handleClick, true);
+    return () => panel.removeEventListener('click', handleClick, true);
+  });
 }
 
 function bindPanelPopover(panel) {
@@ -41268,11 +41746,11 @@ function searchHistoryResultHtml(result, index) {
   const meta = [session, searchHistorySourceLabel(result), time].filter(Boolean).join(' · ');
   const title = structuredMessageText(result, 'title') || t('common.result');
   const snippet = structuredMessageText(result, 'snippet');
-  return `<button type="button" class="search-history-result" data-search-result-index="${index}">
+  return `${toolbarButtonHtml({className: 'search-history-result', action: 'search-history-result', dataset: {searchResultIndex: index}, html: `
     <span class="search-history-row-meta">${esc(meta)}</span>
     <span class="search-history-row-title">${esc(title)}</span>
     <span class="search-history-row-snippet">${esc(snippet)}</span>
-  </button>`;
+  `})}`;
 }
 
 function searchHistoryResultsHtml() {
@@ -41289,12 +41767,12 @@ function runHistoryRowHtml(row) {
   const disabled = sessions.includes(session) ? '' : ' disabled';
   const prompt = row?.prompt ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.prompt'))}</span>${esc(row.prompt)}</div>` : '';
   const summary = row?.latest_summary ? `<div class="search-history-row-field"><span>${esc(t('searchHistory.summary'))}</span>${esc(row.latest_summary)}</div>` : '';
-  return `<button type="button" class="search-history-run" data-run-history-session="${esc(session)}"${disabled}>
+  return `${toolbarButtonHtml({className: 'search-history-run', action: 'run-history-session', dataset: {runHistorySession: session}, disabled: Boolean(disabled), html: `
     <span class="search-history-row-title">${esc(session || t('common.unknown'))}</span>
     <span class="search-history-row-meta">${esc(meta.join(' · '))}</span>
     ${prompt}
     ${summary}
-  </button>`;
+  `})}`;
 }
 
 function runHistoryRowsHtml() {
@@ -41317,8 +41795,8 @@ function searchHistoryPanelHtml() {
   return `
     <form class="search-history-search" data-search-history-form>
       <input class="search-history-input" data-search-history-query value="${esc(searchHistoryState.query)}" placeholder="${esc(t('searchHistory.query.placeholder'))}" aria-label="${esc(t('searchHistory.query.placeholder'))}">
-      <button type="submit" class="preferences-search-button">${esc(t('common.search'))}</button>
-      <button type="button" class="preferences-reset-all" data-run-history-refresh>${esc(t('common.refresh'))}</button>
+      ${toolbarButtonHtml({type: 'submit', className: 'preferences-search-button', label: t('common.search')})}
+      ${toolbarButtonHtml({className: 'preferences-reset-all', action: 'run-history-refresh', dataset: {runHistoryRefresh: true}, label: t('common.refresh')})}
     </form>
     ${errorHtml}
     <section class="search-history-section" aria-label="${esc(t('searchHistory.results'))}">
@@ -41444,56 +41922,46 @@ async function openRunHistorySession(session) {
 }
 
 function bindSearchHistoryPanel(panel) {
-  if (!panel || panel.dataset.searchHistoryBound === 'true') return;
-  panel.dataset.searchHistoryBound = 'true';
-  panel.addEventListener('submit', event => {
-    const form = event.target.closest('[data-search-history-form]');
-    if (!form || !panel.contains(form)) return;
-    event.preventDefault();
-    runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
-  });
-  panel.addEventListener('click', event => {
-    const refresh = event.target.closest('[data-run-history-refresh]');
-    if (refresh && panel.contains(refresh)) {
+  if (!panel) return null;
+  return bindOnce(panel, 'search-history-panel', () => {
+    const handleSubmit = event => {
+      const form = event.target.closest('[data-search-history-form]');
+      if (!form || !panel.contains(form)) return;
       event.preventDefault();
-      loadSearchHistoryPanelData({query: searchHistoryState.query});
-      return;
-    }
-    const result = event.target.closest('[data-search-result-index]');
-    if (result && panel.contains(result)) {
-      event.preventDefault();
-      openSearchHistoryResult(result.dataset.searchResultIndex);
-      return;
-    }
-    const run = event.target.closest('[data-run-history-session]');
-    if (run && panel.contains(run)) {
-      event.preventDefault();
-      openRunHistorySession(run.dataset.runHistorySession);
-    }
+      runSearchHistoryQuery(form.querySelector('[data-search-history-query]')?.value || '');
+    };
+    panel.addEventListener('submit', handleSubmit);
+    const disposeActions = bindActionDispatcher(panel, {
+      'run-history-refresh': () => loadSearchHistoryPanelData({query: searchHistoryState.query}),
+      'search-history-result': (_event, result) => openSearchHistoryResult(result.dataset.searchResultIndex),
+      'run-history-session': (_event, run) => openRunHistorySession(run.dataset.runHistorySession),
+    });
+    return () => {
+      panel.removeEventListener('submit', handleSubmit);
+      disposeActions?.();
+    };
   });
 }
 
 function createSearchHistoryPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel search-history-panel';
-  panel.id = panelDomId(searchHistoryItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: searchHistoryItemId,
-    headClass: 'search-history-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel search-history-panel',
+    frame: {
+      headClass: 'search-history-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(searchHistoryItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${searchHistoryItemId}" class="panel-session-label"><span class="session-button-dir">${esc(searchHistoryTabLabel())}</span></div>
           <div id="meta-${searchHistoryItemId}" class="pane-info-bar-meta meta">${esc(searchHistoryPanelStatusText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(searchHistoryItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(searchHistoryItemId)}
       </div>`,
-    bodyClass: 'search-history-body info-pane',
-    bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+      bodyClass: 'search-history-body info-pane',
+      bodyHtml: `<div class="search-history-scroll info-list" data-search-history-scroll>${searchHistoryPanelHtml()}</div>`,
+    },
+    bind: bindSearchHistoryPanel,
   });
-  bindPanelShell(panel, searchHistoryItemId);
-  bindSearchHistoryPanel(panel);
-  return panel;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -41706,44 +42174,42 @@ function bindInfoPanel(panel) {
 }
 
 function createInfoPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel info-tree-panel';
-  panel.id = panelDomId(infoItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: infoItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
-    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
+    className: 'panel info-panel info-tree-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
+      afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
       </div>`,
-    bodyClass: 'info-pane',
-    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+      bodyClass: 'info-pane',
+      bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
+    },
+    bind: bindInfoPanel,
   });
-  bindPanelShell(panel, infoItemId);
-  bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   return panel;
 }
 
 function createYoagentPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel yoagent-panel';
-  panel.id = panelDomId(yoagentItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: yoagentItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
-    afterHeadHtml: `<div class="info-actions-bar">
+    className: 'panel info-panel yoagent-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
+      afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}" ${activitySummaryEnabled ? '' : 'disabled aria-disabled="true"'}>${esc(t('yoagent.refresh'))}</button>
         </div>
       </div>`,
-    bodyClass: 'info-pane',
-    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+      bodyClass: 'info-pane',
+      bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
+    },
+    bind: bindYoagentPanel,
   });
-  bindPanelShell(panel, yoagentItemId);
-  bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
   renderYoagentPanel({scrollBottom: true});
   loadYoagentConversation({silent: true, scrollBottom: true});
@@ -42529,8 +42995,8 @@ function yoagentPendingWaitsHtml() {
 }
 
 function setYoagentJobs(items, options = {}) {
-  if (options.invalidateRequest !== false) yoagentJobsState.guard.invalidate();
   yoagentJobsState.items = Array.isArray(items) ? items : [];
+  if (options.invalidateRequest !== false) yoagentJobsResource().replace(yoagentJobsState.items, 'jobs-push', options);
   return yoagentJobsState.items;
 }
 
@@ -42669,7 +43135,6 @@ function yoagentChatQueueHtml() {
 function applyYoagentConversationPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
-  if (options.source !== 'request') yoagentConversationState.guard.invalidate();
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const hadPendingWaits = Array.isArray(yoagentConversationState.pendingWaits) && yoagentConversationState.pendingWaits.length > 0;
   yoagentConversationState.pendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
@@ -42679,6 +43144,7 @@ function applyYoagentConversationPayload(payload = {}, options = {}) {
   yoagentConversationState.displayPath = String(payload.transcript_display_path || yoagentConversationState.path);
   yoagentConversationState.loaded = true;
   yoagentConversationState.loading = false;
+  if (options.source !== 'request') yoagentConversationResource().replace(payload, 'conversation-push', options);
   if (hadPendingWaits && !yoagentConversationState.pendingWaits.length && yoagentChatState.queue.length) {
     if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
     else Promise.resolve().then(() => drainYoagentChatQueue());
@@ -42690,7 +43156,7 @@ function applyYoagentStreamPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const streamId = String(payload.stream_id || '').trim();
   if (!streamId) return false;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'stream'});
   if (!(yoagentConversationState.streamingMessages instanceof Map)) yoagentConversationState.streamingMessages = new Map();
   const createdAt = String(payload.created_at || new Date().toISOString());
   const content = String(payload.content || '');
@@ -42957,56 +43423,74 @@ function yoagentRecentAgentsMessageHtml() {
   });
 }
 
-async function loadYoagentConversation(options = {}) {
+function syncYoagentLatestResourceState(state, snapshot) {
+  state.loading = snapshot.loading;
+  state.request = snapshot.request;
+}
+
+function yoagentConversationResource() {
+  if (yoagentConversationState.resource) return yoagentConversationState.resource;
+  yoagentConversationState.resource = createLatestResource({
+    initial: null,
+    load: () => apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'}),
+    apply(payload) {
+      applyYoagentConversationPayload(payload, {source: 'request'});
+      return payload;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState(snapshot, event) {
+      syncYoagentLatestResourceState(yoagentConversationState, snapshot);
+      const options = event.context || {};
+      if (event.phase === 'failed' && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error: snapshot.error}));
+      if (event.phase === 'settled' && options.render !== false) {
+        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+      }
+    },
+  });
+  return yoagentConversationState.resource;
+}
+
+function yoagentJobsResource() {
+  if (yoagentJobsState.resource) return yoagentJobsState.resource;
+  yoagentJobsState.resource = createLatestResource({
+    initial: yoagentJobsState.items,
+    load: () => apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'}),
+    apply(payload) {
+      applyYoagentJobsPayload(payload, {source: 'request'});
+      return yoagentJobsState.items;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState(snapshot, event) {
+      syncYoagentLatestResourceState(yoagentJobsState, snapshot);
+      const options = event.context || {};
+      if (event.phase === 'failed' && !options.silent) console.warn('YO!agent jobs refresh failed', snapshot.error);
+      if (event.phase === 'applied' && options.render !== false && yoagentPanelIsActive()) {
+        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+      }
+    },
+  });
+  return yoagentJobsState.resource;
+}
+
+function loadYoagentConversation(options = {}) {
   if (readOnlyMode) return false;
   if (yoagentConversationState.request && options.force !== true) return yoagentConversationState.request;
   if (yoagentConversationState.loaded && options.force !== true) return;
-  const requestIsCurrent = yoagentConversationState.guard.begin();
   yoagentConversationState.loading = true;
   if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      return applyYoagentConversationPayload(payload, {source: 'request'});
-    } catch (error) {
-      if (requestIsCurrent() && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
-      return false;
-    } finally {
-      if (yoagentConversationState.request === request) {
-        yoagentConversationState.loading = false;
-        yoagentConversationState.request = null;
-        if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
-      }
-    }
-  })();
-  yoagentConversationState.request = request;
-  return request;
+  const target = options.force === true ? Symbol('forced-conversation') : 'conversation';
+  return yoagentConversationResource().read(target, options);
 }
 
-async function loadYoagentJobs(options = {}) {
+function loadYoagentJobs(options = {}) {
   if (yoagentJobsState.request && options.force !== true) return yoagentJobsState.request;
-  const requestIsCurrent = yoagentJobsState.guard.begin();
   yoagentJobsState.loading = true;
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      applyYoagentJobsPayload(payload, {source: 'request'});
-      if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
-      return true;
-    } catch (error) {
-      if (requestIsCurrent() && !options.silent) console.warn('YO!agent jobs refresh failed', error);
-      return false;
-    } finally {
-      if (yoagentJobsState.request === request) {
-        yoagentJobsState.loading = false;
-        yoagentJobsState.request = null;
-      }
-    }
-  })();
-  yoagentJobsState.request = request;
-  return request;
+  const target = options.force === true ? Symbol('forced-jobs') : 'jobs';
+  return yoagentJobsResource().read(target, options);
 }
 
 let yoagentAgentAvailabilityRefreshPromise = null;
@@ -43313,7 +43797,7 @@ function cancelActiveYoagentChatRequest() {
 }
 
 async function clearYoagentConversation() {
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'clear'});
   yoagentConversationState.messages = [];
   yoagentConversationState.pendingWaits = [];
   yoagentChatState.queue = [];
@@ -43406,7 +43890,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'chat-send'});
   yoagentChatState.activeRequest = {id: requestId, streamId, controller, text, cancelled: false};
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
@@ -43483,7 +43967,7 @@ function updateYoagentActionPreview(previewId, patch) {
 
 async function executeYoagentActionSend(previewId) {
   if (!previewId || readOnlyMode || yoagentChatState.busy) return;
-  yoagentConversationState.guard.invalidate();
+  yoagentConversationState.resource?.invalidate({source: 'action-send'});
   hideYoagentStartupInfo();
   yoagentChatState.busy = true;
   updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));
@@ -43669,12 +44153,10 @@ const chatState = {
   followTail: true,
   draft: '',
   typingActive: false,
-  typingTimer: null,
-  typingExpiryTimer: null,
+  lifecycleScope: null,
   requestGeneration: 0,
   olderGeneration: 0,
   contextGeneration: 0,
-  requestController: null,
   searchGeneration: 0,
   searchOpen: false,
   searchVisible: false,
@@ -43683,20 +44165,29 @@ const chatState = {
   searchSnapshot: null,
   acknowledgedTone: '',
   acknowledgementStartedAt: 0,
-  acknowledgementTimer: null,
   notifiedIds: new Set(),
   emojiCatalogPromise: null,
   emojiOpen: false,
   emojiCategory: 'recent',
   searchQuery: '',
-  olderObserver: null,
-  olderObserverTarget: null,
   statusSignature: null,
   timelineSignature: '',
   lastAnnouncement: '',
   renderedAnnouncement: '',
   clientIp: '',
 };
+
+function chatLifecycleScope() {
+  if (chatState.lifecycleScope?.current()) return chatState.lifecycleScope;
+  const scope = createLifecycleScope({
+    isCurrent: () => chatState.lifecycleScope === scope,
+    onDispose: () => {
+      if (chatState.lifecycleScope === scope) chatState.lifecycleScope = null;
+    },
+  });
+  chatState.lifecycleScope = scope;
+  return scope;
+}
 const chatEmojiOverlayController = createDismissableOverlayController({
   trapFocus: true,
   onOpen: () => {
@@ -43720,10 +44211,13 @@ function chatApiPost(path, payload, options = {}) {
 }
 
 function chatRequestOptions() {
-  if (!chatState.requestController || chatState.requestController.signal.aborted) {
-    chatState.requestController = new AbortController();
+  const scope = chatLifecycleScope();
+  let controller = scope.value('request-controller');
+  if (!controller || controller.signal.aborted) {
+    controller = new AbortController();
+    scope.replace('request-controller', controller, value => value.abort());
   }
-  return {signal: chatState.requestController.signal};
+  return {signal: controller.signal};
 }
 
 function beginChatLoadingRequest(generationKey) {
@@ -44209,24 +44703,24 @@ function chatMediaPanelBodyHtml(url) {
 
 function createChatMediaPanel(item) {
   const url = chatMediaUrlForItem(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-media-panel';
-  panel.id = panelDomId(item);
-  panel.dataset.chatMediaUrl = url;
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item,
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    bodyClass: 'info-pane yochat-media-pane',
-    bodyHtml: chatMediaPanelBodyHtml(url),
-    toastStack: false,
+    className: 'panel info-panel chat-media-panel',
+    dataset: {chatMediaUrl: url},
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      bodyClass: 'info-pane yochat-media-pane',
+      bodyHtml: chatMediaPanelBodyHtml(url),
+      toastStack: false,
+    },
+    bind(panel) {
+      installLinkContextMenu(panel);
+      panel.addEventListener('click', event => {
+        const action = event.target.closest('[data-chat-media-action]');
+        if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
+      });
+    },
   });
-  bindPanelShell(panel, item);
-  installLinkContextMenu(panel);
-  panel.addEventListener('click', event => {
-    const action = event.target.closest('[data-chat-media-action]');
-    if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
-  });
-  return panel;
 }
 
 function relocalizeChatMediaPanel(panel, item) {
@@ -44254,16 +44748,19 @@ function chatIntroductionGreetingKey(browserInstanceId = chatBrowserInstanceId) 
 
 function replaceChatTyping(typing) {
   chatState.typing = (Array.isArray(typing) ? typing : []).filter(item => Number(item?.expires_at_utc) > Date.now() / 1000);
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  const scope = chatLifecycleScope();
+  scope.release('typing-expiry-timer');
   const earliest = Math.min(...chatState.typing.map(item => Number(item.expires_at_utc)).filter(Number.isFinite));
   if (!Number.isFinite(earliest)) return;
-  chatState.typingExpiryTimer = setTimeout(() => {
-    chatState.typingExpiryTimer = null;
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('typing-expiry-timer', timer);
+    if (!scope.current()) return;
     replaceChatTyping(chatState.typing);
     renderChatPanel();
     loadChatBootstrap({incoming: false});
   }, Math.max(0, (earliest * 1000) - Date.now()) + 20);
+  scope.ownTimer('typing-expiry-timer', timer);
 }
 
 function chatMergeMessages(messages, options = {}) {
@@ -44283,10 +44780,7 @@ function chatMergeMessages(messages, options = {}) {
     const fromThisInstance = message.sender_instance_id === chatBrowserInstanceId;
     if (options.incoming === true && fromThisInstance && id > chatState.readUpToId) chatAdvanceReadCursor(id);
     if (options.incoming === true && !fromThisInstance) {
-      if (chatState.acknowledgementTimer) {
-        clearTimeout(chatState.acknowledgementTimer);
-        chatState.acknowledgementTimer = null;
-      }
+      chatState.lifecycleScope?.release('acknowledgement-timer');
       chatState.acknowledgedTone = '';
       chatState.unread.set(id, message);
       chatState.lastAnnouncement = chatNotificationBody(message);
@@ -44431,12 +44925,16 @@ async function chatAcknowledgeUpTo(messageId) {
   for (const [id] of acknowledged) chatState.unread.delete(id);
   chatState.acknowledgedTone = tone;
   chatState.acknowledgementStartedAt = Date.now();
-  if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
-  chatState.acknowledgementTimer = setTimeout(() => {
+  const scope = chatLifecycleScope();
+  scope.release('acknowledgement-timer');
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('acknowledgement-timer', timer);
+    if (!scope.current()) return;
     chatState.acknowledgedTone = '';
-    chatState.acknowledgementTimer = null;
     renderChatStatus();
   }, agentStatusPulsePeriodMs);
+  scope.ownTimer('acknowledgement-timer', timer);
   renderChatStatus();
   return chatAdvanceReadCursor(newest);
 }
@@ -44448,15 +44946,17 @@ function chatAcknowledge() {
 
 function setChatTyping(active, options = {}) {
   const next = active === true;
-  if (chatState.typingTimer) {
-    clearTimeout(chatState.typingTimer);
-    chatState.typingTimer = null;
-  }
+  const scope = chatLifecycleScope();
+  scope.release('typing-heartbeat-timer');
   if (next === chatState.typingActive && !options.heartbeat) return;
   chatState.typingActive = next;
   chatApiPost('/api/chat/typing', {browser_instance_id: chatBrowserInstanceId, typing: next}, {keepalive: options.keepalive}).catch(() => {});
   if (next) {
-    chatState.typingTimer = setTimeout(() => setChatTyping(true, {heartbeat: true}), chatTypingRefreshMs);
+    const timer = setTimeout(() => {
+      scope.release('typing-heartbeat-timer', timer);
+      if (scope.current()) setChatTyping(true, {heartbeat: true});
+    }, chatTypingRefreshMs);
+    scope.ownTimer('typing-heartbeat-timer', timer);
   }
 }
 
@@ -44847,48 +45347,51 @@ function autosizeChatComposer(panel = document.getElementById(panelDomId(chatIte
 
 function installChatComposerResizeObserver(panel) {
   if (!panel) return false;
-  panel?._chatComposerResizeObserver?.disconnect?.();
-  panel._chatComposerResizeObserver = null;
+  const scope = chatLifecycleScope();
+  scope.release('composer-resize-observer');
   const pane = panel?.querySelector('.chat-pane');
   if (!pane || typeof ResizeObserver !== 'function') return false;
-  panel._chatComposerResizeObserver = new ResizeObserver(() => {
+  const observer = new ResizeObserver(() => {
+    if (!scope.current() || scope.value('composer-resize-observer') !== observer) return;
     autosizeChatComposer(panel);
     if (chatState.followTail) chatScrollTimelineToBottom(panel);
     else syncChatTailState(panel);
   });
-  panel._chatComposerResizeObserver.observe(pane);
+  scope.ownObserver('composer-resize-observer', observer);
+  observer.observe(pane);
   return true;
 }
 
 function syncChatHistoryObserver(panel = document.getElementById(panelDomId(chatItemId))) {
   const target = panel?.querySelector('[data-chat-history-sentry]');
-  if (chatState.olderObserverTarget === target && chatState.olderObserver) return true;
-  chatState.olderObserver?.disconnect?.();
-  chatState.olderObserver = null;
-  chatState.olderObserverTarget = null;
+  const scope = chatLifecycleScope();
+  const currentObserver = scope.value('older-history-observer');
+  if (currentObserver?.target === target) return true;
+  scope.release('older-history-observer');
   if (!target || typeof IntersectionObserver !== 'function') return false;
-  chatState.olderObserver = new IntersectionObserver(entries => {
+  const observer = new IntersectionObserver(entries => {
+    if (!scope.current() || scope.value('older-history-observer') !== observer) return;
     if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;
     loadOlderChatMessages();
   }, {root: panel.querySelector('[data-chat-timeline]'), threshold: 0});
-  chatState.olderObserver.observe(target);
-  chatState.olderObserverTarget = target;
+  observer.target = target;
+  scope.ownObserver('older-history-observer', observer);
+  observer.observe(target);
   return true;
 }
 
 function createChatPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-panel';
-  panel.id = panelDomId(chatItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: chatItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
-    afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+    className: 'panel info-panel chat-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
+      afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
       <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
     </div>`,
-    bodyClass: 'info-pane chat-pane',
-    bodyHtml: `<div class="chat-history-search-split">
+      bodyClass: 'info-pane chat-pane',
+      bodyHtml: `<div class="chat-history-search-split">
         <div class="chat-search-results" data-chat-search-results hidden></div>
         <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
       </div>
@@ -44901,10 +45404,9 @@ function createChatPanel() {
         <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
         <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
       </div>`,
+    },
+    bind: bindChatPanel,
   });
-  bindPanelShell(panel, chatItemId);
-  bindChatPanel(panel);
-  return panel;
 }
 
 function mountChatPanel() {
@@ -44948,26 +45450,17 @@ function handleChatInvalidation(type) {
 }
 
 function clearChatLifecycle(options = {}) {
-  if (chatState.typingTimer) clearTimeout(chatState.typingTimer);
-  chatState.typingTimer = null;
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  chatState.lifecycleScope?.release('typing-heartbeat-timer');
+  chatState.lifecycleScope?.release('typing-expiry-timer');
   if (chatState.typingActive) setChatTyping(false, {keepalive: options.keepalive === true});
   closeChatEmojiPicker({returnFocus: false});
   if (options.destroy === true) {
-    const panel = document.getElementById(panelDomId(chatItemId));
-    panel?._chatComposerResizeObserver?.disconnect?.();
-    if (panel) panel._chatComposerResizeObserver = null;
     chatState.requestGeneration += 1;
     chatState.olderGeneration += 1;
     chatState.contextGeneration += 1;
     chatState.searchGeneration += 1;
     chatState.loadingRequest = null;
-    chatState.requestController?.abort?.();
-    chatState.requestController = null;
-    chatState.olderObserver?.disconnect?.();
-    chatState.olderObserver = null;
-    chatState.olderObserverTarget = null;
+    chatState.lifecycleScope?.dispose('chat-destroy');
     chatState.olderRequested = false;
     chatState.followTail = true;
     chatState.timelineSignature = '';
@@ -45767,26 +46260,24 @@ function preferencesPanelHtml() {
     ${resetBlock}`;
 }
 function createPreferencesPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel preferences-panel';
-  panel.id = panelDomId(prefsItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: prefsItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel preferences-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(prefsItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${prefsItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('common.preferences'))}</span></div>
           <div id="meta-${prefsItemId}" class="pane-info-bar-meta meta">${esc(preferenceStatusText())}</div>
         </div>
         <button type="button" class="panel-detail-close" data-detail-toggle="${esc(prefsItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>`,
-    bodyClass: 'preferences-body',
-    bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+      bodyClass: 'preferences-body',
+      bodyHtml: `<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+    },
+    bind: bindPreferencesPanel,
   });
-  bindPanelShell(panel, prefsItemId);
-  bindPreferencesPanel(panel);
-  return panel;
 }
 
 function focusPreferencesSearch(panel = null, options = {}) {
@@ -45838,19 +46329,15 @@ function renderPreferencesPanels(options = {}) {
       const shouldKeepDom = activeControl && options.force !== true;
       // the scroller is the inner .preferences-scroll, not the overlay-root body.
       const scroller = () => body.querySelector('.preferences-scroll') || body;
-      const prevScroll = scroller();
-      const scrollTop = prevScroll.scrollTop;
-      const scrollLeft = prevScroll.scrollLeft;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
         if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
-        body.innerHTML = `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`;
-      }
-      if (options.focusSearch !== true) {
-        const restore = () => { const s = scroller(); s.scrollTop = scrollTop; s.scrollLeft = scrollLeft; };
-        restore();
-        requestAnimationFrame(restore);
+        reconcilePanelBody({
+          body,
+          html: `${panelToastStackHtml(prefsItemId)}<div class="preferences-scroll">${preferencesPanelHtml()}</div>`,
+          anchors: options.focusSearch === true ? [] : [elementScrollAnchor('.preferences-scroll', true)],
+        });
       }
     }
     bindPreferencesPanel(panel);
@@ -45902,9 +46389,10 @@ function autosizePreferenceTextareas(root) {
 }
 
 function bindPreferencesPanel(panel) {
-  if (!panel || panel.dataset.preferencesBound === 'true') return;
-  panel.dataset.preferencesBound = 'true';
-  panel.addEventListener('input', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'preferences-panel', () => {
+    const scope = createLifecycleScope();
+    scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-preferences-search]');
     if (search && panel.contains(search)) {
       preferencesSearchText = search.value || '';
@@ -45931,7 +46419,7 @@ function bindPreferencesPanel(panel) {
       if (control.dataset.settingPath === 'appearance.pane_ring_opacity') applyPaneRingOpacity(value);
     }
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     const delivery = event.target.closest('[data-notification-delivery]');
     if (delivery && panel.contains(delivery)) {
       setNotificationDelivery(delivery.dataset.notificationDelivery, delivery.checked);
@@ -45942,21 +46430,21 @@ function bindPreferencesPanel(panel) {
     if (!control || !panel.contains(control)) return;
     savePreferenceControl(control);
   });
-  panel.addEventListener('wheel', event => {
+    scope.ownEvent('wheel', panel, 'wheel', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('touchmove', event => {
+    scope.ownEvent('touchmove', panel, 'touchmove', event => {
     if (event.target.closest?.('.preferences-scroll')) notePreferencesScrollActivity();
   }, {passive: true});
-  panel.addEventListener('scroll', event => {
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (event.target?.classList?.contains('preferences-scroll')) notePreferencesScrollActivity();
   }, true);
-  panel.addEventListener('focusout', () => {
+    scope.ownEvent('focusout', panel, 'focusout', () => {
     setTimeout(() => {
       if (!activePreferenceControl(panel)) renderPreferencesPanels();
     }, 0);
   });
-  bindActionDispatcher(panel, {
+    const disposeActions = bindActionDispatcher(panel, {
     'preferences-search': () => {
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true});
@@ -46006,6 +46494,9 @@ function bindPreferencesPanel(panel) {
       scheduleShareUiStatePublish();
     },
     'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    return () => scope.dispose('preferences-panel-unbound');
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -46806,12 +47297,12 @@ function bindPreferencesPanel(panel) {
     let capabilitiesPromise = null;
     let startPromise = null;
     let controller = null;
-    let source = null;
+    let lifecycleScope = null;
     let streamEpoch = 0;
+    let streamTransportToken = 0;
     let running = false;
     let visible = true;
     let readFenceRecovery = null;
-    let readinessTimer = null;
     let readinessEpoch = 0;
     let healthy = false;
     let deliverySequence = 0;
@@ -46819,39 +47310,32 @@ function bindPreferencesPanel(panel) {
     let lastDeliveryKind = '';
     let lastDeliveryAtMs = 0;
     let lastDeliveryEpoch = 0;
-    let pageRetirementReason = '';
+    const ownsPageTransportLifecycle = options.pageTransportLifecycle === undefined
+      && options.pageLifecycle !== undefined;
+    const transportLifecycle = options.pageTransportLifecycle || (
+      ownsPageTransportLifecycle
+        ? createPageTransportLifecycle(options.pageLifecycle)
+        : pageTransportLifecycle
+    );
+    streamTransportToken = transportLifecycle.begin();
 
-    // How the client knows it is unloading rather than failing.
-    //
-    // The browser aborts an open EventSource as part of unloading the document and fires
-    // the very same `error` event a dead server or a dropped network fires, with no
-    // payload to tell them apart. Measured against live 7771 (probe: authenticated page,
-    // stream open and healthy, `location.replace('about:blank')`): `beforeunload` ran at
-    // t+0ms, the EventSource `error` at t+6ms, `pagehide` at t+18ms, and
-    // `document.visibilityState` was still "visible" at both `beforeunload` and
-    // `pagehide`. So `beforeunload` is the earliest event that discriminates the two, and
-    // visibility does not discriminate them at all. Latch on `beforeunload` or `pagehide`,
-    // whichever the browser delivers first.
-    //
-    // The latch is cleared by anything that proves the document is still transporting: a
-    // `pageshow` (bfcache restore) or any stream delivery. A navigation another listener
-    // cancels therefore cannot leave a genuine mid-session failure permanently
-    // misclassified, and a genuine failure that has not been preceded by an unload signal
-    // is never reclassified at all.
-    const pageLifecycle = options.pageLifecycle === undefined
-      ? (typeof globalThis?.addEventListener === 'function' ? globalThis : null)
-      : options.pageLifecycle;
-    if (pageLifecycle && typeof pageLifecycle.addEventListener === 'function') {
-      for (const eventName of ['beforeunload', 'pagehide']) {
-        pageLifecycle.addEventListener(eventName, () => {
-          if (!pageRetirementReason) pageRetirementReason = `page_${eventName}`;
-        });
-      }
-      pageLifecycle.addEventListener('pageshow', () => { pageRetirementReason = ''; });
+    function ensureLifecycleScope() {
+      if (lifecycleScope?.current()) return lifecycleScope;
+      const scope = createLifecycleScope({
+        isCurrent: () => lifecycleScope === scope,
+        onDispose: () => {
+          if (lifecycleScope === scope) lifecycleScope = null;
+        },
+      });
+      lifecycleScope = scope;
+      transportLifecycle.start();
+      return scope;
     }
+    ensureLifecycleScope();
 
     function recordStreamDelivery(kind, epoch, {acceptedDelta = false} = {}) {
-      pageRetirementReason = '';
+      transportLifecycle.noteDelivery(streamTransportToken);
+      streamTransportToken = transportLifecycle.begin();
       deliverySequence = Math.min(Number.MAX_SAFE_INTEGER, deliverySequence + 1);
       if (acceptedDelta) acceptedDeltaSequence = Math.min(Number.MAX_SAFE_INTEGER, acceptedDeltaSequence + 1);
       lastDeliveryKind = kind;
@@ -46867,7 +47351,7 @@ function bindPreferencesPanel(panel) {
         running,
         visible,
         healthy,
-        streamOpen: source !== null,
+        streamOpen: lifecycleScope?.value('stream') !== null,
         streamEpoch,
         deliverySequence,
         acceptedDeltaSequence,
@@ -46883,8 +47367,7 @@ function bindPreferencesPanel(panel) {
     }
 
     function clearReadinessTimer() {
-      if (readinessTimer !== null && typeof clock.clearTimeout === 'function') clock.clearTimeout(readinessTimer);
-      readinessTimer = null;
+      lifecycleScope?.release('readiness-timer');
     }
 
     function readinessMessage(error) {
@@ -46901,11 +47384,13 @@ function bindPreferencesPanel(panel) {
     }
 
     function scheduleReadinessRetry() {
-      if (!running || !visible || readinessTimer !== null || typeof clock.setTimeout !== 'function') return;
-      readinessTimer = clock.setTimeout(() => {
-        readinessTimer = null;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
+      const timer = clock.setTimeout(() => {
+        scope.release('readiness-timer', timer);
         void beginActivation().catch(() => {});
       }, readinessRetryMs);
+      scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
     }
 
     function handleReadinessFailure(error, epoch) {
@@ -46970,13 +47455,14 @@ function bindPreferencesPanel(panel) {
 
     function closeStream() {
       streamEpoch += 1;
-      const closing = source;
-      source = null;
-      if (closing) closing.close();
+      for (const eventName of ['delta', 'ready', 'repair', 'unavailable', 'error']) {
+        lifecycleScope?.release(`stream-${eventName}`);
+      }
+      lifecycleScope?.release('stream');
     }
 
     function routeStreamFailure(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleTransportFailure();
     }
@@ -46985,24 +47471,25 @@ function bindPreferencesPanel(panel) {
     // itself performs while unloading. A server-sent `unavailable` frame and a rejected
     // `delta`/`ready` frame are the server or the payload failing and stay failures.
     function routeStreamTransportError(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
-      if (!pageRetirementReason) {
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
+      const retirementReason = transportLifecycle.reasonSince(streamTransportToken);
+      if (!retirementReason) {
         routeStreamFailure(candidate, epoch);
         return;
       }
-      const reason = pageRetirementReason;
       closeStream();
-      controller.handleTransportRetirement(reason);
+      controller.handleTransportRetirement(retirementReason);
     }
 
     function routeStreamRepair(candidate, epoch) {
-      if (source !== candidate || streamEpoch !== epoch) return;
+      if (lifecycleScope?.value('stream') !== candidate || streamEpoch !== epoch) return;
       closeStream();
       controller.handleReconnect({requiresFullSnapshot: false});
     }
 
     function openStream() {
-      if (!running || !visible || source || !controller?.generation()) return;
+      const scope = ensureLifecycleScope();
+      if (!running || !visible || scope.value('stream') || !controller?.generation()) return;
       const request = controller.deltaRequest();
       const url = exactUrl('/api/stats-stream', [
         ['range_seconds', request.range_seconds],
@@ -47020,9 +47507,10 @@ function bindPreferencesPanel(panel) {
         return;
       }
       streamEpoch = epoch;
-      source = candidate;
-      candidate.addEventListener('delta', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      streamTransportToken = transportLifecycle.begin();
+      scope.ownStream('stream', candidate);
+      scope.ownEvent('stream-delta', candidate, 'delta', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           if (controller.acceptDelta(JSON.parse(event.data))) {
             recordStreamDelivery('delta', epoch, {acceptedDelta: true});
@@ -47031,8 +47519,8 @@ function bindPreferencesPanel(panel) {
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('ready', event => {
-        if (source !== candidate || streamEpoch !== epoch) return;
+      scope.ownEvent('stream-ready', candidate, 'ready', event => {
+        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
         try {
           const ready = JSON.parse(event.data);
           exactFields(ready, ['cache_generation', 'revision'], 'ready');
@@ -47051,9 +47539,9 @@ function bindPreferencesPanel(panel) {
           routeStreamFailure(candidate, epoch);
         }
       });
-      candidate.addEventListener('repair', () => routeStreamRepair(candidate, epoch));
-      candidate.addEventListener('unavailable', () => routeStreamFailure(candidate, epoch));
-      candidate.addEventListener('error', () => routeStreamTransportError(candidate, epoch));
+      scope.ownEvent('stream-repair', candidate, 'repair', () => routeStreamRepair(candidate, epoch));
+      scope.ownEvent('stream-unavailable', candidate, 'unavailable', () => routeStreamFailure(candidate, epoch));
+      scope.ownEvent('stream-error', candidate, 'error', () => routeStreamTransportError(candidate, epoch));
     }
 
     async function activate(epoch) {
@@ -47109,12 +47597,14 @@ function bindPreferencesPanel(panel) {
       clearReadinessTimer();
       const timeout = typeof clock.setTimeout === 'function'
         ? new Promise((_resolve, reject) => {
-          readinessTimer = clock.setTimeout(() => {
-            readinessTimer = null;
+          const scope = ensureLifecycleScope();
+          const timer = clock.setTimeout(() => {
+            scope.release('readiness-timer', timer);
             const error = new Error(`current stats readiness timed out after ${readinessTimeoutMs}ms`);
             if (startPromise === null && handleReadinessFailure(error, epoch)) scheduleReadinessRetry();
             reject(error);
           }, readinessTimeoutMs);
+          scope.ownTimer('readiness-timer', timer, value => clock.clearTimeout(value));
         })
         : null;
       const activation = Promise.resolve().then(() => activate(epoch));
@@ -47136,7 +47626,7 @@ function bindPreferencesPanel(panel) {
     function start() {
       if (running) {
         if (startPromise) return startPromise;
-        if (controller || readinessTimer !== null) return Promise.resolve(controller);
+        if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
         return beginActivation();
       }
       running = true;
@@ -47181,7 +47671,7 @@ function bindPreferencesPanel(panel) {
           controller.setVisible(visible);
           if (!running) controller.stop();
         }
-        if (visible && running && !controller && !startPromise && readinessTimer === null) {
+        if (visible && running && !controller && !startPromise && lifecycleScope?.value('readiness-timer') === null) {
           void beginActivation().catch(() => {});
         }
       },
@@ -47209,8 +47699,9 @@ function bindPreferencesPanel(panel) {
       stop() {
         running = false;
         readinessEpoch += 1;
-        clearReadinessTimer();
-        closeStream();
+        streamEpoch += 1;
+        lifecycleScope?.dispose('stats-client-stop');
+        if (ownsPageTransportLifecycle) transportLifecycle.dispose('stats-client-stop');
         if (controller) controller.stop();
         startPromise = null;
       },
@@ -48690,6 +49181,156 @@ function bindPreferencesPanel(panel) {
 })();
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Debug graph/history runtime declarations used by the following rendering partial.
+
+const debugRuntimeFacades = new Map();
+
+function registerDebugRuntimeFacade(name, facade) {
+  const key = String(name || '');
+  if (!key || !facade || typeof facade !== 'object' || debugRuntimeFacades.has(key)) return false;
+  debugRuntimeFacades.set(key, Object.freeze({...facade}));
+  return true;
+}
+
+function debugRuntimeFacade(name) {
+  return debugRuntimeFacades.get(String(name || '')) || null;
+}
+
+const debugRuntimeState = {
+  subTab: 'graph',
+  graphRangeSeconds: 15 * 60,
+  graphResolutionOverrideSeconds: 0,
+  graphChartLayout: 0,
+  graphHiddenCharts: null,
+  graphVisibleCharts: null,
+  statsUiPreferencesLoaded: false,
+};
+
+function debugGraphLocalizedLabel(item = {}) {
+  if (!item.labelKey) return String(item.label || '');
+  const params = {...(item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(item.labelKey, params);
+}
+
+function debugGraphLocalizedDescription(item = {}) {
+  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
+  if (!descKey) return '';
+  const params = {...(item.descParams || item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(descKey, params);
+}
+
+function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
+  if (!descKey) return '';
+  const text = desc || t(descKey, params);
+  if (!text || text === descKey) return '';
+  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
+}
+
+function normalizedJsDebugSubTab(value) {
+  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
+}
+
+function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
+  const seconds = Number(value);
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  if (options.some(option => option.seconds === seconds)) return seconds;
+  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
+  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+}
+
+function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds, nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true});
+  return debugRuntimeState.graphRangeSeconds;
+}
+
+function loadJsDebugStatsUiPreferences() {
+  if (debugRuntimeState.statsUiPreferencesLoaded) return;
+  debugRuntimeState.statsUiPreferencesLoaded = true;
+  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+  debugRuntimeState.subTab = normalizedJsDebugSubTab(saved.subTab);
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
+  debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
+  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
+  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
+  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
+  for (const key of visible) hidden.delete(key);
+  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
+  debugRuntimeState.graphHiddenCharts = hidden;
+  debugRuntimeState.graphVisibleCharts = visible;
+  // Respect a previously-persisted level selection (including an intentionally
+  // empty one); only fresh state falls back to the warning+error default.
+  const storedLogLevels = Array.isArray(saved.logLevels)
+    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
+    : null;
+  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+}
+
+function saveJsDebugStatsUiPreferences() {
+  if (!debugRuntimeState.statsUiPreferencesLoaded) return;
+  try {
+    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
+      subTab: debugRuntimeState.subTab,
+      rangeSeconds: debugRuntimeState.graphRangeSeconds,
+      resolutionOverrideSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
+      chartLayout: debugRuntimeState.graphChartLayout,
+      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
+      visibleCharts: [...(debugRuntimeState.graphVisibleCharts instanceof Set ? debugRuntimeState.graphVisibleCharts : [])].sort(),
+      logLevels: [...jsDebugLogsState.levels].sort(),
+    }));
+  } catch (_) {
+  }
+}
+
+function debugGraphHiddenChartKeys() {
+  loadJsDebugStatsUiPreferences();
+  if (!(debugRuntimeState.graphHiddenCharts instanceof Set)) debugRuntimeState.graphHiddenCharts = new Set();
+  if (!(debugRuntimeState.graphVisibleCharts instanceof Set)) debugRuntimeState.graphVisibleCharts = new Set();
+  return debugRuntimeState.graphHiddenCharts;
+}
+
+function debugGraphChartVisible(key) {
+  const chartKey = String(key || '');
+  if (chartKey === 'modelTokens' && !debugRuntimeState.graphVisibleCharts.has(chartKey)) return false;
+  return !debugGraphHiddenChartKeys().has(chartKey);
+}
+
+function setDebugGraphChartVisible(key, visible) {
+  const chartKey = String(key || '');
+  if (!chartKey) return;
+  const hidden = debugGraphHiddenChartKeys();
+  if (visible) {
+    hidden.delete(chartKey);
+    debugRuntimeState.graphVisibleCharts.add(chartKey);
+  } else {
+    hidden.add(chartKey);
+    debugRuntimeState.graphVisibleCharts.delete(chartKey);
+  }
+  saveJsDebugStatsUiPreferences();
+  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
+  // while a graph control is focused, but deferring the user's own activation
+  // leaves aria-pressed and the chart body visibly stale until focus moves.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
+}
+
+function jsDebugGraphRangeOptionIndex(rangeSeconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  return Math.max(0, options.findIndex(option => option.seconds === normalized));
+}
+
+function jsDebugGraphRangeLabel(seconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
+  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
+}
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // JavaScript debug panel rendering and controls.
 
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
@@ -48747,7 +49388,6 @@ const jsDebugHistoryReadiness = {
   overlayVisible: false,
   overlayTimer: null,
 };
-let jsDebugSubTab = 'graph';
 const jsDebugSystemPollMs = 5000;
 // The retry cadence used while `/api/system-status` answers with a TYPED REFUSAL (no snapshot has
 // been published yet, or the newest one is past its freshness deadline and its aged body is
@@ -48807,14 +49447,11 @@ const jsDebugLogsState = {
   clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
-let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
-let jsDebugGraphResolutionOverrideSeconds = 0;
 // When a Resolution change needs a history fetch, this holds the value to restore and the
 // history generation to match so a stale response cannot revert a newer request. Cleared
 // on the matching ready (success) or error (revert + toast). Null when the last change was
 // served from cache (instant, no overlay).
 let jsDebugGraphPendingResolutionChange = null;
-let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
   pending: false,
@@ -48865,6 +49502,11 @@ const jsDebugCurrentObservationState = {
   instrumentationCostMs: 0,
   receipts: new Map(),
 };
+let jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+function currentObservationLifecycleScope() {
+  if (jsDebugCurrentObservationLifecycleScope.disposed()) jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+  return jsDebugCurrentObservationLifecycleScope;
+}
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
@@ -48889,12 +49531,19 @@ const jsDebugGraphZoomMinBuckets = 3;
 let jsDebugGraphLastPointerType = 'mouse';
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveTimer = 0;
+let jsDebugGraphLifecycleScope = createLifecycleScope();
+function debugGraphLifecycleScope() {
+  if (jsDebugGraphLifecycleScope.disposed()) jsDebugGraphLifecycleScope = createLifecycleScope();
+  return jsDebugGraphLifecycleScope;
+}
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
-let jsDebugGraphHiddenCharts = null;
-let jsDebugGraphVisibleCharts = null;
-let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
+let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+function debugPricingRefreshLifecycleScope() {
+  if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+  return jsDebugPricingRefreshLifecycleScope;
+}
 const jsDebugUsageAtomBackfill = {state: 'unknown', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -49174,130 +49823,6 @@ const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flat
   ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
 
-function debugGraphLocalizedLabel(item = {}) {
-  if (!item.labelKey) return String(item.label || '');
-  const params = {...(item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(item.labelKey, params);
-}
-
-function debugGraphLocalizedDescription(item = {}) {
-  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
-  if (!descKey) return '';
-  const params = {...(item.descParams || item.labelParams || {})};
-  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
-  return t(descKey, params);
-}
-
-function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
-  if (!descKey) return '';
-  const text = desc || t(descKey, params);
-  if (!text || text === descKey) return '';
-  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
-}
-
-function normalizedJsDebugSubTab(value) {
-  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
-}
-
-function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
-  const seconds = Number(value);
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  if (options.some(option => option.seconds === seconds)) return seconds;
-  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
-  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
-}
-
-function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
-  syncDebugGraphResolutionOverride(nowMs, {persist: true});
-  return jsDebugGraphRangeSeconds;
-}
-
-function loadJsDebugStatsUiPreferences() {
-  if (jsDebugStatsUiPreferencesLoaded) return;
-  jsDebugStatsUiPreferencesLoaded = true;
-  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-  jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
-  jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
-  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
-  for (const key of visible) hidden.delete(key);
-  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
-  jsDebugGraphHiddenCharts = hidden;
-  jsDebugGraphVisibleCharts = visible;
-  // Respect a previously-persisted level selection (including an intentionally
-  // empty one); only fresh state falls back to the warning+error default.
-  const storedLogLevels = Array.isArray(saved.logLevels)
-    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
-    : null;
-  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
-  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
-}
-
-function saveJsDebugStatsUiPreferences() {
-  if (!jsDebugStatsUiPreferencesLoaded) return;
-  try {
-    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
-      subTab: jsDebugSubTab,
-      rangeSeconds: jsDebugGraphRangeSeconds,
-      resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
-      chartLayout: jsDebugGraphChartLayout,
-      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
-      visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
-      logLevels: [...jsDebugLogsState.levels].sort(),
-    }));
-  } catch (_) {
-  }
-}
-
-function debugGraphHiddenChartKeys() {
-  loadJsDebugStatsUiPreferences();
-  if (!(jsDebugGraphHiddenCharts instanceof Set)) jsDebugGraphHiddenCharts = new Set();
-  if (!(jsDebugGraphVisibleCharts instanceof Set)) jsDebugGraphVisibleCharts = new Set();
-  return jsDebugGraphHiddenCharts;
-}
-
-function debugGraphChartVisible(key) {
-  const chartKey = String(key || '');
-  if (chartKey === 'modelTokens' && !jsDebugGraphVisibleCharts.has(chartKey)) return false;
-  return !debugGraphHiddenChartKeys().has(chartKey);
-}
-
-function setDebugGraphChartVisible(key, visible) {
-  const chartKey = String(key || '');
-  if (!chartKey) return;
-  const hidden = debugGraphHiddenChartKeys();
-  if (visible) {
-    hidden.delete(chartKey);
-    jsDebugGraphVisibleCharts.add(chartKey);
-  } else {
-    hidden.add(chartKey);
-    jsDebugGraphVisibleCharts.delete(chartKey);
-  }
-  saveJsDebugStatsUiPreferences();
-  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
-  // while a graph control is focused, but deferring the user's own activation
-  // leaves aria-pressed and the chart body visibly stale until focus moves.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
-}
-
-function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
-  return Math.max(0, options.findIndex(option => option.seconds === normalized));
-}
-
-function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
-  const options = debugGraphAvailableRangeOptions(nowMs);
-  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
-  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
-}
-
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
 }
@@ -49429,13 +49954,13 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const previousRangeSeconds = Number(state.requestedRangeSeconds) || 0;
-  const nextRangeSeconds = Number(jsDebugGraphRangeSeconds) || 0;
+  const nextRangeSeconds = Number(debugRuntimeState.graphRangeSeconds) || 0;
   const loadingOlder = Number(state.loadedStartSeconds) > 0
     && previousRangeSeconds > 0
     && nextRangeSeconds > previousRangeSeconds;
   const snapshot = setJsDebugHistoryReadiness('loading', {
     reason: retry ? 'retry' : (loadingOlder ? 'older' : 'initial'),
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
     requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
@@ -49746,7 +50271,7 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
   // (finest supported exact cell) when the picker is on AUTO.
-  const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
+  const override = Math.max(0, Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
   const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
   return choices.length ? Number(choices[0]) : 1;
@@ -49786,7 +50311,7 @@ function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resol
 
 function resetJsDebugHistoryReadiness() {
   return setJsDebugHistoryReadiness('idle', {
-    requestedRangeSeconds: jsDebugGraphRangeSeconds,
+    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
     targetStartSeconds: 0,
     targetEndSeconds: 0,
     requestedStartSeconds: 0,
@@ -49842,8 +50367,35 @@ function debugStatHtml(label, value, key = '') {
 }
 
 function debugSubTabButtonHtml(tab, label) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
-  return `<button type="button" class="js-debug-subtab${active ? ' active' : ''}" role="tab" data-js-debug-subtab="${esc(tab)}" aria-selected="${active ? 'true' : 'false'}"><span class="session-button-dir">${esc(label)}</span></button>`;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
+  return toolbarButtonHtml({
+    className: `js-debug-subtab${active ? ' active' : ''}`,
+    role: 'tab',
+    action: 'debug-subtab',
+    dataset: {jsDebugSubtab: tab},
+    attributes: {'aria-selected': active ? 'true' : 'false'},
+    html: `<span class="session-button-dir">${esc(label)}</span>`,
+  });
+}
+
+function debugEventsSubviewHtml() {
+  const counts = debugEventCounts();
+  const apiCopyLabel = debugApiCopyButtonLabel();
+  return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
+      <div class="js-debug-toolbar">
+        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+        </div>
+        <div class="js-debug-actions">
+          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
+        </div>
+      </div>
+      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
+    </div>`;
 }
 
 function debugSubTabsHtml() {
@@ -49857,7 +50409,7 @@ function debugSubTabsHtml() {
 }
 
 function debugSubViewAttrs(tab) {
-  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
   return `data-js-debug-subview="${esc(tab)}"${active ? '' : ' hidden'}`;
 }
 
@@ -51244,6 +51796,14 @@ function installJsDebugCurrentObservationLiveness() {
   state.livenessTimer = setInterval(() => {
     recordJsDebugClientHealthObservation(0, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
+  currentObservationLifecycleScope().ownTimer('liveness', state.livenessTimer, clearInterval);
+}
+
+function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
+  const state = jsDebugCurrentObservationState;
+  jsDebugCurrentObservationLifecycleScope.dispose(reason);
+  state.timer = null;
+  state.livenessTimer = null;
 }
 
 installJsDebugCurrentObservationLiveness();
@@ -51436,12 +51996,15 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
   if (state.timer !== null) {
     if (delay !== 0) return;
     clearTimeout(state.timer);
+    currentObservationLifecycleScope().release('flush', state.timer);
     state.timer = null;
   }
   state.timer = setTimeout(() => {
+    currentObservationLifecycleScope().relinquish('flush', state.timer);
     state.timer = null;
     void flushJsDebugCurrentObservations();
   }, delay);
+  currentObservationLifecycleScope().ownTimer('flush', state.timer);
 }
 
 async function flushJsDebugCurrentObservations() {
@@ -52115,9 +52678,9 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
-  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
-  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === debugRuntimeState.graphResolutionOverrideSeconds) return false;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   if (persist) saveJsDebugStatsUiPreferences();
   return true;
 }
@@ -52150,7 +52713,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) {
     let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
     // Point-cap: an explicit override that would render more than the budget of buckets
@@ -52238,7 +52801,7 @@ function debugGraphContributingSourceSlices(domain) {
   return slices;
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = debugRuntimeState.graphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
@@ -52258,10 +52821,10 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
 // debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
   const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
-  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
 }
 
-function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
+function debugGraphDomain(nowMs = Date.now(), rangeSeconds = debugRuntimeState.graphRangeSeconds) {
   const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   if (debugGraphZoomDomainValid()) {
     const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
@@ -53071,7 +53634,7 @@ function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
-  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -53121,7 +53684,7 @@ function debugGraphChartToggleControlsHtml() {
 }
 
 function debugGraphLayoutControlsHtml() {
-  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
+  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${debugRuntimeState.graphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
 }
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
@@ -54070,7 +54633,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
   }
   return defaultBuckets;
 }
@@ -54398,7 +54961,7 @@ function debugGraphChartLabel(group, buckets = []) {
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(jsDebugGraphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
     ${debugGraphHistoryOverlayHtml()}
   </div>`;
 }
@@ -55344,11 +55907,18 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
-  if (jsDebugPricingRefreshState.timer !== null) clearTimeout(jsDebugPricingRefreshState.timer);
+  if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
   jsDebugPricingRefreshState.timer = setTimeout(() => {
+    debugPricingRefreshLifecycleScope().relinquish('status', jsDebugPricingRefreshState.timer);
     jsDebugPricingRefreshState.timer = null;
     void refreshDebugCostPricingStatus();
   }, 750);
+  debugPricingRefreshLifecycleScope().ownTimer('status', jsDebugPricingRefreshState.timer);
+}
+
+function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
+  jsDebugPricingRefreshLifecycleScope.dispose(reason);
+  jsDebugPricingRefreshState.timer = null;
 }
 
 async function refreshDebugCostPricingStatus() {
@@ -55424,8 +55994,8 @@ function debugGraphHtml() {
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
-  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
-  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
+  const domain = debugGraphDomain(nowMs, debugRuntimeState.graphRangeSeconds);
+  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: debugRuntimeState.graphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
   // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
   // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
@@ -55440,7 +56010,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
-    rangeSeconds: jsDebugGraphRangeSeconds,
+    rangeSeconds: debugRuntimeState.graphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
     zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
@@ -55515,8 +56085,8 @@ function jsDebugStatsLayoutItemsVisible(items) {
 
 function jsDebugCurrentStatsSelection() {
   return {
-    rangeSeconds: normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds),
-    resolution: normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO',
+    rangeSeconds: normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds),
+    resolution: normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds) || 'AUTO',
   };
 }
 
@@ -55655,7 +56225,7 @@ function jsDebugStatsLivePushEnabled() {
   // A drag zoom is a fixed historical domain. The shared range slider is the
   // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
   // every durable one-second push.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
 }
 
 function jsDebugStatsPollIntervalMs() {
@@ -56253,10 +56823,25 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSystemPolling({pollNow: visible});
-    syncDebugLogsPolling({pollNow: visible});
+    syncDebugSubviewActivation({pollNow: visible});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
+  });
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', event => {
+    void event;
+    stopDebugGraphLiveTicker();
+    disposeDebugPricingRefreshLifecycle('pagehide');
+    disposeJsDebugCurrentObservationLifecycle('pagehide');
+  });
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted !== true) return;
+    installJsDebugCurrentObservationLiveness();
+    scheduleJsDebugCurrentObservationFlush();
+    if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+    syncDebugGraphLiveTicker();
   });
 }
 
@@ -57882,7 +58467,7 @@ function debugSystemPollDelayMs() {
 
 async function pollDebugSystemStatus({force = false} = {}) {
   if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
   jsDebugSystemState.inFlight = true;
   jsDebugSystemState.error = '';
   refreshDebugSystemViews();
@@ -57907,12 +58492,12 @@ async function pollDebugSystemStatus({force = false} = {}) {
 // keeps the existing timer when the delay is unchanged, so calling this after every poll costs
 // nothing on the steady path.
 function retimeDebugSystemPolling() {
-  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) return;
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) return;
   resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, debugSystemPollDelayMs());
 }
 
 function syncDebugSystemPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-system');
     return;
   }
@@ -57949,7 +58534,7 @@ function refreshDebugLogsViews() {
 
 async function pollDebugLogs({force = false} = {}) {
   if (jsDebugLogsState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
   jsDebugLogsState.inFlight = true;
   jsDebugLogsState.error = '';
   refreshDebugLogsViews();
@@ -57978,7 +58563,7 @@ async function pollDebugLogs({force = false} = {}) {
 }
 
 function syncDebugLogsPolling({pollNow = false} = {}) {
-  if (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible()) {
+  if (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-logs');
     return;
   }
@@ -57986,33 +58571,101 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
   if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
 }
 
-function debugPanelHtml() {
+function debugSubviewNoop() {}
+
+function renderDebugEventsSubview(panel, options = {}) {
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
   const counts = debugEventCounts();
-  const apiCopyLabel = debugApiCopyButtonLabel();
+  const values = {
+    events: jsDebugEvents.length,
+    api: counts.apiCalls,
+    sse: counts.sseEvents,
+    errors: counts.errors,
+  };
+  for (const [key, value] of Object.entries(values)) {
+    const stat = panel.querySelector(`[data-js-debug-stat="${key}"]`);
+    if (stat) stat.textContent = String(value);
+  }
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const anchor = debugLogScrollAnchor(log);
+  log.value = text;
+  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+}
+
+function debugSubviewDescriptor({id, html, render = debugSubviewNoop, bind = debugSubviewNoop, activate = debugSubviewNoop, deactivate = debugSubviewNoop, relocalize = debugSubviewNoop}) {
+  return Object.freeze({id, html, render, bind, activate, deactivate, relocalize});
+}
+
+const DEBUG_SUBVIEWS = Object.freeze([
+  debugSubviewDescriptor({
+    id: 'logs',
+    html: () => `<div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`,
+    render: () => refreshDebugLogsViews(),
+    activate: ({pollNow = false} = {}) => syncDebugLogsPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-logs'),
+  }),
+  debugSubviewDescriptor({
+    id: 'system',
+    html: () => `<div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>`,
+    activate: ({pollNow = false} = {}) => syncDebugSystemPolling({pollNow}),
+    deactivate: () => clearRuntimeInterval('debug-system'),
+  }),
+  debugSubviewDescriptor({
+    id: 'events',
+    html: debugEventsSubviewHtml,
+    render: renderDebugEventsSubview,
+  }),
+  debugSubviewDescriptor({
+    id: 'graph',
+    html: () => `<div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`,
+    render: (panel, options = {}) => refreshDebugGraphElement(panel.querySelector('[data-js-debug-graph]'), options),
+    bind: panel => {
+      bindDebugGraphTouchSelection(panel);
+      bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
+    },
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+  }),
+  debugSubviewDescriptor({
+    id: 'cost',
+    html: yoCostPanelHtml,
+    render: (panel, options = {}) => renderYoCostPanels(options),
+    bind: bindYoCostPanel,
+    activate: () => syncDebugGraphLiveTicker(),
+    deactivate: () => syncDebugGraphLiveTicker(),
+    relocalize: relocalizeYoCostPanelChrome,
+  }),
+]);
+
+function debugSubview(id) {
+  return DEBUG_SUBVIEWS.find(view => view.id === id);
+}
+
+function debugPanelSubviewDescriptors() {
+  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
+}
+
+function syncDebugSubviewActivation({pollNow = false} = {}) {
+  for (const view of debugPanelSubviewDescriptors()) {
+    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
+    else view.deactivate();
+  }
+}
+
+function debugPanelHtml() {
   return `
     ${debugSubTabsHtml()}
-    <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
-      <div class="js-debug-toolbar">
-        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
-          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
-          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
-          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
-          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
-        </div>
-        <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
-          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
-        </div>
-      </div>
-      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
-    </div>
-    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
-    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>
-    <div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`;
+    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
-  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  const result = relocalizeVirtualPanelChrome(panel, t('tab.debug'));
+  for (const view of debugPanelSubviewDescriptors()) view.relocalize(panel);
+  return result;
 }
 
 function yoCostPanelHtml() {
@@ -58050,52 +58703,54 @@ function openYoCostTranscriptPreview(event) {
 }
 
 function bindYoCostPanel(panel) {
-  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
-  panel.dataset.jsYoCostBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  panel.addEventListener('scroll', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'yo-cost-panel', () => {
+    const scope = createLifecycleScope();
+    const disposeTouchSelection = bindDebugGraphTouchSelection(panel);
+    scope.replace('touch-selection', disposeTouchSelection, dispose => dispose?.());
+    scope.ownEvent('scroll', panel, 'scroll', event => {
     if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
     panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
   }, {capture: true, passive: true});
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => { handleDebugGraphPointerMove(event, panel); });
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('input', panel, 'input', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('change', panel, 'change', event => { handleDebugGraphControlEvent(event, panel); });
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
     openYoCostTranscriptPreview(event);
+    });
+    return () => scope.dispose('yo-cost-panel-unbound');
   });
 }
 
 function createYoCostPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-yocost-panel';
-  panel.id = panelDomId(yocostItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: yocostItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
-    bodyClass: 'preferences-body js-yocost-body',
-    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    className: 'panel js-yocost-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
+      bodyClass: 'preferences-body js-yocost-body',
+      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    },
+    bind: panel => debugSubview('cost').bind(panel),
   });
-  bindPanelShell(panel, yocostItemId);
-  bindYoCostPanel(panel);
-  return panel;
 }
 
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
@@ -58121,15 +58776,14 @@ function renderYoCostPanels({force = false} = {}) {
       continue;
     }
     const body = panel.querySelector('.js-yocost-body');
-    const scroll = body?.querySelector('.js-yocost-scroll');
-    const scrollTop = scroll?.scrollTop || 0;
-    const scrollLeft = scroll?.scrollLeft || 0;
-    const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-    if (body) {
-      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
-      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-    }
+    reconcilePanelBody({
+      body,
+      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+      anchors: [
+        elementScrollAnchor('.js-yocost-scroll'),
+        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+      ],
+    });
     delete panel.dataset.jsDebugGraphRefreshPending;
     bindYoCostPanel(panel);
     rendered = true;
@@ -58155,25 +58809,24 @@ function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(
 
 function createDebugPanel() {
   enableDebugMode();
-  const panel = document.createElement('article');
-  panel.className = 'panel js-debug-panel';
-  panel.id = panelDomId(debugPaneItemId);
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item: debugPaneItemId,
-    headClass: 'preferences-panel-head',
-    controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    className: 'panel js-debug-panel',
+    frame: {
+      headClass: 'preferences-panel-head',
+      controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
-        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
+        ${panelDetailCloseButtonHtml(debugPaneItemId)}
       </div>`,
-    bodyClass: 'preferences-body js-debug-body',
-    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+      bodyClass: 'preferences-body js-debug-body',
+      bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+    },
+    bind: bindDebugPanel,
   });
-  bindPanelShell(panel, debugPaneItemId);
-  bindDebugPanel(panel);
   // `debugPanelHtml` above just wrote the five Daemons regions. Record what it wrote, or the first
   // poll after this panel appears replaces every one of them for no change at all.
   seedDebugSystemRenderedRegions(panel);
@@ -58209,23 +58862,25 @@ function renderDebugPanels(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      const outerScroll = body.querySelector('.js-debug-scroll');
-      const outerScrollTop = outerScroll?.scrollTop || 0;
-      const outerScrollLeft = outerScroll?.scrollLeft || 0;
-      const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
-      const logAnchor = debugLogScrollAnchor(body.querySelector('[data-js-debug-log]'));
-      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
-      // Same contract as `createDebugPanel`: this rebuild owns the five Daemons regions it just
-      // wrote, so it records them. Without this the next poll replaced all five again.
-      seedDebugSystemRenderedRegions(body);
-      restoreElementScrollPosition(body.querySelector('.js-debug-scroll'), outerScrollTop, outerScrollLeft);
-      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
-      restoreDebugLogScrollAnchor(body.querySelector('[data-js-debug-log]'), logAnchor, {scrollToBottom: options.scrollLogToBottom === true});
+      reconcilePanelBody({
+        body,
+        html: `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
+        anchors: [
+          elementScrollAnchor('.js-debug-scroll'),
+          keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+          {
+            capture: root => debugLogScrollAnchor(root.querySelector('[data-js-debug-log]')),
+            restore: (root, value) => restoreDebugLogScrollAnchor(root.querySelector('[data-js-debug-log]'), value, {scrollToBottom: options.scrollLogToBottom === true}),
+          },
+        ],
+        // Same contract as `createDebugPanel`: record the five Daemons regions just written.
+        afterReplace: seedDebugSystemRenderedRegions,
+      });
     }
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -58238,34 +58893,14 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  renderYoCostPanels(options);
+  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
-  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
-  if (meta) meta.textContent = debugMetaText();
-  const counts = debugEventCounts();
-  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
-  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
-  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
-  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
-  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
-  if (statApi) statApi.textContent = String(counts.apiCalls);
-  if (statSse) statSse.textContent = String(counts.sseEvents);
-  if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
-  if (panel.querySelector('[data-js-debug-subview="logs"]')) refreshDebugLogsViews();
-  const graph = panel.querySelector('[data-js-debug-graph]');
-  refreshDebugGraphElement(graph, options);
-  const log = panel.querySelector('[data-js-debug-log]');
-  if (!log) return;
-  const text = jsDebugTextForClipboard();
-  if (log.value === text) return;
-  const anchor = debugLogScrollAnchor(log);
-  log.value = text;
-  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
+  for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
 }
 
 function debugGraphFocusedControl(graph) {
@@ -58291,7 +58926,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
   }
   const rangeLabel = graph.querySelector('[data-js-debug-range-label]');
   if (rangeLabel) {
-    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(jsDebugGraphRangeSeconds, nowMs);
+    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(debugRuntimeState.graphRangeSeconds, nowMs);
     rangeLabel.classList.toggle('js-debug-range-label--zoomed', zoomed);
     rangeLabel.title = zoomed ? debugGraphCostRangeText(domain) : '';
   }
@@ -58318,7 +58953,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     rangeControl.insertBefore(prefix, slider || rangeControl.firstChild);
   }
   graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
-    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
+    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === debugRuntimeState.graphChartLayout ? 'true' : 'false');
   });
   graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(toggle => {
     toggle.checked = debugGraphChartVisible(toggle.dataset.jsDebugChartToggle);
@@ -58390,7 +59025,7 @@ function debugGraphSlidingAxisActive() {
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
   // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
   // hidden panel is not static but simply does not repaint until it is shown again.
-  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
+  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
 function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
@@ -58420,11 +59055,12 @@ function debugGraphSlideLiveViews(nowMs = Date.now()) {
 }
 
 function stopDebugGraphLiveTicker() {
-  if (jsDebugGraphLiveTimer) clearTimeout(jsDebugGraphLiveTimer);
+  if (jsDebugGraphLiveTimer) debugGraphLifecycleScope().release('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
 }
 
 function debugGraphLiveTimerTick() {
+  debugGraphLifecycleScope().relinquish('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const nowMs = Date.now();
@@ -58440,6 +59076,7 @@ function syncDebugGraphLiveTicker() {
   }
   if (jsDebugGraphLiveTimer) return;
   jsDebugGraphLiveTimer = setTimeout(debugGraphLiveTimerTick, Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
+  debugGraphLifecycleScope().ownTimer('live-ticker', jsDebugGraphLiveTimer);
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
@@ -58496,11 +59133,13 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
 function bindDebugCostSummaryTabButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
-    if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
-    anchor.dataset.jsDebugCostDetailsBound = 'true';
-    anchor.addEventListener('click', event => {
+    bindOnce(anchor, 'debug-cost-details', () => {
+      const handleClick = event => {
       event.preventDefault();
       selectSession(yocostItemId, {userInitiated: true});
+      };
+      anchor.addEventListener('click', handleClick);
+      return () => anchor.removeEventListener('click', handleClick);
     });
   });
 }
@@ -58508,23 +59147,22 @@ function bindDebugCostSummaryTabButtons(graph) {
 function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
-    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === debugRuntimeState.subTab;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
-    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === jsDebugSubTab;
+    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === debugRuntimeState.subTab;
     view.hidden = !active;
   });
 }
 
 function setDebugSubTab(tab) {
   loadJsDebugStatsUiPreferences();
-  jsDebugSubTab = normalizedJsDebugSubTab(tab);
+  debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs'});
+  syncDebugSubviewActivation({pollNow: true});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -58559,7 +59197,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const state = jsDebugHistoryReadiness;
   if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
+    && Number(state.requestedRangeSeconds) === Number(debugRuntimeState.graphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
     && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
     && Number(state.requestedResolutionSeconds) === Number(coverageResolutionSeconds);
@@ -58580,7 +59218,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
 function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
-  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
+  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;
@@ -58592,7 +59230,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
   if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
-      requestedRangeSeconds: jsDebugGraphRangeSeconds,
+      requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
       requestedStartSeconds,
       attemptCount: 0,
       error: '',
@@ -58604,10 +59242,10 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
-  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
+  const previousSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
   const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = normalized;
+  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
   saveJsDebugStatsUiPreferences();
   // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
   // value now, before any fetch resolves.
@@ -58631,7 +59269,7 @@ function setDebugGraphResolutionOverride(value) {
   const pending = {
     previousSeconds,
     targetSeconds: normalized,
-    rangeSeconds: Number(jsDebugGraphRangeSeconds),
+    rangeSeconds: Number(debugRuntimeState.graphRangeSeconds),
     requestedResolutionSeconds: Number(jsDebugHistoryReadiness.requestedResolutionSeconds),
     targetStartSeconds: Number(jsDebugHistoryReadiness.targetStartSeconds),
     targetEndSeconds: Number(jsDebugHistoryReadiness.targetEndSeconds),
@@ -58664,8 +59302,8 @@ function clearDebugGraphPendingResolutionChange({hideOverlay = false} = {}) {
 function debugGraphResolutionChangeDataSatisfied(pending, state) {
   if (!pending || state?.phase !== 'ready') return false;
   if (Number(state.generation) < Number(pending.armedGeneration)) return false;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
-  if (Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
+  if (Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
   if (Number(state.resolutionSeconds) !== Number(pending.requestedResolutionSeconds)) return false;
   const intervals = [...(state.requestCoverageIntervals || [])]
     .filter(interval => Number(interval.resolutionSeconds) === Number(pending.requestedResolutionSeconds))
@@ -58718,10 +59356,10 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
     return;
   }
   if (state.phase !== 'error') return;
-  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return;
+  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return;
   clearDebugGraphPendingResolutionChange();
   const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
-  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
+  debugRuntimeState.graphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
   const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
@@ -58738,7 +59376,7 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
-  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
+  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
 }
@@ -59012,11 +59650,12 @@ function handleDebugGraphTouchMove(event, panel) {
 }
 
 function bindDebugGraphTouchSelection(panel) {
-  if (!panel || panel.dataset.jsDebugTouchSelectionBound === 'true') return;
-  panel.dataset.jsDebugTouchSelectionBound = 'true';
-  panel.addEventListener('touchmove', event => {
-    handleDebugGraphTouchMove(event, panel);
-  }, {passive: false});
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-graph-touch-selection', () => {
+    const handleTouchMove = event => { handleDebugGraphTouchMove(event, panel); };
+    panel.addEventListener('touchmove', handleTouchMove, {passive: false});
+    return () => panel.removeEventListener('touchmove', handleTouchMove, {passive: false});
+  });
 }
 
 function startDebugGraphSelection(candidate, event = null) {
@@ -59280,49 +59919,46 @@ function handleDebugGraphControlEvent(event, panel) {
 }
 
 function bindDebugPanel(panel) {
-  if (!panel || panel.dataset.debugBound === 'true') return;
-  panel.dataset.debugBound = 'true';
-  bindDebugGraphTouchSelection(panel);
-  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
-  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
-  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
-  panel.addEventListener('focusout', event => {
+  if (!panel) return null;
+  return bindOnce(panel, 'debug-panel', () => {
+    const scope = createLifecycleScope();
+    for (const view of debugPanelSubviewDescriptors()) view.bind(panel);
+    syncDebugSubviewActivation({pollNow: true});
+    const disposeActions = bindActionDispatcher(panel, {
+    'debug-subtab': (_event, button) => setDebugSubTab(button.dataset.jsDebugSubtab),
+    });
+    scope.replace('actions', disposeActions, dispose => dispose?.());
+    scope.ownEvent('focusout', panel, 'focusout', event => {
     const graph = event.target?.closest?.('[data-js-debug-graph]');
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
   });
-  panel.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-  panel.addEventListener('pointermove', event => {
+    scope.ownEvent('pointermove', panel, 'pointermove', event => {
     handleDebugGraphPointerMove(event, panel);
   });
-  panel.addEventListener('pointerleave', () => {
+    scope.ownEvent('pointerleave', panel, 'pointerleave', () => {
     debugGraphClearInteractionLinesUnlessPinned(panel);
   });
-  panel.addEventListener('pointerup', event => {
+    scope.ownEvent('pointerup', panel, 'pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-  panel.addEventListener('pointercancel', event => {
+    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-  panel.addEventListener('input', event => {
+    scope.ownEvent('input', panel, 'input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('change', event => {
+    scope.ownEvent('change', panel, 'change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-  panel.addEventListener('click', event => {
+    scope.ownEvent('click', panel, 'click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
-    const subtab = event.target.closest('[data-js-debug-subtab]');
-    if (subtab && panel.contains(subtab)) {
-      event.preventDefault();
-      setDebugSubTab(subtab.dataset.jsDebugSubtab);
-      return;
-    }
     const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
     if (systemRefresh && panel.contains(systemRefresh)) {
       event.preventDefault();
@@ -59386,8 +60022,17 @@ function bindDebugPanel(panel) {
       clearJsDebugEvents();
       statusEl.textContent = t('debug.cleared');
     }
+    });
+    return () => scope.dispose('debug-panel-unbound');
   });
 }
+
+registerDebugRuntimeFacade('panel', {
+  createDebugPanel,
+  createYoCostPanel,
+  renderDebugPanels,
+  renderYoCostPanels,
+});
 const changesOutsideRepoKey = 'Outside repo';
 
 function sessionForFileRepo(path) {
@@ -62170,13 +62815,6 @@ function setEditorPreviewFontSize(value) {
 // they may coexist in separate panes without a global mode switch rebuilding one another.
 function createFileExplorerPanel(item = finderItemId) {
   const view = fileExplorerViewForItem(item) || 'finder';
-  const panel = document.createElement('article');
-  panel.className = `panel file-explorer-panel file-explorer-${view}`;
-  panel.id = panelDomId(item);
-  panel.dataset.panelItem = item;
-  // Refresh paths select panels by their fixed view. Keep this identity alongside the
-  // item identity so Finder, Differ, and Tabber can coexist without global-mode drift.
-  panel.dataset.fileExplorerView = view;
   const initialPath = fileExplorerRoot || homePath || '/';
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
@@ -62202,18 +62840,21 @@ function createFileExplorerPanel(item = finderItemId) {
             </span>
           </div>
         </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession(), 'differ')}</div></div>` : '';
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-explorer-head',
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    headAfterTabsHtml: finderToolbarHtml,
-    bodyClass: 'file-explorer-pane',
-    bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
+    className: `panel file-explorer-panel file-explorer-${view}`,
+    dataset: {panelItem: item, fileExplorerView: view},
+    frame: {
+      headClass: 'file-explorer-head',
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      headAfterTabsHtml: finderToolbarHtml,
+      bodyClass: 'file-explorer-pane',
+      bodyHtml: `<div class="file-explorer-tree-panel" role="tree" tabindex="0"></div>
         <div class="file-explorer-changes-resizer" data-file-explorer-changes-resizer title="${esc(t('finder.toolbar.resize'))}"></div>
         <div class="file-explorer-changes-panel" data-file-explorer-changes></div>`,
+    },
+    bind: bindChangesPanel,
   });
-  bindPanelShell(panel, item);
-  bindChangesPanel(panel);
   const hiddenBtn = panel.querySelector('.file-explorer-hidden-toggle-panel');
   const rootModeBtn = panel.querySelector('.file-explorer-root-mode-toggle-panel');
   const dateBtn = panel.querySelector('[data-file-explorer-tree-dates]');
@@ -62709,14 +63350,13 @@ function relocalizeFileEditorPanel(panel, item) {
 
 function createFileEditorPanel(item) {
   const path = fileItemPath(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel file-editor-panel';
-  panel.dataset.filePath = path;
-  panel.dataset.layoutItem = item;
-  panel.innerHTML = panelFrameHtml({
+  const panel = createFramedPanel({
     item,
-    headClass: 'file-editor-panel-head',
-    controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
+    className: 'panel file-editor-panel',
+    dataset: {filePath: path, layoutItem: item},
+    frame: {
+      headClass: 'file-editor-panel-head',
+      controlsHtml: `<div class="file-editor-panel-actions file-editor-frame-actions">
           ${paneFrameControlsGroupHtml(item, {
             groupClass: 'file-editor-frame-controls',
             actions: false,
@@ -62728,9 +63368,9 @@ function createFileEditorPanel(item) {
             closeLabel: t('editor.closePane'),
           })}
         </div>`,
-    afterHeadHtml: fileEditorToolbarHtml(item),
-    bodyClass: 'file-editor-panel-body',
-    bodyHtml: `<div class="file-editor-content">
+      afterHeadHtml: fileEditorToolbarHtml(item),
+      bodyClass: 'file-editor-panel-body',
+      bodyHtml: `<div class="file-editor-content">
           <div class="file-editor-codemirror-panel" hidden></div>
           <pre class="file-editor-raw-panel" hidden><code></code></pre>
           <div class="file-editor-preview-pane-panel markdown-body" hidden></div>
@@ -62745,8 +63385,8 @@ function createFileEditorPanel(item) {
           <div class="file-editor-image-panel" hidden></div>
         </div>
         <div class="file-editor-status-panel"><span class="file-editor-status-message"></span><span class="file-editor-count-status"></span><span class="file-editor-cursor-status"></span></div>`,
+    },
   });
-  bindPanelShell(panel, item);
   panel.addEventListener('click', event => {
     if (event.defaultPrevented) return;
     if (event.target?.closest?.('button, a, input, textarea, select, [data-diff-ref-input]')) return;
@@ -64540,22 +65180,8 @@ function resetPreviewZoomSurfaceClasses(shell) {
 }
 
 function disconnectPreviewZoomSurface(shell, options = {}) {
-  if (typeof shell?._previewZoomControlsCleanup === 'function') {
-    shell._previewZoomControlsCleanup();
-    shell._previewZoomControlsCleanup = null;
-  }
-  if (shell?._previewZoomResizeObserver) {
-    shell._previewZoomResizeObserver.disconnect();
-    shell._previewZoomResizeObserver = null;
-  }
-  if (shell?._previewZoomResizeFrame) {
-    previewZoomOwnerWindow(shell)?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-    shell._previewZoomResizeFrame = 0;
-  }
-  if (shell?._previewZoomRevealTimer) {
-    previewZoomOwnerWindow(shell)?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = 0;
-  }
+  shell?._previewZoomLifecycleScope?.dispose('preview-zoom-disconnect');
+  if (shell) shell._previewZoomLifecycleScope = null;
   shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
   if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
 }
@@ -64752,14 +65378,17 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   const toolbar = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar');
   const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
   if (!toolbar || !viewport) return false;
-  const cleanup = [];
+  const lifecycleScope = createLifecycleScope({
+    isCurrent: () => shell._previewZoomLifecycleScope === lifecycleScope,
+    onDispose: () => {
+      if (shell._previewZoomLifecycleScope === lifecycleScope) shell._previewZoomLifecycleScope = null;
+    },
+  });
+  shell._previewZoomLifecycleScope = lifecycleScope;
+  let nextListenerId = 0;
   const bind = (target, type, handler, listenerOptions = false) => {
     if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, listenerOptions);
-    cleanup.push(() => target.removeEventListener?.(type, handler, listenerOptions));
-  };
-  shell._previewZoomControlsCleanup = () => {
-    while (cleanup.length) cleanup.pop()();
+    lifecycleScope.ownEvent(`listener-${nextListenerId += 1}`, target, type, handler, listenerOptions);
   };
   bind(toolbar, 'click', event => {
     const button = event.target?.closest?.('[data-preview-zoom-action]');
@@ -64777,12 +65406,15 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
   // debounce after the last apply reveals it once at the settled size.
   shell.classList.add('file-editor-preview-zoom-measuring');
   const scheduleReveal = () => {
-    if (!shell.classList.contains('file-editor-preview-zoom-measuring')) return;
-    if (shell._previewZoomRevealTimer) ownerWindow?.clearTimeout?.(shell._previewZoomRevealTimer);
-    shell._previewZoomRevealTimer = ownerWindow?.setTimeout?.(() => {
-      shell._previewZoomRevealTimer = 0;
+    if (!lifecycleScope.current() || !shell.classList.contains('file-editor-preview-zoom-measuring')) return;
+    lifecycleScope.release('reveal-timer');
+    let timer = null;
+    timer = ownerWindow?.setTimeout?.(() => {
+      lifecycleScope.release('reveal-timer', timer);
+      if (!lifecycleScope.current()) return;
       shell.classList.remove('file-editor-preview-zoom-measuring');
     }, 150);
+    lifecycleScope.ownTimer('reveal-timer', timer, value => ownerWindow?.clearTimeout?.(value));
   };
   const applyAndScheduleReveal = applyOptions => {
     applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
@@ -64796,17 +65428,25 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
       // so applying synchronously here would re-trigger this observer and emit the noisy
       // "ResizeObserver loop completed with undelivered notifications" warning.
       const ownerWin = previewZoomOwnerWindow(shell);
-      if (shell._previewZoomResizeFrame) ownerWin?.cancelAnimationFrame?.(shell._previewZoomResizeFrame);
-      shell._previewZoomResizeFrame = schedulePreviewZoomFrame(shell, () => {
-        shell._previewZoomResizeFrame = 0;
+      lifecycleScope.release('resize-frame');
+      let frame = 0;
+      frame = schedulePreviewZoomFrame(shell, () => {
+        lifecycleScope.release('resize-frame', frame);
+        if (!lifecycleScope.current()) return;
         applyAndScheduleReveal();
       });
+      lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
     });
-    shell._previewZoomResizeObserver = resizeObserver;
+    lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
   }
   bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
-  schedulePreviewZoomFrame(shell, () => applyAndScheduleReveal({centerIfUnfocused: true}));
+  let initialFrame = 0;
+  initialFrame = schedulePreviewZoomFrame(shell, () => {
+    lifecycleScope.release('initial-frame', initialFrame);
+    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true});
+  });
+  lifecycleScope.ownTimer('initial-frame', initialFrame, value => ownerWindow?.cancelAnimationFrame?.(value));
   return true;
 }
 
@@ -65100,21 +65740,35 @@ function notebookStructuredPreview(source) {
   return {label: t('preview.notebook.title'), text: out.join('\n'), language: 'markdown', error: ''};
 }
 
-function structuredPreviewValue(path, text) {
-  const ext = fileExtensionOf(path);
-  const source = String(text ?? '');
-  if (ext === '.json') return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
-  if (ext === '.geojson') return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
-  if (ext === '.excalidraw') return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
-  if (ext === '.ipynb') return notebookStructuredPreview(source);
-  if (ext === '.toml') return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''};
-  if (['.xml', '.drawio', '.dio'].includes(ext)) return {label: t('preview.structured.title', {format: ext === '.xml' ? 'XML' : 'Draw.io XML'}), text: source, language: 'xml', error: ''};
-  if (['.ini', '.cfg', '.conf', '.env', '.properties', '.props'].includes(ext)) return {label: t('preview.structured.title', {format: t('preview.format.config')}), text: source, language: 'ini', error: ''};
-  return {label: t('preview.structured.title', {format: 'YAML'}), text: source, language: 'yaml', error: ''};
+function parseJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'JSON'}), source, t('preview.structured.parseError', {format: 'JSON'}));
 }
 
-function renderStructuredPreviewInto(container, path, text) {
-  const value = structuredPreviewValue(path, text);
+function parseGeoJsonStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'GeoJSON'}), source, t('preview.structured.parseError', {format: 'GeoJSON'}));
+}
+
+function parseExcalidrawStructuredPreviewStrategy(source) {
+  return jsonStructuredPreview(t('preview.structured.title', {format: 'Excalidraw JSON'}), source, t('preview.structured.parseError', {format: 'Excalidraw'}));
+}
+
+function parseNotebookStructuredPreviewStrategy(source) { return notebookStructuredPreview(source); }
+function parseTomlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'TOML'}), text: source, language: 'ini', error: ''}; }
+function parseXmlStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'XML'}), text: source, language: 'xml', error: ''}; }
+function parseDrawioStructuredPreviewStrategy(source) { return {label: t('preview.structured.title', {format: 'Draw.io XML'}), text: source, language: 'xml', error: ''}; }
+
+function parseStructuredPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const source = String(text ?? '');
+  const ext = fileExtensionOf(path);
+  const parse = renderer.parseByExtension?.[ext];
+  if (parse) return parse(source);
+  const language = renderer?.languageByExtension?.[ext] || 'yaml';
+  const format = language === 'ini' ? t('preview.format.config') : 'YAML';
+  return {label: t('preview.structured.title', {format}), text: source, language, error: ''};
+}
+
+function renderStructuredPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('structured')) {
+  const value = renderer.parse(path, text, renderer);
   const bounded = boundedPreviewText(value.text);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-data-preview';
@@ -65308,12 +65962,8 @@ function renderJsonLinesTablePreviewInto(container, path, text) {
   container.replaceChildren(wrapper);
 }
 
-function renderTablePreviewInto(container, path, text) {
-  if (['.jsonl', '.ndjson'].includes(fileExtensionOf(path))) {
-    renderJsonLinesTablePreviewInto(container, path, text);
-    return;
-  }
-  const delimiter = fileExtensionOf(path) === '.tsv' ? '\t' : ',';
+function parseDelimitedPreviewStrategy(path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const delimiter = renderer.delimiterByExtension[fileExtensionOf(path)];
   const maxRows = 200;
   const maxCols = 50;
   const lines = String(text ?? '').split(/\r?\n/).filter(line => line.length > 0);
@@ -65323,6 +65973,11 @@ function renderTablePreviewInto(container, path, text) {
     if (cells.length > maxCols) truncatedColumns = true;
     return cells.slice(0, maxCols);
   });
+  return {delimiter, lines, maxRows, rows, truncatedColumns};
+}
+
+function renderDelimitedPreviewInto(container, path, text, renderer = PREVIEW_RENDERER_BY_ID.get('table')) {
+  const {delimiter, lines, maxRows, rows, truncatedColumns} = renderer.parse(path, text, renderer);
   const wrapper = document.createElement('div');
   wrapper.className = 'file-editor-table-preview';
   const header = document.createElement('div');
@@ -65494,65 +66149,81 @@ function renderHtmlPreviewInto(container, path, text) {
   container.replaceChildren(...children);
 }
 
+const PREVIEW_SURFACE_CLASSES = Object.freeze([
+  'markdown-body', 'html-preview-body', 'image-preview-body', 'pdf-preview-body',
+  'data-preview-body', 'media-preview-body', 'code-preview-body',
+]);
+
+function cleanupStandardPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+  container._mermaidSig = null;
+}
+
+function cleanupMarkdownPreviewStrategy(container) {
+  container._mermaidSig = null;
+}
+
+function cleanupMermaidPreviewStrategy(container) {
+  container._previewPath = null;
+  container._previewText = null;
+  container._previewDisplayMode = null;
+  container._previewContext = null;
+}
+
+function markdownPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, fileEditorPreviewDisplayMode, context]);
+}
+
+function mermaidPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
+}
+
+function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+  const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
+  if (currentSignature === signature) return;
+  container._previewPath = path;
+  container._previewText = text;
+  container._previewDisplayMode = fileEditorPreviewDisplayMode;
+  container._previewContext = context;
+  renderMarkdownPreviewInto(container, text, path, {context});
+}
+
+function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  container._mermaidSig = signature;
+  container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+}
+
+function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
+function renderImagePreviewStrategy({container, path, state, context}) { renderRawImagePreviewInto(container, path, state, {context}); }
+function renderPdfPreviewStrategy({container, path}) { renderPdfPreviewInto(container, path); }
+function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
+function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
+function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
+function renderNativeMediaPreviewStrategy({container, path, state, renderer}) { renderNativeMediaPreviewInto(container, path, state, renderer.kind); }
+function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }
+function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
+
+function renderPreviewDescriptor(renderer, context) {
+  renderer.cleanup(context.container, context);
+  const signature = typeof renderer.signature === 'function' ? renderer.signature(context) : null;
+  return renderer.render({...context, renderer, signature});
+}
+
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const state = fileState.get(path) || null;
-  const previewKind = previewKindForPath(path, state);
+  const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
-  container.classList.toggle('markdown-body', previewKind === 'markdown');
-  container.classList.toggle('html-preview-body', previewKind === 'html');
-  container.classList.toggle('image-preview-body', previewKind === 'image');
-  container.classList.toggle('pdf-preview-body', previewKind === 'pdf');
-  container.classList.toggle('data-preview-body', previewKind === 'structured' || previewKind === 'table');
-  container.classList.toggle('media-preview-body', previewKind === 'audio' || previewKind === 'video');
-  container.classList.toggle('code-preview-body', previewKind === 'text' || previewKind === 'mermaid');
+  for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  if (previewKind === 'markdown') {
-    container._mermaidSig = null;
-    // fix 6: skip the expensive markdown render (marked.parse + recursive sanitize + per-block
-    // hljs) when the path + content are unchanged from the last render — mirrors CodeMirror's
-    // _cmSignature short-circuit. Prevents a multi-second stall re-rendering a large .md when an
-    // unrelated panel render fires (off the reorder hot path once S2 lands, but a latent cost).
-    if (container._previewPath !== path || container._previewText !== text || container._previewDisplayMode !== fileEditorPreviewDisplayMode || container._previewContext !== previewContext) {
-      container._previewPath = path;
-      container._previewText = text;
-      container._previewDisplayMode = fileEditorPreviewDisplayMode;
-      container._previewContext = previewContext;
-      renderMarkdownPreviewInto(container, text, path, {context: previewContext});
-    }
-  } else if (previewKind === 'mermaid') {
-    // Idempotent: a periodic pane refresh re-runs this with identical source; re-rendering rebuilds
-    // the SVG and (with the reveal gate) FLASHES the diagram on every refresh tick. Skip when the
-    // source, preview theme, and context are unchanged AND a rendered diagram (or error) is already
-    // present. editorPreviewThemeState() is in the signature so a Bright/Dark/Vanilla toggle still
-    // re-renders with the new palette.
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    const mermaidSig = JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', previewContext]);
-    if (container._mermaidSig !== mermaidSig || !container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) {
-      container._mermaidSig = mermaidSig;
-      container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context: previewContext});
-    }
-  } else {
-    container._previewPath = null;
-    container._previewText = null;
-    container._previewDisplayMode = null;
-    container._previewContext = null;
-    container._mermaidSig = null;
-    if (previewKind === 'html') renderHtmlPreviewInto(container, path, text);
-    else if (previewKind === 'image') renderRawImagePreviewInto(container, path, state, {context: previewContext});
-    else if (previewKind === 'pdf') renderPdfPreviewInto(container, path);
-    else if (previewKind === 'structured') renderStructuredPreviewInto(container, path, text);
-    else if (previewKind === 'table') renderTablePreviewInto(container, path, text);
-    else if (previewKind === 'audio' || previewKind === 'video') renderNativeMediaPreviewInto(container, path, state, previewKind);
-    else if (previewKind === 'unsupported') renderUnsupportedPreviewInto(container, path, state);
-    else renderEditorCodePreviewInto(container, path, text);
-  }
+  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -69706,12 +70377,11 @@ function shareReplaySendUiMessage(message = {}) {
 }
 
 function shareReplayResetKeyframeRequestBackoff() {
-  shareReplayKeyframeInFlight = false;
-  shareReplayKeyframeBackoffMs = 0;
+  shareReplayState.resetKeyframeRequest();
 }
 
 function shareReplayNextKeyframeRequestBackoff() {
-  const previous = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
+  const previous = shareReplayState.keyframeRequestSnapshot().backoffMs;
   if (!previous) return shareReplayKeyframeRequestInitialBackoffMs;
   return Math.min(shareReplayKeyframeRequestMaxBackoffMs, Math.round(previous * 1.7));
 }
@@ -69719,11 +70389,10 @@ function shareReplayNextKeyframeRequestBackoff() {
 function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
   const now = Date.now();
   shareReplayRecordLastReplayError(reason, detail);
-  const activeBackoffMs = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
-  const lastRequestAt = Math.max(0, Math.round(Number(shareReplayKeyframeLastRequestAt) || 0));
-  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, shareReplayKeyframeInFlight ? activeBackoffMs : 0);
-  if (lastRequestAt > 0 && now - lastRequestAt < requestFloorMs) {
-    shareReplayKeyframeRequestSuppressedCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestSuppressedCount) || 0)) + 1;
+  let keyframeRequest = shareReplayState.keyframeRequestSnapshot();
+  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, keyframeRequest.inFlight ? keyframeRequest.backoffMs : 0);
+  if (keyframeRequest.lastAt > 0 && now - keyframeRequest.lastAt < requestFloorMs) {
+    shareReplayState.suppressKeyframeRequest();
     void shareUploadDebugProfile('share-keyframe-request-suppressed', {
       reason: String(reason || 'replay-error'),
       detail,
@@ -69731,16 +70400,14 @@ function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
     });
     return false;
   }
-  shareReplayKeyframeRequestCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestCount) || 0)) + 1;
-  shareReplayKeyframeLastRequestAt = now;
-  shareReplayKeyframeBackoffMs = shareReplayNextKeyframeRequestBackoff();
-  shareReplayKeyframeInFlight = true;
+  shareReplayState.beginKeyframeRequest(now, shareReplayNextKeyframeRequestBackoff());
+  keyframeRequest = shareReplayState.keyframeRequestSnapshot();
   const payload = {
     reason: String(reason || 'replay-error'),
     error: String(detail.error || '').slice(0, 500),
     digest: String(detail.digest || ''),
-    backoffMs: shareReplayKeyframeBackoffMs,
-    suppressed: shareReplayKeyframeRequestSuppressedCount,
+    backoffMs: keyframeRequest.backoffMs,
+    suppressed: keyframeRequest.suppressed,
   };
   for (const key of ['epoch', 'sequence', 'baseSequence', 'currentEpoch', 'lastSequence']) {
     const value = Number(detail[key]);
@@ -70883,8 +71550,8 @@ function shareReplayApplyStaticKeyframe(payload = {}, message = {}) {
   shareReplayApplyScrollEntries(payload.scroll || []);
   if (payload.viewport && typeof payload.viewport === 'object') applyShareViewportState(payload.viewport);
   bindShareReplayPaneTabPopovers(root);
-  shareReplayCurrentEpoch = Math.max(0, Math.round(Number(message.epoch) || Number(payload.epoch) || shareReplayCurrentEpoch || 1));
-  shareReplayLastSequence = Math.max(0, Math.round(Number(message.sequence) || Number(payload.sequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  shareReplayState.acceptSequence(Number(message.epoch) || Number(payload.epoch) || replaySequence.epoch || 1, Number(message.sequence) || Number(payload.sequence) || 0);
   shareReplayLastKeyframe = {payload, message};
   setShareReplayShellStatus('mirrored', {
     digest: payload.digest,
@@ -70909,15 +71576,16 @@ function shareReplayFrameNumberDetail(message = {}) {
     epoch: frameNumber(message.epoch),
     sequence: frameNumber(message.sequence),
     baseSequence: frameNumber(message.baseSequence ?? payload.baseSequence),
-    currentEpoch: Math.max(0, Math.round(Number(shareReplayCurrentEpoch) || 0)),
-    lastSequence: Math.max(0, Math.round(Number(shareReplayLastSequence) || 0)),
+    currentEpoch: shareReplayState.sequenceSnapshot().epoch,
+    lastSequence: shareReplayState.sequenceSnapshot().last,
   };
 }
 
 function shareReplayErrorDetail(reason = 'replay-error', detail = {}) {
   const cleanDetail = detail && typeof detail === 'object' ? detail : {};
-  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? shareReplayCurrentEpoch) || 0));
-  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? shareReplayLastSequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? replaySequence.epoch) || 0));
+  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? replaySequence.last) || 0));
   const epoch = Number(cleanDetail.epoch);
   const sequence = Number(cleanDetail.sequence);
   const baseSequence = Number(cleanDetail.baseSequence);
@@ -71094,9 +71762,8 @@ function shareReplaySkipUnknownNodeDelta(payload = {}, sequenceStatus = {}) {
   const sequence = Number(sequenceStatus.sequence);
   const epoch = Number(sequenceStatus.epoch);
   if (!Number.isFinite(epoch) || !Number.isFinite(sequence)) return false;
-  shareReplayStaleFrames += 1;
-  shareReplayCurrentEpoch = epoch;
-  shareReplayLastSequence = sequence;
+  shareReplayState.recordStaleFrame();
+  shareReplayState.acceptSequence(epoch, sequence);
   setShareReplayShellStatus('mirrored', {sequence});
   return true;
 }
@@ -71107,10 +71774,10 @@ function applyShareReplayDelta(payload = {}, message = {}) {
   const sequenceStatus = shareReplayDeltaSequenceStatus(message);
   if (!sequenceStatus.ok) {
     if (sequenceStatus.stale === true) {
-      shareReplayStaleFrames += 1;
+      shareReplayState.recordStaleFrame();
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     shareReplayRequestKeyframe(sequenceStatus.reason, {
       ...sequenceStatus,
       frameType: message.type || shareMirrorProtocol.frames.domDelta,
@@ -71134,8 +71801,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (expectedDigest && expectedDigest !== actualDigest) {
       throw new Error('replay DOM digest mismatch');
     }
-    shareReplayCurrentEpoch = sequenceStatus.epoch;
-    shareReplayLastSequence = sequenceStatus.sequence;
+    shareReplayState.acceptSequence(sequenceStatus.epoch, sequenceStatus.sequence);
     setShareReplayShellStatus('mirrored', {
       sequence: sequenceStatus.sequence,
       digest: expectedDigest || actualDigest,
@@ -71145,7 +71811,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (shareReplayErrorIsUnknownNode(error) && shareReplaySkipUnknownNodeDelta(payload, sequenceStatus)) {
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
     shareReplayRequestKeyframe('replay-error', {
       ...shareReplayFrameNumberDetail(message),
@@ -73639,22 +74305,24 @@ function shareReplayTerminalPlaceholderDiagnostics() {
 
 function shareReplayHealthDiagnostics() {
   const terminalPlaceholders = shareReplayTerminalPlaceholderDiagnostics();
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const keyframeRequest = shareReplayState.keyframeRequestSnapshot();
   return shareRedactDiagnosticValue({
     kind: 'share-replay-health',
     at: new Date().toISOString(),
     match: shareReplayShellState.status === 'mirrored' && terminalPlaceholders.healthy,
     status: shareReplayShellState.status || 'idle',
     userStatus: shareReplayUserStatusText(shareReplayShellState.status || ''),
-    epoch: shareReplayCurrentEpoch,
-    sequence: shareReplayLastSequence,
+    epoch: replaySequence.epoch,
+    sequence: replaySequence.last,
     keyframeBytes: shareReplayLastKeyframeBytes,
     deltaBytes: shareReplayLastDeltaBytes,
-    droppedFrames: shareReplayDroppedFrames,
-    staleFrames: shareReplayStaleFrames,
-    keyframeRequests: shareReplayKeyframeRequestCount,
-    keyframeRequestsSuppressed: shareReplayKeyframeRequestSuppressedCount,
-    keyframeRequestBackoffMs: shareReplayKeyframeBackoffMs,
-    keyframeRequestInFlight: shareReplayKeyframeInFlight,
+    droppedFrames: replaySequence.dropped,
+    staleFrames: replaySequence.stale,
+    keyframeRequests: keyframeRequest.count,
+    keyframeRequestsSuppressed: keyframeRequest.suppressed,
+    keyframeRequestBackoffMs: keyframeRequest.backoffMs,
+    keyframeRequestInFlight: keyframeRequest.inFlight,
     hostKeyframesSuppressed: shareReplayHostKeyframeSuppressedCount,
     hostKeyframePending: Boolean(shareReplayHostKeyframeTimer),
     replayLatencyMs: shareReplayLastLatencyMs,
@@ -74833,6 +75501,35 @@ function installShareReadonlyInteractionBlocker() {
     window.addEventListener(name, blockShareReadonlyInteraction, {capture: true, passive: false});
   }
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Terminal mobile-accessory action declarations used by the following orchestration partial.
+
+const terminalRuntimeFacades = new Map();
+
+function registerTerminalRuntimeFacade(name, facade) {
+  const key = String(name || '');
+  if (!key || !facade || typeof facade !== 'object' || terminalRuntimeFacades.has(key)) return false;
+  terminalRuntimeFacades.set(key, Object.freeze({...facade}));
+  return true;
+}
+
+function terminalRuntimeFacade(name) {
+  return terminalRuntimeFacades.get(String(name || '')) || null;
+}
+
+const terminalMobileAccessoryActionFamilies = Object.freeze({
+  primary: Object.freeze(['tmux-prefix', 'backspace', 'more']),
+  side: Object.freeze(['tab', 'shift', 'ctrl']),
+  dpad: Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']),
+});
+registerTerminalRuntimeFacade('mobile-accessory-actions', terminalMobileAccessoryActionFamilies);
+
+let clientEventTransportLifecycleScope = null;
+function currentClientEventTransportLifecycleScope() {
+  if (!clientEventTransportLifecycleScope || clientEventTransportLifecycleScope.disposed()) clientEventTransportLifecycleScope = createLifecycleScope();
+  return clientEventTransportLifecycleScope;
+}
 
 function paneFrameControlsHtml(session, options = {}) {
   const role = paneRoleForSlot(options.slot || slotForItem(session));
@@ -74971,7 +75668,6 @@ function panelActiveTabName(session) {
   if (id === `events-pane-${session}`) return 'events';
   return 'terminal';
 }
-
 const tmuxStatusModes = new Map();
 
 // Mobile terminal apps conventionally supplement, rather than replace, the OS keyboard with a
@@ -75063,14 +75759,14 @@ const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'sh
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);
+const terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade('mobile-accessory-actions').primary;
 // Esc renders alone in the top-left corner. Tab, Shift, and Ctrl fill the left utility column;
 // Ctrl anchors the bottom row before Alt/Cmd, and Copy/Paste stack beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);
+const terminalMobileAccessorySideActions = terminalRuntimeFacade('mobile-accessory-actions').side;
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = terminalRuntimeFacade('mobile-accessory-actions').dpad;
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -75888,13 +76584,11 @@ async function cycleTmuxStatusMode(session) {
 }
 
 function createPanel(session) {
-  const panel = document.createElement('article');
-  panel.className = 'panel';
-  panel.id = panelDomId(session);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: session,
-    controlsHtml: panelControlsHtml(session),
-    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    frame: {
+      controlsHtml: panelControlsHtml(session),
+      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-popover-zone panel-popover-zone">
           <div id="panel-tab-${session}" class="panel-session-label">${panelHeaderStateHtml(sessionState(session, transcriptMetadataState.payload.sessions?.[session]))}</div>
           <div id="meta-${session}" class="pane-info-bar-meta meta">${esc(t('pane.findingBranch'))}</div>
@@ -75904,11 +76598,11 @@ function createPanel(session) {
         ${isTmuxSession(session) ? `<div id="meta-controls-${session}" class="pane-info-bar-controls"></div>` : ''}
         ${isTmuxSession(session) ? tmuxStatusToggleHtml(session) : ''}
       </div>`,
-    bodyClass: 'tab-pane active',
-    bodyAttributes: `id="terminal-pane-${esc(session)}"`,
-    bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
-    toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
-    afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
+      bodyClass: 'tab-pane active',
+      bodyAttributes: `id="terminal-pane-${esc(session)}"`,
+      bodyHtml: `<div id="term-${session}" class="terminal"></div>${terminalMobileAccessoryHtml(session)}`,
+      toastContentHtml: `<div id="upload-${session}" class="upload-result toast" hidden></div>`,
+      afterBodyHtml: `<div id="transcript-pane-${session}" class="tab-pane">
         <div class="transcript">
           <div class="transcript-head">${esc(t('common.transcript'))}</div>
           <div id="transcript-path-${session}" class="transcript-path-row">${esc(t('pane.findingTranscript'))}</div>
@@ -75928,10 +76622,9 @@ function createPanel(session) {
           <div id="events-${session}" class="event-list" data-locale-text-key="events.loading">${esc(t('events.loading'))}</div>
         </div>
       </div>`,
+    },
+    bind: bindPanelControls,
   });
-  bindPanelShell(panel, session);
-  bindPanelControls(panel, session);
-  return panel;
 }
 
 function setMetadataRefreshButtonLoading(button, loading, idleLabel, idleTitle) {
@@ -76030,8 +76723,10 @@ function backgroundOwnerSessionFilesSummary(payload = backgroundOwnerStatusState
 
 function applyBackgroundOwnerStatusPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
-  backgroundOwnerStatusState.guard.invalidate();
   backgroundOwnerStatusState.payload = payload;
+  if (options.source !== 'request' && options.source !== 'resource-replace') {
+    backgroundOwnerStatusResource().replace(payload, 'background-owner-push', {...options, source: 'resource-replace'});
+  }
   backgroundOwnerStatusState.updatedAt = Date.now();
   backgroundOwnerStatusState.error = '';
   backgroundOwnerStatusState.loading = false;
@@ -76047,35 +76742,45 @@ function backgroundOwnerStatusIsFresh() {
     && Date.now() - Number(backgroundOwnerStatusState.updatedAt || 0) < startupSnapshotFreshnessMs;
 }
 
-async function refreshBackgroundOwnerStatus(options = {}) {
-  if (shareViewMode) return false;
+function syncBackgroundOwnerStatusResource(snapshot, event) {
+  backgroundOwnerStatusState.request = snapshot.request;
+  backgroundOwnerStatusState.loading = snapshot.loading && !backgroundOwnerStatusState.payload;
+  backgroundOwnerStatusState.error = snapshot.error ? userMessageSnapshot(snapshot.error) : '';
+  const options = event.context || {};
+  if (event.phase === 'loading' || event.phase === 'failed') {
+    if (options.render !== false) renderInfoPanel();
+    if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
+  }
+}
+
+function backgroundOwnerStatusResource() {
+  if (backgroundOwnerStatusState.resource) return backgroundOwnerStatusState.resource;
+  backgroundOwnerStatusState.resource = createLatestResource({
+    initial: backgroundOwnerStatusState.payload,
+    load: () => apiFetchJson('/api/background/status', {cache: 'no-store'}),
+    apply(payload, {context}) {
+      applyBackgroundOwnerStatusPayload(payload, {...(context || {}), source: 'request'});
+      return payload;
+    },
+    result: () => true,
+    staleResult: () => false,
+    failureResult: () => false,
+    onState: syncBackgroundOwnerStatusResource,
+  });
+  return backgroundOwnerStatusState.resource;
+}
+
+function refreshBackgroundOwnerStatus(options = {}) {
+  if (shareViewMode) return Promise.resolve(false);
   // Every consumer observes the same current snapshot. A reconnect may require a new request
   // after this settles, but must not discard and duplicate the request boot already owns.
   if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
-  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return true;
-  const requestIsCurrent = backgroundOwnerStatusState.guard.begin();
+  if (options.preferFresh === true && backgroundOwnerStatusIsFresh()) return Promise.resolve(true);
   backgroundOwnerStatusState.loading = !backgroundOwnerStatusState.payload;
   backgroundOwnerStatusState.error = '';
   if (options.render !== false) renderInfoPanel();
   if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-  const request = (async () => {
-    try {
-      const payload = await apiFetchJson('/api/background/status', {cache: 'no-store'});
-      if (!requestIsCurrent()) return false;
-      return applyBackgroundOwnerStatusPayload(payload, options);
-    } catch (error) {
-      if (!requestIsCurrent()) return false;
-      backgroundOwnerStatusState.error = userMessageSnapshot(error);
-      backgroundOwnerStatusState.loading = false;
-      if (options.render !== false) renderInfoPanel();
-      if (typeof updateTopbarOwnerStatus === 'function') updateTopbarOwnerStatus();
-      return false;
-    } finally {
-      if (backgroundOwnerStatusState.request === request) backgroundOwnerStatusState.request = null;
-    }
-  })();
-  backgroundOwnerStatusState.request = request;
-  return request;
+  return backgroundOwnerStatusResource().read('background-owner-status', options);
 }
 
 // client-side mirror of the backend parse_pull_request_ref — normalize a watched-PR entry
@@ -80652,6 +81357,36 @@ function renderAutoApproveButton(session, payload) {
   updateTypingIndicator(session);
 }
 
+function tmuxSessionStreamLifecycleScope(scopes, session) {
+  scopes.get(session)?.dispose('replaced');
+  let scope = null;
+  const token = tmuxSessionLifecycleToken(session);
+  scope = createLifecycleScope({
+    isCurrent: () => scopes.get(session) === scope && tmuxSessionLifecycleTokenIsCurrent(token),
+    onDispose: () => {
+      tmuxSessionLifecycleReleaseScope(token, scope);
+      if (scopes.get(session) === scope) scopes.delete(session);
+    },
+  });
+  tmuxSessionLifecycleOwnScope(token, scope);
+  scopes.set(session, scope);
+  return {scope, token};
+}
+
+function ownTmuxSessionStream(scope, token, source) {
+  tmuxSessionLifecycleOwnSource(token?.name, source);
+  return scope.replace('stream', source, value => {
+    tmuxSessionLifecycleReleaseSource(token, value);
+    value?.close?.();
+  });
+}
+
+function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
+  const scope = scopes.get(session);
+  if (!scope || (expectedSource && scope.value('stream') !== expectedSource)) return false;
+  return scope.dispose('stopped');
+}
+
 function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
@@ -80668,10 +81403,9 @@ function startSummaryStream(session) {
   // plain paragraphs, then the model's markdown summary renders properly.
   let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
+  const {scope, token} = tmuxSessionStreamLifecycleScope(summaryLifecycleScopes, session);
   let source = null;
-  const streamIsCurrent = () => source
-    && summaryStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
+  const streamIsCurrent = () => source && scope.current() && scope.value('stream') === source;
   const renderSummary = () => {
     renderScheduled = false;
     if (!streamIsCurrent()) return;
@@ -80687,8 +81421,7 @@ function startSummaryStream(session) {
     }
   };
   source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
-  tmuxSessionLifecycleOwnSource(session, source);
-  summaryStreams.set(session, source);
+  ownTmuxSessionStream(scope, token, source);
   renderSummary();
   source.addEventListener('meta', event => {
     if (!streamIsCurrent()) return;
@@ -80739,11 +81472,7 @@ function startSummaryStream(session) {
 }
 
 function stopSummaryStream(session, expectedSource = null) {
-  const source = summaryStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  summaryStreams.delete(session);
+  stopTmuxSessionStreamScope(summaryLifecycleScopes, session, expectedSource);
 }
 
 function reloadIsSafe() {
@@ -81575,11 +82304,10 @@ function startTranscriptStream(session, options = {}) {
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
+  const {scope, token: lifecycleToken} = tmuxSessionStreamLifecycleScope(transcriptLifecycleScopes, session);
   const source = new EventSource(url);
-  const lifecycleToken = tmuxSessionLifecycleOwnSource(session, source);
-  const streamIsCurrent = () => transcriptStreams.get(session) === source
-    && tmuxSessionLifecycleSourceIsCurrent(source);
-  transcriptStreams.set(session, source);
+  ownTmuxSessionStream(scope, lifecycleToken, source);
+  const streamIsCurrent = () => scope.current() && scope.value('stream') === source;
   source.addEventListener('reset', event => {
     if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
@@ -81596,28 +82324,28 @@ function startTranscriptStream(session, options = {}) {
   source.addEventListener('ping', () => {});
   source.onerror = () => {
     if (!streamIsCurrent()) return;
-    stopTranscriptStream(session, source);
+    scope.release('stream', source);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken) && pane?.classList.contains(CLS.active)) {
+    if (scope.current() && pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
       const reconnectTimer = setTimeout(() => {
-        tmuxSessionLifecycleReleaseTimer(lifecycleToken, reconnectTimer);
-        if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+        scope.release('reconnect', reconnectTimer);
+        if (scope.current()
             && document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
       tmuxSessionLifecycleOwnTimer(lifecycleToken, reconnectTimer);
+      scope.replace('reconnect', reconnectTimer, timer => {
+        tmuxSessionLifecycleReleaseTimer(lifecycleToken, timer);
+        clearTimeout(timer);
+      });
     }
   };
 }
 
 function stopTranscriptStream(session, expectedSource = null) {
-  const source = transcriptStreams.get(session);
-  if (!source || (expectedSource && source !== expectedSource)) return;
-  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
-  source.close();
-  transcriptStreams.delete(session);
+  stopTmuxSessionStreamScope(transcriptLifecycleScopes, session, expectedSource);
 }
 
 function renderTranscriptItems(container, path, items, options = {}) {
@@ -81855,11 +82583,13 @@ function refreshAll() {
 }
 
 function scheduleReconnectResync(reason = '') {
-  if (clientEventTransportState.resyncTimer) clearTimeout(clientEventTransportState.resyncTimer);
+  if (clientEventTransportState.resyncTimer) currentClientEventTransportLifecycleScope().release('resync', clientEventTransportState.resyncTimer);
   clientEventTransportState.resyncTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('resync', clientEventTransportState.resyncTimer);
     clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('resync', clientEventTransportState.resyncTimer);
 }
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
@@ -82371,16 +83101,18 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
-    if (clientEventTransportState.frame) cancelAnimationFrame(clientEventTransportState.frame);
+    if (clientEventTransportState.frame) currentClientEventTransportLifecycleScope().release('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
   if (clientEventTransportState.frame) return;
   clientEventTransportState.frame = requestAnimationFrame(() => {
+    currentClientEventTransportLifecycleScope().relinquish('dispatch-frame', clientEventTransportState.frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
+  currentClientEventTransportLifecycleScope().replace('dispatch-frame', clientEventTransportState.frame, cancelAnimationFrame);
 }
 
 function flushQueuedClientPushEvents() {
@@ -82683,7 +83415,7 @@ function clientEventDemandSignature(descriptor) {
 function clearClientEventDisconnectEpisode(source, options = {}) {
   const episode = clientEventTransportState.disconnectEpisode;
   if (!episode || episode.source !== source) return false;
-  if (clientEventTransportState.disconnectTimer) clearTimeout(clientEventTransportState.disconnectTimer);
+  if (clientEventTransportState.disconnectTimer) currentClientEventTransportLifecycleScope().release('disconnect-episode', clientEventTransportState.disconnectTimer);
   clientEventTransportState.disconnectTimer = null;
   clientEventTransportState.disconnectEpisode = null;
   if (options.recovered === true && episode.reported === true) {
@@ -82709,6 +83441,7 @@ function scheduleClientEventDisconnectEpisode(source) {
   };
   clientEventTransportState.disconnectEpisode = episode;
   clientEventTransportState.disconnectTimer = setTimeout(() => {
+    currentClientEventTransportLifecycleScope().relinquish('disconnect-episode', clientEventTransportState.disconnectTimer);
     clientEventTransportState.disconnectTimer = null;
     if ((source !== null && clientEventTransportState.source !== source)
         || (source === null && clientEventTransportState.source !== null)
@@ -82721,6 +83454,7 @@ function scheduleClientEventDisconnectEpisode(source) {
       diagnosticFailure: true,
     });
   }, clientEventDisconnectGraceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('disconnect-episode', clientEventTransportState.disconnectTimer);
   return true;
 }
 
@@ -82736,7 +83470,7 @@ function abandonClientEventCandidate(source) {
   if (clientEventTransportState.replacementSource !== source) return false;
   clientEventTransportState.replacementSource = null;
   clearClientEventCandidateEpisode(source);
-  source?.close?.();
+  if (!currentClientEventTransportLifecycleScope().release('candidate-stream', source)) source?.close?.();
   return true;
 }
 
@@ -82748,8 +83482,8 @@ function closeClientEventStream() {
   clientEventTransportState.replacementSource = null;
   clearClientEventCandidateEpisode();
   clientEventTransportState.connected = false;
-  source?.close?.();
-  if (replacementSource !== source) replacementSource?.close?.();
+  if (!currentClientEventTransportLifecycleScope().release('active-stream', source)) source?.close?.();
+  if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
 
 function openClientEventStream(descriptor, options = {}) {
@@ -82791,9 +83525,11 @@ function openClientEventStream(descriptor, options = {}) {
       attempts: 0,
       startedAt: performance.now(),
     };
-    priorReplacement?.close?.();
+    if (!currentClientEventTransportLifecycleScope().release('candidate-stream', priorReplacement)) priorReplacement?.close?.();
+    currentClientEventTransportLifecycleScope().ownStream('candidate-stream', source);
   } else {
     clientEventTransportState.source = source;
+    currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
   }
   const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
@@ -82811,7 +83547,8 @@ function openClientEventStream(descriptor, options = {}) {
       clientEventTransportState.replacementSource = null;
       // The candidate is now the ACTIVE stream; its bounded retry episode is over.
       clearClientEventCandidateEpisode(source);
-      previousSource?.close?.();
+      currentClientEventTransportLifecycleScope().relinquish('candidate-stream', source);
+      currentClientEventTransportLifecycleScope().ownStream('active-stream', source);
     } else if (clientEventTransportState.source !== source) {
       return;
     }
@@ -82900,6 +83637,7 @@ function openClientEventStream(descriptor, options = {}) {
 }
 
 function applyClientEventDemand() {
+  currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   clientEventTransportState.demandTimer = null;
   if (!clientEventTransportState.enabled) return false;
   const descriptor = clientEventDemandDescriptor();
@@ -82919,15 +83657,35 @@ function applyClientEventDemand() {
 
 function syncClientEventDemand(options = {}) {
   if (!clientEventTransportState.enabled) return false;
-  if (clientEventTransportState.demandTimer) clearTimeout(clientEventTransportState.demandTimer);
+  if (clientEventTransportState.demandTimer) currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
   if (options.immediate === true) return applyClientEventDemand();
   clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
+  currentClientEventTransportLifecycleScope().ownTimer('demand', clientEventTransportState.demandTimer);
   return true;
 }
 
 function installClientEventStream() {
   clientEventTransportState.enabled = true;
   return syncClientEventDemand({immediate: true});
+}
+
+function disposeClientEventTransportLifecycle(reason = 'disposed') {
+  clientEventTransportLifecycleScope?.dispose(reason);
+  clientEventTransportState.source = null;
+  clientEventTransportState.replacementSource = null;
+  clientEventTransportState.connected = false;
+  clientEventTransportState.disconnectTimer = null;
+  clientEventTransportState.disconnectEpisode = null;
+  clientEventTransportState.demandTimer = null;
+  clientEventTransportState.frame = 0;
+  clientEventTransportState.resyncTimer = null;
+}
+
+if (typeof window !== 'undefined' && window?.addEventListener) {
+  window.addEventListener('pagehide', () => disposeClientEventTransportLifecycle('pagehide'));
+  window.addEventListener('pageshow', event => {
+    if (event?.persisted === true && clientEventTransportState.enabled) syncClientEventDemand({immediate: true});
+  });
 }
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
@@ -83080,6 +83838,18 @@ function handleFocusedTerminalCopyShortcut(event) {
   event.stopPropagation?.();
   return true;
 }
+
+registerTerminalRuntimeFacade('panel', {
+  createPanel,
+  panelControlsHtml,
+  relocalizeTerminalPanelChrome,
+});
+registerTerminalRuntimeFacade('transport', {
+  connectTerminalSocket,
+  installClientEventStream,
+  startSummaryStream,
+  startTranscriptStream,
+});
 
 if (refreshMeta) {
   refreshMetaButtonChrome();

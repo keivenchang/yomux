@@ -1667,6 +1667,7 @@ function newTmuxSessionLifecycleRecord(session, phase = 'stable', topologyEpoch 
     pendingUntil: tmuxSessionLifecyclePendingPhases.has(phase) ? Date.now() + pendingTmuxSessionGraceMs : 0,
     requestLeases: new Set(),
     controllers: new Set(),
+    lifecycleScopes: new Set(),
     sources: new Set(),
     timers: new Set(),
     consumerDetachments: 0,
@@ -1709,6 +1710,15 @@ function tmuxSessionLifecycleOwnSource(session, source) {
   return token;
 }
 
+function tmuxSessionLifecycleOwnScope(token, scope) {
+  if (token?.record && scope) token.record.lifecycleScopes.add(scope);
+  return scope;
+}
+
+function tmuxSessionLifecycleReleaseScope(token, scope) {
+  token?.record?.lifecycleScopes?.delete(scope);
+}
+
 function tmuxSessionLifecycleReleaseSource(token, source) {
   token?.record?.sources?.delete(source);
   if (source?._tmuxSessionLifecycleToken === token) delete source._tmuxSessionLifecycleToken;
@@ -1733,6 +1743,8 @@ function retireTmuxSessionLifecycleRecord(record) {
   record.pendingUntil = 0;
   for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
   record.controllers.clear();
+  for (const scope of record.lifecycleScopes) scope.dispose?.('session-retired');
+  record.lifecycleScopes.clear();
   for (const source of record.sources) source.close?.();
   record.sources.clear();
   for (const timer of record.timers) clearTimeout(timer);
@@ -6457,8 +6469,8 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
-  const completionGeneration = Number(options.completionGeneration || pendingLayoutMutationGeneration) || 0;
-  if (completionGeneration === pendingLayoutMutationGeneration) pendingLayoutMutationGeneration = 0;
+  const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
+  runtimeState.consumePendingLayoutMutation(completionGeneration);
   if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
@@ -6489,15 +6501,15 @@ function applyLayoutSlots(nextSlots, options = {}) {
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
   });
-  for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  if (!dockviewLayoutActive()) {
+    for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
+  }
   scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
   // metadata interval (50_editor_settings_runtime.js), and the session-changing mutations
   // (create/rename/kill, 70_layout_actions.js) call refreshTranscripts() at their own sites.
-  renderAutoApproveButtons();
-  updatePanelInactiveOverlays();
   const statsActivated = typeof jsDebugStatsLayoutItemsVisible === 'function'
     && !jsDebugStatsLayoutItemsVisible(previousActive)
     && jsDebugStatsLayoutItemsVisible(activeSessions);
@@ -6526,17 +6538,31 @@ function layoutRenderRequest(request = {}) {
 
 function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= layoutMutationCompletedGeneration) return;
-  layoutMutationCompletedGeneration = generation;
+  if (!runtimeState.completeLayoutMutation(generation)) return;
   window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+}
+
+function waitForLayoutMutationCompletion(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0
+      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+    return Promise.resolve(generation);
+  }
+  return new Promise(resolve => {
+    const complete = event => {
+      if (Number(event?.detail?.generation || 0) < generation) return;
+      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      resolve(generation);
+    };
+    window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
 }
 
 function beginLayoutMutationCompletion(state = null) {
   if (Number.isSafeInteger(state?.completionGeneration) && state.completionGeneration > 0) {
     return state.completionGeneration;
   }
-  const generation = ++layoutMutationGeneration;
-  pendingLayoutMutationGeneration = generation;
+  const generation = runtimeState.beginLayoutMutation();
   if (state) state.completionGeneration = generation;
   return generation;
 }
@@ -6571,6 +6597,7 @@ function performLayoutRender(request = {}) {
     if (!dockviewLayoutActive()) {
       renderPaneTabStrips();
       syncPanelVisibility(previousActive);
+      renderAutoApproveButtons();
     }
     completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;

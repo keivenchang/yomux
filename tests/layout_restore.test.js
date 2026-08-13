@@ -298,6 +298,7 @@ async function runLayoutRestoreSuite() {
       events: {contextmenu: event => contexts.push(event.type)},
     });
     assert.equal(button.id, 'shared-button');
+    assert.equal(button.className, 'btn-base shared-button-class');
     assert.equal(button.type, 'button');
     assert.equal(button.textContent, 'Shared');
     assert.equal(button.title, 'Shared title');
@@ -315,6 +316,70 @@ async function runLayoutRestoreSuite() {
     button.listeners.get('contextmenu')[0]({type: 'contextmenu'});
     assert.deepStrictEqual(clicks, ['click']);
     assert.deepStrictEqual(contexts, ['contextmenu']);
+  });
+
+  test('bindOnce keeps implementation sentinels out of DOM and supports disposal plus remount', () => {
+    const api = loadYolomux();
+    const root = new TestElement('bind-once-root');
+    const events = [];
+    const install = () => {
+      events.push('install');
+      return () => events.push('dispose');
+    };
+    const first = api.bindOnceForTest(root, 'owner', install);
+    const duplicate = api.bindOnceForTest(root, 'owner', install);
+    assert.strictEqual(duplicate, first);
+    assert.deepStrictEqual(events, ['install']);
+    assert.deepStrictEqual({...root.dataset}, {}, 'implementation-only ownership is not serialized into replay DOM');
+    assert.equal(first(), true);
+    assert.equal(first(), false);
+    const remounted = api.bindOnceForTest(root, 'owner', install);
+    assert.notStrictEqual(remounted, first);
+    assert.deepStrictEqual(events, ['install', 'dispose', 'install']);
+  });
+
+  test('frontend orchestration facades expose the registered runtime families', () => {
+    const api = loadYolomux();
+    const debugPanel = api.debugRuntimeFacadeForTest('panel');
+    assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'createYoCostPanel', 'renderDebugPanels', 'renderYoCostPanels']);
+    assert.ok(Object.values(debugPanel).every(value => typeof value === 'function'));
+
+    const mobileActions = api.terminalRuntimeFacadeForTest('mobile-accessory-actions');
+    assert.deepStrictEqual(canonical(mobileActions), {
+      primary: ['tmux-prefix', 'backspace', 'more'],
+      side: ['tab', 'shift', 'ctrl'],
+      dpad: ['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down'],
+    });
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('panel')).sort(), ['createPanel', 'panelControlsHtml', 'relocalizeTerminalPanelChrome']);
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('transport')).sort(), ['connectTerminalSocket', 'installClientEventStream', 'startSummaryStream', 'startTranscriptStream']);
+  });
+
+  test('migrated framed-panel binders dispose and remount one listener without DOM sentinels', () => {
+    const api = loadYolomux('', ['1']);
+    const panel = api.appRootForTest().constructor === TestElement ? new TestElement('framed-panel') : api.appRootForTest();
+    const first = api.bindPaneFrameControlsForTest(panel, '1');
+    const duplicate = api.bindPaneFrameControlsForTest(panel, '1');
+    assert.strictEqual(duplicate, first);
+    assert.equal(panel.listeners.get('click').length, 1);
+    assert.deepStrictEqual({...panel.dataset}, {});
+    assert.equal(first(), true);
+    assert.equal(panel.listeners.get('click').length, 0);
+    api.bindPaneFrameControlsForTest(panel, '1');
+    assert.equal(panel.listeners.get('click').length, 1);
+
+    const history = new TestElement('history-panel');
+    const historyFirst = api.bindSearchHistoryPanelForTest(history);
+    const historyDuplicate = api.bindSearchHistoryPanelForTest(history);
+    assert.strictEqual(historyDuplicate, historyFirst);
+    assert.equal(history.listeners.get('submit').length, 1);
+    assert.equal(history.listeners.get('click').length, 1);
+    assert.deepStrictEqual({...history.dataset}, {});
+    historyFirst();
+    assert.equal(history.listeners.get('submit').length, 0);
+    assert.equal(history.listeners.get('click').length, 0);
+    api.bindSearchHistoryPanelForTest(history);
+    assert.equal(history.listeners.get('submit').length, 1);
+    assert.equal(history.listeners.get('click').length, 1);
   });
 
   test('saved Preferences layout state does not translate before i18n initialization', () => {
@@ -646,20 +711,63 @@ async function runLayoutRestoreSuite() {
     assert.equal(noFinderParams.has('finder'), false, 'closed Finder/Differ/Tabber state is omitted from the URL');
   });
 
-  await testAsync('renamed tmux tab survives stale session rosters while tmux catches up', async () => {
+  await testAsync('renamed tmux tab survives stale session rosters and queued Dockview adoption', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1', '2']);
+    api.queueDockviewLayoutAdoptionForTest(api.dockviewJsonFromLayoutSlots(api.currentSlots()));
     api.replaceTmuxSessionInClient('1', '8002b', ['2']);
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['8002b'], active: '8002b'},
-    }, 'rename immediately keeps the renamed tab open even when the returned roster omits it');
-
+    const renamedPanes = {left: {tabs: ['8002b'], active: '8002b'}};
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), renamedPanes, 'rename immediately keeps the renamed tab open even when the returned roster omits it');
     await api.applyTranscriptsPayloadForTest({session_order: ['2'], sessions: {'2': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
-      left: {tabs: ['8002b'], active: '8002b'},
-    }, 'a stale transcript push cannot drop the pending renamed tab');
-
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), renamedPanes, 'a stale transcript push cannot drop the pending renamed tab');
     await api.applyTranscriptsPayloadForTest({session_order: ['2', '8002b'], sessions: {'2': {panes: []}, '8002b': {panes: []}}}, {refreshAuto: false, refreshContext: false, refreshActivity: false});
     assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['8002b'], 'fresh server roster does not end the renamed-session grace window before tmux/socket state settles');
+    api.adoptQueuedDockviewLayoutForTest();
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), renamedPanes, 'a stale queued Dockview adoption cannot restore the retired session identity');
+  });
+
+  await testAsync('session rename resolves only after its delayed layout realization', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/rename-session') {
+        return Promise.resolve(jsonResponse({new_session: 'renamed', sessions: ['renamed'], ok: true}));
+      }
+      if (parsed.pathname === '/api/ensure-session') {
+        return Promise.resolve(jsonResponse({session: 'renamed', created: false, ok: true}));
+      }
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['renamed'], sessions: {renamed: {panes: []}}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    api.setDragSessionForTest('held-render');
+    let resolved = false;
+    const rename = api.renameTmuxSessionForTest('1', 'renamed').then(result => {
+      resolved = true;
+      return result;
+    });
+    await flushAsyncWork();
+
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
+      left: {tabs: ['renamed'], active: 'renamed'},
+    }, 'rename commits the desired layout while rendering is held');
+    assert.equal(api.pendingPanelsRenderForTest(), true, 'the renamed layout still has a pending realization');
+    assert.deepStrictEqual(canonical(api.layoutMutationSnapshotForTest()), {
+      generation: 1,
+      completed: 0,
+      pending: 0,
+    }, 'rename owns one consumed but incomplete layout receipt while realization is held');
+    assert.equal(resolved, false, 'rename does not report success before the shared layout receipt');
+
+    api.endSessionDrag({});
+    await flushAsyncWork();
+    assert.equal(await rename, true, 'rename resolves after the pending layout render completes');
+    assert.equal(api.pendingPanelsRenderForTest(), false, 'the shared scheduler consumed the renamed layout');
+    assert.deepStrictEqual(canonical(api.layoutMutationSnapshotForTest()), {
+      generation: 1,
+      completed: 1,
+      pending: 0,
+    }, 'the realized layout publishes the same receipt generation');
   });
 
   test('renaming a tmux tab preserves a YO!stats tab in its existing Vertical Side Pane', () => {
@@ -1352,9 +1460,26 @@ async function runLayoutRestoreSuite() {
     assert.ok(semanticRanges[0].style.includes('font-weight:700'));
     assert.ok(semanticRanges[1].style.includes('font-style:italic'));
 
+    class FakeLanguageSupport {
+      constructor(language) {
+        this.language = language;
+      }
+    }
+    const streamLanguageApi = {
+      LanguageDescription: {of(config) { return config; }},
+      LanguageSupport: FakeLanguageSupport,
+      StreamLanguage: {define(mode) { return {parser: mode}; }},
+      shell: {name: 'shell'},
+      toml: {name: 'toml'},
+    };
+    const streamDescriptions = api.codeMirrorMarkdownCodeLanguages(streamLanguageApi);
+    assert.deepStrictEqual([...streamDescriptions].map(description => description.name), ['Shell', 'TOML'], 'Markdown fenced stream languages retain both registered modes');
+    assert.ok(streamDescriptions.every(description => description.support instanceof FakeLanguageSupport), 'Markdown fenced stream modes are LanguageSupport values with parser-bearing languages');
+
     const brokenLanguageApi = {
       javascript() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
       markdown() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
+      LanguageSupport: class {},
       LanguageDescription: {
         of() { throw new TypeError("Cannot read properties of undefined (reading 'parser')"); },
       },
@@ -1366,7 +1491,7 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.codeMirrorLanguageExtension(brokenLanguageApi, '/home/test/README.md')), [], 'broken Markdown language support falls back to editable plain text');
     assert.deepStrictEqual(canonical(api.codeMirrorMarkdownCodeLanguages(brokenLanguageApi)), [], 'broken fenced-code language descriptions are skipped');
     assert.deepStrictEqual(canonical(api.codeMirrorHighlightExtension({})), [], 'missing highlight support falls back without crashing');
-    assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
+    assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}, LanguageSupport: class {}}), true, 'CodeMirror API validation accepts critical editor/search/language exports');
     assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
     assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
     const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package.json', 'utf8'));
@@ -1895,7 +2020,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(/relocalize:\s*\(_item, panel\)[\s\S]*?renderInfoPanel\(\{force: true\}\)[\s\S]*?relocalizeInfoPanelChrome\(panel\)/.test(infoTabTypeSource), 'YO!info owns its forced locale repaint through the shared tab-type relocalizer');
     assert.ok(/relocalize:\s*\(_item, panel, options = \{\}\)[\s\S]*?renderYoagentPanel\(\{preserveDraft: true, allowBusyRebuild: options\.localeChange === true\}\)[\s\S]*?relocalizeYoagentPanelChrome\(panel\)/.test(yoagentTabTypeSource), 'YO!agent owns its locale repaint and busy rebuild through the shared tab-type relocalizer');
     assert.ok(/function rerenderForLocale\(options = \{\}\)[\s\S]*?relocalizeMountedPanels\(options\)[\s\S]*?localeGlobalSurfaceHooks\.forEach\(run => run\(options\)\)/.test(source), 'a language switch dispatches mounted panels and global chrome through the shared locale registries');
-    assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(source), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
+    const terminalFacadeSource = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
+    assert.equal(/function virtualPanelControlsHtml\(session\)[\s\S]*terminal-tab/.test(terminalFacadeSource), false, '#40: Preferences and YO!info virtual pane controls do not render a redundant active-tab pill');
     assert.ok(/function relocalizeInfoPanelChrome[\s\S]*?data-info-refresh/.test(source), 'YO!info refresh chrome is localized in place');
     assert.ok(/function relocalizeYoagentPanelChrome[\s\S]*?data-yoagent-refresh/.test(source), 'YO!agent refresh chrome is localized in place');
     assert.equal(/function relocalizeInfoPanelChrome[\s\S]*?info\.subtitle/.test(source), false, '#40/#50: no removed YO!info subtitle bar remains to relocalize');

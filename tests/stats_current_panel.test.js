@@ -795,18 +795,19 @@ test('client failures use the existing bounded observation uploader without debu
 
 test('browser observation uploader emits a periodic heartbeat when the page is otherwise idle', () => {
   assert.match(source, /const jsDebugCurrentObservationHeartbeatMs = 10_000/);
-  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval/);
+  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval[\s\S]*currentObservationLifecycleScope\(\)\.ownTimer\('liveness'/);
   assert.match(source, /installJsDebugCurrentObservationLiveness\(\);/);
   const functionText = source.slice(
     source.indexOf('function installJsDebugCurrentObservationLiveness()'),
     source.indexOf('\nfunction jsDebugBrowserFamily()'),
   );
   const runFixture = unscopedHostRequests => {
-    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}};
+    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}, currentObservationLifecycleScope: () => ({ownTimer() {}})};
     vm.runInNewContext(`
       const jsDebugCurrentObservationHeartbeatMs = 10000;
       function recordJsDebugClientHealthObservation(...args) { calls.push(args); }
       function setInterval(callback, delay) { timers.push({callback, delay}); return 91; }
+      function clearInterval() {}
       ${clientCapabilityFixtureSource(unscopedHostRequests)}
       ${functionText}
     `, context);
@@ -821,6 +822,14 @@ test('browser observation uploader emits a periodic heartbeat when the page is o
   assert.equal(context.timers[0].delay, 10000);
   context.timers[0].callback();
   assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'the periodic timer emits another heartbeat without other traffic');
+});
+
+test('observation, pricing, and graph resources share lifecycle scopes with pagehide disposal and bfcache resume', () => {
+  assert.match(source, /function disposeJsDebugCurrentObservationLifecycle\(reason = 'disposed'\)/);
+  assert.match(source, /function disposeDebugPricingRefreshLifecycle\(reason = 'disposed'\)/);
+  assert.match(source, /function stopDebugGraphLiveTicker\(\)[\s\S]*debugGraphLifecycleScope\(\)\.release\('live-ticker'/);
+  assert.match(source, /window\.addEventListener\('pagehide'[\s\S]*stopDebugGraphLiveTicker\(\)[\s\S]*disposeDebugPricingRefreshLifecycle\('pagehide'\)[\s\S]*disposeJsDebugCurrentObservationLifecycle\('pagehide'\)/);
+  assert.match(source, /window\.addEventListener\('pageshow'[\s\S]*event\?\.persisted[\s\S]*installJsDebugCurrentObservationLiveness\(\)[\s\S]*scheduleJsDebugCurrentObservationFlush\(\)[\s\S]*syncDebugGraphLiveTicker\(\)/);
 });
 
 test('client failure observations are signed, source-bounded, and omit arbitrary event fields', () => {
@@ -1023,6 +1032,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       const jsDebugCurrentObservationBatchDelayMs = 10000;
       const jsDebugCurrentObservationRetryMaxMs = 300000;
       const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, epoch: ${JSON.stringify(epoch)}, highWaterDepth: 0, drops: 0, retries: 0, instrumentationCostMs: 0, receipts: new Map()};
+      function currentObservationLifecycleScope() { return {ownTimer() {}, release() { return false; }}; }
       ${endpointSource}
       ${byteLengthSource}
       ${failureClassifierSource}
@@ -2009,7 +2019,7 @@ test('same-range resolution replacement is not mislabeled as older history', () 
   );
   const context = {
     result: null,
-    jsDebugGraphRangeSeconds: 7200,
+    debugRuntimeState: {graphRangeSeconds: 7200},
     jsDebugHistoryReadiness: {generation: 1, requestedRangeSeconds: 7200, loadedStartSeconds: 1000},
     performanceNow: () => 10,
     setJsDebugHistoryReadiness: (_phase, updates) => updates,
@@ -2018,7 +2028,7 @@ test('same-range resolution replacement is not mislabeled as older history', () 
   vm.runInNewContext(`${functionText}\nresult = beginJsDebugHistoryReadiness(970, {requestedEndSeconds: 8170, requestedResolutionSeconds: 300});`, context);
   assert.equal(context.result.reason, 'initial');
 
-  context.jsDebugGraphRangeSeconds = 57600;
+  context.debugRuntimeState.graphRangeSeconds = 57600;
   vm.runInNewContext(`result = beginJsDebugHistoryReadiness(0, {requestedEndSeconds: 58600, requestedResolutionSeconds: 300});`, context);
   assert.equal(context.result.reason, 'older');
 });
@@ -2212,8 +2222,7 @@ test('resolution completion accepts later matching generations only after matchi
   const context = {result: null};
   vm.runInNewContext(`
     let jsDebugGraphPendingResolutionChange = null;
-    let jsDebugGraphResolutionOverrideSeconds = 300;
-    let jsDebugGraphRangeSeconds = 7200;
+    const debugRuntimeState = {graphResolutionOverrideSeconds: 300, graphRangeSeconds: 7200};
     let jsDebugGraphExactResolutionEnabled = true;
     const jsDebugHistoryReadiness = {overlayVisible: true};
     const diagnostics = [];
@@ -2352,8 +2361,7 @@ test('hidden panels start the document-visible client and paint only when opened
     const debugModeEnabled = true;
     const debugPaneItemId = 'debug';
     const yocostItemId = 'cost';
-    const jsDebugGraphRangeSeconds = 7200;
-    const jsDebugGraphResolutionOverrideSeconds = 300;
+    const debugRuntimeState = {graphRangeSeconds: 7200, graphResolutionOverrideSeconds: 300};
     function normalizedJsDebugGraphRange(value) { return value; }
     function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
     function itemIsActivePaneTab() { return panelVisible; }
@@ -2408,14 +2416,13 @@ test('hidden boot loads saved exact selection before constructing the one curren
     const debugModeEnabled = true;
     const debugPaneItemId = 'debug';
     const yocostItemId = 'cost';
-    let jsDebugGraphRangeSeconds = 900;
-    let jsDebugGraphResolutionOverrideSeconds = 0;
+    const debugRuntimeState = {graphRangeSeconds: 900, graphResolutionOverrideSeconds: 0};
     let loaded = false;
     let constructed = null;
     function loadJsDebugStatsUiPreferences() {
       loaded = true;
-      jsDebugGraphRangeSeconds = 3600;
-      jsDebugGraphResolutionOverrideSeconds = 60;
+      debugRuntimeState.graphRangeSeconds = 3600;
+      debugRuntimeState.graphResolutionOverrideSeconds = 60;
     }
     function normalizedJsDebugGraphRange(value) { return value; }
     function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
@@ -2601,7 +2608,7 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     let nowMs = 0;
     let jsDebugGraphLiveTimer = 0;
     let jsDebugCostAgeNextRefreshAtMs = 0;
-    let jsDebugGraphRangeSeconds = 300;
+    const debugRuntimeState = {graphRangeSeconds: 300};
     const jsDebugGraphSlideMaxRangeSeconds = 3600;
     let queryCount = 0;
     const timers = [];
@@ -2616,6 +2623,7 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     function debugCostAgeRefreshDelayMs() { return 3000; }
     function setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; }
     function clearTimeout() {}
+    function debugGraphLifecycleScope() { return {ownTimer() {}, release() { return false; }, relinquish() { return true; }}; }
     const Date = {now: () => nowMs};
     ${tickerSource}
     syncDebugGraphLiveTicker();
@@ -2765,8 +2773,10 @@ test('API SSE log preserves reader position through updates and forced rebuilds'
   assert.equal(context.result.threshold, 1200);
   assert.equal(context.result.explicit, 1200);
   const renderText = sourceFunction('renderDebugPanels', 'refreshDebugPanelsFromEvents');
-  assert.ok(renderText.indexOf('debugLogScrollAnchor(') < renderText.indexOf('body.innerHTML ='));
-  assert.ok(renderText.indexOf('body.innerHTML =') < renderText.indexOf('restoreDebugLogScrollAnchor('));
+  assert.match(renderText, /reconcilePanelBody\(\{[\s\S]*capture: root => debugLogScrollAnchor\([\s\S]*restore: \(root, value\) => restoreDebugLogScrollAnchor\(/);
+  const reconcileText = slice(coreSource, 'function reconcilePanelBody(', '\nfunction elementScrollAnchor(');
+  assert.ok(reconcileText.indexOf('anchor.capture(body)') < reconcileText.indexOf('body.innerHTML = html'));
+  assert.ok(reconcileText.indexOf('body.innerHTML = html') < reconcileText.indexOf('anchor.restore?.(body, value)'));
   const refreshText = sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl');
   assert.doesNotMatch(refreshText, /document\.activeElement === log/);
   assert.doesNotMatch(refreshText, /options\.force === true \? log\.scrollHeight/);
@@ -2937,6 +2947,25 @@ test('the YO!stats Daemons subtab keeps the system key and every locale carries 
     assert.doesNotMatch(label, /^Services$/, `${name} debug.tab.services no longer the old "Services" label`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(built, 'en.json'), 'utf8'))['debug.tab.services'], 'Daemons');
+});
+
+test('debug subviews share one complete lifecycle descriptor registry', () => {
+  const registry = source.slice(
+    source.indexOf('const DEBUG_SUBVIEWS = Object.freeze(['),
+    source.indexOf('\nfunction debugSubview(id)'),
+  );
+  for (const id of ['logs', 'system', 'events', 'graph', 'cost']) {
+    assert.equal((registry.match(new RegExp(`id: '${id}'`, 'g')) || []).length, 1, `${id} has one descriptor`);
+  }
+  const factory = sourceFunction('debugSubviewDescriptor', 'debugPanelHtml');
+  for (const hook of ['render', 'bind', 'activate', 'deactivate', 'relocalize']) {
+    assert.match(factory, new RegExp(`${hook} = debugSubviewNoop`), `${hook} has an explicit no-op default`);
+  }
+  assert.match(sourceFunction('debugPanelHtml', 'relocalizeDebugPanelChrome'), /debugSubview\(id\)\.html\(\)/);
+  assert.match(sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl'), /view\.render\(panel, options\)/);
+  assert.match(source.slice(source.indexOf('function bindDebugPanel(')), /view\.bind\(panel\)/);
+  assert.match(sourceFunction('setDebugSubTab', 'requestJsDebugHistoryForCurrentDomain'), /syncDebugSubviewActivation\(\{pollNow: true\}\)/);
+  assert.match(sourceFunction('relocalizeDebugPanelChrome', 'yoCostPanelHtml'), /view\.relocalize\(panel\)/);
 });
 
 test('the YO!cost report shows one always-visible column legend sharing the description owner', () => {

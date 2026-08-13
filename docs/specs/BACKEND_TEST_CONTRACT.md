@@ -232,6 +232,8 @@ Did two parallel runs share a mutable resource?
 - Rust does not apply in the current path; if an `.rs` file is introduced or changed, run `cargo fmt` immediately.
 - Run `nice -n 10 python3 tools/check.py` only after the focused conflict group is green and resource cleanup is verified. A full gate failure is classified by exact owner/namespace before any rerun.
 - Raw command/test/browser logs stay under `/tmp`. The DOIT records commands, counts, first failure, and final result without copying logs.
+- Add a fixture boot shape through one immutable `BrowserBootScenario` preset and its route registry. Add an owned runtime through `FixtureRuntime` or `GateLiveServer`; its manifest includes app, server/thread, browser, tmux/runtime paths, log cursors, and teardown order, with injected start and cleanup failures proving zero survivors.
+- Add a test phase or check lane only in `tools/test_plan.py` through `TestPhaseSpec` or `LaneSpec`. Keep argv construction in `tools/check.py`, model boot smoke as a prerequisite edge, and prove collection has one execution owner with no prerequisite cycle or copied lane selection.
 
 
 ### DOIT Update And Handoff Contract

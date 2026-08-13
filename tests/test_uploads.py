@@ -9,7 +9,7 @@ import pytest
 from yolomux_lib.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from yolomux_lib.common import UPLOAD_MAX_BYTES
 from yolomux_lib.common import UPLOAD_MAX_FILES
-from yolomux_lib.server import Handler
+from yolomux_lib.server import FilesystemHttpAdapter, Handler
 from yolomux_lib.uploads import UploadTargetError
 from yolomux_lib.uploads import UploadRetentionSweeper
 from yolomux_lib.uploads import central_upload_target
@@ -115,7 +115,7 @@ def test_upload_default_size_cap_matches_file_transfer_preference_default():
 def test_upload_request_limit_comes_from_live_settings():
     # Scoped to handle_upload (inspect, not full-file string slicing): the per-request cap comes from
     # the LIVE settings (app.file_transfer_max_bytes()), not the static module constant, and feeds the parser.
-    body = inspect.getsource(Handler.handle_upload)
+    body = inspect.getsource(FilesystemHttpAdapter.handle_upload)
 
     assert "self.file_transfer_max_bytes()" in body
     assert "content_length > UPLOAD_MAX_BYTES" not in body

@@ -637,6 +637,38 @@ def test_v4_flat_snapshot_migrates_in_place_and_stays_searchable(tmp_path):
         assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
         assert "generation" in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
         assert conn.execute("SELECT value FROM metadata WHERE key='version'").fetchone()[0] == "5"
+        assert file_index._row_serving_snapshot_metadata(dict(conn.execute("SELECT key, value FROM metadata")))
+
+
+def test_post_unindex_clean_generation_is_not_readable_before_first_publish(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "current.txt").write_text("current", encoding="utf-8")
+    bfs_index.build_root_progressively(root, set(), generation=1)
+    identity = file_index._write_tombstone(root)
+
+    build = bfs_index.ProgressiveBuild(root, set(), generation=2, tombstone_identity=identity)
+    with build:
+        assert build.enqueue_startup()
+        startup_metadata = file_index._authoritative_store_metadata(root)
+        assert startup_metadata is not None
+        assert startup_metadata.get("tombstone_identity") == identity
+        assert file_index._row_serving_snapshot_metadata(startup_metadata) is False
+        assert file_index._load_disk(root, set(), "") is None
+        assert file_index._read_sqlite_index(root, set()) is None
+        with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 0
+
+        assert build.step()
+
+    opened = file_index._read_sqlite_index(root, set())
+    assert opened is not None
+    conn, published_metadata = opened
+    try:
+        assert file_index._row_serving_snapshot_metadata(published_metadata) is True
+        assert {row[0] for row in conn.execute("SELECT name FROM entries")} == {"current.txt"}
+    finally:
+        conn.close()
 
 
 # --------------------------------------------------------------------------

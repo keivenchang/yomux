@@ -46,12 +46,10 @@ const chatState = {
   followTail: true,
   draft: '',
   typingActive: false,
-  typingTimer: null,
-  typingExpiryTimer: null,
+  lifecycleScope: null,
   requestGeneration: 0,
   olderGeneration: 0,
   contextGeneration: 0,
-  requestController: null,
   searchGeneration: 0,
   searchOpen: false,
   searchVisible: false,
@@ -60,20 +58,29 @@ const chatState = {
   searchSnapshot: null,
   acknowledgedTone: '',
   acknowledgementStartedAt: 0,
-  acknowledgementTimer: null,
   notifiedIds: new Set(),
   emojiCatalogPromise: null,
   emojiOpen: false,
   emojiCategory: 'recent',
   searchQuery: '',
-  olderObserver: null,
-  olderObserverTarget: null,
   statusSignature: null,
   timelineSignature: '',
   lastAnnouncement: '',
   renderedAnnouncement: '',
   clientIp: '',
 };
+
+function chatLifecycleScope() {
+  if (chatState.lifecycleScope?.current()) return chatState.lifecycleScope;
+  const scope = createLifecycleScope({
+    isCurrent: () => chatState.lifecycleScope === scope,
+    onDispose: () => {
+      if (chatState.lifecycleScope === scope) chatState.lifecycleScope = null;
+    },
+  });
+  chatState.lifecycleScope = scope;
+  return scope;
+}
 const chatEmojiOverlayController = createDismissableOverlayController({
   trapFocus: true,
   onOpen: () => {
@@ -97,10 +104,13 @@ function chatApiPost(path, payload, options = {}) {
 }
 
 function chatRequestOptions() {
-  if (!chatState.requestController || chatState.requestController.signal.aborted) {
-    chatState.requestController = new AbortController();
+  const scope = chatLifecycleScope();
+  let controller = scope.value('request-controller');
+  if (!controller || controller.signal.aborted) {
+    controller = new AbortController();
+    scope.replace('request-controller', controller, value => value.abort());
   }
-  return {signal: chatState.requestController.signal};
+  return {signal: controller.signal};
 }
 
 function beginChatLoadingRequest(generationKey) {
@@ -586,24 +596,24 @@ function chatMediaPanelBodyHtml(url) {
 
 function createChatMediaPanel(item) {
   const url = chatMediaUrlForItem(item);
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-media-panel';
-  panel.id = panelDomId(item);
-  panel.dataset.chatMediaUrl = url;
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item,
-    controlsHtml: virtualPanelInnerControlsHtml(item),
-    bodyClass: 'info-pane yochat-media-pane',
-    bodyHtml: chatMediaPanelBodyHtml(url),
-    toastStack: false,
+    className: 'panel info-panel chat-media-panel',
+    dataset: {chatMediaUrl: url},
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(item),
+      bodyClass: 'info-pane yochat-media-pane',
+      bodyHtml: chatMediaPanelBodyHtml(url),
+      toastStack: false,
+    },
+    bind(panel) {
+      installLinkContextMenu(panel);
+      panel.addEventListener('click', event => {
+        const action = event.target.closest('[data-chat-media-action]');
+        if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
+      });
+    },
   });
-  bindPanelShell(panel, item);
-  installLinkContextMenu(panel);
-  panel.addEventListener('click', event => {
-    const action = event.target.closest('[data-chat-media-action]');
-    if (action) runChatMediaAction(url, action.dataset.chatMediaAction);
-  });
-  return panel;
 }
 
 function relocalizeChatMediaPanel(panel, item) {
@@ -631,16 +641,19 @@ function chatIntroductionGreetingKey(browserInstanceId = chatBrowserInstanceId) 
 
 function replaceChatTyping(typing) {
   chatState.typing = (Array.isArray(typing) ? typing : []).filter(item => Number(item?.expires_at_utc) > Date.now() / 1000);
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  const scope = chatLifecycleScope();
+  scope.release('typing-expiry-timer');
   const earliest = Math.min(...chatState.typing.map(item => Number(item.expires_at_utc)).filter(Number.isFinite));
   if (!Number.isFinite(earliest)) return;
-  chatState.typingExpiryTimer = setTimeout(() => {
-    chatState.typingExpiryTimer = null;
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('typing-expiry-timer', timer);
+    if (!scope.current()) return;
     replaceChatTyping(chatState.typing);
     renderChatPanel();
     loadChatBootstrap({incoming: false});
   }, Math.max(0, (earliest * 1000) - Date.now()) + 20);
+  scope.ownTimer('typing-expiry-timer', timer);
 }
 
 function chatMergeMessages(messages, options = {}) {
@@ -660,10 +673,7 @@ function chatMergeMessages(messages, options = {}) {
     const fromThisInstance = message.sender_instance_id === chatBrowserInstanceId;
     if (options.incoming === true && fromThisInstance && id > chatState.readUpToId) chatAdvanceReadCursor(id);
     if (options.incoming === true && !fromThisInstance) {
-      if (chatState.acknowledgementTimer) {
-        clearTimeout(chatState.acknowledgementTimer);
-        chatState.acknowledgementTimer = null;
-      }
+      chatState.lifecycleScope?.release('acknowledgement-timer');
       chatState.acknowledgedTone = '';
       chatState.unread.set(id, message);
       chatState.lastAnnouncement = chatNotificationBody(message);
@@ -808,12 +818,16 @@ async function chatAcknowledgeUpTo(messageId) {
   for (const [id] of acknowledged) chatState.unread.delete(id);
   chatState.acknowledgedTone = tone;
   chatState.acknowledgementStartedAt = Date.now();
-  if (chatState.acknowledgementTimer) clearTimeout(chatState.acknowledgementTimer);
-  chatState.acknowledgementTimer = setTimeout(() => {
+  const scope = chatLifecycleScope();
+  scope.release('acknowledgement-timer');
+  let timer = null;
+  timer = setTimeout(() => {
+    scope.release('acknowledgement-timer', timer);
+    if (!scope.current()) return;
     chatState.acknowledgedTone = '';
-    chatState.acknowledgementTimer = null;
     renderChatStatus();
   }, agentStatusPulsePeriodMs);
+  scope.ownTimer('acknowledgement-timer', timer);
   renderChatStatus();
   return chatAdvanceReadCursor(newest);
 }
@@ -825,15 +839,17 @@ function chatAcknowledge() {
 
 function setChatTyping(active, options = {}) {
   const next = active === true;
-  if (chatState.typingTimer) {
-    clearTimeout(chatState.typingTimer);
-    chatState.typingTimer = null;
-  }
+  const scope = chatLifecycleScope();
+  scope.release('typing-heartbeat-timer');
   if (next === chatState.typingActive && !options.heartbeat) return;
   chatState.typingActive = next;
   chatApiPost('/api/chat/typing', {browser_instance_id: chatBrowserInstanceId, typing: next}, {keepalive: options.keepalive}).catch(() => {});
   if (next) {
-    chatState.typingTimer = setTimeout(() => setChatTyping(true, {heartbeat: true}), chatTypingRefreshMs);
+    const timer = setTimeout(() => {
+      scope.release('typing-heartbeat-timer', timer);
+      if (scope.current()) setChatTyping(true, {heartbeat: true});
+    }, chatTypingRefreshMs);
+    scope.ownTimer('typing-heartbeat-timer', timer);
   }
 }
 
@@ -1224,48 +1240,51 @@ function autosizeChatComposer(panel = document.getElementById(panelDomId(chatIte
 
 function installChatComposerResizeObserver(panel) {
   if (!panel) return false;
-  panel?._chatComposerResizeObserver?.disconnect?.();
-  panel._chatComposerResizeObserver = null;
+  const scope = chatLifecycleScope();
+  scope.release('composer-resize-observer');
   const pane = panel?.querySelector('.chat-pane');
   if (!pane || typeof ResizeObserver !== 'function') return false;
-  panel._chatComposerResizeObserver = new ResizeObserver(() => {
+  const observer = new ResizeObserver(() => {
+    if (!scope.current() || scope.value('composer-resize-observer') !== observer) return;
     autosizeChatComposer(panel);
     if (chatState.followTail) chatScrollTimelineToBottom(panel);
     else syncChatTailState(panel);
   });
-  panel._chatComposerResizeObserver.observe(pane);
+  scope.ownObserver('composer-resize-observer', observer);
+  observer.observe(pane);
   return true;
 }
 
 function syncChatHistoryObserver(panel = document.getElementById(panelDomId(chatItemId))) {
   const target = panel?.querySelector('[data-chat-history-sentry]');
-  if (chatState.olderObserverTarget === target && chatState.olderObserver) return true;
-  chatState.olderObserver?.disconnect?.();
-  chatState.olderObserver = null;
-  chatState.olderObserverTarget = null;
+  const scope = chatLifecycleScope();
+  const currentObserver = scope.value('older-history-observer');
+  if (currentObserver?.target === target) return true;
+  scope.release('older-history-observer');
   if (!target || typeof IntersectionObserver !== 'function') return false;
-  chatState.olderObserver = new IntersectionObserver(entries => {
+  const observer = new IntersectionObserver(entries => {
+    if (!scope.current() || scope.value('older-history-observer') !== observer) return;
     if (!chatState.olderRequested || !entries.some(entry => entry.isIntersecting)) return;
     loadOlderChatMessages();
   }, {root: panel.querySelector('[data-chat-timeline]'), threshold: 0});
-  chatState.olderObserver.observe(target);
-  chatState.olderObserverTarget = target;
+  observer.target = target;
+  scope.ownObserver('older-history-observer', observer);
+  observer.observe(target);
   return true;
 }
 
 function createChatPanel() {
-  const panel = document.createElement('article');
-  panel.className = 'panel info-panel chat-panel';
-  panel.id = panelDomId(chatItemId);
-  panel.innerHTML = panelFrameHtml({
+  return createFramedPanel({
     item: chatItemId,
-    controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
-    afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
+    className: 'panel info-panel chat-panel',
+    frame: {
+      controlsHtml: virtualPanelInnerControlsHtml(chatItemId),
+      afterHeadHtml: `<div class="info-actions-bar chat-actions-bar" data-chat-search-bar hidden>
       <form data-chat-search-form role="search"><input type="search" class="search-history-input" data-chat-search placeholder="${esc(t('chat.search.placeholder'))}" aria-label="${esc(t('common.search'))}"></form>
       <button type="button" data-action="chat-search-close" data-chat-search-close title="${esc(t('common.close'))}" aria-label="${esc(t('common.close'))}">×</button>
     </div>`,
-    bodyClass: 'info-pane chat-pane',
-    bodyHtml: `<div class="chat-history-search-split">
+      bodyClass: 'info-pane chat-pane',
+      bodyHtml: `<div class="chat-history-search-split">
         <div class="chat-search-results" data-chat-search-results hidden></div>
         <div class="chat-timeline" data-chat-timeline role="log" aria-live="off" aria-label="${esc(t('chat.timeline.label'))}"></div>
       </div>
@@ -1278,10 +1297,9 @@ function createChatPanel() {
         <nav class="chat-emoji-categories" data-chat-emoji-categories aria-label="${esc(t('chat.emoji.categories'))}">${chatEmojiCategoriesHtml()}</nav>
         <div class="chat-emoji-grid" data-chat-emoji-grid role="grid" aria-label="${esc(t('chat.emoji.grid'))}"></div>
       </div>`,
+    },
+    bind: bindChatPanel,
   });
-  bindPanelShell(panel, chatItemId);
-  bindChatPanel(panel);
-  return panel;
 }
 
 function mountChatPanel() {
@@ -1325,26 +1343,17 @@ function handleChatInvalidation(type) {
 }
 
 function clearChatLifecycle(options = {}) {
-  if (chatState.typingTimer) clearTimeout(chatState.typingTimer);
-  chatState.typingTimer = null;
-  if (chatState.typingExpiryTimer) clearTimeout(chatState.typingExpiryTimer);
-  chatState.typingExpiryTimer = null;
+  chatState.lifecycleScope?.release('typing-heartbeat-timer');
+  chatState.lifecycleScope?.release('typing-expiry-timer');
   if (chatState.typingActive) setChatTyping(false, {keepalive: options.keepalive === true});
   closeChatEmojiPicker({returnFocus: false});
   if (options.destroy === true) {
-    const panel = document.getElementById(panelDomId(chatItemId));
-    panel?._chatComposerResizeObserver?.disconnect?.();
-    if (panel) panel._chatComposerResizeObserver = null;
     chatState.requestGeneration += 1;
     chatState.olderGeneration += 1;
     chatState.contextGeneration += 1;
     chatState.searchGeneration += 1;
     chatState.loadingRequest = null;
-    chatState.requestController?.abort?.();
-    chatState.requestController = null;
-    chatState.olderObserver?.disconnect?.();
-    chatState.olderObserver = null;
-    chatState.olderObserverTarget = null;
+    chatState.lifecycleScope?.dispose('chat-destroy');
     chatState.olderRequested = false;
     chatState.followTail = true;
     chatState.timelineSignature = '';

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import filesystem
+from ..local_service_projection import registry_runtime_row
 from ..workspace import session_files
 from ..observability.activity_summary import tabber_activity_view_result
 from .common import RUNTIME_DIR
@@ -37,16 +38,17 @@ from .common import inline_json_product_metadata
 from .common import product_filename
 from .common import tail_file_lines
 from ..local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
-from ..local_services.rpc import LOCAL_RPC_VERSION, safe_socket_path  # noqa: F401 - public transport-version compatibility export
+from ..local_services.rpc import LOCAL_RPC_VERSION, new_envelope, request as local_service_request, safe_socket_path  # noqa: F401 - public transport-version compatibility export
 from ..local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
 from ..local_services.runtime import local_service_exception_cause
-from ..local_services.runtime import local_service_failure_text
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
 from ..local_services.client import LocalServiceClient
+from ..local_services.command_router import CommonDaemonActions
+from ..local_services.command_router import LocalServiceCommandRouter
 from ..workspace.metadata import _discover_indexed_repo_roots
 from ..workspace.metadata import metadata_warm_view_result
 from ..observability.transcripts import compact_transcript_items
@@ -183,6 +185,7 @@ JOBD_REQUEST_ACTIONS = frozenset({
     "ping", "status", "profile", "submit", "result", "product", "produce", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
 })
+JOBD_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in JOBD_REQUEST_ACTIONS})
 JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
 
 
@@ -601,6 +604,8 @@ class PersistentJobBroker:
         self.state_lock = threading.RLock()
         self.scheduler_event = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
+        self.scheduler_start_lock = threading.Lock()
+        self.scheduler_readiness_thread: threading.Thread | None = None
 
     def _bump_counter(self, task: str, name: str) -> None:
         counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0, "timed_out": 0})
@@ -1296,53 +1301,68 @@ class PersistentJobBroker:
         action = str(request.get("action") or "")
         action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
         self.request_counters[action_counter] = self.request_counters.get(action_counter, 0) + 1
-        if action == "ping":
-            return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at, "source_epoch": self.source_epoch}, b""
-        if action == "status":
-            return self.common_status(), b""
-        if action == "profile":
-            return {"ok": True, "profile": self.common_status()}, b""
-        if action == "submit":
-            return self._submit(request), b""
-        if action == "result":
-            self._refresh_records()
-            record = self.records.get(str(request.get("job_id") or ""))
-            return ({"ok": False, "error": "unknown job"} if record is None else {"ok": True, "job": self._record_payload(record, include_result=True)}), b""
-        if action == "product":
-            self._refresh_records()
-            return self._product(request)
-        if action == "produce":
-            return self._produce(request)
-        if action == "cancel":
-            record = self.records.get(str(request.get("job_id") or ""))
-            if record is None:
-                return {"ok": False, "error": "unknown job"}, b""
-            if record.status == "queued":
-                record.status = "cancelled"
-                record.completed_at = time.time()
-            elif record.status == "running" and record.future is not None:
-                if record.future.cancel():
-                    self._mark_terminal(record, "cancelled")
-                else:
-                    return {"ok": False, "error": "job already executing", "job": self._record_payload(record)}, b""
-            return {"ok": True, "job": self._record_payload(record)}, b""
-        if action == "lease":
-            response = acquire_client_lease(
-                self.leases,
-                request.get("client_pid"),
-                request.get("lease_id"),
-            )
-            return {**response, "version": JOBD_PROTOCOL_VERSION}, b""
-        if action == "release":
-            return release_client_lease(self.leases, request.get("lease_id")), b""
-        if action in {"shutdown", "shutdown_if_idle"}:
-            if action == "shutdown_if_idle" and self.leases:
-                return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
-            self.stop_event.set()
-            return {"ok": True, "shutdown": True}, b""
-        return {"ok": False, "error": "unknown jobd action"}, b""
+        response = JOBD_COMMAND_ROUTER.dispatch(self, action, request, b"")
+        return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
+
+    def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at, "source_epoch": self.source_epoch}, b""
+
+    def _handle_status(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return self.common_status(), b""
+
+    def _handle_profile(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return CommonDaemonActions.status(self.common_status, profile=True)
+
+    def _handle_submit(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return self._submit(request), b""
+
+    def _handle_result(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        self._refresh_records()
+        record = self.records.get(str(request.get("job_id") or ""))
+        return ({"ok": False, "error": "unknown job"} if record is None else {"ok": True, "job": self._record_payload(record, include_result=True)}), b""
+
+    def _handle_product(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        self._refresh_records()
+        return self._product(request)
+
+    def _handle_produce(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return self._produce(request)
+
+    def _handle_cancel(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        record = self.records.get(str(request.get("job_id") or ""))
+        if record is None:
+            return {"ok": False, "error": "unknown job"}, b""
+        if record.status == "queued":
+            record.status = "cancelled"
+            record.completed_at = time.time()
+        elif record.status == "running" and record.future is not None:
+            if record.future.cancel():
+                self._mark_terminal(record, "cancelled")
+            else:
+                return {"ok": False, "error": "job already executing", "job": self._record_payload(record)}, b""
+        return {"ok": True, "job": self._record_payload(record)}, b""
+
+    def _handle_lease(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
+        return {**response, "version": JOBD_PROTOCOL_VERSION}, b""
+
+    def _handle_release(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        return release_client_lease(self.leases, request.get("lease_id")), b""
+
+    def _handle_shutdown(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        self.stop_event.set()
+        return {"ok": True, "shutdown": True}, b""
+
+    def _handle_shutdown_if_idle(self, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
+        if self.leases:
+            return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
+        return self._handle_shutdown(request, body)
 
     def _scheduler_loop(self) -> None:
+        # Control-plane readiness belongs to the listener. Lower priority only after the first
+        # data-plane submission has started this scheduler, so a saturated host can still answer
+        # ping/status before background work competes for CPU.
+        apply_service_process_priority()
         while not self.stop_event.is_set():
             self.scheduler_event.wait(JOBD_SCHEDULER_POLL_SECONDS)
             self.scheduler_event.clear()
@@ -1352,14 +1372,31 @@ class PersistentJobBroker:
                 self._record_scheduler_pump_failure(exc, traceback.format_exc())
 
     def _start_scheduler(self) -> None:
-        if self.scheduler_thread is not None and self.scheduler_thread.is_alive():
-            return
-        self.scheduler_thread = threading.Thread(
-            target=self._scheduler_loop,
-            name="jobd-scheduler",
-            daemon=True,
-        )
-        self.scheduler_thread.start()
+        with self.scheduler_start_lock:
+            if self.scheduler_thread is not None and self.scheduler_thread.is_alive():
+                return
+            self.scheduler_thread = threading.Thread(
+                target=self._scheduler_loop,
+                name="jobd-scheduler",
+                daemon=True,
+            )
+            self.scheduler_thread.start()
+
+    def _start_scheduler_after_listener_accepts(self) -> None:
+        """Arm data-plane maintenance only after the listener completes one private accept."""
+        def activate() -> None:
+            try:
+                envelope = new_envelope("jobd", "ping", {"action": "ping", "protocol_version": JOBD_PROTOCOL_VERSION}, timeout_seconds=1.0)
+                response, _binary = local_service_request(self.socket_path, envelope, timeout_seconds=1.0)
+                if response.get("ok") is not True:
+                    raise RuntimeError("jobd listener readiness ping failed")
+            except (OSError, RuntimeError) as exc:
+                self._record_scheduler_pump_failure(exc, traceback.format_exc())
+                return
+            self._start_scheduler()
+
+        self.scheduler_readiness_thread = threading.Thread(target=activate, name="jobd-listener-readiness", daemon=True)
+        self.scheduler_readiness_thread.start()
 
     def _idle_should_stop(self) -> bool:
         with self.state_lock:
@@ -1372,6 +1409,8 @@ class PersistentJobBroker:
 
     def _on_shutdown(self) -> None:
         self.scheduler_event.set()
+        if self.scheduler_readiness_thread is not None:
+            self.scheduler_readiness_thread.join(timeout=0.5)
         if self.scheduler_thread is not None:
             self.scheduler_thread.join(timeout=0.5)
         for lane in JOBD_LANE_PRIORITIES:
@@ -1387,7 +1426,7 @@ class PersistentJobBroker:
             on_idle=self._idle_should_stop,
             on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
             on_idle_failure=self._record_scheduler_pump_failure,
-            on_start=self._start_scheduler,
+            on_start=self._start_scheduler_after_listener_accepts,
             on_shutdown=self._on_shutdown,
             concurrent_handlers=JOBD_CONCURRENT_HANDLER_LIMIT,
         )
@@ -1493,7 +1532,6 @@ class JobClient(LocalServiceClient):
         """
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        pid = int(payload.get("pid") or 0)
         worker_pids: list[int] = []
         if isinstance(payload.get("worker_pids"), list):
             for value in payload["worker_pids"]:
@@ -1503,7 +1541,28 @@ class JobClient(LocalServiceClient):
                     continue
                 if worker_pid > 0:
                     worker_pids.append(worker_pid)
-        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": local_service_failure_text(status, payload), "last_job_failure": str(payload.get("last_job_failure") or ""), "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {}, "absence_expected_reason": "" if self.holds_scheduler_lease else JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE, "resources": self.registry.resources_for_pids(pid, worker_pids)}
+        return registry_runtime_row("jobd", self.registry, status, payload, resource_pids=worker_pids, include_version=False, fields_before_failure={
+            "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
+            "active_task": str(payload.get("active_task") or ""),
+            "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [],
+            "worker_count": int(payload.get("worker_count") or len(worker_pids)),
+            "worker_pids": worker_pids,
+            "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
+            "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {},
+            "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {},
+            "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {},
+            "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {},
+            "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {},
+            "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {},
+            "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {},
+            "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {},
+            "generation": int(payload.get("generation") or 0),
+            "last_success": float(payload.get("last_success") or 0.0),
+        }, fields_after_failure={
+            "last_job_failure": str(payload.get("last_job_failure") or ""),
+            "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {},
+            "absence_expected_reason": "" if self.holds_scheduler_lease else JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE,
+        })
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1515,7 +1574,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not args.serve:
         parser.error("--serve is required")
-    apply_service_process_priority()
     return PersistentJobBroker(Path(args.socket), idle_seconds=args.idle_seconds, workers=args.workers).run()
 
 
