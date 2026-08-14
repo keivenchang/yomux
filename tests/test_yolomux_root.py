@@ -34,7 +34,7 @@ def _rooted_subprocess_environment(root: Path) -> dict[str, str]:
     return values
 
 
-def test_rooted_subprocess_contains_every_writable_path_despite_isolated_home():
+def test_rooted_subprocess_isolates_instance_state_but_reuses_user_codex_credentials():
     """Exercise the actual import path under both Docker and host pytest routes."""
 
     # The test container's pytest temp root is deliberately very deep.  A
@@ -81,18 +81,18 @@ print(json.dumps({
         "config": str(root / "config"),
         "state": str(root / "state"),
         "cache": str(root / "cache"),
-        "codex": str(root / "codex"),
+        "codex": str(Path.home() / ".codex"),
         "runtime": str(root / "runtime"),
     }
     assert all(
         Path(payload[name]).is_relative_to(root)
-        for name in ("config", "state", "cache", "codex", "runtime", "longest_socket")
+        for name in ("config", "state", "cache", "runtime", "longest_socket")
     )
     assert not Path(payload["home"]).is_relative_to(root)
     assert payload["socket_bytes"] <= payload["socket_budget"], payload
 
 
-def test_root_derives_every_writable_family_and_ignores_ambient_homes(tmp_path: Path):
+def test_root_isolates_instance_state_but_not_user_owned_codex_credentials(tmp_path: Path):
     root = Path("/tmp/yr")
     paths = common.resolve_yolomux_roots(
         {"YOLOMUX_ROOT": str(root), "XDG_CACHE_HOME": "/outside/cache", "CODEX_HOME": "/outside/codex"},
@@ -102,7 +102,7 @@ def test_root_derives_every_writable_family_and_ignores_ambient_homes(tmp_path: 
     assert paths.config_dir == root / "config"
     assert paths.state_dir == root / "state"
     assert paths.cache_dir == root / "cache"
-    assert paths.codex_home == root / "codex"
+    assert paths.codex_home == Path.home() / ".codex"
     assert paths.runtime_dir.is_relative_to(root / "runtime")
     assert all(path.is_relative_to(root) for path in paths.writable_paths())
 

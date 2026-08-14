@@ -42,6 +42,7 @@ from ..tmux.tmux_utils import tmux_capture_pane_styled
 from ..tmux.tmux_utils import tmux_clear_input
 from ..tmux.tmux_utils import tmux_paste_text
 from ..observability.transcripts import codex_event_text
+from ..workdir import agent_auth_entry_available
 from .stream_events import ClaudeStreamJsonNormalizer
 from .stream_events import ERROR
 
@@ -244,7 +245,7 @@ def _classify_provider_backend(
     entry = auth_status.get(provider) if isinstance(auth_status, dict) else None
     entry = entry if isinstance(entry, dict) else {}
     cli_installed = bool(entry.get("installed"))
-    cli_logged_in = cli_installed and entry.get("logged_in") is not False
+    cli_logged_in = cli_installed and agent_auth_entry_available(entry)
     sdk_module = YOAGENT_PROVIDER_SDK_MODULES.get(provider, "")
     sdk_installed = bool(sdk_module) and bool(module_available(sdk_module))
     if (cli_installed and cli_logged_in) or sdk_installed:

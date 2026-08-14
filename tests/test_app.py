@@ -15318,6 +15318,23 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
     assert app_module.resolve_yoagent_backend("deterministic") == "deterministic"
 
 
+def test_resolve_yoagent_backend_uses_shared_auth_availability_owner(monkeypatch):
+    statuses = {
+        "codex": {"installed": True, "logged_in": True, "shared_available": False},
+        "claude": {"installed": True, "logged_in": False, "shared_available": True},
+    }
+    seen = []
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda: statuses)
+    monkeypatch.setattr(
+        app_module.yoagent_backends,
+        "agent_auth_entry_available",
+        lambda entry: seen.append(entry) or entry["shared_available"],
+    )
+
+    assert app_module.resolve_yoagent_backend("auto") == "claude"
+    assert seen == [statuses["codex"], statuses["claude"]]
+
+
 def test_yoagent_language_directive_only_for_non_english_locales():
     # Phase 1: a non-English UI locale asks the LLM to answer in that language.
     assert app_module.yoagent_language_directive("zh-Hant") == "\n\n請用繁體中文回答。"

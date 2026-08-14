@@ -35,6 +35,28 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 
 async function runLayoutRestoreSuite() {
+  test('server-projected agent auth availability preserves the client tri-state decision', () => {
+    const cases = [
+      {loggedIn: true, available: true, disabled: false, detail: ''},
+      {loggedIn: false, available: false, disabled: true, detail: 'Run codex login'},
+      {loggedIn: null, available: true, disabled: false, detail: ''},
+      {loggedIn: false, available: true, disabled: false, detail: ''},
+      {loggedIn: true, available: false, disabled: true, detail: 'Run codex login'},
+    ];
+    for (const expected of cases) {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        availableAgents: ['codex'],
+        agentAuth: {
+          codex: {installed: true, logged_in: expected.loggedIn, available: expected.available},
+        },
+      });
+      const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
+      const codex = fileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex').primary;
+      assert.equal(codex.disabled, expected.disabled, `logged_in=${expected.loggedIn} uses available=${expected.available}`);
+      assert.equal(codex.detail, expected.detail, `logged_in=${expected.loggedIn} renders the projected availability detail`);
+    }
+  });
+
   await testAsync('activity summary is fail-closed across missing and malformed bootstrap values', async () => {
     for (const activitySummary of [undefined, null, {}, {enabled: false}, {enabled: 1}, {enabled: 'true'}]) {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {activitySummary}});
@@ -2031,7 +2053,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision)'), 'the metadata poll checks the live server version and client bundle revision');
     // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
     // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
-    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in !== false/.test(source), '#39: agentLoggedIn treats only confirmed logged-out status as unavailable');
+    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.available !== false/.test(source), '#39: agentLoggedIn consumes the server-owned tri-state availability decision');
     assert.ok(source.includes('const loggedOut = available && !agentLoggedIn(agent);'), '#39: the new-session picker computes a logged-out state per agent');
     assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
     assert.ok(/loggedOut[\s\S]*?t\('menu\.tmux\.runLogin', \{command: agentLoginCommand\(agent\)\}\)/.test(source), '#39: a logged-out agent shows its login command as the menu detail (via t())');

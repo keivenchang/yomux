@@ -21,8 +21,8 @@ let agentAuth = bootstrap.agentAuth || {};
 const agentLoginCommands = {claude: 'claude auth login', codex: 'codex login'};
 function agentLoggedIn(agent) {
   const entry = agentAuth[agent];
-  // Unknown (term, or no status yet) counts as logged-in so we never block a usable agent.
-  return !entry || !entry.installed || entry.logged_in !== false;
+  // The server owns the tri-state decision; absent status remains usable during startup.
+  return !entry || entry.available !== false;
 }
 function agentLoginCommand(agent) {
   return agentLoginCommands[agent] || '';

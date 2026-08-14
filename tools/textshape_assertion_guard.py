@@ -41,6 +41,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_auth_config.py:test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter": "The migration writes the same documented starter-file contract.",
     "tests/test_auth_config.py:test_uncommented_auth_yaml_is_active": "The parser's active-versus-commented configuration grammar is intentionally text-defined.",
     "tests/test_auth_config.py:test_setup_auth_script_has_no_parallel_english_status_fallbacks": "The setup script must route status strings through the locale owner rather than duplicate literals.",
+    "tests/test_auth_config.py:test_auth_setup_brand_pulses_without_rotating": "The auth-setup stylesheet is the animation contract: the pulse keyframe must remain wired while the retired rotation name stays absent; the rendered no-rotation behavior is also checked in the real browser.",
     "tests/test_auth_config.py:test_pre_auth_pages_share_reload_picker_and_localize_first_paint": "The pre-auth template's shared picker and localization bootstrap are a static first-paint contract.",
     "tests/test_background_owner.py:test_background_owner_required_log_event_names_have_emitters": "The event-name catalog is a compatibility contract between the producer and event consumers.",
     "tests/test_browser_editor.py:test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels": "The embedded Mermaid sample is a fixed rendering fixture, not a substitute for browser behavior tests.",
@@ -110,7 +111,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "42c128b4a20a7146b702a0febe685f779f385c88e51ea685e25bfae5408080a0"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "9ceda53664da031c4454b64bea6942c5046b49671325518bb5ad865297b280c9"
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,7 @@ maps to a specific actionable locale string in static_src/locales/en.json.
 import json
 from pathlib import Path
 
+from yolomux_lib.yoagent import transports as transports_module
 from yolomux_lib.yoagent.preferences import backend_no_backend_notice
 from yolomux_lib.yoagent.transports import BACKEND_REASON_AVAILABLE
 from yolomux_lib.yoagent.transports import BACKEND_REASON_MODULE_MISSING
@@ -111,6 +112,22 @@ def test_unknown_cli_auth_does_not_suppress_installed_provider():
     assert result.available is True
     assert result.reason == BACKEND_REASON_AVAILABLE
     assert result.backend == "claude"
+
+
+def test_provider_backend_uses_shared_auth_availability_owner(monkeypatch):
+    entry = {"installed": True, "logged_in": True, "shared_available": False}
+    seen = []
+    monkeypatch.setattr(
+        transports_module,
+        "agent_auth_entry_available",
+        lambda candidate: seen.append(candidate) or candidate["shared_available"],
+    )
+
+    result = backend_availability("codex", {"codex": entry}, module_available=_no_module)
+
+    assert result.available is False
+    assert result.reason == BACKEND_REASON_NO_CREDENTIALS
+    assert seen == [entry]
 
 
 def test_auto_backend_prefers_available_then_most_actionable_blocker():

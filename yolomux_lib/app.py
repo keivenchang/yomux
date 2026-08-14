@@ -256,6 +256,7 @@ from .web import bootstrap_agent_auth_status as cached_agent_auth_status_snapsho
 from .web import server_string
 from .workdir import agent_command
 from .workdir import agent_auth_status
+from .workdir import agent_auth_status_payload
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
 from .workdir import terminal_command
@@ -12893,7 +12894,7 @@ class TmuxWebtermApp:
 
     def agent_auth_payload(self, force: bool = False) -> dict[str, Any]:
         return {
-            "agentAuth": agent_auth_status(force=True) if force else cached_agent_auth_status_snapshot(),
+            "agentAuth": agent_auth_status_payload(agent_auth_status(force=True)) if force else cached_agent_auth_status_snapshot(),
             "availableAgents": available_agent_commands(),
         }
 

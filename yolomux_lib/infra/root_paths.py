@@ -18,7 +18,7 @@ class YolomuxRootError(ValueError):
 
 @dataclass(frozen=True)
 class YolomuxRoots:
-    """Resolved mutable roots; a configured parent owns every member."""
+    """Resolved runtime roots; credentials remain user-owned unless explicitly overridden."""
 
     config_dir: Path
     state_dir: Path
@@ -28,7 +28,8 @@ class YolomuxRoots:
     root: Path | None = None
 
     def writable_paths(self) -> tuple[Path, ...]:
-        return (self.config_dir, self.state_dir, self.cache_dir, self.codex_home, self.runtime_dir)
+        """Return paths YOLOmux itself mutates for an isolated instance."""
+        return (self.config_dir, self.state_dir, self.cache_dir, self.runtime_dir)
 
 
 def resolved_path(value: str | Path) -> Path:
@@ -65,11 +66,18 @@ def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Pat
             default_runtime_dir,
         )
     root = resolved_path(configured_root)
+    config_dir = config_dir_from_environ(values)
+    configured_codex_home = values.get("YOLOMUX_CODEX_HOME")
+    codex_home = (
+        rooted_override(values, "YOLOMUX_CODEX_HOME", root, root / "codex")
+        if configured_codex_home
+        else Path.home() / ".codex"
+    )
     return YolomuxRoots(
-        config_dir_from_environ(values),
+        config_dir,
         rooted_override(values, "YOLOMUX_STATE_DIR", root, root / "state"),
         rooted_override(values, "YOLOMUX_CACHE_DIR", root, root / "cache"),
-        rooted_override(values, "YOLOMUX_CODEX_HOME", root, root / "codex"),
+        codex_home,
         rooted_override(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime"),
         root,
     )

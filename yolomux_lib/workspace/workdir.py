@@ -164,7 +164,7 @@ def _probe_agent_logged_in(agent: str) -> bool | None:
         return False
     kwargs: dict[str, object] = {"capture_output": True, "text": True, "timeout": _AGENT_AUTH_PROBE_TIMEOUT}
     if agent == "codex":
-        kwargs["env"] = codex_runtime_env()
+        kwargs["env"] = codex_runtime_env(create_home=False)
     try:
         result = subprocess.run(list(probe), **kwargs)
     except (subprocess.TimeoutExpired, OSError, ValueError):
@@ -176,6 +176,16 @@ def _probe_agent_logged_in(agent: str) -> bool | None:
     if result.returncode != 0:
         return False if any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS) else None
     return not any(marker in combined for marker in _AGENT_LOGGED_OUT_MARKERS)
+
+
+def agent_auth_entry_available(entry: dict[str, object] | None) -> bool:
+    """Treat only a confirmed installed-and-logged-out agent as unavailable."""
+    return not entry or entry.get("installed") is not True or entry.get("logged_in") is not False
+
+
+def agent_auth_status_payload(status: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    """Attach the one server-owned tri-state availability decision to each auth row."""
+    return {agent: {**entry, "available": agent_auth_entry_available(entry)} for agent, entry in status.items()}
 
 
 def _default_agent_auth_status() -> dict[str, dict[str, object]]:

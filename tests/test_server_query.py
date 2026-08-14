@@ -2215,6 +2215,15 @@ def test_stream_codex_summary_rejects_logged_out_codex_before_prompt(monkeypatch
     )]
 
 
+def test_codex_summary_allows_unknown_auth_state(monkeypatch):
+    handler = object.__new__(Handler)
+    monkeypatch.setattr(server_module, "agent_auth_status", lambda: {
+        "codex": {"installed": True, "logged_in": None, "unavailable_reason": "auth-unknown"},
+    })
+
+    assert Handler.codex_summary_availability_error(handler, {"backend": "codex"}) is None
+
+
 def test_stream_codex_summary_rejects_unknown_session_before_provider_availability(monkeypatch):
     writes = []
     diagnostic = "unknown session: missing"

@@ -96,6 +96,7 @@ from .websocket import read_ws_frame
 from .websocket import set_pty_size
 from .websocket import wait_for_ws_frame
 from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_entry_available
 from .workdir import agent_auth_status
 from .workdir import start_agent_auth_status_refresh
 
@@ -2395,7 +2396,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 "provider": "codex",
                 "login_command": AGENT_LOGIN_COMMANDS["codex"],
             }
-        if not codex_status.get("logged_in"):
+        if not agent_auth_entry_available(codex_status):
             command = AGENT_LOGIN_COMMANDS["codex"]
             diagnostic = f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{command}`."
             return {

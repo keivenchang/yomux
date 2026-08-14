@@ -39,7 +39,9 @@ from .settings import save_settings
 from .settings import settings_payload
 from .stats_current import storage as stats_current_storage
 from .workdir import AGENT_LOGIN_COMMANDS
+from .workdir import agent_auth_entry_available
 from .workdir import agent_auth_status
+from .workdir import agent_auth_status_payload
 from .workdir import agent_command
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
@@ -226,9 +228,10 @@ def brand_html(class_name: str = "brand-title", tag: str = "span", locale: str |
 
 def bootstrap_agent_auth_status() -> dict[str, dict[str, object]]:
     try:
-        return agent_auth_status(block=False, allow_stale=True, refresh=True)
+        status = agent_auth_status(block=False, allow_stale=True, refresh=True)
     except TypeError:
-        return agent_auth_status()
+        status = agent_auth_status()
+    return agent_auth_status_payload(status)
 
 
 def bootstrap_settings_payload(settings_data: dict) -> dict:
@@ -440,11 +443,11 @@ def agent_login_notice_html(css_class: str = "login-warning", locale: str = FALL
     # (or none are installed — a terminal-only host needs no agent login).
     status = agent_auth_status()
     installed = [agent for agent in ("claude", "codex") if status.get(agent, {}).get("installed")]
-    logged_out = [agent for agent in installed if not status[agent]["logged_in"]]
+    logged_out = [agent for agent in installed if not agent_auth_entry_available(status[agent])]
     if not installed or not logged_out:
         return ""
     commands = " ".join(f"<code>{html.escape(AGENT_LOGIN_COMMANDS[agent])}</code>" for agent in logged_out)
-    if not any(status[agent]["logged_in"] for agent in installed):
+    if not any(agent_auth_entry_available(status[agent]) for agent in installed):
         names = " or ".join(agent.capitalize() for agent in logged_out)
         lead = server_string(locale, "login.agent.loginTo", names=names)
     else:

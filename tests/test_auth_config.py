@@ -313,6 +313,26 @@ def test_login_screen_has_no_notice_when_agents_logged_in(monkeypatch):
     assert "setup-login-notice" not in web.setup_auth_html()
 
 
+def test_login_screen_has_no_notice_when_installed_agent_auth_is_unknown(monkeypatch):
+    monkeypatch.setattr(web, "STATIC_DIR", SOURCE_STATIC_DIR)
+    monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
+        "claude": {"installed": True, "logged_in": None, "unavailable_reason": "auth-unknown"},
+        "codex": {"installed": False, "logged_in": False},
+    })
+
+    assert web.agent_login_notice_html() == ""
+
+
+def test_auth_setup_brand_pulses_without_rotating():
+    css = (Path(__file__).resolve().parents[1] / "static" / "setup-auth.css").read_text(encoding="utf-8")
+    rule = re.search(r"\.setup-brand-waiting \.brand-yolo\s*\{(?P<body>[^}]*)\}", css, re.DOTALL)
+
+    assert rule is not None
+    assert "setup-brand-yolo-pulse" in rule.group("body")
+    assert "setup-brand-yolo-rotate" not in rule.group("body")
+    assert "setup-brand-yolo-rotate" not in css
+
+
 def test_main_page_bootstrap_includes_agent_auth(monkeypatch):
     monkeypatch.setattr(web, "agent_auth_status", lambda *a, **k: {
         "claude": {"installed": True, "logged_in": True},
@@ -321,7 +341,7 @@ def test_main_page_bootstrap_includes_agent_auth(monkeypatch):
     page = web.html_page([])
     match = re.search(r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>', page, re.DOTALL)
     parsed = json.loads(match.group(1))
-    assert parsed["agentAuth"]["codex"] == {"installed": True, "logged_in": False}
+    assert parsed["agentAuth"]["codex"] == {"installed": True, "logged_in": False, "available": False}
 
 
 def test_bootstrap_locale_resolves_language_and_serves_locale_catalogs():

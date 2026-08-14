@@ -91,6 +91,48 @@ def test_codex_runtime_env_defaults_to_user_codex_home(monkeypatch, tmp_path):
     assert env["NO_COLOR"] == "1"
 
 
+def test_rooted_codex_runtime_reuses_user_credentials_without_creating_instance_home(monkeypatch, tmp_path):
+    root = common.Path(f"/tmp/yolomux-auth-runtime-{os.getpid()}")
+    user_home = tmp_path / "user"
+    auth_file = user_home / ".codex" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    for name in ("YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(common.Path, "home", lambda: user_home)
+
+    env = common.codex_runtime_env({"PATH": "/usr/bin", "YOLOMUX_ROOT": str(root)}, create_home=False)
+
+    assert env["CODEX_HOME"] == str(auth_file.parent)
+    assert not (root / "codex").exists()
+
+
+def test_rooted_codex_auth_probe_uses_existing_user_login_without_creating_instance_home(monkeypatch, tmp_path):
+    root = common.Path(f"/tmp/yolomux-auth-probe-{os.getpid()}")
+    user_home = tmp_path / "user"
+    auth_file = user_home / ".codex" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
+    for name in ("YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setattr(common.Path, "home", lambda: user_home)
+
+    def run(cmd, *args, **kwargs):
+        assert kwargs["env"]["CODEX_HOME"] == str(auth_file.parent)
+        assert auth_file.is_file()
+        return _completed(cmd, 0, stdout="Logged in using ChatGPT")
+
+    monkeypatch.setattr(workdir.subprocess, "run", run)
+
+    assert workdir._probe_agent_logged_in("codex") is True
+    assert not (root / "codex").exists()
+
+
 def test_codex_runtime_env_respects_yolomux_codex_home_override(monkeypatch, tmp_path):
     codex_home = tmp_path / "codex-home"
     monkeypatch.setenv("YOLOMUX_CODEX_HOME", str(codex_home))
