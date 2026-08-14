@@ -4688,22 +4688,18 @@ function fileQuickOpenOpenFolderItem() {
   };
 }
 
-function fileQuickOpenStrictExternalIndexedQuery(query = commandPaletteSearchQuery()) {
-  const text = String(query || '').trim();
-  if (!text || text.includes('/') || text.startsWith('~')) return false;
-  return /[.]/.test(text);
-}
-
 function fileQuickOpenExternalIndexedMatchAllowed(file, query = commandPaletteSearchQuery()) {
-  if (!fileQuickOpenStrictExternalIndexedQuery(query)) return true;
+  const text = String(query || '').trim();
+  if (!text || text.includes('/') || text.startsWith('~')) return true;
   const path = String(file?.path || '');
   const basename = String(file?.name || basenameOf(path));
   const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
-  const needle = fuzzyCanonicalPrefixText(query);
-  if (!needle) return true;
-  return [basename, stem]
-    .map(fuzzyCanonicalPrefixText)
-    .some(value => value && (value.startsWith(needle) || value.includes(needle)));
+  const relativeSegments = String(file?.relative_path || '').split('/').filter(Boolean);
+  // External roots can be very long (for example an iCloud container path). Let the fuzzy matcher
+  // work within a filename or one relative-path segment, but never assemble one apparent match from
+  // isolated characters spread across unrelated directories and the indexed-root prefix.
+  return [basename, stem, ...relativeSegments]
+    .some(value => Number.isFinite(fuzzySubsequenceScore(text, value)));
 }
 
 function fileQuickOpenItems() {
@@ -5068,7 +5064,7 @@ function commandPaletteStatusHtml() {
 function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
-      <span class="command-palette-group">${esc(item.group)}</span>
+      <span class="command-palette-group" title="${esc(item.group)}">${esc(item.group)}</span>
       <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="chip-base command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
