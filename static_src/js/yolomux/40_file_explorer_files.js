@@ -3374,22 +3374,13 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   reconcileChildNodes(container, nextNodes);
 }
 
-function rawFileUrl(path, params = {}) {
-  const queryParts = [`path=${encodeURIComponent(path)}`];
-  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value === null || value === undefined || value === '') continue;
-    queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  }
-  return `/api/fs/raw?${queryParts.join('&')}`;
-}
-
 function zipFileDownloadUrl(path) {
   return `/api/fs/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {
   if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
+  releaseRawFileMediaSources(fileImagePreviewPopover);
   fileImagePreviewPopover?.remove();
   fileImagePreviewPopover = null;
 }
@@ -3413,7 +3404,6 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   popover.dataset.previewPath = path;
   const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
   const media = document.createElement(mediaKind === 'video' ? 'video' : 'img');
-  media.src = options.sourceUrl || rawFileUrl(path);
   if (mediaKind === 'video') {
     media.autoplay = true;
     media.loop = true;
@@ -3426,6 +3416,21 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
+  if (options.sourceUrl) {
+    media.src = options.sourceUrl;
+  } else {
+    void installRawFileMediaSource(media, path, {
+      onFailure: error => {
+        if (fileImagePreviewPopover !== popover) return;
+        const failure = document.createElement('div');
+        failure.className = 'file-image-preview-error';
+        failure.textContent = userMessageText(error, t('preview.image.loadFailed'));
+        popover.replaceChildren(failure);
+        positionFileImagePreview(anchor, popover, point);
+      },
+      isCurrent: () => fileImagePreviewPopover === popover,
+    });
+  }
 }
 
 function bindFileImagePreview(anchor, path, entry, options = {}) {

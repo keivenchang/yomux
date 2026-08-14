@@ -20,10 +20,12 @@ from yolomux_lib import http_routes
 from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.app import FilesystemOperationHttpResponse
+from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import filesystem_operation_descriptor
 from yolomux_lib.infra import jobd
 from yolomux_lib.server import Handler
 from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
+from tests.helpers.fixture_http_server import FixtureArtifactTransfer
 from tests.helpers.fixture_http_server import FixtureHttpServer
 from tests.helpers.fixture_http_server import request_fixture_http_header_list as request_header_list
 from tests.helpers.fixture_http_server import request_fixture_http_tuple as request
@@ -211,6 +213,17 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
                 return FilesystemOperationHttpResponse(exc.payload, HTTPStatus(exc.status))
             except filesystem.FilesystemError as exc:
                 return FilesystemOperationHttpResponse(exc.payload(path=path), HTTPStatus(exc.status))
+            if isinstance(result, jobd.JobdArtifactResult):
+                return FilesystemOperationHttpResponse(
+                    None,
+                    HTTPStatus.OK,
+                    product=dict(result.product),
+                    transfer=FixtureArtifactTransfer.adopt(
+                        jobd.artifact_root() / result.basename,
+                        result.product,
+                        jobd.JOBD_ARTIFACT_CHUNK_BYTES,
+                    ),
+                )
             return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=result.body, product=result.product)
         app.filesystem_operation_relay = filesystem_operation_relay
     runtime = FixtureHttpServer.start(app, tls_context=tls_context, label="login-auth fixture HTTP server")
@@ -1348,6 +1361,37 @@ def test_fs_raw_download_sets_attachment_header(monkeypatch, tmp_path):
         assert headers["Content-Disposition"] == 'attachment; filename="report _a__.txt"'
     finally:
         stop_server(server, thread)
+
+
+def test_authenticated_png_subresource_above_generic_job_budget_returns_image_bytes(monkeypatch, tmp_path):
+    target = tmp_path / "preview.png"
+    body = b"\x89PNG\r\n\x1a\n" + (b"x" * (1_957_801 - 8))
+    target.write_bytes(body)
+    socket_path = tmp_path / "jobd.sock"
+    client = jobd.JobClient(socket_path)
+    assert client.ensure_started() is True
+    app = TmuxWebtermApp([], status_service_mode=True)
+    app.job_client = client
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        cookie = _login_and_extract_auth_cookie(port)
+        ping_status, _ping_headers, ping_body = request(port, "GET", "/api/ping", headers={"Cookie": cookie})
+        status, headers, returned = request(
+            port,
+            "GET",
+            f"/api/fs/raw?{urlencode({'path': str(target)})}",
+            headers={"Cookie": cookie, "Sec-Fetch-Dest": "image", "Sec-Fetch-Mode": "no-cors"},
+        )
+
+        assert ping_status == HTTPStatus.OK and json.loads(ping_body)["ok"] is True
+        assert status == HTTPStatus.OK
+        assert headers["Content-Type"] == "image/png"
+        assert returned == body
+    finally:
+        stop_server(server, thread)
+        app.stop_jobd_operation_service()
+        assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
 
 
 def test_fs_zip_download_sets_timestamped_attachment_and_contains_folder(monkeypatch, tmp_path):

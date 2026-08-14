@@ -1371,6 +1371,114 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/status\.(?:settingsSaveFailed|settingsResetFailed|themeSaveFailed)', \{error\}\)/.test(settingsSources), false, 'settings save/reset/theme catches have no raw Error interpolation path');
   });
 
+  await testAsync('raw media fetches expose typed status and own exact blob URL lifecycles', async () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('raw-media', {
+      'auth.error.authenticationRequired': 'AUTH-T',
+      'common.pathNotFound': 'MISSING-T {path}',
+      'editor.fileTooLargeTitle': 'LARGE-T',
+      'common.requestFailed': 'REQUEST-T',
+    });
+    api.setActiveLocaleForTest('raw-media');
+    const response = (payload, status, blob = null) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: String(status),
+      body: null,
+      headers: {get: name => name === 'Content-Type' ? (blob?.type || 'application/json') : ''},
+      json: async () => payload,
+      blob: async () => blob,
+    });
+    const missingNonJson = response({}, 404);
+    missingNonJson.json = async () => { throw new SyntaxError('not json'); };
+    const failures = [response({}, 401), missingNonJson, response({}, 413)];
+    const requests = [];
+    api.setFetchForTest(async (url, options) => {
+      requests.push({url: String(url), options});
+      return failures.shift();
+    });
+    const auth = await api.fetchRawFileBlobForTest('/repo/image.png');
+    const missing = await api.fetchRawFileBlobForTest('/repo/image.png');
+    const large = await api.fetchRawFileBlobForTest('/repo/image.png');
+    assert.deepStrictEqual(canonical([
+      [auth.status, api.fileErrorTextForTest(auth.error, 'common.requestFailed')],
+      [missing.status, api.fileErrorTextForTest(missing.error, 'common.requestFailed')],
+      [large.status, api.fileErrorTextForTest(large.error, 'common.requestFailed')],
+    ]), [
+      [401, 'AUTH-T'],
+      [404, 'MISSING-T /repo/image.png'],
+      [413, 'LARGE-T'],
+    ], '401, 404, and over-cap failures retain distinct localized status messages');
+    assert.equal(requests[0].options.credentials, 'same-origin', 'raw media explicitly uses the authenticated same-origin fetch contract');
+    assert.ok(requests[0].options.signal instanceof AbortSignal, 'raw media passes an AbortSignal through the shared fetch owner');
+    assert.equal(requests[1].url, '/api/fs/raw?path=%2Frepo%2Fimage.png', 'a non-JSON error response retains the requested path for its typed fallback');
+    assert.deepStrictEqual(canonical(api.locationAssignmentsForTest()), [], 'status-aware raw media does not redirect before rendering its typed 401');
+
+    const created = [];
+    const revoked = [];
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = blob => {
+      const value = `blob:test-${created.length + 1}`;
+      created.push({value, blob});
+      return value;
+    };
+    URL.revokeObjectURL = value => revoked.push(value);
+    try {
+      const blob = new Blob(['image'], {type: 'image/png'});
+      api.setFetchForTest(async () => response({}, 200, blob));
+      const media = new TestElement('raw-media', 'img');
+      const installed = await api.installRawFileMediaSourceForTest(media, '/repo/image.png');
+      assert.equal(installed.ok, true);
+      assert.equal(media.src, 'blob:test-1');
+      assert.equal(created.length, 1, 'only a successful response creates a blob URL');
+      api.releaseRawFileMediaSourceForTest(media);
+      api.releaseRawFileMediaSourceForTest(media);
+      assert.deepStrictEqual(revoked, ['blob:test-1'], 'the installed object URL is revoked exactly once');
+
+      let decodeFailures = 0;
+      const decodeMedia = new TestElement('decode-media', 'img');
+      await api.installRawFileMediaSourceForTest(decodeMedia, '/repo/broken.png', {
+        onDecodeFailure: () => { decodeFailures += 1; },
+      });
+      const decodeHandler = decodeMedia.listeners.get('error')?.[0];
+      assert.equal(typeof decodeHandler, 'function', 'a fetched media source installs a decode-failure handler');
+      decodeHandler();
+      decodeHandler();
+      api.releaseRawFileMediaSourceForTest(decodeMedia);
+      assert.equal(decodeFailures, 1, 'decode failure is reported exactly once');
+      assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2'], 'decode failure revokes its object URL exactly once');
+
+      let settleFetch;
+      api.setFetchForTest(() => new Promise(resolve => { settleFetch = resolve; }));
+      const staleMedia = new TestElement('stale-media', 'img');
+      const pending = api.installRawFileMediaSourceForTest(staleMedia, '/repo/old.png');
+      await flushAsyncWork();
+      api.releaseRawFileMediaSourceForTest(staleMedia);
+      settleFetch(response({}, 200, blob));
+      const stale = await pending;
+      assert.equal(stale.ok, true);
+      assert.equal(staleMedia.src, undefined, 'an aborted/stale owner cannot install late bytes');
+      assert.equal(created.length, 2, 'an aborted/stale owner creates no object URL');
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+
+    const sources = [
+      fs.readFileSync('static_src/js/yolomux/39_raw_file_media.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8'),
+    ].join('\n');
+    assert.equal((sources.match(/function fetchRawFileBlob\(/g) || []).length, 1, 'one shared raw-byte fetch owner serves every preview surface');
+    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*installRawFileMediaSource/.test(sources), 'Markdown local images use the shared status-aware owner');
+    assert.ok(/function openFileImagePreview[\s\S]*installRawFileMediaSource/.test(sources), 'Finder and Differ hover images use the shared status-aware owner');
+    assert.ok(/function renderFileEditorImagePane[\s\S]*installRawFileMediaSource/.test(sources), 'editor images use the shared status-aware owner');
+    assert.ok(/function previewFileActionLinks[\s\S]*openRawFileInNewTab[\s\S]*triggerFileDownload/.test(sources), 'Open and Download siblings route through status-aware fetch owners');
+  });
+
   test('Differ repo issues resolve descriptors at render time', () => {
     const api = loadYolomux('', ['1']);
     api.i18nSetCatalogForTest('zz', {'diff.warning.refsFallback': 'ZZ fallback for {repo}'});

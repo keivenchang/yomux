@@ -429,7 +429,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     recordApiDebugResponseBytes(debugEvent, response);
     noteApiDebugHeaders(debugEvent, url, startedAt);
   }
-  if (response.status === 401) {
+  if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
     if (registeredCommandRouteForRequest(url, requestOptions)?.contractClass === 'background') {
       cleanup();
       const error = new Error('authentication required');

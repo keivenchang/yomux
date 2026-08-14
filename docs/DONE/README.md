@@ -4,11 +4,11 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-171 entries, 2026-06-02 to 2026-08-13.
+172 entries, 2026-06-02 to 2026-08-13.
 
 | month | entries |
 | --- | ---: |
-| [2026-08](2026-08/) | 14 |
+| [2026-08](2026-08/) | 15 |
 | [2026-07](2026-07/) | 55 |
 | [2026-06](2026-06/) | 102 |
 
@@ -16,6 +16,7 @@ This is a historical record, not the current architecture or API contract: a lat
 
 | date | what shipped |
 | --- | --- |
+| 2026-08-13 | [v0.7.5 Markdown preview image recovery](2026-08/DONE.0-7-5-markdown-image-401.md) |
 | 2026-08-12 | [DOIT.p0.v0.7.3 — YOLOmux 0.7.3](2026-08/DONE.v0.7.3.md) |
 | 2026-08-13 | [0.7.4 behavior-preserving architecture cleanup](2026-08/DONE.0-7-4-behavior-preserving-architecture-cleanup.md) |
 | 2026-08-12 | [0.7.3 release —  (`7bf385828`)](2026-08/DONE.0-7-3-release.md) |

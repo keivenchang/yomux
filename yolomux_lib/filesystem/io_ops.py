@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import os
 import json
 import shutil
@@ -95,6 +96,33 @@ IMAGE_EXTENSIONS = {
 
 MAX_RAW_BYTES = 100 * 1024 * 1024  # Fallback raw file download cap when no app transfer cap is supplied.
 FS_ZIP_MAX_BYTES = 100 * 1024 * 1024  # Fallback folder zip cap when no app transfer cap is supplied.
+TRANSFER_COPY_CHUNK_BYTES = 1024 * 1024
+
+
+class _BoundedSeekableWriter:
+    """Keep a seekable archive output below its configured wire-size cap."""
+
+    def __init__(self, target: Any, maximum: int):
+        self.target = target
+        self.maximum = maximum
+        self.high_water = 0
+
+    def write(self, data: bytes) -> int:
+        end = self.target.tell() + len(data)
+        if end > self.maximum:
+            raise paths.FilesystemError.file_too_large(end, self.maximum, label="archive")
+        written = self.target.write(data)
+        self.high_water = max(self.high_water, self.target.tell())
+        return written
+
+    def tell(self) -> int:
+        return self.target.tell()
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self.target.seek(offset, whence)
+
+    def flush(self) -> None:
+        self.target.flush()
 
 
 def read_json_file(
@@ -475,6 +503,44 @@ def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
         return data, mime
 
 
+def copy_raw_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str, str]:
+    """Copy one authorized file to a seekable artifact without materializing it in memory."""
+    with paths.safe_path(raw_path, operation="read_raw") as handle:
+        path = handle.requested
+        if stat.S_ISDIR(handle.stat_result.st_mode):
+            raise paths.FilesystemError.is_directory(path)
+        byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else MAX_RAW_BYTES
+        if handle.stat_result.st_size > byte_cap:
+            raise paths.FilesystemError.file_too_large(handle.stat_result.st_size, byte_cap)
+        digest = hashlib.sha256()
+        sample = b""
+        copied = 0
+        with os.fdopen(os.dup(handle.descriptor), "rb") as source:
+            while True:
+                chunk = source.read(min(TRANSFER_COPY_CHUNK_BYTES, byte_cap + 1 - copied))
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > byte_cap:
+                    raise paths.FilesystemError.file_too_large(copied, byte_cap)
+                if not sample:
+                    sample = chunk[:64]
+                target.write(chunk)
+                digest.update(chunk)
+        final_stat = os.fstat(handle.descriptor)
+        initial_identity = (handle.stat_result.st_dev, handle.stat_result.st_ino, handle.stat_result.st_size, handle.stat_result.st_mtime_ns)
+        final_identity = (final_stat.st_dev, final_stat.st_ino, final_stat.st_size, final_stat.st_mtime_ns)
+        if stat.S_ISREG(handle.stat_result.st_mode) and (final_identity != initial_identity or copied != handle.stat_result.st_size):
+            raise paths.FilesystemError(
+                "file changed while it was being transferred",
+                status=409,
+                message_key="fs.error.changedOnDisk",
+                message_params={"path": str(path)},
+            )
+        mime = _sniff_raw_mime(sample) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "application/octet-stream")
+        return copied, mime, digest.hexdigest()
+
+
 def _format_zip_size(size: int) -> str:
     mib = size / (1024 * 1024)
     return f"{mib:.1f} MB ({size} bytes)"
@@ -547,57 +613,91 @@ def count_directory_files(raw_path: str) -> dict[str, Any]:
 def zip_directory(raw_path: str, max_bytes: int | None = None) -> tuple[Any, int]:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_path, flags=flags, operation="zip_directory") as handle:
-        path = handle.requested
         byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else FS_ZIP_MAX_BYTES
         data = tempfile.SpooledTemporaryFile(max_size=1024 * 1024)
         try:
-            with zipfile.ZipFile(data, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
-                root_name = path.name or "root"
-                archive.writestr(f"{root_name}/", b"")
-                total_size = 0
-                walker = paths.walk_directory(
-                    handle.descriptor,
-                    operation="zip_directory",
-                    requested_root=path,
-                )
-                with contextlib.closing(walker):
-                    for relative_directory, directory_fd, dirnames, file_rows in walker:
-                        for dirname in dirnames:
-                            archive_name = Path(root_name) / relative_directory / dirname
-                            archive.writestr(archive_name.as_posix().rstrip("/") + "/", b"")
-                        for filename, _scanned_stat in file_rows:
-                            try:
-                                member_path = path / relative_directory / filename
-                                member_fd = os.open(
-                                    filename,
-                                    os.O_RDONLY | paths.nofollow_flag(),
-                                    dir_fd=directory_fd,
-                                )
-                            except OSError as error:
-                                if error.errno in {errno.ELOOP, errno.ENOENT}:
-                                    continue
-                                raise
-                            try:
-                                paths.authority_pinned("zip_directory", member_path)
-                                member_stat = os.fstat(member_fd)
-                                if not stat.S_ISREG(member_stat.st_mode):
-                                    continue
-                                total_size += member_stat.st_size
-                                if total_size > byte_cap:
-                                    raise paths.FilesystemError(
-                                        _zip_limit_message(path, total_size, byte_cap),
-                                        status=413,
-                                        message_key="fs.error.folderTooLarge",
-                                        message_params={"path": str(path), "size": total_size, "max": byte_cap},
-                                    )
-                                archive_name = (Path(root_name) / relative_directory / filename).as_posix()
-                                with os.fdopen(os.dup(member_fd), "rb") as source, archive.open(archive_name, "w") as target:
-                                    shutil.copyfileobj(source, target, length=1024 * 1024)
-                            finally:
-                                os.close(member_fd)
-            size = data.tell()
-            data.seek(0)
+            size, _digest = _zip_directory_handle_to(handle, data, byte_cap)
             return data, size
         except Exception:
             data.close()
             raise
+
+
+def zip_directory_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str]:
+    """Write one authorized directory archive into a bounded seekable artifact."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(raw_path, flags=flags, operation="zip_directory") as handle:
+        byte_cap = int(max_bytes) if isinstance(max_bytes, (int, float)) and max_bytes > 0 else FS_ZIP_MAX_BYTES
+        return _zip_directory_handle_to(handle, target, byte_cap)
+
+
+def _zip_directory_handle_to(handle: Any, target: Any, byte_cap: int) -> tuple[int, str]:
+    """Create one bounded archive from an already-authorized directory descriptor."""
+    path = handle.requested
+    # Preserve the existing source-size contract before archive headers can hit the response cap.
+    # The second descriptor-pinned walk below creates the snapshot and detects mutation.
+    _walk_directory_sources(
+        handle.descriptor_path(),
+        byte_cap,
+        root_fd=handle.descriptor,
+        operation="zip_directory",
+        requested_root=path,
+    )
+    output = _BoundedSeekableWriter(target, byte_cap)
+    with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        root_name = path.name or "root"
+        archive.writestr(f"{root_name}/", b"")
+        source_bytes = 0
+        walker = paths.walk_directory(handle.descriptor, operation="zip_directory", requested_root=path)
+        with contextlib.closing(walker):
+            for relative_directory, directory_fd, dirnames, file_rows in walker:
+                for dirname in dirnames:
+                    archive_name = Path(root_name) / relative_directory / dirname
+                    archive.writestr(archive_name.as_posix().rstrip("/") + "/", b"")
+                for filename, _scanned_stat in file_rows:
+                    member_path = path / relative_directory / filename
+                    try:
+                        member_fd = os.open(filename, os.O_RDONLY | paths.nofollow_flag(), dir_fd=directory_fd)
+                    except OSError as error:
+                        if error.errno in {errno.ELOOP, errno.ENOENT}:
+                            continue
+                        raise
+                    try:
+                        paths.authority_pinned("zip_directory", member_path)
+                        before = os.fstat(member_fd)
+                        if not stat.S_ISREG(before.st_mode):
+                            continue
+                        source_bytes += before.st_size
+                        if source_bytes > byte_cap:
+                            raise paths.FilesystemError(
+                                _zip_limit_message(path, source_bytes, byte_cap),
+                                status=413,
+                                message_key="fs.error.folderTooLarge",
+                                message_params={"path": str(path), "size": source_bytes, "max": byte_cap},
+                            )
+                        archive_name = (Path(root_name) / relative_directory / filename).as_posix()
+                        with os.fdopen(os.dup(member_fd), "rb") as source, archive.open(archive_name, "w") as archive_member:
+                            shutil.copyfileobj(source, archive_member, length=TRANSFER_COPY_CHUNK_BYTES)
+                        after = os.fstat(member_fd)
+                        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+                            raise paths.FilesystemError(
+                                "file changed while its archive was being created",
+                                status=409,
+                                message_key="fs.error.changedOnDisk",
+                                message_params={"path": str(member_path)},
+                            )
+                    finally:
+                        os.close(member_fd)
+    size = output.high_water
+    target.flush()
+    target.seek(0)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = target.read(min(TRANSFER_COPY_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise OSError("archive artifact ended before its declared size")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    target.seek(0)
+    return size, digest.hexdigest()

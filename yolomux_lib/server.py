@@ -1112,6 +1112,9 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             path=raw_path,
             args=args,
         )
+        if response.transfer is not None:
+            self.api_response_writer.write_product_stream(response.transfer)
+            return
         if response.product is not None:
             self.write_product_bytes(response.body, response.product)
             return
@@ -1717,6 +1720,58 @@ class ApiResponseWriter(_HandlerAdapter):
         """Frame or forward one trusted producer's opaque product bytes."""
 
         self.write_api_response(data, product_metadata=product, product_promise=promise)
+
+    def write_product_stream(self, transfer: Any) -> None:
+        """Forward one verified file-backed artifact without retaining its body in this process."""
+        product = validated_product_metadata(transfer.product, body_length=int(transfer.product["length"]))
+        route = self._route_response
+        if route is None or route.protocol != RESPONSE_BINARY or product["format"] != "opaque_bytes":
+            transfer.close()
+            raise ValueError("streamed product has invalid route or format")
+        self._route_response_written = True
+        head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
+        digest = hashlib.sha256()
+        offset = 0
+        try:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", product["content_type"])
+            self.send_header("Content-Length", str(product["length"]))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Vary", "Accept-Encoding")
+            if product["disposition"] == "attachment":
+                self.send_header("Content-Disposition", f'attachment; filename="{product["filename"]}"')
+            self.send_auth_cookie_if_needed()
+            self.end_headers()
+            if not head_only:
+                while offset < product["length"]:
+                    chunk = transfer.read(offset)
+                    if not chunk or offset + len(chunk) > product["length"]:
+                        raise OSError("artifact stream ended outside its declared length")
+                    written = self.wfile.write(chunk)
+                    if written != len(chunk):
+                        raise OSError(f"response writer emitted {written} of {len(chunk)} artifact bytes")
+                    digest.update(chunk)
+                    offset += len(chunk)
+                if digest.hexdigest() != product["sha256"]:
+                    raise OSError("artifact stream integrity mismatch")
+            self.record_http_response_bytes(
+                HTTPStatus.OK,
+                0 if head_only else offset,
+                product["content_type"],
+                {
+                    "uncompressed_bytes": product["length"],
+                    "wire_bytes": 0 if head_only else offset,
+                    "representation_bytes": product["length"],
+                    "content_encoding": "identity",
+                    "head_only": head_only,
+                    "product_format": product["format"],
+                    "product_bytes": product["length"],
+                    "product_sha256": product["sha256"],
+                    "product_disposition": product["disposition"],
+                },
+            )
+        finally:
+            transfer.close()
 
     def write_api_response(
         self,

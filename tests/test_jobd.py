@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
@@ -154,8 +155,7 @@ def test_session_files_view_task_rejects_malformed_or_oversized_payload():
 def test_jobd_product_exposes_uniform_framing_metadata(tmp_path):
     server = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     body = b'{"retained":true}'
-    server.latest_product["framing-key"] = (1, body, 123.0)
-    server.latest_product_metadata["framing-key"] = {
+    product = {
         "format": "json",
         "content_type": "application/json; charset=utf-8",
         "length": len(body),
@@ -163,6 +163,7 @@ def test_jobd_product_exposes_uniform_framing_metadata(tmp_path):
         "disposition": "inline",
         "filename": "",
     }
+    server.product_store.store_inline(key="framing-key", generation=1, body=body, product=product, schedule={}, stored_at=123.0)
 
     response, returned = server._product({"coalesce_key": "framing-key"})
 
@@ -245,10 +246,32 @@ def test_filesystem_operation_task_preserves_raw_bytes(tmp_path):
         args={"download": True},
     )).encode("utf-8"))
 
-    assert result.body == body
+    assert isinstance(result, jobd.JobdArtifactResult)
+    assert (jobd.artifact_root() / result.basename).read_bytes() == body
+    (jobd.artifact_root() / result.basename).unlink()
     assert result.product["format"] == "opaque_bytes"
     assert result.product["disposition"] == "attachment"
     assert result.product["filename"] == "payload.bin"
+
+
+def test_filesystem_operation_task_preserves_raw_bytes_above_generic_json_budget(tmp_path):
+    path = tmp_path / "preview.png"
+    body = b"\x89PNG\r\n\x1a\n" + (b"x" * (jobd.JOBD_MAX_RESULT_BYTES + 1024))
+    assert len(body) < jobd.LOCAL_RPC_MAX_BINARY_BYTES
+    path.write_bytes(body)
+
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps(_fs_descriptor(
+        op="raw",
+        path=str(path),
+        args={"max_bytes": len(body) + 1},
+    )).encode("utf-8"))
+
+    assert isinstance(result, jobd.JobdArtifactResult)
+    assert (jobd.artifact_root() / result.basename).read_bytes() == body
+    (jobd.artifact_root() / result.basename).unlink()
+    assert result.product["format"] == "opaque_bytes"
+    assert result.product["content_type"] == "image/png"
+    assert result.product["disposition"] == "inline"
 
 
 def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path):
@@ -463,6 +486,26 @@ def _poll_broker_product(broker, coalesce_key, *, wait_seconds=5.0):
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         response, returned = broker.handle({"action": "product", "coalesce_key": coalesce_key})
+        if response.get("artifact") is True and response.get("state") in {"ready", "stale"}:
+            opened, _empty = broker.handle({
+                "action": "artifact_open",
+                "coalesce_key": coalesce_key,
+                "generation": response["generation"],
+            })
+            chunks = []
+            offset = 0
+            try:
+                while offset < opened["product"]["length"]:
+                    _metadata, chunk = broker.handle({
+                        "action": "artifact_chunk",
+                        "lease_id": opened["lease_id"],
+                        "offset": offset,
+                    })
+                    chunks.append(chunk)
+                    offset += len(chunk)
+            finally:
+                broker.handle({"action": "artifact_close", "lease_id": opened["lease_id"]})
+            return response, b"".join(chunks)
         if returned and response.get("state") in {"ready", "stale"}:
             return response, returned
         if response.get("state") == "none" and response.get("inflight") is not True:
@@ -515,24 +558,109 @@ def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay
 
     assert response["state"] == "ready"
     assert response["product"]["format"] == "opaque_bytes"
-    assert returned == body
+    assert returned == b""
+    assert response["artifact"] is True
+    opened, _empty = broker.handle({"action": "artifact_open", "coalesce_key": "relay-raw", "generation": 1})
+    chunked = bytearray()
+    offset = 0
+    while offset < len(body):
+        chunk_meta, chunk = broker.handle({
+            "action": "artifact_chunk", "lease_id": opened["lease_id"], "offset": offset,
+        })
+        assert len(chunk) <= jobd.LOCAL_RPC_MAX_BINARY_BYTES
+        assert chunk_meta["sha256"] == hashlib.sha256(chunk).hexdigest()
+        chunked.extend(chunk)
+        offset += len(chunk)
+    assert bytes(chunked) == body
+    closed, _empty = broker.handle({"action": "artifact_close", "lease_id": opened["lease_id"]})
+    assert closed == {"ok": True, "closed": True}
+    assert broker.product_store.lease_count() == 0
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Unix FIFO saturation fixture is POSIX-only")
-def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_handler_slots(tmp_path):
+@pytest.mark.parametrize("operation", ("raw", "zip"))
+def test_large_filesystem_transfer_uses_bounded_artifact_chunks(operation, tmp_path, monkeypatch):
+    monkeypatch.setattr(jobd, "RUNTIME_DIR", tmp_path / "runtime")
+    source = tmp_path / "source"
+    expected = b"z" * (jobd.LOCAL_RPC_MAX_BINARY_BYTES + 257)
+    if operation == "raw":
+        source.write_bytes(expected)
+        args = {"max_bytes": len(expected) + 1024}
+    else:
+        source.mkdir()
+        (source / "payload.bin").write_bytes(expected)
+        args = {"max_bytes": len(expected) + 1024, "filename": "source.zip"}
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    result = jobd.run_registered_task_result(
+        "filesystem_operation",
+        json.dumps(_fs_descriptor(op=operation, path=str(source), args=args)).encode("utf-8"),
+    )
+    assert isinstance(result, jobd.JobdArtifactResult)
+    artifact_path = jobd.artifact_root() / result.basename
+    record = broker._queue_record("filesystem_operation", {}, "interactive", 1, f"large-{operation}")
+    record.product = broker.product_store.store_artifact(
+        key=record.coalesce_key, generation=record.generation, result=result, schedule=broker._record_schedule(record),
+    )
+    assert artifact_path.exists() is False, "broker adoption must unlink the worker pathname"
+    assert record.result == b""
+    assert broker.product_store.inline_bytes() == 0
+    opened, _empty = broker.handle({"action": "artifact_open", "coalesce_key": f"large-{operation}", "generation": 1})
+    chunks = []
+    offset = 0
+    while offset < opened["product"]["length"]:
+        metadata, chunk = broker.handle({"action": "artifact_chunk", "lease_id": opened["lease_id"], "offset": offset})
+        assert 0 < len(chunk) <= jobd.LOCAL_RPC_MAX_BINARY_BYTES
+        chunks.append(chunk)
+        offset += len(chunk)
+        assert metadata["offset"] + metadata["length"] == offset
+    broker.handle({"action": "artifact_close", "lease_id": opened["lease_id"]})
+    if operation == "raw":
+        assert b"".join(chunks) == expected
+    else:
+        archive_path = tmp_path / "returned.zip"
+        archive_path.write_bytes(b"".join(chunks))
+        with zipfile.ZipFile(archive_path) as archive:
+            assert archive.read("source/payload.bin") == expected
+    broker._on_shutdown()
+    assert broker.product_store.open_descriptor_count() == 0 and broker.product_store.lease_count() == 0
+
+
+def test_filesystem_transfer_cap_plus_one_is_typed_413(tmp_path, monkeypatch):
+    monkeypatch.setattr(jobd, "RUNTIME_DIR", tmp_path / "runtime")
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"x" * 1025)
+    with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
+        jobd.run_registered_task_result(
+            "filesystem_operation",
+            json.dumps(_fs_descriptor(op="raw", path=str(source), args={"max_bytes": 1024})).encode("utf-8"),
+        )
+    assert failure.value.status == 413
+    assert failure.value.payload["user_message"]["key"] == "fs.error.tooLarge"
+
+
+def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_handler_slots(tmp_path, monkeypatch):
     """Cold byte work occupies the worker, not one RPC handler for its lifetime.
 
-    A FIFO read is a deterministic cold job: the jobd worker cannot finish until this test opens
-    the writer. Both zero-wait produce calls and a product poll must nevertheless complete over
-    the real Unix listener before that release. The retired relay would have parked one handler
-    per request at this point and exhausted a two-slot listener.
+    A controlled executor keeps the first regular-file transfer cold without weakening the raw
+    file contract to admit FIFOs. Both zero-wait produce calls and a product poll must nevertheless
+    complete over the real Unix listener before that release. The retired relay would have parked
+    one handler per request at this point and exhausted a two-slot listener.
     """
     socket_path = tmp_path / "jobd.sock"
-    first_fifo = tmp_path / "first.fifo"
-    second_fifo = tmp_path / "second.fifo"
-    os.mkfifo(first_fifo)
-    os.mkfifo(second_fifo)
+    first_path = tmp_path / "first.bin"
+    second_path = tmp_path / "second.bin"
+    first_path.write_bytes(b"first")
+    second_path.write_bytes(b"second")
     broker = jobd.PersistentJobBroker(socket_path, workers=1)
+    submitted = []
+
+    class ControlledExecutor:
+        def submit(self, function, *args):
+            future = Future()
+            submitted.append((future, function, args))
+            return future
+
+    controlled_executor = ControlledExecutor()
+    monkeypatch.setattr(broker, "_executor", lambda *_args: controlled_executor)
     worker = threading.Thread(target=broker.run, daemon=True)
     worker.start()
     client = jobd.JobClient(socket_path)
@@ -542,7 +670,7 @@ def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_hand
     assert client.registry.healthy() is True
     try:
         receipts = []
-        for index, path in enumerate((first_fifo, second_fifo), start=1):
+        for index, path in enumerate((first_path, second_path), start=1):
             response, body = client.produce(
                 "filesystem_operation",
                 _fs_descriptor(op="raw", path=str(path), args={"download": True}),
@@ -562,15 +690,21 @@ def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_hand
         assert pending["state"] in {"pending", "none"}
         assert pending.get("inflight") is True
 
-        with first_fifo.open("wb", buffering=0) as writer:
-            writer.write(b"first")
+        deadline = time.monotonic() + 2.0
+        while not submitted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        first_future, first_function, first_args = submitted.pop(0)
+        first_future.set_result(first_function(*first_args))
         ready, returned = _poll_broker_product(broker, "former-relay-1")
         assert ready["state"] in {"ready", "stale"}
         assert returned == b"first"
     finally:
-        # Unblock the queued second worker before broker shutdown.
-        with second_fifo.open("wb", buffering=0) as writer:
-            writer.write(b"second")
+        deadline = time.monotonic() + 2.0
+        while not submitted and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if submitted:
+            second_future, second_function, second_args = submitted.pop(0)
+            second_future.set_result(second_function(*second_args))
         broker.stop_event.set()
         worker.join(timeout=2.0)
     assert worker.is_alive() is False
@@ -2059,7 +2193,7 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
     # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, and v22 retires the blocking `relay` action in favor of zero-wait produce plus a web-side product poll.
-    assert jobd.JOBD_PROTOCOL_VERSION == 22
+    assert jobd.JOBD_PROTOCOL_VERSION == 23
     assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
@@ -2110,8 +2244,7 @@ def test_jobd_produce_preserves_one_bounded_batch_product_and_caller_delivery_mo
     service._pump = lambda: None
     items = [{"id": f"item-{index}", "type": "info", "path": f"/repo/{index}"} for index in range(64)]
     ready_body = json.dumps({"results": items}, separators=(",", ":")).encode("utf-8")
-    service.latest_product["fs-batch"] = (7, ready_body, time.time())
-    service.latest_product_metadata["fs-batch"] = {
+    product = {
         "format": "json",
         "content_type": "application/json; charset=utf-8",
         "length": len(ready_body),
@@ -2119,6 +2252,7 @@ def test_jobd_produce_preserves_one_bounded_batch_product_and_caller_delivery_mo
         "disposition": "inline",
         "filename": "",
     }
+    service.product_store.store_inline(key="fs-batch", generation=7, body=ready_body, product=product, schedule={})
 
     ready_meta, forwarded = service._produce({
         "task": "filesystem_batch",
@@ -2141,7 +2275,7 @@ def test_jobd_produce_preserves_one_bounded_batch_product_and_caller_delivery_mo
 
     assert ready_meta["state"] == "ready"
     assert ready_meta["job"]["generation"] == 7
-    assert ready_meta["product"] == service.latest_product_metadata["fs-batch"]
+    assert ready_meta["product"] == service.product_store.inline_metadata("fs-batch")
     assert json.loads(forwarded)["results"] == items
     assert receipt_meta["state"] == "queued"
     assert receipt_meta["job"]["generation"] == 8
@@ -2412,13 +2546,13 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
     # The newer generation completes first and becomes the product.
     newer.future.set_result(b'{"gen":2}')
     service._pump()
-    assert service.latest_product["k"][0] == 2
+    assert service.product_store.inline_generation("k") == 2
 
     # A slow OLDER-generation completion must not replace the newer complete product.
     older.future.set_result(b'{"gen":1}')
     service._pump()
-    assert service.latest_product["k"][0] == 2
-    assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
+    assert service.product_store.inline_generation("k") == 2
+    assert json.loads(service.product_store.inline_body("k")) == {"gen": 2}
 
     # A failed refresh must not replace it either.
     failing = service._queue_record("json_compact", {"gen": 3}, "freshness", 3, "k")
@@ -2433,7 +2567,7 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
     service.executors["bulk"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     assert failing.status == "failed"
-    assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
+    assert json.loads(service.product_store.inline_body("k")) == {"gen": 2}
 
 
 def test_jobd_product_counters_track_accepted_coalesced_superseded_and_completed(tmp_path):
@@ -2714,7 +2848,7 @@ def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):
             record.future = Future()
             record.future.set_result(f'{{"i":{index}}}'.encode())
             service._pump()
-        assert set(service.latest_product) == {"key-0", "key-1", "key-2"}
+        assert service.product_store.inline_keys() == {"key-0", "key-1", "key-2"}
 
         overflow = service._queue_record("json_compact", {"i": 3}, "freshness", 1, "key-3")
         overflow.status = "running"
@@ -2722,9 +2856,9 @@ def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):
         overflow.future.set_result(b'{"i":3}')
         service._pump()
 
-        assert len(service.latest_product) == 3
-        assert "key-0" not in service.latest_product  # the oldest-stored entry was evicted
-        assert "key-3" in service.latest_product
+        assert service.product_store.inline_count() == 3
+        assert "key-0" not in service.product_store.inline_keys()  # the oldest-stored entry was evicted
+        assert "key-3" in service.product_store.inline_keys()
         meta, body = service._product({"coalesce_key": "key-0"})
         assert meta["state"] == "none" and body == b""  # a tombstoned key reports honestly, not stale data
     finally:

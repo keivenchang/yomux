@@ -952,17 +952,31 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   const version = String(state?.mtime || state?.size || 0);
   const img = document.createElement('img');
   img.className = 'file-editor-preview-image';
-  img.src = rawFileUrl(path, version ? {v: version} : {});
   img.alt = basenameOf(path);
   img.loading = 'eager';
   img.decoding = 'async';
-  img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t('preview.image.loadFailed'), `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
     path,
     context: options.context || '',
   })));
+  container._previewAsync = installRawFileMediaSource(img, path, {
+    params: version ? {v: version} : {},
+    isCurrent: () => container.contains(img),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderPdfPreviewInto(container, path) {
@@ -990,9 +1004,17 @@ function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = ''
   open.target = target;
   open.rel = 'noopener noreferrer';
   open.textContent = t('common.open');
+  open.addEventListener('click', event => {
+    event.preventDefault();
+    void openRawFileInNewTab(path);
+  });
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
   download.textContent = t('common.download');
+  download.addEventListener('click', event => {
+    event.preventDefault();
+    void triggerFileDownload(path);
+  });
   return [
     ...(leadingSeparator ? [document.createTextNode(leadingSeparator)] : []),
     open,
@@ -1020,11 +1042,25 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.className = `file-editor-native-media file-editor-native-${kind}`;
   media.controls = true;
   media.preload = 'metadata';
-  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
-  media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  container._previewAsync = installRawFileMediaSource(media, path, {
+    params: state?.mtime ? {v: state.mtime} : {},
+    isCurrent: () => container.contains(media),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderUnsupportedPreviewInto(container, path, state = null) {
@@ -1089,6 +1125,7 @@ const PREVIEW_SURFACE_CLASSES = Object.freeze([
 ]);
 
 function cleanupStandardPreviewStrategy(container) {
+  releaseRawFileMediaSources(container);
   container._previewPath = null;
   container._previewText = null;
   container._previewDisplayMode = null;

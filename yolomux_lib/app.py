@@ -1322,6 +1322,50 @@ class FilesystemOperationHttpResponse:
     status: HTTPStatus
     body: bytes = b""
     product: dict[str, Any] | None = None
+    transfer: "FilesystemArtifactTransfer | None" = None
+
+
+@dataclass
+class FilesystemArtifactTransfer:
+    """One bounded lease over a broker-owned raw/zip artifact."""
+
+    job_client: Any
+    lease_id: str
+    product: dict[str, Any]
+    closed: bool = False
+
+    def read(self, offset: int) -> bytes:
+        metadata, chunk = self.job_client.artifact_chunk(self.lease_id, offset)
+        if metadata.get("ok") is not True or metadata.get("offset") != offset or metadata.get("length") != len(chunk):
+            raise OSError(str(metadata.get("error") or "invalid artifact chunk"))
+        if metadata.get("sha256") != hashlib.sha256(chunk).hexdigest():
+            raise OSError("artifact chunk integrity mismatch")
+        return chunk
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.job_client.artifact_close(self.lease_id)
+
+
+def filesystem_artifact_http_response(
+    job_client: Any,
+    product_key: str,
+    generation: int,
+    product: Mapping[str, Any],
+) -> FilesystemOperationHttpResponse:
+    """Open one exact broker product as a bounded HTTP transfer."""
+    opened = job_client.artifact_open(product_key, generation)
+    lease_id = str(opened.get("lease_id") or "")
+    opened_product = opened.get("product") if isinstance(opened.get("product"), dict) else None
+    if opened.get("ok") is not True or not lease_id or opened_product != dict(product):
+        raise JobdOperationUnavailable(
+            str(opened.get("error") or "jobd artifact unavailable"),
+            dict(opened),
+        )
+    transfer = FilesystemArtifactTransfer(job_client, lease_id, dict(opened_product))
+    return FilesystemOperationHttpResponse(None, HTTPStatus.OK, product=dict(opened_product), transfer=transfer)
 
 
 @dataclass(frozen=True)
@@ -15131,8 +15175,10 @@ class TmuxWebtermApp:
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
                 continue
             product = metadata.get("product") if isinstance(metadata.get("product"), dict) else None
-            if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation and product is not None:
+            if (body or metadata.get("artifact") is True) and state == "ready" and int(metadata.get("generation") or 0) == producer.generation and product is not None:
                 schedule = dict(metadata.get("schedule") or {}) if isinstance(metadata.get("schedule"), dict) else {}
+                if metadata.get("artifact") is True:
+                    schedule["artifact"] = True
                 if transient_polls:
                     schedule["transient_polls"] = transient_polls
                 return dict(product), body, schedule
@@ -15391,6 +15437,13 @@ class TmuxWebtermApp:
         product = response.get("product") if isinstance(response.get("product"), dict) else None
         if response.get("ok") is True and body and response.get("state") in {"ready", "stale"} and product is not None:
             return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=body, product=dict(product))
+        if response.get("ok") is True and response.get("state") in {"ready", "stale"} and product is not None and response.get("artifact") is True:
+            try:
+                return filesystem_artifact_http_response(self.job_client, product_key, 1, product)
+            except JobdOperationUnavailable as error:
+                result = self.jobd_operation_failure_result(request_id, error.failure, route=route, operation="jobd.artifact_open", code=error.code)
+                self.record_operation_failure("", result)
+                return FilesystemOperationHttpResponse(result, error.status)
         job = response.get("job") if isinstance(response.get("job"), dict) else {}
         job_id = str(job.get("job_id") or "")
         producer_state = str(job.get("status") or "")
@@ -15406,7 +15459,7 @@ class TmuxWebtermApp:
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
         producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=1)
         try:
-            product_meta, product_body, _schedule = self.wait_for_filesystem_operation_product(
+            product_meta, product_body, schedule = self.wait_for_filesystem_operation_product(
                 producer,
                 time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS,
             )
@@ -15424,6 +15477,13 @@ class TmuxWebtermApp:
             )
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, error.status)
+        if not product_body and schedule.get("artifact") is True:
+            try:
+                return filesystem_artifact_http_response(self.job_client, product_key, 1, product_meta)
+            except JobdOperationUnavailable as error:
+                result = self.jobd_operation_failure_result(request_id, error.failure, route=route, operation="jobd.artifact_open", code=error.code)
+                self.record_operation_failure("", result)
+                return FilesystemOperationHttpResponse(result, error.status)
         return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=product_body, product=dict(product_meta))
 
     def context_tail(

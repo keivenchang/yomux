@@ -7,8 +7,10 @@ from __future__ import annotations
 import ast
 import errno
 import hashlib
+import io
 import inspect
 import json
+from contextlib import nullcontext
 from http import HTTPStatus
 from pathlib import Path
 from types import MethodType
@@ -598,6 +600,54 @@ def test_response_parent_forwards_non_json_product_without_framing() -> None:
         "product_metadata": metadata,
     })]
     assert handler._route_response_written is True
+
+
+@pytest.mark.parametrize("disconnect", (False, True), ids=("complete", "disconnect"))
+def test_response_parent_streams_artifact_chunks_and_always_closes_lease(disconnect: bool) -> None:
+    body = b"first" if disconnect else b"first" + b"second"
+    product = {
+        "format": "opaque_bytes",
+        "content_type": "application/octet-stream" if disconnect else "image/png",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+
+    class Transfer:
+        def __init__(self):
+            self.closed = False
+            self.product = product
+
+        def read(self, offset):
+            return b"first" if offset == 0 else b"second"
+
+        def close(self):
+            self.closed = True
+
+    class BrokenWriter:
+        def write(self, _body):
+            raise BrokenPipeError(errno.EPIPE, "client disconnected")
+
+    transfer = Transfer()
+    handler = server.Handler.__new__(server.Handler)
+    handler._route_response = http_routes.Route("GET", "/api/fs/raw", "readonly", lambda *_args: None, protocol=http_routes.RESPONSE_BINARY)
+    handler._route_response_written = False
+    handler.command = "GET"
+    handler.wfile = BrokenWriter() if disconnect else io.BytesIO()
+    handler.send_response = lambda *_args: None
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.record_http_response_bytes = lambda *_args, **_kwargs: None
+
+    expectation = pytest.raises(BrokenPipeError) if disconnect else nullcontext()
+    with expectation:
+        handler.api_response_writer.write_product_stream(transfer)
+    assert transfer.closed is True
+    if not disconnect:
+        assert handler.wfile.getvalue() == body
+        assert handler._route_response_written is True
 
 
 def test_queued_delivery_ledger_registers_explicit_ready_product_terminal_once() -> None:

@@ -3530,6 +3530,7 @@ function fileEditorEmptyState(title, detail = '') {
 }
 
 function disconnectFileEditorImageObserver(imagePane) {
+  releaseRawFileMediaSources(imagePane);
   if (imagePane?._imageResizeObserver) {
     imagePane._imageResizeObserver.disconnect();
     imagePane._imageResizeObserver = null;
@@ -3559,19 +3560,30 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
       applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
-    img.onerror = () => {
-      disconnectFileEditorImageObserver(imagePane);
-      imagePane.replaceChildren(fileEditorEmptyState(
-        t('preview.image.loadFailed'),
-        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
-      ));
-      status(t('preview.image.loadFailedStatus'), 'error');
-    };
-    img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
+    imagePane._previewAsync = installRawFileMediaSource(img, path, {
+      params: {v: version},
+      isCurrent: () => imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version && imagePane.contains(img),
+      onFailure: error => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          userMessageText(error, t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)})),
+        ));
+        status(userMessageText(error, t('preview.image.loadFailedStatus')), 'error');
+      },
+      onDecodeFailure: () => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+        ));
+        status(t('preview.image.loadFailedStatus'), 'error');
+      },
+    });
   }
   if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);
   else applyPreviewZoomSurface(imagePane, img, zoomOptions);

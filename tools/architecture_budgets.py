@@ -33,15 +33,16 @@ from tools.test_plan import StepId  # noqa: E402
 DEFAULT_MANIFEST = REPO_ROOT / "tests/fixtures/architecture_budgets/v1.json"
 MANIFEST_VERSION = 1
 
-CLASS_TARGETS: Final[dict[str, str]] = {
-    "yolomux_lib/app.py": "TmuxWebtermApp",
-    "yolomux_lib/server.py": "Handler",
-    "yolomux_lib/stats_current/service.py": "StatsCurrentService",
-    "yolomux_lib/local_services/registry.py": "LocalServiceRegistry",
-    "yolomux_lib/watchd.py": "PersistentWatchService",
-    "yolomux_lib/infra/jobd.py": "PersistentJobBroker",
-    "yolomux_lib/infra/background_owner.py": "BackgroundOwnerRegistry",
-}
+CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
+    ("yolomux_lib/app.py", "TmuxWebtermApp"),
+    ("yolomux_lib/server.py", "Handler"),
+    ("yolomux_lib/stats_current/service.py", "StatsCurrentService"),
+    ("yolomux_lib/local_services/registry.py", "LocalServiceRegistry"),
+    ("yolomux_lib/watchd.py", "PersistentWatchService"),
+    ("yolomux_lib/infra/jobd.py", "PersistentJobBroker"),
+    ("yolomux_lib/infra/jobd.py", "JobProductStore"),
+    ("yolomux_lib/infra/background_owner.py", "BackgroundOwnerRegistry"),
+)
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
     "yolomux_lib/app.py",
     "yolomux_lib/server.py",
@@ -317,7 +318,7 @@ def capture(root: Path) -> dict[str, Any]:
         "manifest_version": MANIFEST_VERSION,
         "class_budgets": {
             f"{relative}:{class_name}": _class_budget(root, relative, class_name)
-            for relative, class_name in CLASS_TARGETS.items()
+            for relative, class_name in CLASS_TARGETS
         },
         "test_to_test_imports": _test_imports(root),
         "partial_global_writes": _partial_global_writes(root),

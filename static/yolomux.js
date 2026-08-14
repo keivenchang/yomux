@@ -3057,7 +3057,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     recordApiDebugResponseBytes(debugEvent, response);
     noteApiDebugHeaders(debugEvent, url, startedAt);
   }
-  if (response.status === 401) {
+  if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
     if (registeredCommandRouteForRequest(url, requestOptions)?.contractClass === 'background') {
       cleanup();
       const error = new Error('authentication required');
@@ -19281,6 +19281,107 @@ function agentWindowActivityIconHtmlForStatus(agent, agentKey = agent?.kind, ses
     item: agentWindowActivityIconForStatusItem(agent, agentKey, session, options),
   });
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Authenticated raw-byte fetch and Blob URL lifecycle shared by file preview surfaces.
+
+function rawFileUrl(path, params = {}) {
+  const queryParts = [`path=${encodeURIComponent(path)}`];
+  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
+  for (const [key, value] of Object.entries(params)) {
+    if (value === null || value === undefined || value === '') continue;
+    queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+  }
+  return `/api/fs/raw?${queryParts.join('&')}`;
+}
+
+function rawFileFailureFallback(status, path) {
+  if (status === 401) return {key: 'auth.error.authenticationRequired', params: {}, fallback: 'Authentication required.'};
+  if (status === 404) return {key: 'common.pathNotFound', params: {path}, fallback: `path not found: ${path}`};
+  if (status === 413) return {key: 'editor.fileTooLargeTitle', params: {}, fallback: 'File is too large to preview'};
+  return {key: 'common.requestFailed', params: {}, fallback: 'request failed'};
+}
+
+async function rawFileFailureResult(response, path) {
+  const status = Number(response?.status || 0);
+  const payload = typeof response?.json === 'function' ? await response.json().catch(() => ({})) : {};
+  return {ok: false, status, error: userMessageSnapshot(payload, rawFileFailureFallback(status, path))};
+}
+
+async function fetchRawFileBlob(path, options = {}) {
+  try {
+    const response = await apiFetch(rawFileUrl(path, options.params || {}), {
+      cache: 'no-store',
+      deadlineMs: options.deadlineMs || apiFetchLongOperationDeadlineMs,
+      ...(options.signal ? {signal: options.signal} : {}),
+    }, {returnUnauthorizedResponse: true});
+    if (!response.ok) return rawFileFailureResult(response, path);
+    const blob = await response.blob();
+    return {
+      ok: true,
+      status: Number(response.status || 200),
+      blob,
+      contentType: String(response.headers?.get?.('Content-Type') || blob?.type || ''),
+      contentDisposition: String(response.headers?.get?.('Content-Disposition') || ''),
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') return {ok: false, aborted: true, status: 0, error: null};
+    const status = Number(error?.status || 0);
+    return {ok: false, status, error: userMessageSnapshot(error, rawFileFailureFallback(status, path))};
+  }
+}
+
+function releaseRawFileMediaSource(media) {
+  media?._rawFileAbortController?.abort?.();
+  if (media) media._rawFileAbortController = null;
+  if (media?._rawFileErrorHandler) media.removeEventListener?.('error', media._rawFileErrorHandler);
+  if (media) media._rawFileErrorHandler = null;
+  const objectUrl = String(media?._rawFileObjectUrl || '');
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  if (media) media._rawFileObjectUrl = '';
+}
+
+async function installRawFileMediaSource(media, path, options = {}) {
+  if (!media || !path) return {ok: false, status: 0, error: null};
+  releaseRawFileMediaSource(media);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  media._rawFileAbortController = controller;
+  const result = await fetchRawFileBlob(path, {params: options.params, signal: controller?.signal, deadlineMs: options.deadlineMs});
+  if (media._rawFileAbortController !== controller || options.isCurrent?.() === false) return result;
+  media._rawFileAbortController = null;
+  if (!result.ok) {
+    if (!result.aborted) options.onFailure?.(result.error, result);
+    return result;
+  }
+  const objectUrl = URL.createObjectURL(result.blob);
+  if (options.isCurrent?.() === false) {
+    URL.revokeObjectURL(objectUrl);
+    return {...result, stale: true};
+  }
+  media._rawFileObjectUrl = objectUrl;
+  if (typeof options.onDecodeFailure === 'function') {
+    const handleDecodeFailure = () => {
+      if (media._rawFileErrorHandler !== handleDecodeFailure) return;
+      releaseRawFileMediaSource(media);
+      options.onDecodeFailure();
+    };
+    media._rawFileErrorHandler = handleDecodeFailure;
+    media.addEventListener?.('error', handleDecodeFailure, {once: true});
+  }
+  media.src = objectUrl;
+  if (typeof media.decode === 'function') {
+    try {
+      await media.decode();
+    } catch (_) {
+      media._rawFileErrorHandler?.();
+    }
+  }
+  return {...result, objectUrl};
+}
+
+function releaseRawFileMediaSources(root) {
+  for (const media of Array.from(root?.querySelectorAll?.('img, audio, video') || [])) releaseRawFileMediaSource(media);
+}
 function toggleFileExplorer() {
   if (!fileExplorer) return;
   const opening = fileExplorer.hasAttribute('hidden');
@@ -22657,22 +22758,13 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   reconcileChildNodes(container, nextNodes);
 }
 
-function rawFileUrl(path, params = {}) {
-  const queryParts = [`path=${encodeURIComponent(path)}`];
-  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value === null || value === undefined || value === '') continue;
-    queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  }
-  return `/api/fs/raw?${queryParts.join('&')}`;
-}
-
 function zipFileDownloadUrl(path) {
   return `/api/fs/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {
   if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
+  releaseRawFileMediaSources(fileImagePreviewPopover);
   fileImagePreviewPopover?.remove();
   fileImagePreviewPopover = null;
 }
@@ -22696,7 +22788,6 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   popover.dataset.previewPath = path;
   const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
   const media = document.createElement(mediaKind === 'video' ? 'video' : 'img');
-  media.src = options.sourceUrl || rawFileUrl(path);
   if (mediaKind === 'video') {
     media.autoplay = true;
     media.loop = true;
@@ -22709,6 +22800,21 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
+  if (options.sourceUrl) {
+    media.src = options.sourceUrl;
+  } else {
+    void installRawFileMediaSource(media, path, {
+      onFailure: error => {
+        if (fileImagePreviewPopover !== popover) return;
+        const failure = document.createElement('div');
+        failure.className = 'file-image-preview-error';
+        failure.textContent = userMessageText(error, t('preview.image.loadFailed'));
+        popover.replaceChildren(failure);
+        positionFileImagePreview(anchor, popover, point);
+      },
+      isCurrent: () => fileImagePreviewPopover === popover,
+    });
+  }
 }
 
 function bindFileImagePreview(anchor, path, entry, options = {}) {
@@ -24945,12 +25051,12 @@ async function copyImageFileToClipboard(path, options = {}) {
     return;
   }
   try {
-    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
-    if (!response.ok) {
-      await showFileTransferResponseError(response, t('common.copyFailed', {error: t('common.requestFailed')}));
+    const result = await fetchRawFileBlob(path);
+    if (!result.ok) {
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('common.copyFailed', {error: t('common.requestFailed')})});
       return;
     }
-    const blob = await response.blob();
+    const blob = result.blob;
     const type = blob.type || 'image/png';
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
     showCopyFeedback({button: options.button, statusText: t('status.copiedImage', {name: basenameOf(path)})});
@@ -25011,17 +25117,37 @@ async function triggerFileDownload(path) {
   const label = basenameOf(path) || path;
   statusEl.textContent = t('fileTransfer.downloading', {name: label});
   try {
-    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
-    if (!response.ok) {
-      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+    const result = await fetchRawFileBlob(path, {params: {download: 1}});
+    if (!result.ok) {
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
       return;
     }
-    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
-    const blob = await response.blob();
-    saveBlobDownload(blob, filename);
+    const filename = downloadFilenameFromContentDisposition(result.contentDisposition, basenameOf(path) || 'download');
+    saveBlobDownload(result.blob, filename);
     statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
     showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
+  }
+}
+
+async function openRawFileInNewTab(path) {
+  if (!path) return;
+  const opened = window.open('about:blank', '_blank');
+  if (opened) opened.opener = null;
+  try {
+    const result = await fetchRawFileBlob(path);
+    if (!result.ok) {
+      opened?.close?.();
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('preview.openFailed', {path})});
+      return;
+    }
+    const objectUrl = URL.createObjectURL(result.blob);
+    if (opened) opened.location.href = objectUrl;
+    else window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    opened?.close?.();
+    showFileTransferError(error, {fallback: t('preview.openFailed', {path})});
   }
 }
 
@@ -63569,6 +63695,7 @@ function fileEditorEmptyState(title, detail = '') {
 }
 
 function disconnectFileEditorImageObserver(imagePane) {
+  releaseRawFileMediaSources(imagePane);
   if (imagePane?._imageResizeObserver) {
     imagePane._imageResizeObserver.disconnect();
     imagePane._imageResizeObserver = null;
@@ -63598,19 +63725,30 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
       applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
-    img.onerror = () => {
-      disconnectFileEditorImageObserver(imagePane);
-      imagePane.replaceChildren(fileEditorEmptyState(
-        t('preview.image.loadFailed'),
-        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
-      ));
-      status(t('preview.image.loadFailedStatus'), 'error');
-    };
-    img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
+    imagePane._previewAsync = installRawFileMediaSource(img, path, {
+      params: {v: version},
+      isCurrent: () => imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version && imagePane.contains(img),
+      onFailure: error => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          userMessageText(error, t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)})),
+        ));
+        status(userMessageText(error, t('preview.image.loadFailedStatus')), 'error');
+      },
+      onDecodeFailure: () => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+        ));
+        status(t('preview.image.loadFailedStatus'), 'error');
+      },
+    });
   }
   if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);
   else applyPreviewZoomSurface(imagePane, img, zoomOptions);
@@ -64303,8 +64441,9 @@ function markdownImageFallbackNode(path, label = '') {
   return node;
 }
 
-function rewriteMarkdownPreviewImages(root, markdownPath) {
-  if (!root || !markdownPath) return;
+function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
+  if (!root || !markdownPath) return [];
+  const pending = [];
   for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
     const original = img.getAttribute('src') || '';
     const target = markdownPreviewImageTarget(original, markdownPath);
@@ -64312,12 +64451,29 @@ function rewriteMarkdownPreviewImages(root, markdownPath) {
     img.classList.add('markdown-preview-image');
     img.dataset.originalSrc = original;
     if (target.path) img.dataset.resolvedPath = target.path;
-    img.setAttribute('src', target.src);
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
-    img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
-    }, {once: true});
+    if (target.external) {
+      img.setAttribute('src', target.src);
+      img.addEventListener('error', () => {
+        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+      }, {once: true});
+      continue;
+    }
+    img.removeAttribute('src');
+    pending.push(installRawFileMediaSource(img, target.path, {
+      isCurrent: options.isCurrent,
+      onFailure: error => {
+        if (options.isCurrent?.() === false) return;
+        const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
+        img.replaceWith(markdownImageFallbackNode(target.path, label));
+      },
+      onDecodeFailure: () => {
+        if (options.isCurrent?.() === false) return;
+        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+      },
+    }));
   }
+  return pending;
 }
 
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
@@ -64659,6 +64815,7 @@ function invalidateMarkdownPreviewArtifacts(container) {
   // a slow prior render cannot install its SVG after newer Markdown wins.
   const generation = Number(container?._markdownPreviewGeneration || 0) + 1;
   if (container) container._markdownPreviewGeneration = generation;
+  releaseRawFileMediaSources(container);
   for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
     host.dataset.mermaidRenderSeq = `stale-${generation}`;
     if (typeof disconnectPreviewZoomSurface === 'function') {
@@ -64679,13 +64836,16 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   applyMarkdownHtmlBackgroundClasses(frag);
   applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
-  rewriteMarkdownPreviewImages(frag, markdownPath);
+  const localImages = rewriteMarkdownPreviewImages(frag, markdownPath, {
+    isCurrent: () => container._markdownPreviewGeneration === generation,
+  });
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
+  const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
+  container._previewAsync = Promise.all([mermaid, ...localImages]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),
@@ -66022,17 +66182,31 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   const version = String(state?.mtime || state?.size || 0);
   const img = document.createElement('img');
   img.className = 'file-editor-preview-image';
-  img.src = rawFileUrl(path, version ? {v: version} : {});
   img.alt = basenameOf(path);
   img.loading = 'eager';
   img.decoding = 'async';
-  img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t('preview.image.loadFailed'), `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
     path,
     context: options.context || '',
   })));
+  container._previewAsync = installRawFileMediaSource(img, path, {
+    params: version ? {v: version} : {},
+    isCurrent: () => container.contains(img),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderPdfPreviewInto(container, path) {
@@ -66060,9 +66234,17 @@ function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = ''
   open.target = target;
   open.rel = 'noopener noreferrer';
   open.textContent = t('common.open');
+  open.addEventListener('click', event => {
+    event.preventDefault();
+    void openRawFileInNewTab(path);
+  });
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
   download.textContent = t('common.download');
+  download.addEventListener('click', event => {
+    event.preventDefault();
+    void triggerFileDownload(path);
+  });
   return [
     ...(leadingSeparator ? [document.createTextNode(leadingSeparator)] : []),
     open,
@@ -66090,11 +66272,25 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.className = `file-editor-native-media file-editor-native-${kind}`;
   media.controls = true;
   media.preload = 'metadata';
-  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
-  media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  container._previewAsync = installRawFileMediaSource(media, path, {
+    params: state?.mtime ? {v: state.mtime} : {},
+    isCurrent: () => container.contains(media),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderUnsupportedPreviewInto(container, path, state = null) {
@@ -66159,6 +66355,7 @@ const PREVIEW_SURFACE_CLASSES = Object.freeze([
 ]);
 
 function cleanupStandardPreviewStrategy(container) {
+  releaseRawFileMediaSources(container);
   container._previewPath = null;
   container._previewText = null;
   container._previewDisplayMode = null;

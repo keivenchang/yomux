@@ -12,6 +12,8 @@ import hashlib
 import json
 import multiprocessing
 import os
+import stat
+import tempfile
 import threading
 import time
 import traceback
@@ -98,7 +100,9 @@ from ..web import html_preview_document
 # whole job.  A v21 daemon still accepts `relay` and would block; a v22 web process never sends it,
 # and a v21 web process sending `relay` to a v22 daemon gets `unknown jobd action`, so the fence
 # retires the mismatched pair.
-JOBD_PROTOCOL_VERSION = 22
+# v23: raw and zip products are private, file-backed artifacts consumed through bounded chunk
+# leases. A v22 peer can only retain/return whole byte products, so mixed peers must be fenced.
+JOBD_PROTOCOL_VERSION = 23
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
@@ -172,6 +176,11 @@ JOBD_MAX_PAYLOAD_BYTES = 256 * 1024
 JOBD_MAX_RESULT_BYTES = 512 * 1024
 JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES = LOCAL_RPC_MAX_BINARY_BYTES
 JOBD_MAX_RETAINED_RESULT_BYTES = 32 * 1024 * 1024
+JOBD_MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
+JOBD_MAX_ARTIFACTS = 64
+JOBD_MAX_ARTIFACT_LEASES = 128
+JOBD_ARTIFACT_CHUNK_BYTES = 1024 * 1024
+JOBD_ARTIFACT_LEASE_SECONDS = 120.0
 JOBD_MAX_RECORDS = 256
 # The last-known-good product store is keyed by coalesce_key (per file/session), so bound it
 # independently of the job-record ring and evict the oldest completed bytes past this many keys.
@@ -181,16 +190,39 @@ JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_SCHEDULER_POLL_SECONDS = 0.05
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
-JOBD_REQUEST_ACTIONS = frozenset({
+JOBD_BROKER_ACTIONS = frozenset({
     "ping", "status", "profile", "submit", "result", "product", "produce", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
 })
-JOBD_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in JOBD_REQUEST_ACTIONS})
+JOBD_ARTIFACT_ACTION_METHODS = {
+    "artifact_open": "open",
+    "artifact_chunk": "chunk",
+    "artifact_close": "close",
+}
+JOBD_REQUEST_ACTIONS = frozenset((*JOBD_BROKER_ACTIONS, *JOBD_ARTIFACT_ACTION_METHODS))
+JOBD_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in JOBD_BROKER_ACTIONS})
+JOBD_ARTIFACT_COMMAND_ROUTER = LocalServiceCommandRouter(JOBD_ARTIFACT_ACTION_METHODS)
 JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
 
 
 def default_socket_path() -> Path:
     return safe_socket_path(RUNTIME_DIR / "services" / JOBD_SOCKET_NAME, prefix="yolomux-jobd")
+
+
+def artifact_root() -> Path:
+    return RUNTIME_DIR / "jobd-artifacts"
+
+
+def _private_artifact_root() -> Path:
+    root = artifact_root()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.is_symlink():
+        raise OSError("jobd artifact root must not be a symlink")
+    root_stat = root.stat()
+    if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != os.getuid():
+        raise OSError("jobd artifact root has an invalid owner or type")
+    os.chmod(root, 0o700)
+    return root
 
 
 def default_worker_count(cpu_count: int | None = None) -> int:
@@ -343,7 +375,7 @@ def _filesystem_batch(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _filesystem_operation_untyped(payload: bytes) -> bytes:
+def _filesystem_operation_untyped(payload: bytes) -> bytes | JobdTaskResult | JobdArtifactResult:
     """Execute one typed filesystem snapshot descriptor outside the web process.
 
     This daemon is shared by every server on every port, so the descriptor's own access policy --
@@ -359,7 +391,7 @@ def _filesystem_operation_untyped(payload: bytes) -> bytes:
         return _filesystem_operation_authorized(value)
 
 
-def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes:
+def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskResult | JobdArtifactResult:
     operation = str(value.get("op") or "")
     path = str(value.get("path") or "")
     args = value.get("args", {})
@@ -410,32 +442,57 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes:
     elif operation == "mkdir":
         result = filesystem.create_directory(path)
     elif operation == "raw":
-        body, content_type = filesystem.read_raw(path, max_bytes=args.get("max_bytes"))
-        return JobdTaskResult(body, {
-            "format": "opaque_bytes",
-            "content_type": content_type,
-            "length": len(body),
-            "sha256": hashlib.sha256(body).hexdigest(),
-            "disposition": "attachment" if args.get("download") is True else "inline",
-            "filename": product_filename(Path(path).name, fallback="download") if args.get("download") is True else "",
-        })
+        return _filesystem_transfer_artifact(operation, path, args)
     elif operation == "zip":
-        archive, _size = filesystem.zip_directory(path, max_bytes=args.get("max_bytes"))
-        try:
-            body = archive.read()
-        finally:
-            archive.close()
-        return JobdTaskResult(body, {
-            "format": "opaque_bytes",
-            "content_type": "application/zip",
-            "length": len(body),
-            "sha256": hashlib.sha256(body).hexdigest(),
-            "disposition": "attachment",
-            "filename": product_filename(args.get("filename") or f"{Path(path).name or 'archive'}.zip", fallback="archive.zip"),
-        })
+        return _filesystem_transfer_artifact(operation, path, args)
     else:
         raise ValueError("unsupported filesystem operation")
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _filesystem_transfer_artifact(operation: str, path: str, args: dict[str, Any]) -> JobdArtifactResult:
+    root = _private_artifact_root()
+    descriptor, raw_name = tempfile.mkstemp(prefix="transfer-", dir=root)
+    basename = Path(raw_name).name
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(os.dup(descriptor), "w+b", buffering=0) as target:
+            if operation == "raw":
+                length, content_type, digest = filesystem.copy_raw_to(path, target, max_bytes=args.get("max_bytes"))
+                disposition = "attachment" if args.get("download") is True else "inline"
+                filename = product_filename(Path(path).name, fallback="download") if disposition == "attachment" else ""
+            else:
+                length, digest = filesystem.zip_directory_to(path, target, max_bytes=args.get("max_bytes"))
+                content_type = "application/zip"
+                disposition = "attachment"
+                filename = product_filename(args.get("filename") or f"{Path(path).name or 'archive'}.zip", fallback="archive.zip")
+        artifact_stat = os.fstat(descriptor)
+        return JobdArtifactResult(
+            basename=basename,
+            device=artifact_stat.st_dev,
+            inode=artifact_stat.st_ino,
+            product={
+                "format": "opaque_bytes",
+                "content_type": content_type,
+                "length": length,
+                "sha256": digest,
+                "disposition": disposition,
+                "filename": filename,
+            },
+        )
+    except Exception:
+        directory_fd = -1
+        try:
+            directory_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            os.unlink(basename, dir_fd=directory_fd)
+        except OSError:
+            pass
+        finally:
+            if directory_fd >= 0:
+                os.close(directory_fd)
+        raise
+    finally:
+        os.close(descriptor)
 
 
 def _filesystem_operation(payload: bytes) -> bytes:
@@ -487,6 +544,46 @@ class JobdTaskResult:
     product: dict[str, object]
 
 
+@dataclass(frozen=True)
+class JobdArtifactResult:
+    """Worker-created private artifact adopted by the broker through one pinned descriptor."""
+
+    basename: str
+    device: int
+    inode: int
+    product: dict[str, object]
+
+
+@dataclass(slots=True)
+class StoredInlineProduct:
+    generation: int
+    body: bytes
+    stored_at: float
+    product: dict[str, object]
+
+
+@dataclass(slots=True)
+class StoredArtifactProduct:
+    generation: int
+    descriptor: int
+    stored_at: float
+    product: dict[str, object]
+
+
+@dataclass(slots=True)
+class StoredJobProduct:
+    inline: StoredInlineProduct | None = None
+    artifact: StoredArtifactProduct | None = None
+    schedule: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class JobdArtifactLease:
+    descriptor: int
+    product: dict[str, object]
+    expires_at: float
+
+
 class JobdFilesystemOperationFailure(RuntimeError):
     """Preserve a worker filesystem error's HTTP payload across the process boundary."""
 
@@ -499,27 +596,33 @@ class JobdFilesystemOperationFailure(RuntimeError):
         return type(self), (self.status, self.payload)
 
 
-def _validated_product_metadata(body: bytes, product: dict[str, object]) -> dict[str, object]:
+def _validated_product_metadata(body: bytes, product: dict[str, object], *, expected_length: int | None = None) -> dict[str, object]:
     if set(product) != {"format", "content_type", "length", "sha256", "disposition", "filename"}:
         raise ValueError("invalid product metadata fields")
     if product["format"] not in {"json", "opaque_bytes"} or product["disposition"] not in {"inline", "attachment"}:
         raise ValueError("invalid product metadata")
     if not isinstance(product["content_type"], str) or not product["content_type"]:
         raise ValueError("invalid product content type")
-    if product["length"] != len(body) or not isinstance(product["sha256"], str) or product["sha256"] != hashlib.sha256(body).hexdigest():
+    body_length = len(body) if expected_length is None else expected_length
+    if product["length"] != body_length or not isinstance(product["sha256"], str):
+        raise ValueError("invalid product integrity")
+    if expected_length is None and product["sha256"] != hashlib.sha256(body).hexdigest():
         raise ValueError("invalid product integrity")
     if not isinstance(product["filename"], str) or "/" in product["filename"] or "\\" in product["filename"]:
         raise ValueError("invalid product filename")
     return dict(product)
 
 
-def run_registered_task_result(task: str, payload: bytes) -> JobdTaskResult:
+def run_registered_task_result(task: str, payload: bytes) -> JobdTaskResult | JobdArtifactResult:
     """Executor entry point that preserves opaque task bodies for broker retention."""
     if task not in REGISTERED_TASKS:
         raise ValueError("unknown task")
     if len(payload) > JOBD_MAX_PAYLOAD_BYTES:
         raise ValueError("payload too large")
     result = REGISTERED_TASKS[task](payload)
+    if isinstance(result, JobdArtifactResult):
+        _validated_product_metadata(b"", result.product, expected_length=int(result.product.get("length") or -1))
+        return result
     if isinstance(result, JobdTaskResult):
         body = result.body
         product = _validated_product_metadata(body, result.product)
@@ -558,6 +661,277 @@ class JobRecord:
     running_started_monotonic: float = 0.0
 
 
+class JobProductStore:
+    """One bounded owner for retained inline products, artifacts, and artifact leases."""
+
+    def __init__(self) -> None:
+        self.entries: dict[str, StoredJobProduct] = {}
+        self.leases: dict[str, JobdArtifactLease] = {}
+
+    @staticmethod
+    def _artifact_directory_fd() -> int:
+        return os.open(_private_artifact_root(), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+
+    def _adopt_artifact(self, result: JobdArtifactResult) -> StoredArtifactProduct:
+        if Path(result.basename).name != result.basename or result.basename in {"", ".", ".."}:
+            raise ValueError("invalid artifact basename")
+        directory_fd = self._artifact_directory_fd()
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                result.basename,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            artifact_stat = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(artifact_stat.st_mode)
+                or artifact_stat.st_uid != os.getuid()
+                or artifact_stat.st_dev != result.device
+                or artifact_stat.st_ino != result.inode
+                or artifact_stat.st_size != result.product.get("length")
+            ):
+                raise ValueError("artifact identity does not match its manifest")
+            digest = hashlib.sha256()
+            offset = 0
+            while offset < artifact_stat.st_size:
+                chunk = os.pread(descriptor, min(JOBD_ARTIFACT_CHUNK_BYTES, artifact_stat.st_size - offset), offset)
+                if not chunk:
+                    raise ValueError("artifact ended before its manifest length")
+                digest.update(chunk)
+                offset += len(chunk)
+            if digest.hexdigest() != result.product.get("sha256"):
+                raise ValueError("artifact digest does not match its manifest")
+            product = _validated_product_metadata(b"", result.product, expected_length=artifact_stat.st_size)
+            artifact = StoredArtifactProduct(0, descriptor, time.time(), product)
+            descriptor = -1
+            return artifact
+        finally:
+            try:
+                os.unlink(result.basename, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
+
+    @staticmethod
+    def _close_artifact(artifact: StoredArtifactProduct | None) -> None:
+        if artifact is not None:
+            os.close(artifact.descriptor)
+
+    def discard_artifact_result(self, result: JobdArtifactResult) -> None:
+        self._close_artifact(self._adopt_artifact(result))
+
+    def store_inline(
+        self,
+        *,
+        key: str,
+        generation: int,
+        body: bytes,
+        product: dict[str, object],
+        schedule: dict[str, object],
+        stored_at: float | None = None,
+    ) -> None:
+        entry = self.entries.setdefault(key, StoredJobProduct())
+        if entry.inline is not None and generation < entry.inline.generation:
+            return
+        entry.inline = StoredInlineProduct(generation, body, time.time() if stored_at is None else stored_at, dict(product))
+        entry.schedule = dict(schedule)
+        while self.inline_count() > JOBD_MAX_PRODUCTS or self.inline_bytes() > JOBD_MAX_RETAINED_RESULT_BYTES:
+            oldest_key = min(
+                (candidate for candidate, retained in self.entries.items() if retained.inline is not None),
+                key=lambda candidate: self.entries[candidate].inline.stored_at,  # type: ignore[union-attr]
+            )
+            oldest = self.entries[oldest_key]
+            oldest.inline = None
+            oldest.schedule = {}
+            if oldest.artifact is None:
+                self.entries.pop(oldest_key, None)
+
+    def store_artifact(
+        self,
+        *,
+        key: str,
+        generation: int,
+        result: JobdArtifactResult,
+        schedule: dict[str, object],
+    ) -> dict[str, object]:
+        current_bytes = sum(
+            int(entry.artifact.product["length"])
+            for entry in self.entries.values()
+            if entry.artifact is not None
+        )
+        incoming_bytes = int(result.product.get("length") or 0)
+        if self.artifact_count() >= JOBD_MAX_ARTIFACTS or current_bytes + incoming_bytes > JOBD_MAX_ARTIFACT_BYTES:
+            self.discard_artifact_result(result)
+            raise ValueError("artifact capacity full")
+        artifact = self._adopt_artifact(result)
+        artifact.generation = generation
+        entry = self.entries.setdefault(key, StoredJobProduct())
+        self._close_artifact(entry.artifact)
+        entry.artifact = artifact
+        entry.schedule = dict(schedule)
+        return dict(artifact.product)
+
+    def prune_leases(self) -> None:
+        now = time.monotonic()
+        for lease_id, lease in list(self.leases.items()):
+            if lease.expires_at <= now:
+                os.close(lease.descriptor)
+                self.leases.pop(lease_id, None)
+
+    def product(
+        self,
+        key: str,
+        *,
+        latest_generation: int,
+        inflight: bool,
+        source_epoch: str,
+    ) -> tuple[dict[str, object], bytes]:
+        entry = self.entries.get(key)
+        if entry is None or (entry.inline is None and entry.artifact is None):
+            return {"ok": True, "state": "pending" if inflight else "none", "generation": 0, "inflight": inflight}, b""
+        if entry.artifact is not None:
+            retained = entry.artifact
+            return {
+                "ok": True,
+                "state": "stale" if (inflight or latest_generation > retained.generation) else "ready",
+                "generation": retained.generation,
+                "source_epoch": source_epoch,
+                "stored_at": retained.stored_at,
+                "inflight": inflight,
+                "artifact": True,
+                "product": dict(retained.product),
+                "schedule": dict(entry.schedule),
+            }, b""
+        retained = entry.inline
+        if retained is None:
+            raise RuntimeError("retained product is empty")
+        return {
+            "ok": True,
+            "state": "stale" if (inflight or latest_generation > retained.generation) else "ready",
+            "generation": retained.generation,
+            "source_epoch": source_epoch,
+            "stored_at": retained.stored_at,
+            "inflight": inflight,
+            "product": dict(retained.product),
+            "schedule": dict(entry.schedule),
+        }, retained.body
+
+    def submission_identity(self, key: str) -> tuple[int, float] | None:
+        entry = self.entries.get(key)
+        if entry is None:
+            return None
+        retained = entry.inline if entry.inline is not None else entry.artifact
+        return None if retained is None else (retained.generation, retained.stored_at)
+
+    def handle(self, action: str, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
+        response = JOBD_ARTIFACT_COMMAND_ROUTER.dispatch(self, action, request, body)
+        return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
+
+    def open(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        if len(self.leases) >= JOBD_MAX_ARTIFACT_LEASES:
+            return {"ok": False, "error": "artifact lease capacity full"}, b""
+        entry = self.entries.get(str(request.get("coalesce_key") or ""))
+        if entry is None or entry.artifact is None:
+            return {"ok": False, "error": "artifact unavailable"}, b""
+        requested_generation = int(request.get("generation") or 0)
+        artifact = entry.artifact
+        if artifact.generation != requested_generation:
+            return {"ok": False, "error": "artifact generation unavailable"}, b""
+        lease_id = uuid.uuid4().hex
+        self.leases[lease_id] = JobdArtifactLease(
+            descriptor=os.dup(artifact.descriptor),
+            product=dict(artifact.product),
+            expires_at=time.monotonic() + JOBD_ARTIFACT_LEASE_SECONDS,
+        )
+        return {"ok": True, "lease_id": lease_id, "product": dict(artifact.product)}, b""
+
+    def chunk(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        self.prune_leases()
+        lease = self.leases.get(str(request.get("lease_id") or ""))
+        if lease is None:
+            return {"ok": False, "error": "artifact lease unavailable"}, b""
+        try:
+            offset = int(request.get("offset") or 0)
+            requested = int(request.get("max_bytes") or JOBD_ARTIFACT_CHUNK_BYTES)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid artifact chunk range"}, b""
+        length = int(lease.product["length"])
+        if offset < 0 or offset > length or requested < 1:
+            return {"ok": False, "error": "invalid artifact chunk range"}, b""
+        chunk = os.pread(lease.descriptor, min(requested, JOBD_ARTIFACT_CHUNK_BYTES, length - offset), offset)
+        if not chunk and offset < length:
+            return {"ok": False, "error": "artifact ended before its declared length"}, b""
+        lease.expires_at = time.monotonic() + JOBD_ARTIFACT_LEASE_SECONDS
+        return {
+            "ok": True,
+            "offset": offset,
+            "length": len(chunk),
+            "eof": offset + len(chunk) == length,
+            "sha256": hashlib.sha256(chunk).hexdigest(),
+        }, chunk
+
+    def close(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        lease = self.leases.pop(str(request.get("lease_id") or ""), None)
+        if lease is None:
+            return {"ok": True, "closed": False}, b""
+        os.close(lease.descriptor)
+        return {"ok": True, "closed": True}, b""
+
+    def shutdown(self) -> None:
+        for lease in self.leases.values():
+            os.close(lease.descriptor)
+        self.leases.clear()
+        for entry in self.entries.values():
+            self._close_artifact(entry.artifact)
+            entry.artifact = None
+
+    def inline_count(self) -> int:
+        return sum(entry.inline is not None for entry in self.entries.values())
+
+    def inline_bytes(self) -> int:
+        return sum(len(entry.inline.body) for entry in self.entries.values() if entry.inline is not None)
+
+    def stale_inline_count(self, latest_generations: dict[str, int]) -> int:
+        return sum(
+            latest_generations.get(key, entry.inline.generation) > entry.inline.generation
+            for key, entry in self.entries.items()
+            if entry.inline is not None
+        )
+
+    def artifact_count(self) -> int:
+        return sum(entry.artifact is not None for entry in self.entries.values())
+
+    def lease_count(self) -> int:
+        return len(self.leases)
+
+    def open_descriptor_count(self) -> int:
+        return self.artifact_count()
+
+    def inline_keys(self) -> set[str]:
+        return {key for key, entry in self.entries.items() if entry.inline is not None}
+
+    def inline_generation(self, key: str) -> int:
+        entry = self.entries[key]
+        if entry.inline is None:
+            raise KeyError(key)
+        return entry.inline.generation
+
+    def inline_body(self, key: str) -> bytes:
+        entry = self.entries[key]
+        if entry.inline is None:
+            raise KeyError(key)
+        return entry.inline.body
+
+    def inline_metadata(self, key: str) -> dict[str, object]:
+        entry = self.entries[key]
+        if entry.inline is None:
+            raise KeyError(key)
+        return dict(entry.inline.product)
+
+
 class PersistentJobBroker:
     """One local broker with bounded spawn-only capacity for typed CPU jobs."""
 
@@ -578,13 +952,11 @@ class PersistentJobBroker:
         # Materialized-product layer: newest completed bytes per coalesce_key (last-known-good),
         # and bounded per-task counters. These make stale-while-revalidate a broker property so a
         # web route can serve a prior complete product while a newer generation is still building.
-        self.latest_product: dict[str, tuple[int, bytes, float]] = {}
-        self.latest_product_metadata: dict[str, dict[str, object]] = {}
+        self.product_store = JobProductStore()
         # Scheduling facts retained beside each stored product so a completed operation can say
         # which lane ran it, how long it waited to be dispatched and how long it executed.  Without
         # this the only visible number is total wall time, which cannot distinguish a slow task from
         # a task that sat behind a lane holder -- the exact question a stalled editor open raises.
-        self.latest_product_schedule: dict[str, dict[str, object]] = {}
         self.product_counters: dict[str, dict[str, int]] = {}
         # Per-task pure execution duration (excludes queue wait): count/total/max in milliseconds,
         # bounded per task name (not per job) so this dict cannot grow with job volume.
@@ -696,25 +1068,6 @@ class PersistentJobBroker:
         }
         while len(self.source_diagnostics) > JOBD_MAX_SOURCE_DIAGNOSTICS:
             self.source_diagnostics.pop(next(iter(self.source_diagnostics)))
-
-    def _store_product(self, record: JobRecord) -> None:
-        # Generation guard: a slow older-generation completion must never overwrite a newer
-        # complete product. A failed/superseded record never reaches here (it is terminal already).
-        stored = self.latest_product.get(record.coalesce_key)
-        if stored is not None and record.generation < stored[0]:
-            return
-        stored_at = time.time()
-        self.latest_product[record.coalesce_key] = (record.generation, record.result, stored_at)
-        self.latest_product_metadata[record.coalesce_key] = dict(record.product)
-        self.latest_product_schedule[record.coalesce_key] = self._record_schedule(record)
-        while (
-            len(self.latest_product) > JOBD_MAX_PRODUCTS
-            or sum(len(body) for _generation, body, _stored_at in self.latest_product.values()) > JOBD_MAX_RETAINED_RESULT_BYTES
-        ):
-            oldest_key = min(self.latest_product, key=lambda key: self.latest_product[key][2])
-            self.latest_product.pop(oldest_key, None)
-            self.latest_product_metadata.pop(oldest_key, None)
-            self.latest_product_schedule.pop(oldest_key, None)
 
     @staticmethod
     def _record_schedule(record: JobRecord) -> dict[str, object]:
@@ -830,12 +1183,31 @@ class PersistentJobBroker:
                 continue
             future = record.future
             if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}:
+                try:
+                    abandoned = future.result()
+                    if isinstance(abandoned, JobdArtifactResult):
+                        self.product_store.discard_artifact_result(abandoned)
+                except Exception:
+                    pass
                 record.future = None
                 continue
             try:
                 task_result = future.result()
                 if isinstance(task_result, bytes):
                     task_result = JobdTaskResult(task_result, inline_json_product_metadata(task_result))
+                if isinstance(task_result, JobdArtifactResult):
+                    record.product = self.product_store.store_artifact(
+                        key=record.coalesce_key,
+                        generation=record.generation,
+                        result=task_result,
+                        schedule=self._record_schedule(record),
+                    )
+                    record.result = b""
+                    self._mark_terminal(record, "completed")
+                    self._bump_counter(record.task, "completed")
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+                    continue
                 result = task_result.body
                 result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
                 if len(result) > result_limit:
@@ -846,7 +1218,13 @@ class PersistentJobBroker:
                     record.result = result
                     record.product = dict(task_result.product)
                     self._mark_terminal(record, "completed")
-                    self._store_product(record)
+                    self.product_store.store_inline(
+                        key=record.coalesce_key,
+                        generation=record.generation,
+                        body=record.result,
+                        product=record.product,
+                        schedule=self._record_schedule(record),
+                    )
                     self._bump_counter(record.task, "completed")
                     self._record_phase_runtime_ms(record.task, result)
                     if record.running_started_monotonic > 0:
@@ -928,6 +1306,7 @@ class PersistentJobBroker:
         self._expire_deadlines(now)
         self._handle_finished_futures()
         self._prune_records()
+        self.product_store.prune_leases()
 
     def _pump(self) -> None:
         dispatch: list[JobRecord] = []
@@ -1096,28 +1475,14 @@ class PersistentJobBroker:
         coalesce_key = str(request.get("coalesce_key") or "")
         if not coalesce_key:
             return {"ok": False, "error": "missing coalesce_key"}, b""
-        stored = self.latest_product.get(coalesce_key)
         latest_gen = self.latest_generation.get(coalesce_key, 0)
         inflight = any(record.coalesce_key == coalesce_key and record.status in {"queued", "running"} for record in self.records.values())
-        if stored is None:
-            # `pending`: a job is building the first product. `none`: a successful lookup with
-            # nothing in flight and nothing ever produced (distinct from an RPC failure = unavailable).
-            return {"ok": True, "state": "pending" if inflight else "none", "generation": 0, "inflight": inflight}, b""
-        generation, body, stored_at = stored
-        product = self.latest_product_metadata.get(coalesce_key)
-        if product is None:
-            return {"ok": False, "error": "retained product metadata missing"}, b""
-        state = "stale" if (inflight or latest_gen > generation) else "ready"
-        return {
-            "ok": True,
-            "state": state,
-            "generation": generation,
-            "source_epoch": self.source_epoch,
-            "stored_at": stored_at,
-            "inflight": inflight,
-            "product": dict(product),
-            "schedule": dict(self.latest_product_schedule.get(coalesce_key) or {}),
-        }, body
+        return self.product_store.product(
+            coalesce_key,
+            latest_generation=latest_gen,
+            inflight=inflight,
+            source_epoch=self.source_epoch,
+        )
 
     def _produce(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
         """Submit one product job and return materialized bytes or its accepted receipt.
@@ -1138,28 +1503,30 @@ class PersistentJobBroker:
         if submission is None:
             return error or {"ok": False, "error": "invalid submission"}, b""
         coalesce_key = str(submission["coalesce_key"])
-        stored = self.latest_product.get(coalesce_key)
-        if submission.get("fresh_only") is not True and delivery == "ready_or_receipt" and stored is not None and stored[0] >= int(submission["generation"]):
+        stored = self.product_store.submission_identity(coalesce_key)
+        stored_generation = stored[0] if stored is not None else -1
+        if submission.get("fresh_only") is not True and delivery == "ready_or_receipt" and stored_generation >= int(submission["generation"]):
             product_response, body = self._product({"coalesce_key": coalesce_key})
             state = str(product_response.get("state") or "")
-            if body and (state == "ready" or request.get("allow_stale") is True):
+            if (body or product_response.get("artifact") is True) and (state == "ready" or request.get("allow_stale") is True):
                 existing_id = self.coalesced.get((str(submission["task"]), coalesce_key))
                 existing = self.records.get(existing_id or "")
                 job = self._record_payload(existing) if existing is not None else {
                     "job_id": "",
                     "task": str(submission["task"]),
                     "priority": str(submission["priority"]),
-                    "generation": int(stored[0]),
+                    "generation": int(stored_generation),
                     "status": "completed",
                     "submitted_at": 0.0,
                     "running_started_at": 0.0,
-                    "completed_at": float(stored[2]),
+                    "completed_at": float(stored[1]),
                     "deadline_at": 0.0,
                     "error": "",
                 }
                 return {
                     "ok": True,
                     "state": state,
+                    "artifact": product_response.get("artifact") is True,
                     "coalesced": True,
                     "job": job,
                     "product": dict(product_response.get("product") or {}),
@@ -1198,6 +1565,12 @@ class PersistentJobBroker:
             response["product"] = dict(product_response.get("product") or {})
             response["schedule"] = dict(product_response.get("schedule") or {})
             return response, body
+        if product_response.get("artifact") is True and (state == "ready" or (allow_stale and state == "stale")):
+            response["state"] = state
+            response["artifact"] = True
+            response["product"] = dict(product_response.get("product") or {})
+            response["schedule"] = dict(product_response.get("schedule") or {})
+            return response, b""
         return response, b""
 
     def common_status(self) -> dict[str, Any]:
@@ -1245,11 +1618,11 @@ class PersistentJobBroker:
             "worker_pids": worker_pids,
             "cache": {
                 "records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS,
-                "products": len(self.latest_product),
+                "products": self.product_store.inline_count(),
                 # A stored product is "stale" when a newer generation for the same coalesce_key has
                 # since been observed (queued, running, or already completed elsewhere) -- an honest
                 # age/staleness signal without exposing raw product bytes/keys in diagnostics.
-                "products_stale": sum(1 for key, (generation, _body, _stored_at) in self.latest_product.items() if self.latest_generation.get(key, generation) > generation),
+                "products_stale": self.product_store.stale_inline_count(self.latest_generation),
             },
             "product_counters": {task: dict(counters) for task, counters in self.product_counters.items()},
             "product_runtime_ms": {
@@ -1301,7 +1674,11 @@ class PersistentJobBroker:
         action = str(request.get("action") or "")
         action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
         self.request_counters[action_counter] = self.request_counters.get(action_counter, 0) + 1
-        response = JOBD_COMMAND_ROUTER.dispatch(self, action, request, b"")
+        if action in JOBD_ARTIFACT_ACTION_METHODS:
+            self._refresh_records()
+            response = self.product_store.handle(action, request, b"")
+        else:
+            response = JOBD_COMMAND_ROUTER.dispatch(self, action, request, b"")
         return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
 
     def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
@@ -1415,6 +1792,7 @@ class PersistentJobBroker:
             self.scheduler_thread.join(timeout=0.5)
         for lane in JOBD_LANE_PRIORITIES:
             self._shutdown_executor(lane=lane)
+        self.product_store.shutdown()
 
     def run(self) -> int:
         return run_local_rpc_service(
@@ -1494,6 +1872,23 @@ class JobClient(LocalServiceClient):
         failure to unavailable. Bytes are empty unless a completed product exists.
         """
         return self.request_with_binary({"action": "product", "coalesce_key": coalesce_key}, timeout=timeout)
+
+    def artifact_open(self, coalesce_key: str, generation: int) -> dict[str, Any]:
+        return self.request({"action": "artifact_open", "coalesce_key": coalesce_key, "generation": generation})
+
+    def artifact_chunk(self, lease_id: str, offset: int, max_bytes: int = JOBD_ARTIFACT_CHUNK_BYTES) -> tuple[dict[str, Any], bytes]:
+        return self.request_with_binary({
+            "action": "artifact_chunk",
+            "lease_id": lease_id,
+            "offset": offset,
+            "max_bytes": min(max_bytes, JOBD_ARTIFACT_CHUNK_BYTES),
+        })
+
+    def artifact_close(self, lease_id: str) -> dict[str, Any]:
+        return self.request({"action": "artifact_close", "lease_id": lease_id})
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        return self.request({"action": "cancel", "job_id": job_id})
 
     def produce(
         self,

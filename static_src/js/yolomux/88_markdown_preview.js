@@ -466,8 +466,9 @@ function markdownImageFallbackNode(path, label = '') {
   return node;
 }
 
-function rewriteMarkdownPreviewImages(root, markdownPath) {
-  if (!root || !markdownPath) return;
+function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
+  if (!root || !markdownPath) return [];
+  const pending = [];
   for (const img of Array.from(root.querySelectorAll?.('img[src]') || [])) {
     const original = img.getAttribute('src') || '';
     const target = markdownPreviewImageTarget(original, markdownPath);
@@ -475,12 +476,29 @@ function rewriteMarkdownPreviewImages(root, markdownPath) {
     img.classList.add('markdown-preview-image');
     img.dataset.originalSrc = original;
     if (target.path) img.dataset.resolvedPath = target.path;
-    img.setAttribute('src', target.src);
     if (!img.getAttribute('alt') && target.path) img.setAttribute('alt', basenameOf(target.path));
-    img.addEventListener('error', () => {
-      img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
-    }, {once: true});
+    if (target.external) {
+      img.setAttribute('src', target.src);
+      img.addEventListener('error', () => {
+        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+      }, {once: true});
+      continue;
+    }
+    img.removeAttribute('src');
+    pending.push(installRawFileMediaSource(img, target.path, {
+      isCurrent: options.isCurrent,
+      onFailure: error => {
+        if (options.isCurrent?.() === false) return;
+        const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
+        img.replaceWith(markdownImageFallbackNode(target.path, label));
+      },
+      onDecodeFailure: () => {
+        if (options.isCurrent?.() === false) return;
+        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+      },
+    }));
   }
+  return pending;
 }
 
 const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
@@ -822,6 +840,7 @@ function invalidateMarkdownPreviewArtifacts(container) {
   // a slow prior render cannot install its SVG after newer Markdown wins.
   const generation = Number(container?._markdownPreviewGeneration || 0) + 1;
   if (container) container._markdownPreviewGeneration = generation;
+  releaseRawFileMediaSources(container);
   for (const host of Array.from(container?.querySelectorAll?.('.mermaid-preview-host') || [])) {
     host.dataset.mermaidRenderSeq = `stale-${generation}`;
     if (typeof disconnectPreviewZoomSurface === 'function') {
@@ -842,13 +861,16 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   applyMarkdownHtmlBackgroundClasses(frag);
   applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
-  rewriteMarkdownPreviewImages(frag, markdownPath);
+  const localImages = rewriteMarkdownPreviewImages(frag, markdownPath, {
+    isCurrent: () => container._markdownPreviewGeneration === generation,
+  });
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
-  container._previewAsync = renderMarkdownMermaidBlocks(container, markdownPath, {
+  const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
     context: options.context || '',
     isCurrent: () => container._markdownPreviewGeneration === generation,
   });
+  container._previewAsync = Promise.all([mermaid, ...localImages]);
   bindMarkdownTaskCheckboxes(container, text, markdownPath);
   installLinkContextMenu(container);   // right-click Copy URL / Open URL on rendered links
   // when this preview belongs to an on-disk file (file-editor preview, NOT a yoagent body),

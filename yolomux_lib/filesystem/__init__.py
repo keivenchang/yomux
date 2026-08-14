@@ -541,9 +541,21 @@ def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
 
 
 @normalize_os_errors
+def copy_raw_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str, str]:
+    _sync_package_overrides()
+    return io_ops.copy_raw_to(raw_path, target, max_bytes=max_bytes)
+
+
+@normalize_os_errors
 def zip_directory(raw_path: str, max_bytes: int | None = None):
     _sync_package_overrides()
     return io_ops.zip_directory(raw_path, max_bytes=max_bytes)
+
+
+@normalize_os_errors
+def zip_directory_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str]:
+    _sync_package_overrides()
+    return io_ops.zip_directory_to(raw_path, target, max_bytes=max_bytes)
 
 
 @normalize_os_errors
