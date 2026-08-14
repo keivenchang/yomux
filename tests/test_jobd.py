@@ -1377,6 +1377,7 @@ def _wait_for_result(client: jobd.JobClient, job_id: str, *, timeout_seconds: fl
     raise AssertionError(f"job {job_id} did not settle")
 
 
+@pytest.mark.gate_serial
 def test_jobd_control_plane_is_ready_before_blocked_data_plane_setup(tmp_path, monkeypatch):
     socket_path = tmp_path / "jobd.sock"
     executor_setup_started = threading.Event()

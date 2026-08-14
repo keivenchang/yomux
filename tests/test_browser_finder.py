@@ -400,7 +400,7 @@ def test_finder_reload_button_uses_the_delegated_force_refresh(browser, tmp_path
         """
         const done = arguments[0];
         const sessionFileFetches = () => window.__bootFetches.filter(item => item.path === '/api/session-files').length;
-        const filesystemFetches = () => window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list').length;
+        const filesystemFetches = () => window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list' || item.path === '/api/fs/fast/list').length;
         const before = {sessionFiles: sessionFileFetches(), filesystem: filesystemFetches()};
         document.querySelector('.file-explorer-refresh-cluster').click();
         const deadline = performance.now() + 2000;
@@ -454,7 +454,7 @@ def test_finder_tree_toolbar_and_disclosure_use_real_events(browser, tmp_path):
           mode: fileExplorerRootModeValue(),
           root: currentFileExplorerRoot(),
           expandedPaths: Array.from(fileExplorerExpanded),
-          filesystemFetches: window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list'),
+          filesystemFetches: window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list' || item.path === '/api/fs/fast/list'),
           expanded: row()?.getAttribute('aria-expanded') || '',
           child: Boolean(child()),
           errors: jsDebugFailureEvents('error'),
@@ -1481,7 +1481,7 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
           rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
-          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').length,
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch').length,
           plan: fileExplorerSyncPlan('1'),
           expandedSet: Array.from(fileExplorerExpanded),
         };
@@ -1762,7 +1762,7 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
             lookupError: result.error,
             network: result.network,
             fsFetches: window.__bootFetches
-              .filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch')
+              .filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch')
               .map(item => ({path: item.path, body: item.body, search: item.search})),
           }))
           .catch(error => done({error: String(error), stack: String(error?.stack || '')}));
@@ -1841,8 +1841,8 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
           fileVisible: tree.querySelector(`.file-tree-row[data-path="${path}"]`) !== null,
           fileCurrent: tree.querySelector(`.file-tree-row[data-path="${path}"]`)?.classList.contains('current-file') || false,
           expandedSet: Array.from(fileExplorerExpanded),
-          listedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch')
-            .flatMap(item => item.path === '/api/fs/list' ? [new URLSearchParams(item.search || '').get('path')]
+          listedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch')
+            .flatMap(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' ? [new URLSearchParams(item.search || '').get('path')]
               : (item.body?.requests || []).filter(request => request.type === 'list').map(request => request.path)),
         };
         """
@@ -2381,22 +2381,22 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
         const done = arguments[arguments.length - 1];
         const realPushConnected = clientPushConnectedForData;
         const realUserActive = fileExplorerUserIsActive;
-        const realFetchFilesystemBatchItem = fetchFilesystemBatchItem;
+        const realFetchDirectory = fetchDirectory;
         let releaseDev2 = null;
         clientPushConnectedForData = () => true;
         fileExplorerUserIsActive = () => false;
-        fetchFilesystemBatchItem = (kind, path, options = {}) => {
-          if (kind === 'list' && path === '/home/test/yolomux.dev2') {
+        fetchDirectory = (path, options = {}) => {
+          if (path === '/home/test/yolomux.dev2') {
             return new Promise(resolve => {
-              releaseDev2 = () => resolve({entries: [{name: 'src', kind: 'dir'}]});
+              releaseDev2 = () => resolve([{name: 'src', kind: 'dir'}]);
             });
           }
-          return realFetchFilesystemBatchItem(kind, path, options);
+          return realFetchDirectory(path, options);
         };
         const restore = () => {
           clientPushConnectedForData = realPushConnected;
           fileExplorerUserIsActive = realUserActive;
-          fetchFilesystemBatchItem = realFetchFilesystemBatchItem;
+          fetchDirectory = realFetchDirectory;
         };
         const finderSessionSelect = Array.from(document.querySelectorAll('#panel-__finder__ [data-session-files-session]')).find(select => select.getClientRects().length > 0);
         finderSessionSelect.value = '8002';
@@ -3428,7 +3428,7 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
           rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
-          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').map(item => item.path),
+          fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/fast/list' || item.path === '/api/fs/batch').map(item => item.path),
         };
         """
     )

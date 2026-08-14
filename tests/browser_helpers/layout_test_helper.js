@@ -2921,13 +2921,7 @@ globalThis.__layoutTestApi = {
     return Array.from(fileTreeChangedAncestorStats(payload).entries()).map(([path, stats]) => [path, {...stats}]);
   },
   updateFileTreeGitStatusRowsForTest(rows) {
-    const previousQuerySelectorAll = document.querySelectorAll;
-    document.querySelectorAll = selector => selector === '.file-tree-row[data-path]:not([data-tabber-type])' || selector === '.file-tree-row[data-path]' ? rows : previousQuerySelectorAll(selector);
-    try {
-      updateFileTreeGitStatusRows();
-    } finally {
-      document.querySelectorAll = previousQuerySelectorAll;
-    }
+    updateFileTreeGitStatusRows(rows);
   },
   setFileExplorerModeForTest(mode) {
     fileExplorerMode = normalizeFileExplorerMode(mode);

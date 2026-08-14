@@ -398,7 +398,7 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
     if not isinstance(args, dict):
         raise ValueError("filesystem operation args must be an object")
     if operation == "list":
-        result = filesystem.list_directory(path)
+        result = filesystem.list_directory(path, include_repo_info=args.get("include_repo_info") is not False)
     elif operation == "read":
         result = filesystem.read_file(path)
     elif operation == "html_preview":

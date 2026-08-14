@@ -182,7 +182,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.transcriptMetadataLoadErrorLabelForTest(), 'render failed', 'the pane header uses the actual apply error rather than the transcript lookup label');
   });
 
-  await testAsync('Finder keeps one batch pending until its operation terminal SSE result', async () => {
+  await testAsync('Finder keeps deferred INFO work pending until its batch operation terminal SSE result', async () => {
     const api = loadYolomux();
     api.setFetchForTest((url, options = {}) => {
       assert.equal(String(url), '/api/fs/batch');
@@ -201,12 +201,12 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         },
       }, 202));
     });
-    const list = api.fetchDirectoryForTest('/home/test/one', {fresh: true});
-    const info = api.fetchFilePathInfoForTest('/home/test/two', {fresh: true});
+    const firstInfo = api.fetchFilePathInfoForTest('/home/test/one', {fresh: true});
+    const secondInfo = api.fetchFilePathInfoForTest('/home/test/two', {fresh: true});
     const flush = api.flushFileExplorerFsBatchForTest();
     await flushAsyncWork();
     let settled = false;
-    Promise.all([list, info]).then(() => { settled = true; });
+    Promise.all([firstInfo, secondInfo]).then(() => { settled = true; });
     await flushAsyncWork();
     assert.equal(settled, false, 'the 202 receipt remains pending without direct-request fallback');
 
@@ -217,7 +217,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         request: {id: 'r-fs-batch'},
         data: {
           responses: [
-            {id: 1, ok: true, status: 200, payload: {path: '/home/test/one', entries: [{name: 'one.txt', kind: 'file'}]}},
+            {id: 1, ok: true, status: 200, payload: {path: '/home/test/one', kind: 'dir'}},
             {id: 2, ok: true, status: 200, payload: {path: '/home/test/two', kind: 'file'}},
           ],
         },
@@ -226,9 +226,341 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       },
     });
 
-    assert.equal((await list)[0].name, 'one.txt');
-    assert.equal((await info).kind, 'file');
+    assert.equal((await firstInfo).kind, 'dir');
+    assert.equal((await secondInfo).kind, 'file');
     await flush;
+  });
+
+  await testAsync('Finder paints names and dates before batched Git enrichment patches repo rows in place', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    api.setFileExplorerTreeDateModeForTest('date');
+    const entries = Array.from({length: 50}, (_value, index) => ({
+      name: `repo-${String(index).padStart(2, '0')}`,
+      kind: 'dir',
+      size: 0,
+      mtime: 1786640000 + index,
+      repo_info_deferred: true,
+    }));
+    const calls = [];
+    const infoBatch = deferredFetch();
+    const infoResponse = requests => jsonResponse({responses: requests.map(request => ({
+      id: request.id,
+      ok: true,
+      status: 200,
+      payload: {
+        path: request.path,
+        kind: 'dir',
+        mtime: 1786640000,
+        repo: request.path === '/repos/repo-49' ? null : {
+          root: request.path,
+          name: request.path.split('/').at(-1),
+          branch: `feature-${request.path.split('/').at(-1)}`,
+          dirty_count: 2,
+          upstream: 'origin/main',
+          ahead: 1,
+          behind: 0,
+        },
+      },
+    }))});
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url) === '/api/fs/fast/list?path=%2Frepos') {
+        calls.push([{id: 0, type: 'list', path: '/repos'}]);
+        return Promise.resolve(jsonResponse({path: '/repos', entries}));
+      }
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      calls.push(requests);
+      assert.ok(requests.every(request => request.type === 'info'), 'the second phase contains only detailed info reads');
+      if (calls.length === 1) {
+        return Promise.resolve(jsonResponse({responses: requests.map(request => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, kind: 'dir', repo: {root: request.path, branch: 'stale-cache'}},
+        }))}));
+      }
+      return calls.length === 3 ? infoBatch.promise : Promise.resolve(infoResponse(requests));
+    });
+
+    const firstPath = '/repos/repo-00';
+    const seededInfo = api.fetchFilePathInfoForTest(firstPath);
+    await api.flushFileExplorerFsBatchForTest();
+    await seededInfo;
+    assert.equal(calls.length, 1, 'the regression starts with a reusable stale INFO cache entry');
+
+    const open = api.openFileExplorerAtForTest('/repos', {manualSelection: true, refreshPanels: false});
+    assert.equal(await open, true);
+    assert.equal(calls.length, 2, 'the first open batch contains no root or child Git-info request');
+    assert.deepStrictEqual(canonical(calls[1].map(request => request.type)), ['list']);
+
+    const tree = api.fileExplorerTreeForTest();
+    const staleRemovedPath = '/repos/repo-49';
+    api.setFileExplorerSelectionForTest([firstPath], firstPath);
+    api.setFileExplorerExpandedForTest([firstPath]);
+    api.renderTreeChildrenForTest(tree, '/repos', entries);
+    api.setFileExplorerRepoInfoForTest(staleRemovedPath, {root: staleRemovedPath, name: 'repo-49', branch: 'stale-removed'});
+    const staleRemovedRow = tree.querySelector(`.file-tree-row[data-path="${staleRemovedPath}"]`);
+    api.updateFileTreeGitStatusRowsForTest([staleRemovedRow]);
+    assert.ok(staleRemovedRow.querySelector(':scope > .file-tree-name').textContent.includes('stale-removed'));
+    tree.scrollTop = 37;
+    const firstRow = tree.querySelector(`.file-tree-row[data-path="${firstPath}"]`);
+    assert.ok(firstRow, 'the first-phase repo row is visible');
+    const firstDate = firstRow.querySelector(':scope > .file-tree-date').textContent;
+    assert.equal(firstRow.querySelector(':scope > .file-tree-name').textContent, 'repo-00', 'the first paint does not wait for a branch badge');
+    assert.ok(firstDate, 'the base mtime paints the configured Date column before Git enrichment');
+    assert.equal(firstRow.getAttribute('aria-expanded'), 'true');
+    assert.equal(firstRow.classList.contains('selected'), true);
+    assert.ok(frames.length > 0, 'Git enrichment is deferred until a frame after the base listing');
+
+    for (const frame of frames.splice(0)) frame();
+    const enrichmentFlush = api.flushFileExplorerFsBatchForTest();
+    assert.equal(calls.length, 3, 'fresh enrichment bypasses the reusable stale INFO cache');
+    assert.equal(calls[2].length, 8, 'the first detailed wave is bounded independently from the server refusal ceiling');
+    assert.ok(calls[2].every(request => request.trigger_counts['repo-enrichment'] === 1));
+    const frameCountDuringEnrichment = frames.length;
+    await api.fetchDirectoryForTest('/repos');
+    assert.equal(calls.length, 3, 'a cached listing does not duplicate INFO requests already in flight');
+    assert.equal(frames.length, frameCountDuringEnrichment, 'an in-flight enrichment stays the single owner of each repo path');
+    infoBatch.resolve(infoResponse(calls[2]));
+    await enrichmentFlush;
+    await flushAsyncWork();
+    await flushAsyncWork();
+    while (frames.length) {
+      frames.shift()();
+      await api.flushFileExplorerFsBatchForTest();
+      await flushAsyncWork();
+      await flushAsyncWork();
+    }
+    assert.deepStrictEqual(canonical(calls.slice(2).map(requests => requests.length)), [8, 8, 8, 8, 8, 8, 3], 'fifty rows plus the root backfill progressively in bounded detail waves');
+    assert.ok(calls.slice(2).flat().every(request => request.trigger_counts['repo-enrichment'] === 1));
+
+    const enrichedRow = tree.querySelector(`.file-tree-row[data-path="${firstPath}"]`);
+    assert.strictEqual(enrichedRow, firstRow, 'Git enrichment patches the mounted row instead of rebuilding the tree');
+    assert.ok(enrichedRow.querySelector(':scope > .file-tree-name').textContent.includes('feature-repo-00'));
+    assert.equal(enrichedRow.classList.contains('repo-non-main'), true);
+    assert.equal(enrichedRow.querySelector(':scope > .file-tree-date').textContent, firstDate, 'the late patch preserves the base date');
+    assert.equal(enrichedRow.getAttribute('aria-expanded'), 'true');
+    assert.equal(enrichedRow.classList.contains('selected'), true);
+    assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), [firstPath]);
+    assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [firstPath]);
+    assert.equal(tree.scrollTop, 37);
+    assert.ok(api.testElementForId('fileExplorerPath').title.includes('feature-repos'), 'the deferred root info updates the current root summary');
+    assert.equal(staleRemovedRow.dataset.isRepo, 'false', 'an authoritative non-repo result clears the stale repo row state');
+    assert.equal(staleRemovedRow.querySelector(':scope > .file-tree-name').textContent.includes('stale-removed'), false);
+
+    const frameCountBeforeReuse = frames.length;
+    await api.fetchDirectoryForTest('/repos');
+    assert.equal(calls.length, 9, 'a repeated cached listing does not rerun resolved positive or negative Git enrichment');
+    assert.equal(frames.length, frameCountBeforeReuse, 'resolved enrichment does not schedule another deferred wave');
+    api.renderTreeChildrenForTest(tree, '/repos', entries);
+    const cachedRepoRow = tree.querySelector(`.file-tree-row[data-path="${firstPath}"]`);
+    assert.ok(cachedRepoRow.querySelector(':scope > .file-tree-name').textContent.includes('feature-repo-00'), 'a later base-row render reapplies cached Git info without another request');
+  });
+
+  await testAsync('Finder discards invalidated in-flight Git enrichment before patching the mounted row', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const root = '/repos';
+    const repoPath = '/repos/project';
+    const entries = [{name: 'project', kind: 'dir', size: 0, mtime: 1786640000, repo_info_deferred: true}];
+    const staleBatch = deferredFetch();
+    const freshBatch = deferredFetch();
+    let listCalls = 0;
+    let infoCalls = 0;
+    api.setFetchForTest((url, options = {}) => {
+      if (String(url) === '/api/fs/fast/list?path=%2Frepos') {
+        listCalls += 1;
+        return Promise.resolve(jsonResponse({path: root, entries}));
+      }
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      assert.deepStrictEqual(canonical(requests.map(request => request.path)), [repoPath]);
+      infoCalls += 1;
+      return infoCalls === 1 ? staleBatch.promise : freshBatch.promise;
+    });
+
+    assert.deepStrictEqual(canonical((await api.fetchDirectoryForTest(root, {fresh: true})).map(entry => entry.name)), ['project']);
+    const tree = api.fileExplorerTreeForTest();
+    api.renderTreeChildrenForTest(tree, root, entries);
+    const row = tree.querySelector(`.file-tree-row[data-path="${repoPath}"]`);
+    assert.equal(row.querySelector(':scope > .file-tree-name').textContent, 'project');
+    for (const frame of frames.splice(0)) frame();
+    const staleFlush = api.flushFileExplorerFsBatchForTest();
+    await flushAsyncWork();
+    assert.equal(infoCalls, 1, 'the first INFO wave is in flight before invalidation');
+
+    api.invalidateFileExplorerRootsForTest([root]);
+    await api.fetchDirectoryForTest(root, {fresh: true});
+    assert.equal(listCalls, 2, 'the invalidation starts a new fast listing transaction');
+    staleBatch.resolve(jsonResponse({responses: [{
+      id: 1,
+      ok: true,
+      status: 200,
+      payload: {path: repoPath, kind: 'dir', repo: {root: repoPath, branch: 'stale-branch'}},
+    }]}));
+    await staleFlush;
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(row.querySelector(':scope > .file-tree-name').textContent.includes('stale-branch'), false, 'the invalidated INFO result never repaints the mounted row');
+
+    assert.ok(frames.length > 0, 'the replacement enrichment is scheduled after stale ownership retires');
+    for (const frame of frames.splice(0)) frame();
+    const freshFlush = api.flushFileExplorerFsBatchForTest();
+    await flushAsyncWork();
+    assert.equal(infoCalls, 2, 'the invalidation starts one replacement INFO wave');
+    freshBatch.resolve(jsonResponse({responses: [{
+      id: 2,
+      ok: true,
+      status: 200,
+      payload: {path: repoPath, kind: 'dir', repo: {root: repoPath, branch: 'fresh-branch'}},
+    }]}));
+    await freshFlush;
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.ok(row.querySelector(':scope > .file-tree-name').textContent.includes('fresh-branch'), 'the replacement INFO result patches the original mounted row');
+  });
+
+  await testAsync('Finder LIST uses the direct fast route while Git enrichment stays batched', async () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      const route = String(url);
+      requests.push({route, method: options.method || 'GET', body: options.body || ''});
+      if (route === '/api/fs/fast/list?path=%2Frepos') {
+        return Promise.resolve(jsonResponse({
+          path: '/repos',
+          entries: [{name: 'repo-a', kind: 'dir', mtime: 1786640000, repo_info_deferred: true}],
+        }));
+      }
+      assert.equal(route, '/api/fs/batch');
+      const items = JSON.parse(options.body).requests;
+      assert.ok(items.every(item => item.type === 'info'), 'only deferred INFO enrichment enters the batch route');
+      return Promise.resolve(jsonResponse({responses: items.map(item => ({
+        id: item.id,
+        ok: true,
+        status: 200,
+        payload: {path: item.path, kind: 'dir', repo: null},
+      }))}));
+    });
+
+    const opened = await api.openFileExplorerAtForTest('/repos', {manualSelection: true, refreshPanels: false});
+    assert.equal(opened, true, `open failed after requests ${JSON.stringify(requests)}`);
+    assert.deepStrictEqual(canonical(requests.map(request => [request.route, request.method])), [
+      ['/api/fs/fast/list?path=%2Frepos', 'GET'],
+    ], 'the first paint is one direct GET and does not wait for a batch receipt');
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repos/repo-a"]'));
+
+    for (const frame of frames.splice(0)) frame();
+    await api.flushFileExplorerFsBatchForTest();
+    assert.equal(requests[1].route, '/api/fs/batch');
+  });
+
+  await testAsync('Finder Sync paints the fast root before progressive descendant listings finish', async () => {
+    const api = loadYolomux('', ['1']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const pending = new Map();
+    const calls = [];
+    api.setFetchForTest(url => {
+      const route = String(url);
+      calls.push(route);
+      if (route === '/api/fs/fast/list?path=%2Frepo') {
+        return Promise.resolve(jsonResponse({path: '/repo', entries: [{name: 'project', kind: 'dir'}]}));
+      }
+      const deferred = deferredFetch();
+      pending.set(route, deferred);
+      return deferred.promise;
+    });
+    const plan = {
+      session: '1',
+      root: '/repo',
+      expandPaths: ['/repo/project', '/repo/project/one'],
+      affectedDirs: ['/repo/project/one'],
+    };
+    let settled = false;
+    const sync = api.syncFileExplorerRootToPlanForTest(plan, '1').then(value => {
+      settled = true;
+      return value;
+    });
+
+    await flushAsyncWork();
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project"]'), `the root row paints while descendants remain pending; calls=${JSON.stringify(calls)}`);
+    assert.equal(settled, false);
+    assert.equal(calls[0], '/api/fs/fast/list?path=%2Frepo');
+
+    pending.get('/api/fs/fast/list?path=%2Frepo%2Fproject').resolve(jsonResponse({
+      path: '/repo/project',
+      entries: [{name: 'one', kind: 'dir'}],
+    }));
+    await flushAsyncWork();
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project/one"]'), 'the next BFS level backfills without waiting for deeper work');
+    assert.equal(settled, false);
+
+    pending.get('/api/fs/fast/list?path=%2Frepo%2Fproject%2Fone').resolve(jsonResponse({
+      path: '/repo/project/one',
+      entries: [{name: 'README.md', kind: 'file'}],
+    }));
+    assert.equal(await sync, true);
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/project/one/README.md"]'));
+  });
+
+  await testAsync('Finder Sync rejects a stale progressive descendant after a newer transaction takes ownership', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFileExplorerRootMode('sync', {sync: false});
+    const staleDescendant = deferredFetch();
+    api.setFetchForTest(url => {
+      const route = String(url);
+      if (route === '/api/fs/fast/list?path=%2Fold') {
+        return Promise.resolve(jsonResponse({path: '/old', entries: [{name: 'project', kind: 'dir'}]}));
+      }
+      if (route === '/api/fs/fast/list?path=%2Fold%2Fproject') return staleDescendant.promise;
+      if (route === '/api/fs/fast/list?path=%2Fnew') {
+        return Promise.resolve(jsonResponse({path: '/new', entries: [{name: 'current.txt', kind: 'file'}]}));
+      }
+      throw new Error(`unexpected request ${route}`);
+    });
+
+    const staleSync = api.syncFileExplorerRootToPlanForTest({
+      session: '1',
+      root: '/old',
+      expandPaths: ['/old/project'],
+      affectedDirs: ['/old/project'],
+    }, '1');
+    await flushAsyncWork();
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/old/project"]'), 'the first root paints before its descendant settles');
+
+    const currentSync = api.syncFileExplorerRootToPlanForTest({
+      session: '2',
+      root: '/new',
+      expandPaths: [],
+      affectedDirs: ['/new'],
+    }, '2');
+    assert.equal(await currentSync, true);
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/new/current.txt"]'), 'the newer transaction owns the rendered tree');
+
+    staleDescendant.resolve(jsonResponse({
+      path: '/old/project',
+      entries: [{name: 'stale.txt', kind: 'file'}],
+    }));
+    await staleSync;
+    assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/new/current.txt"]'), 'late work cannot repaint the newer root');
+    assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/old/project/stale.txt"]'), null);
   });
 
   await testAsync('operation receipts reuse the shared client-event stream', async () => {
@@ -1950,14 +2282,20 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const api = loadYolomux();
       const batches = [];
       api.setFetchForTest((url, options = {}) => {
-        assert.equal(String(url), '/api/fs/batch');
-        const requests = JSON.parse(options.body || '{}').requests || [];
+        const directList = String(url).startsWith('/api/fs/fast/list?');
+        if (!directList) assert.equal(String(url), '/api/fs/batch');
+        const requests = directList ? [{id: 0}] : (JSON.parse(options.body || '{}').requests || []);
         const batch = {...deferredFetch(), requests};
+        batch.directList = directList;
         batches.push(batch);
         return batch.promise;
       });
       const resolveBatch = (index, marker, ok = true) => {
         const batch = batches[index];
+        if (batch.directList) {
+          batch.resolve(ok ? jsonResponse(resource.payload(marker)) : jsonResponse({error: marker}, 500));
+          return;
+        }
         batch.resolve(jsonResponse({
           responses: batch.requests.map(request => ok
             ? {id: request.id, ok: true, status: 200, payload: resource.payload(marker)}
@@ -1971,7 +2309,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const newer = resource.fetch(api, resource.path, {fresh: true});
       const newerFlush = api.flushFileExplorerFsBatchForTest();
       const coalescedList = resource.type === 'list';
-      assert.equal(batches.length, coalescedList ? 1 : 2, `${resource.type}: list fan-out is coalesced while independent info reads retain stale-generation coverage`);
+      assert.equal(batches.length, coalescedList ? 1 : 2, `${resource.type}: direct LIST fan-out is coalesced while independent batched INFO reads retain stale-generation coverage`);
       if (coalescedList) {
         resolveBatch(0, 'new');
         await Promise.all([olderFlush, newerFlush]);
@@ -3341,23 +3679,16 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     const api = loadYolomux('', ['1']);
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerSyncStateForTest({inFlightSignature: 'old-plan', appliedPlanKey: 'old-plan', generation: 4});
-    api.setFetchForTest((url, options = {}) => {
-      assert.equal(String(url), '/api/fs/batch');
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/fast/list?'));
       const request = {
         ...deferredFetch(),
-        requests: JSON.parse(options.body || '{}').requests || [],
+        path: new URL(String(url), 'https://yolomux.test').searchParams.get('path'),
       };
       pending.push(request);
       return request.promise;
     });
-    const reply = pendingRequest => jsonResponse({
-      responses: pendingRequest.requests.map(request => ({
-        id: request.id,
-        ok: true,
-        status: 200,
-        payload: {path: request.path, entries: [{name: 'README.md', kind: 'file'}]},
-      })),
-    });
+    const reply = pendingRequest => jsonResponse({path: pendingRequest.path, entries: [{name: 'README.md', kind: 'file'}]});
 
     const staleOpen = api.openFileExplorerAtForTest('/home/test/old-root', {syncSelection: true, refreshPanels: false});
     await flushAsyncWork();
@@ -3490,7 +3821,13 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
   });
 
   await testAsync('Finder Sync cursor restore falls back to a visible ancestor without a fetch', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const frames = [];
+    const api = loadYolomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
     api.setFileExplorerRootMode('sync', {sync: false});
     const root = '/home/test';
     api.setFileExplorerDirListingForTest(root, [{name: 'project', kind: 'dir'}]);
@@ -3509,11 +3846,17 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     await api.syncFileExplorerRootToPlanForTest({session: '1', root, expandPaths: [], affectedDirs: [root]}, '1');
     assert.equal(api.fileExplorerSelectionLeadForTest(), `${root}/project`, 'a hidden remembered child degrades to its visible ancestor');
     assert.equal(api.fileExplorerTreeForTest().getAttribute('aria-activedescendant'), api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/home/test/project"]').id, 'fallback cursor remains exposed to assistive tree navigation');
-    assert.equal(fetchCalls, 0, 'restoring a collapsed cursor adds no blocking fetch');
+    assert.equal(fetchCalls, 0, 'restoring a collapsed cursor adds no blocking fetch before deferred revalidation');
   });
 
   await testAsync('Finder Sync warm session switches render synchronously from the bounded listing cache', async () => {
-    const api = loadYolomux('', ['1', '2']);
+    const frames = [];
+    const api = loadYolomux('', ['1', '2'], 'https:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
     api.setFileExplorerRootMode('sync', {sync: false});
     const listings = new Map([
       ['/home/test', [{name: 'project', kind: 'dir'}]],
@@ -3565,18 +3908,11 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerDirListingForTest('/repo', [{name: 'old.txt', kind: 'file'}]);
     const requests = [];
-    api.setFetchForTest((url, options = {}) => {
-      assert.equal(String(url), '/api/fs/batch');
-      const items = JSON.parse(options.body).requests;
-      requests.push(items.map(item => item.path));
-      return Promise.resolve(jsonResponse({
-        responses: items.map(item => ({
-          id: item.id,
-          ok: true,
-          status: 200,
-          payload: {entries: [{name: 'new.txt', kind: 'file'}]},
-        })),
-      }));
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/fast/list?'));
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      requests.push(path);
+      return Promise.resolve(jsonResponse({path, entries: [{name: 'new.txt', kind: 'file'}]}));
     });
     const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
     const sync = api.syncFileExplorerRootToPlanForTest(plan, '1');
@@ -3588,8 +3924,8 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     await flushAsyncWork();
     await flushAsyncWork();
     await flushAsyncWork();
-    assert.equal(requests.length, 1, 'background listings settle in one batched request after the frame');
-    assert.deepStrictEqual([...new Set(requests[0])], ['/repo'], 'revalidation is scoped to the visible cached directory');
+    assert.equal(requests.length, 1, 'background listing settles in one direct request after the frame');
+    assert.deepStrictEqual([...new Set(requests)], ['/repo'], 'revalidation is scoped to the visible cached directory');
     assert.equal(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/old.txt"]'), null, 'a changed cached row is removed in place after revalidation');
     assert.ok(api.fileExplorerTreeForTest().querySelector('.file-tree-row[data-path="/repo/new.txt"]'), 'the changed directory appears after revalidation');
     assert.deepStrictEqual(canonical(api.fileExplorerExpandedForTest()), [], 'background freshness does not collapse or invent disclosure state');
@@ -3605,11 +3941,9 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     });
     api.setFileExplorerRootMode('sync', {sync: false});
     api.setFileExplorerDirListingForTest('/repo', [{name: 'same.txt', kind: 'file'}]);
-    api.setFetchForTest((_url, options = {}) => {
-      const items = JSON.parse(options.body).requests;
-      return Promise.resolve(jsonResponse({responses: items.map(item => ({
-        id: item.id, ok: true, status: 200, payload: {entries: [{name: 'same.txt', kind: 'file'}]},
-      }))}));
+    api.setFetchForTest(url => {
+      const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+      return Promise.resolve(jsonResponse({path, entries: [{name: 'same.txt', kind: 'file'}]}));
     });
     const plan = {session: '1', root: '/repo', expandPaths: [], affectedDirs: ['/repo']};
     await api.syncFileExplorerRootToPlanForTest(plan, '1');
@@ -3643,22 +3977,26 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.deepStrictEqual(canonical(api.treeRowContractForTest(differRow)), canonical(differContract), 'Differ directory DOM/dataset/classes/ARIA/column order are stable');
   });
 
-  await testAsync('Finder Sync cold listings start in bounded parallel batches and share the LRU bound', async () => {
+  await testAsync('Finder Sync cold descendant listings use eight bounded direct workers and share the LRU bound', async () => {
     const api = loadYolomux('', ['1']);
     const directories = Array.from({length: 12}, (_value, index) => `/cold/${index}`);
-    const batches = [];
-    api.setFetchForTest((url, options = {}) => {
-      assert.equal(String(url), '/api/fs/batch');
-      const items = JSON.parse(options.body).requests;
-      batches.push(items.map(item => item.path));
-      return Promise.resolve(jsonResponse({
-        responses: items.map(item => ({id: item.id, ok: true, status: 200, payload: {entries: []}})),
-      }));
+    const pending = [];
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/fs/fast/list?'));
+      const request = {...deferredFetch(), path: new URL(String(url), 'https://yolomux.test').searchParams.get('path')};
+      pending.push(request);
+      return request.promise;
     });
-    const listings = await api.fetchFileExplorerSyncListingsForTest(directories, {force: true});
+    const listingPromise = api.fetchFileExplorerSyncListingsForTest(directories, {force: true});
+    await flushAsyncWork();
+    assert.equal(pending.length, 8, 'the bounded owner starts eight one-level GETs before awaiting a response');
+    for (const request of pending.slice(0, 8)) request.resolve(jsonResponse({path: request.path, entries: []}));
+    await flushAsyncWork();
+    assert.equal(pending.length, 12, 'the remaining four start only after capacity becomes available');
+    for (const request of pending.slice(8)) request.resolve(jsonResponse({path: request.path, entries: []}));
+    const listings = await listingPromise;
     assert.equal(listings.size, directories.length, 'every cold directory settles');
-    assert.equal(batches[0].length, 8, 'the first response is awaited only after all eight bounded workers have started');
-    assert.deepStrictEqual(batches.map(batch => batch.length), [8, 4], 'twelve cold listings take two bounded batches rather than twelve sequential round trips');
+    assert.deepStrictEqual(pending.map(request => request.path), directories, 'the direct one-level requests preserve breadth-first queue order');
 
     const limit = api.fileExplorerMemoryCacheLimitForTest;
     for (let index = 0; index < limit + 5; index += 1) {
@@ -3698,9 +4036,9 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
   });
 
-  await testAsync('a mass re-list is split at the bound the server states instead of posted whole and refused', async () => {
-    // Keiven's Differ pointed at a worktree deleted the day before, which re-lists every open
-    // directory at once. The flush drained the whole queue into ONE body, and the server refuses a
+  await testAsync('a mass deferred INFO enrichment is split at the bound the server states instead of posted whole and refused', async () => {
+    // Deferred repo enrichment can inspect every visible directory at once. The flush once drained
+    // the whole queue into ONE body, and the server refuses a
     // body above filesystem.MAX_BATCH_REQUESTS with a 400 invalid_request, so the entire operation
     // failed rather than being split. The stub refuses exactly the way the server does.
     const api = loadYolomux();
@@ -3721,22 +4059,22 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
           id: request.id,
           ok: true,
           status: 200,
-          payload: {path: request.path, entries: [{name: `${request.id}.txt`, kind: 'file'}]},
+          payload: {path: request.path, kind: 'dir', marker: String(request.id)},
         })),
       }));
     });
 
     const paths = Array.from({length: 130}, (_, index) => `/home/test/mass/${index}`);
-    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const infos = paths.map(path => api.fetchFilePathInfoForTest(path, {fresh: true}));
     const flush = await api.flushFileExplorerFsBatchForTest();
     assert.equal(flush.ok, true, 'a 130-path re-list succeeds instead of being refused');
     assert.deepStrictEqual(bodies.map(requests => requests.length), [64, 64, 2], 'the queue is split into consecutive slices no larger than the stated bound');
     assert.equal(bodies.some(requests => requests.length > 64), false, 'no body reaches the server above the bound it refuses');
     assert.deepStrictEqual(bodies.flat().map(request => request.path), paths, 'chunking preserves queue order across chunk boundaries');
-    const entries = await Promise.all(listings);
+    const entries = await Promise.all(infos);
     assert.deepStrictEqual(
-      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
-      bodies.flat().map(request => [`${request.id}.txt`]),
+      entries.map(entry => entry.marker),
+      bodies.flat().map(request => String(request.id)),
       'every queued path still gets its own per-item result',
     );
   });
@@ -3756,7 +4094,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         // take a whole flush with it.
         if (posts.length === 1) return Promise.reject(new Error('chunk transport failed'));
         return Promise.resolve(jsonResponse({
-          responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+          responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, kind: 'dir', marker: 'ok'}})),
         }));
       }
       // The failed chunk falls back to one request per item; fail those too, so the two items it
@@ -3766,7 +4104,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     });
 
     const paths = ['/home/test/chunk/a', '/home/test/chunk/b', '/home/test/chunk/c', '/home/test/chunk/d', '/home/test/chunk/e'];
-    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const infos = paths.map(path => api.fetchFilePathInfoForTest(path, {fresh: true}));
     const flush = await api.flushFileExplorerFsBatchForTest();
     assert.deepStrictEqual(posts, [
       ['/home/test/chunk/a', '/home/test/chunk/b'],
@@ -3776,10 +4114,10 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(flush.chunks, 3, 'the stated bound of 2 splits five queued paths into three chunks');
     assert.equal(flush.ok, false, 'the flush reports the failed chunk rather than hiding it');
     assert.equal(singles.length, 2, 'only the failed chunk falls back to per-item requests');
-    const entries = await Promise.all(listings);
+    const entries = await Promise.allSettled(infos);
     assert.deepStrictEqual(
-      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
-      [null, null, ['ok.txt'], ['ok.txt'], ['ok.txt']],
+      entries.map(entry => entry.status === 'fulfilled' ? (entry.value?.marker || null) : null),
+      [null, null, 'ok', 'ok', 'ok'],
       'the failed chunk surfaces its own error while every sibling item still gets its result',
     );
   });
@@ -3796,16 +4134,16 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const requests = JSON.parse(options.body || '{}').requests || [];
       bodies.push(requests.map(request => request.path));
       return Promise.resolve(jsonResponse({
-        responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+        responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, kind: 'dir', marker: 'ok'}})),
       }));
     });
 
     const paths = ['/home/test/unstated/a', '/home/test/unstated/b', '/home/test/unstated/c'];
-    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const infos = paths.map(path => api.fetchFilePathInfoForTest(path, {fresh: true}));
     await api.flushFileExplorerFsBatchForTest();
     assert.deepStrictEqual(bodies, [[paths[0]], [paths[1]], [paths[2]]], 'an unstated bound sends one item per request rather than a remembered 64');
-    const entries = await Promise.all(listings);
-    assert.deepStrictEqual(entries.map(entry => entry.map(row => row.name)), [['ok.txt'], ['ok.txt'], ['ok.txt']], 'every item still settles');
+    const entries = await Promise.all(infos);
+    assert.deepStrictEqual(entries.map(entry => entry.marker), ['ok', 'ok', 'ok'], 'every item still settles');
   });
 
   test('compact watchd push revisions cannot overwrite the watch-diff cursor', () => {
@@ -5615,27 +5953,19 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const name = longPath.slice(longPath.lastIndexOf('/') + 1);
       pendingApi.renderTreeChildrenForTest(container, parent, [{name, kind: 'dir'}], 0);
       const row = container.children.find(node => node?.dataset?.path === longPath);
-      let resolveBatch = null;
-      pendingApi.setFetchForTest((url, options = {}) => {
-        if (!String(url).startsWith('/api/fs/batch')) return Promise.resolve(jsonResponse({}));
-        const requests = JSON.parse(options.body || '{}').requests || [];
+      let resolveList = null;
+      pendingApi.setFetchForTest(url => {
+        assert.ok(String(url).startsWith('/api/fs/fast/list?'));
         return new Promise(resolve => {
-          resolveBatch = () => resolve(jsonResponse({responses: requests.map(request => ({
-            id: request.id,
-            ok: true,
-            status: 200,
-            payload: {path: request.path, entries: [{name: 'child.txt', kind: 'file'}]},
-          }))}));
+          resolveList = () => resolve(jsonResponse({path: longPath, entries: [{name: 'child.txt', kind: 'file'}]}));
         });
       });
       const expandPromise = pendingApi.expandDirectoryRowForTest(row, longPath, {manual: true});
-      const flushPromise = pendingApi.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
       assert.equal(row.getAttribute('aria-expanded'), 'true', 'Finder directory shows expanded immediately while the backend listing is pending');
       assert.equal(row.classList.contains('loading-children'), true, 'Finder directory shows a pending expansion spinner while listing is in flight');
-      assert.ok(resolveBatch, 'directory expansion issued the backend listing request');
-      resolveBatch();
-      await flushPromise;
+      assert.ok(resolveList, 'directory expansion issued the direct one-level listing request');
+      resolveList();
       await expandPromise;
       assert.equal(row.getAttribute('aria-expanded'), 'true', 'Finder directory remains expanded after the backend listing resolves');
       assert.equal(row.classList.contains('loading-children'), false, 'Finder directory clears the pending spinner after the backend listing resolves');
@@ -6208,25 +6538,16 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const api = loadYolomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
-        const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
-        return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map(request => ({
-            id: request.id,
-            ok: true,
-            status: 200,
-            payload: {path: request.path, entries: [{name: 'TODO.md', kind: 'file'}]},
-          })),
-        }));
+        calls.push({url: String(url), method: options.method || 'GET'});
+        return Promise.resolve(jsonResponse({path: '/home/test', entries: [{name: 'TODO.md', kind: 'file'}]}));
       });
       const first = api.fetchDirectoryForTest('/home/test', {trigger: 'tree-render'});
       const second = api.fetchDirectoryForTest('/home/test/', {trigger: 'watch-diff-fallback'});
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
-        method: 'POST',
-        requests: [{id: 1, path: '/home/test', trigger_counts: {'tree-render': 1, 'watch-diff-fallback': 1}, type: 'list'}],
-        url: '/api/fs/batch',
-      }], 'concurrent identical directory listings share one batched backend request');
+        method: 'GET',
+        url: '/api/fs/fast/list?path=%2Fhome%2Ftest',
+      }], 'concurrent identical directory listings share one direct fast request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.strictEqual(firstEntries, secondEntries, 'shared directory listing callers receive the same entries object');
       assert.equal(firstEntries[0].name, 'TODO.md');
@@ -6238,9 +6559,9 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     {
       const api = loadYolomux();
       const batches = [];
-      api.setFetchForTest((url, options = {}) => {
-        assert.equal(String(url), '/api/fs/batch');
-        const batch = {...deferredFetch(), requests: JSON.parse(options.body || '{}').requests || []};
+      api.setFetchForTest(url => {
+        assert.equal(String(url), '/api/fs/fast/list?path=%2Fhome%2Ftest%2Fbootstrap');
+        const batch = deferredFetch();
         batches.push(batch);
         return batch.promise;
       });
@@ -6249,23 +6570,15 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       api.renderTreeChildrenForTest(container, '/home/test', [{name: 'bootstrap', kind: 'dir'}], 0);
       const row = container.children.find(node => node?.dataset?.path === path);
       const background = api.fetchDirectoryForTest(path, {trigger: 'tree-render'});
-      const backgroundFlush = api.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
       assert.equal(batches.length, 1, 'the bootstrap list is already in flight');
       const user = api.onFileTreeRowClick(row, path, {name: 'bootstrap', kind: 'dir'}, {});
-      const userFlush = api.flushFileExplorerFsBatchForTest();
       await flushAsyncWork();
-      assert.equal(batches.length, 2, 'a user list gets one successor batch instead of inheriting the bootstrap wait');
-      assert.deepStrictEqual(canonical(batches.map(batch => batch.requests)), [
-        [{id: 1, path: '/home/test/bootstrap', trigger_counts: {'tree-render': 1}, type: 'list'}],
-        [{id: 2, path: '/home/test/bootstrap', trigger_counts: {'explicit-user': 1}, type: 'list'}],
-      ]);
-      batches[1].resolve(jsonResponse({responses: [{id: 2, ok: true, status: 200, payload: {entries: [{name: 'clicked.txt', kind: 'file'}]}}]}));
-      await userFlush;
+      assert.equal(batches.length, 2, 'a user list gets one successor direct GET instead of inheriting the bootstrap wait');
+      batches[1].resolve(jsonResponse({path, entries: [{name: 'clicked.txt', kind: 'file'}]}));
       await user;
       assert.equal(row.classList.contains('loading-children'), false, 'the click settles before the bootstrap response');
-      batches[0].resolve(jsonResponse({responses: [{id: 1, ok: true, status: 200, payload: {entries: [{name: 'bootstrap.txt', kind: 'file'}]}}]}));
-      await backgroundFlush;
+      batches[0].resolve(jsonResponse({path, entries: [{name: 'bootstrap.txt', kind: 'file'}]}));
       assert.equal((await background)[0].name, 'bootstrap.txt', 'the background request remains independently observable');
     }
 
@@ -6274,16 +6587,8 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const calls = [];
       api.setDocumentVisibilityForTest('hidden');
       api.setFetchForTest((url, options = {}) => {
-        const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
-        return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map(request => ({
-            id: request.id,
-            ok: true,
-            status: 200,
-            payload: {path: request.path, entries: [{name: 'visible.txt', kind: 'file'}]},
-          })),
-        }));
+        calls.push({url: String(url), method: options.method || 'GET'});
+        return Promise.resolve(jsonResponse({path: '/home/hidden', entries: [{name: 'visible.txt', kind: 'file'}]}));
       });
       assert.equal(await api.fetchDirectoryForTest('/home/hidden'), null, 'hidden pages skip background Finder directory fetches');
       assert.deepStrictEqual(canonical(calls), [], 'hidden background Finder fetches do not enqueue /api/fs/batch');
@@ -6292,9 +6597,8 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       await api.flushFileExplorerFsBatchForTest();
       assert.equal((await userFetch)[0].name, 'visible.txt');
       assert.deepStrictEqual(canonical(calls), [{
-        method: 'POST',
-        requests: [{id: 1, path: '/home/hidden', trigger_counts: {'explicit-user': 1}, type: 'list'}],
-        url: '/api/fs/batch',
+        method: 'GET',
+        url: '/api/fs/fast/list?path=%2Fhome%2Fhidden',
       }], 'explicit user Finder fetches bypass hidden-background suppression');
     }
 
@@ -6302,24 +6606,15 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       const api = loadYolomux();
       const calls = [];
       api.setFetchForTest((url, options = {}) => {
-        const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
-        return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map((request, index) => ({
-            id: request.id,
-            ok: true,
-            status: 200,
-            payload: {path: request.path, entries: [{name: index === 0 ? 'a.txt' : 'b.txt', kind: 'file'}]},
-          })),
-        }));
+        calls.push({url: String(url), method: options.method || 'GET'});
+        return Promise.resolve(jsonResponse({path: '/home/test', entries: [{name: 'a.txt', kind: 'file'}]}));
       });
       const first = api.fetchDirectoryForTest('/home/test', {fresh: true});
       const second = api.fetchDirectoryForTest('/home/test', {fresh: true});
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
-        method: 'POST',
-        requests: [{id: 1, path: '/home/test', trigger_counts: {'fresh-repair': 2}, type: 'list'}],
-        url: '/api/fs/batch',
+        method: 'GET',
+        url: '/api/fs/fast/list?path=%2Fhome%2Ftest',
       }], 'concurrent fresh directory listings bypass stale values but share one in-flight backend request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
       assert.equal(firstEntries[0].name, 'a.txt');
@@ -6332,30 +6627,19 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       api.setFileExplorerRootForTest('/repo');
       api.setFileExplorerExpandedForTest(['/repo/src', '/repo/src/js', '/repo/tests']);
       api.setFetchForTest((url, options = {}) => {
-        const body = JSON.parse(options.body || '{}');
-        calls.push({url: String(url), method: options.method || 'GET', requests: body.requests || []});
-        return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map(request => ({
-            id: request.id,
-            ok: true,
-            status: 200,
-            payload: {path: request.path, entries: [{name: 'child', kind: 'file'}]},
-          })),
-        }));
+        const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+        calls.push({url: String(url), method: options.method || 'GET'});
+        return Promise.resolve(jsonResponse({path, entries: [{name: 'child', kind: 'file'}]}));
       });
       const entriesPromise = api.fileExplorerEntriesByWatchedDirectoryForTest('/repo');
       await api.flushFileExplorerFsBatchForTest();
       const entriesByDir = await entriesPromise;
-      assert.deepStrictEqual(canonical(calls), [{
-        method: 'POST',
-        requests: [
-          {id: 1, path: '/repo', trigger_counts: {'tree-render': 1}, type: 'list'},
-          {id: 2, path: '/repo/src', trigger_counts: {'tree-render': 1}, type: 'list'},
-          {id: 3, path: '/repo/src/js', trigger_counts: {'tree-render': 1}, type: 'list'},
-          {id: 4, path: '/repo/tests', trigger_counts: {'tree-render': 1}, type: 'list'},
-        ],
-        url: '/api/fs/batch',
-      }], 'watched Finder/Differ directories prefetch in one fs batch instead of one POST per expanded directory');
+      assert.deepStrictEqual(canonical(calls.map(call => call.url)), [
+        '/api/fs/fast/list?path=%2Frepo',
+        '/api/fs/fast/list?path=%2Frepo%2Fsrc',
+        '/api/fs/fast/list?path=%2Frepo%2Fsrc%2Fjs',
+        '/api/fs/fast/list?path=%2Frepo%2Ftests',
+      ], 'watched Finder/Differ directories use explicit one-level fast GETs in breadth-first order');
       assert.deepStrictEqual(canonical(Array.from(entriesByDir.keys()).sort()), ['/repo', '/repo/src', '/repo/src/js', '/repo/tests']);
     }
 
@@ -6369,16 +6653,9 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       assert.equal(await api.fetchDirectoryForTest('/home/test'), null, 'P4: push-refresh-depth still returns null when the same path had a stale error');
       assert.equal(api.currentFileExplorerListErrorForTest('/home/test'), '', 'P4: benign null clears the stale error for the current path');
       api.setFileExplorerPushRefreshDepthForTest(0);
-      api.setFetchForTest((url, options = {}) => {
-        const body = JSON.parse(options.body || '{}');
-        return Promise.resolve(jsonResponse({
-          responses: (body.requests || []).map(request => ({
-            id: request.id,
-            ok: false,
-            status: 403,
-            error: `denied ${request.path}`,
-          })),
-        }));
+      api.setFetchForTest(url => {
+        const path = new URL(String(url), 'https://yolomux.test').searchParams.get('path');
+        return Promise.resolve(jsonResponse({error: `denied ${path}`}, 403));
       });
       assert.equal(await api.fetchDirectoryForTest('/home/test/secret', {fresh: true}), null, 'P4: real list failures still return null');
       assert.equal(api.currentFileExplorerListErrorForTest('/home/test/secret'), 'denied /home/test/secret', 'P4: real list failures record a path-keyed error');
