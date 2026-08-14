@@ -406,12 +406,6 @@ function preferenceSections() {
       preferenceSettingItem('yoagent.intro', {type: 'textarea', alwaysEnableReset: true}),
       preferenceSettingItem('yoagent.format', {type: 'textarea', alwaysEnableReset: true}),
     ]},
-    {id: PREFERENCE_SECTION_IDS.share, title: t('brand.share'), items: [
-      preferenceSettingItem('share.ttl_seconds', {type: 'number', min: 1, max: 480, step: 1, suffix: t('unit.minute.short'), scale: 60}),
-      preferenceSettingItem('share.max_viewers', {type: 'number', min: 1, max: 300, step: 1}),
-      preferenceSettingItem('share.read_only', {type: 'boolean'}),
-      preferenceSettingItem('share.scheme', {type: 'radio', choices: ['http', 'https']}),
-    ]},
     {id: PREFERENCE_SECTION_IDS.yolo, title: t('brand.yolo'), items: [
       preferenceSettingItem('performance.auto_approve_interval_seconds', {type: 'number', min: 0.1, max: 10, step: 0.1, suffix: 's'}),
       preferenceSettingItem('yolo.rule_file_path', {type: 'text', action: 'open-yolo-rule', wide: true}),
@@ -537,7 +531,6 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.includes('throttle')) add(['mute', 'quiet', 'spam', 'cooldown', 'rate limit']);
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
-  if (path.startsWith('share.')) add(['share', 'sharing', 'viewer', 'viewers', 'url', 'http', 'https', 'read-only', 'write']);
   if (path.startsWith('cost.')) add(['cost', 'price', 'pricing', 'api', 'list', 'subscription', 'marginal', 'codex', 'claude', 'openai', 'anthropic', 'tokens']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
@@ -640,7 +633,7 @@ function preferenceControlHtml(item, query = '') {
   }
   const value = preferenceValue(item.path);
   const defaultValue = preferenceDefault(item.path);
-  const preferencesReadOnlyVisual = readOnlyMode && !shareViewMode;
+  const preferencesReadOnlyVisual = readOnlyMode;
   const disabled = preferencesReadOnlyVisual ? ' disabled' : '';
   const controlId = `preference-${item.path.replace(/[^A-Za-z0-9_-]+/g, '-')}`;
   const minAttr = item.min !== undefined ? ` data-setting-min="${esc(item.min)}"` : '';
@@ -749,7 +742,7 @@ function preferencesPanelHtml() {
           <div class="preferences-settings"${collapsed ? ' hidden' : ''}>${rows}</div>
         </section>`;
     }).join('');
-  const readonly = readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : '';
+  const readonly = readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : '';
   const resetDisabled = readOnlyMode ? ' disabled' : '';
   const resetTitle = preferencesResetConfirmVisible ? t('pref.reset.confirmTitle') : t('pref.reset.title');
   const resetWarning = preferencesResetConfirmVisible
@@ -849,7 +842,7 @@ function renderPreferencesPanels(options = {}) {
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode && !shareViewMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
       } else {
         reconcilePanelBody({
           body,
@@ -861,9 +854,6 @@ function renderPreferencesPanels(options = {}) {
     bindPreferencesPanel(panel);
     autosizePreferenceTextareas(panel);
     if (options.focusSearch) focusPreferencesSearch(panel);
-  }
-  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
-    scheduleShareScrollRestoreByKey('preferences');
   }
 }
 
@@ -916,7 +906,6 @@ function bindPreferencesPanel(panel) {
       preferencesSearchText = search.value || '';
       preferencesResetConfirmVisible = false;
       renderPreferencesPanels({force: true, focusSearch: true});
-      scheduleShareUiStatePublish();
       return;
     }
     const control = event.target.closest('[data-setting-path]');
@@ -1009,7 +998,6 @@ function bindPreferencesPanel(panel) {
       } else {
         renderPreferencesPanels({force: true});
       }
-      scheduleShareUiStatePublish();
     },
     'preferences-setting-reset': (_event, target) => resetPreference(target.dataset.settingReset || ''),
     });

@@ -31,10 +31,6 @@ from .login_escalation import escalation_level
 from .login_rate_limit import ADMIT
 from .login_rate_limit import AdmissionDecision
 from .login_rate_limit import RETRY_BAND_HOURS
-from .http_routes import route_for_request
-from .http_routes import SHARE_ACCESS_NONE
-from .http_routes import SHARE_ACCESS_READONLY
-from .http_routes import SHARE_ACCESS_SCOPED_FILE
 from .web import _LOGIN_LOCALE_VALUES
 from .web import current_language_pref
 from .web import login_html
@@ -228,43 +224,6 @@ class AuthMixin:
             return identity.role == "admin"
         return False
 
-    def share_token_text(self) -> str:
-        header_token = self.headers.get("X-Share-Token", "").strip()
-        if header_token:
-            return header_token
-        parsed = urlparse(self.path)
-        return parse_qs(parsed.query).get("token", [""])[0].strip()
-
-    def share_request_allowed(self) -> bool:
-        parsed = urlparse(self.path)
-        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
-        return bool(route and route.share_access != SHARE_ACCESS_NONE)
-
-    def share_readonly_api_allowed(self, parsed: Any) -> bool:
-        if not self.share_token():
-            return False
-        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), parsed.path)
-        if route is None:
-            return False
-        if route.share_access == SHARE_ACCESS_READONLY:
-            return True
-        if route.share_access != SHARE_ACCESS_SCOPED_FILE:
-            return False
-        raw_path = parse_qs(parsed.query).get("path", [""])[0].strip()
-        checker = getattr(self.server.app, "share_record_allows_file_path", None)
-        return callable(checker) and checker(self.share_record(), raw_path)
-
-    def reject_share_forbidden(self) -> None:
-        self.close_after_unread_body()
-        self.write_json(
-            error_payload(
-                "share token is limited to the shared page and websocket",
-                message_key="share.error.pageScope",
-                role="readonly",
-            ),
-            status=HTTPStatus.FORBIDDEN,
-        )
-
     def reject_forbidden(self, identity: AuthIdentity, required_role: str) -> None:
         self.close_after_unread_body()
         self.write_json(
@@ -323,40 +282,9 @@ class AuthMixin:
 
     def require_auth(self, required_role: str = "readonly") -> bool:
         self._auth_cookie_identity = None
-        self._share_session = None
-        self._share_sessions = []
-        self._share_token = None
-        self._share_record = None
-        self._share_mode = "ro"
         bypass_auth = test_auth_bypass_enabled()
         if auth_setup_required() and not bypass_auth:
             self.write_html(setup_auth_html(self.request_locale_pref(), self.headers.get("Accept-Language", ""), secure=self.request_is_https()))
-            return False
-        share_token = self.share_token_text()
-        if share_token:
-            verifier = getattr(self.server.app, "verify_share_token", None)
-            record = verifier(share_token) if callable(verifier) else None
-            if record is None:
-                self._auth_identity = None
-                self.reject_unauthorized()
-                return False
-            identity = AuthIdentity(username="share", password="", role="readonly")
-            self._auth_identity = identity
-            raw_sessions = record.get("sessions") if isinstance(record.get("sessions"), list) else []
-            share_sessions = [str(session or "").strip() for session in raw_sessions if str(session or "").strip()]
-            if not share_sessions and record.get("session"):
-                share_sessions = [str(record.get("session") or "")]
-            self._share_sessions = share_sessions
-            self._share_session = share_sessions[0] if share_sessions else ""
-            self._share_token = share_token
-            self._share_record = dict(record)
-            self._share_mode = str(record.get("mode") or "ro") if self.request_is_https() else "ro"
-            if not self.share_request_allowed():
-                self.reject_share_forbidden()
-                return False
-            if self.role_allows(identity, required_role):
-                return True
-            self.reject_forbidden(identity, required_role)
             return False
         if bypass_auth:
             identity = AuthIdentity(username="test-auth-bypass", password="", role="admin")
@@ -404,23 +332,6 @@ class AuthMixin:
 
     def auth_readonly(self) -> bool:
         return self.auth_identity().role == "readonly"
-
-    def share_session(self) -> str:
-        return str(getattr(self, "_share_session", "") or "")
-
-    def share_sessions(self) -> list[str]:
-        sessions = getattr(self, "_share_sessions", [])
-        return list(sessions) if isinstance(sessions, list) else []
-
-    def share_token(self) -> str:
-        return str(getattr(self, "_share_token", "") or "")
-
-    def share_record(self) -> dict[str, Any] | None:
-        record = getattr(self, "_share_record", None)
-        return dict(record) if isinstance(record, dict) else None
-
-    def share_mode(self) -> str:
-        return str(getattr(self, "_share_mode", "ro") or "ro")
 
     def handle_login_page(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

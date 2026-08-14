@@ -645,7 +645,7 @@ def browser_auth_yaml() -> str:
 
 class BrowserFakeTlsContext:
     def wrap_socket(self, *_args, **_kwargs):
-        raise AssertionError("plain HTTP share requests should not be TLS-wrapped")
+        raise AssertionError("plain HTTP fixture requests should not be TLS-wrapped")
 
 
 def isolate_browser_runtime_paths(monkeypatch, tmp_path):
@@ -751,7 +751,7 @@ def start_fixture_runtime(monkeypatch, tmp_path, options: FixtureRuntimeOptions)
         raise
 
 
-def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
+def start_isolated_browser_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
     return start_fixture_runtime(
         monkeypatch,
         tmp_path,
@@ -759,7 +759,7 @@ def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, 
     )
 
 
-def stop_isolated_browser_share_app(runtime):
+def stop_isolated_browser_app(runtime):
     if runtime is None:
         return
     if isinstance(runtime, FixtureRuntime):
@@ -768,7 +768,7 @@ def stop_isolated_browser_share_app(runtime):
     FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
 
 
-def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
+def start_browser_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
     auth_path = tmp_path / "auth.yaml"
     auth_path.write_text(browser_auth_yaml(), encoding="utf-8")
     monkeypatch.setattr(common, "AUTH_CONFIG_PATH", auth_path)
@@ -785,7 +785,7 @@ def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, 
     return runtime.server, runtime.thread
 
 
-def stop_browser_share_server(
+def stop_browser_server(
     server,
     thread,
     *,
@@ -799,7 +799,7 @@ def stop_browser_share_server(
     base_url = runtime.base_url if isinstance(runtime, GateLiveServer) else f"http://127.0.0.1:{server.server_address[1]}"
     owned_browsers = (browser, *tuple(browsers)) if invalid_browser_arguments else (tuple(browsers) if browsers else browser)
     validation_error = (
-        ValueError("pass either browser or browsers to stop_browser_share_server, not both")
+        ValueError("pass either browser or browsers to stop_browser_server, not both")
         if invalid_browser_arguments
         else None
     )
@@ -2276,7 +2276,7 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "sessions": sessions,
         "availableAgents": list(scenario.available_agents) if scenario.available_agents is not None else ["term"],
         "accessRole": scenario.access_role,
-        "authUsername": scenario.auth_username if scenario.share_bootstrap is None else "",
+        "authUsername": scenario.auth_username,
         "dangerouslyYolo": scenario.dangerously_yolo,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
@@ -2301,8 +2301,6 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
         "localeRegistry": locale_registry_payload(),
         "strings": {"en": dict(app_english_strings())},
     }
-    if scenario.share_bootstrap is not None:
-        bootstrap["share"] = dict(scenario.share_bootstrap)
     if scenario.agent_auth is not None:
         bootstrap["agentAuth"] = dict(scenario.agent_auth)
     return bootstrap
@@ -2354,7 +2352,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     grid_height = scenario.grid_height
     file_explorer_open_intent = scenario.file_explorer_open_intent
     auto_approve_payload = dict(scenario.auto_approve_payload) if scenario.auto_approve_payload is not None else None
-    share_status_payload = dict(scenario.share_status_payload) if scenario.share_status_payload is not None else None
     wrap_app_root = scenario.wrap_app_root
     yoagent_chat_mode = scenario.yoagent_chat_mode
     background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
@@ -2879,7 +2876,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             rules: {path: '/home/test/.config/yolomux/yolo-rules.yaml', source: 'default', rules: [], errors: []},
           });
         }
-        if (url.pathname === '/api/share') return jsonResponse(window.__fixtureSharePayload || {});
         if (url.pathname === '/api/session-metadata' || url.pathname === '/api/transcripts') {
           const transcriptSessions = window.__fixtureTranscriptSessions || {};
           const currentPath = window.__fixtureTranscriptCurrentPath || '/home/test/yolomux.dev';
@@ -3116,7 +3112,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           window.__fixtureAutoApprovePayload = {json.dumps(auto_approve_payload, separators=(",", ":")) if auto_approve_payload is not None else "null"};
           window.__fixtureHoldAutoApprove = {json.dumps(bool(hold_auto_approve))};
           window.__fixtureReleaseAutoApprove = null;
-          window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
           window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
           window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
@@ -3131,7 +3126,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     """)
 
 
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
     """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
 
     return render_browser_boot_scenario(BrowserBootScenario(
@@ -3150,8 +3145,6 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         auto_approve_payload=auto_approve_payload,
         access_role=access_role,
         auth_username=auth_username,
-        share_bootstrap=share_bootstrap,
-        share_status_payload=share_status_payload,
         wrap_app_root=wrap_app_root,
         yoagent_chat_mode=yoagent_chat_mode,
         available_agents=tuple(available_agents) if available_agents is not None else None,
@@ -3326,9 +3319,7 @@ def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redire
     # An explicitly allowed redirect has left the app realm, so there is no client-event transport to own on the destination page.
     if urlsplit(ready_state.get("url", "")).path in frozenset(expected_redirect_paths):
         return
-    share_bootstrap = fixture_kwargs.get("share_bootstrap")
-    share_view_mode = isinstance(share_bootstrap, dict) and share_bootstrap.get("view") is True
-    wait_for_fixture_client_event_demand(browser, expected_enabled=not share_view_mode)
+    wait_for_fixture_client_event_demand(browser, expected_enabled=True)
 
 
 def live_runtime_bundle_state(browser):

@@ -46,51 +46,13 @@ const accessRole = bootstrap.accessRole || 'admin';
 const authUsername = String(bootstrap.authUsername || '');
 const readOnlyMode = accessRole !== 'admin';
 const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api/dev-reload + auto-reload
-const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
-const shareViewMode = shareBootstrap?.view === true;
-const shareWriteMode = shareViewMode && shareBootstrap?.mode === 'rw';
 const clientCapabilityState = Object.freeze({
-  unscopedHostRequests: shareViewMode === false,
+  unscopedHostRequests: true,
 });
 function clientCanUseUnscopedHostRequests() {
   return clientCapabilityState.unscopedHostRequests === true;
 }
-const shareToken = (() => {
-  if (!shareViewMode) return '';
-  try {
-    return new URLSearchParams(String(location.hash || '').replace(/^#/, '')).get('t') || '';
-  } catch (_) {
-    return '';
-  }
-})();
-const shareDebugEnabled = (() => {
-  if (!shareViewMode) return false;
-  try {
-    const query = new URLSearchParams(location.search || '');
-    if (query.get('shareDebug') === '1') return true;
-  } catch (_) {}
-  return storageGet('yolomux.shareDebug') === '1';
-})();
-const shareReplaySemanticEscapeEnabled = (() => {
-  if (!shareViewMode) return false;
-  if (bootstrap.shareReplay === false || shareBootstrap?.replay === false) return true;
-  try {
-    const query = new URLSearchParams(location.search || '');
-    if (query.get('shareReplay') === '0' || query.get('shareSemantic') === '1') return true;
-  } catch (_) {}
-  return storageGet('yolomux.shareReplaySemantic') === '1';
-})();
-const shareReplayEnabled = (() => {
-  if (shareReplaySemanticEscapeEnabled) return false;
-  if (bootstrap.shareReplay === true || shareBootstrap?.replay === true) return true;
-  try {
-    const query = new URLSearchParams(location.search || '');
-    if (query.get('shareReplay') === '1') return true;
-  } catch (_) {}
-  if (shareViewMode) return true;
-  return storageGet('yolomux.shareReplay') === '1';
-})();
-function randomShareViewerId() {
+function randomBrowserInstanceId() {
   try {
     if (crypto?.randomUUID) return crypto.randomUUID();
     const bytes = new Uint8Array(16);
@@ -100,179 +62,8 @@ function randomShareViewerId() {
   } catch (_) {}
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
-const shareViewerId = (() => {
-  if (!shareViewMode) return '';
-  const key = `yolomux.share.viewer.${shareBootstrap?.id || 'current'}`;
-  return sessionScopedId(key);
-})();
-const shareClientId = (() => {
-  if (shareViewMode && shareViewerId) return shareViewerId;
-  const key = shareViewMode
-    ? `yolomux.share.client.${shareBootstrap?.id || 'current'}`
-    : 'yolomux.share.hostClient';
-  return sessionScopedId(key);
-})();
-function shareBootstrapFinderState() {
-  return shareViewMode && shareBootstrap?.finder && typeof shareBootstrap.finder === 'object'
-    ? shareBootstrap.finder
-    : {};
-}
-function shareBootstrapFinderRoot() {
-  const root = shareBootstrapFinderState().root;
-  return typeof root === 'string' && root.trim() ? root.trim() : '';
-}
-function shareBootstrapFinderRootMode(fallback = 'sync') {
-  const mode = shareBootstrapFinderState().rootMode;
-  if (mode === 'fixed' || mode === 'sync') return mode;
-  return fallback === 'fixed' ? 'fixed' : 'sync';
-}
-function shareBootstrapFinderMode(fallback = 'files') {
-  const mode = shareBootstrapFinderState().mode;
-  if (mode === 'diff' || mode === 'tabber' || mode === 'files') return mode;
-  return fallback;
-}
-function shareBootstrapFinderSession() {
-  const session = String(shareBootstrapFinderState().session || '').trim();
-  return session && sessions.includes(session) ? session : '';
-}
-// One lifecycle record owns all state associated with a share sender/session.  In
-// particular, teardown removes the record rather than trying to remember every
-// independent replay map that may have acquired state for that key.
-const shareSenderRecords = new Map();
-function shareSenderRecord(key, options = {}) {
-  const cleanKey = String(key || '').trim();
-  if (!cleanKey) return null;
-  let record = shareSenderRecords.get(cleanKey) || null;
-  if (!record && options.create !== false) {
-    record = {
-      connection: null,
-      dimensions: null,
-      lastFrame: null,
-      pointer: null,
-      popupSequence: 0,
-      replayScrollPublish: null,
-      scrollPublish: null,
-      scrollTarget: null,
-    };
-    shareSenderRecords.set(cleanKey, record);
-  }
-  return record;
-}
-function deleteShareSenderRecord(key) {
-  const cleanKey = String(key || '').trim();
-  const record = shareSenderRecords.get(cleanKey);
-  if (!record) return;
-  for (const state of [record.pointer, record.scrollPublish, record.replayScrollPublish]) {
-    if (state?.hideTimer) clearTimeout(state.hideTimer);
-    if (state?.timer) clearTimeout(state.timer);
-  }
-  record.pointer?.ghost?.remove?.();
-  shareSenderRecords.delete(cleanKey);
-}
-function shareSenderRecordEntries(field) {
-  return Array.from(shareSenderRecords.entries()).filter(([, record]) => record?.[field] != null);
-}
-if (shareViewMode && shareBootstrap?.session && shareBootstrap?.hostDims) {
-  shareSenderRecord(shareBootstrap.session).dimensions = {
-    rows: Number(shareBootstrap.hostDims.rows) || 0,
-    cols: Number(shareBootstrap.hostDims.cols) || 0,
-  };
-}
-if (shareViewMode && shareBootstrap?.hostDimsBySession && typeof shareBootstrap.hostDimsBySession === 'object') {
-  for (const [session, dims] of Object.entries(shareBootstrap.hostDimsBySession)) {
-    shareSenderRecord(session).dimensions = {
-      rows: Number(dims?.rows) || 0,
-      cols: Number(dims?.cols) || 0,
-    };
-  }
-}
-let activeShare = null;
-let activeShares = [];
-let shareCreateErrorPayload = null;
-let shareMirrorEpoch = 1;
-let shareMirrorSequence = 0;
-let shareReplayMirrorEpoch = 1;
-let shareReplayMirrorSequence = 0;
-let shareUiStatePublishTimer = null;
-let shareViewportPublishTimer = null;
-let shareAppearancePublishTimer = null;
-let sharePointerFramePending = false;
-let sharePointerLastEvent = null;
-let sharePointerLastPublishedAt = -Infinity;
-let shareScrollSnapshotGeneration = 0;
-let shareDebugSequence = 0;
-let shareDebugReports = [];
-const shareDebugReportLimit = 20;
-let shareDebugProfileLastUploadAtByKind = new Map();
-let shareLastGeometryDigest = null;
-let shareLastGeometryDigestResult = null;
-let shareGeometryResyncInFlight = false;
-let shareGeometryResyncLastStartedAt = 0;
-let shareGeometryRepairInFlight = false;
-const shareAppliedTextWrapMetricsByKey = new Map();
-let applyingShareRemoteScroll = false;
-let applyingShareRemoteUiState = 0;
-let sharePopupLayerNode = null;
-let sharePopupLayerPublishTimer = null;
-let sharePopupLayerObserver = null;
-let sharePopupLayerSequence = 0;
-let shareReplayHostNodeIds = new WeakMap();
-let shareReplayHostMirroredNodes = new WeakSet();
-let shareReplayHostNextNodeId = 1;
-let shareReplayMutationObserver = null;
-let shareReplayPendingMutations = [];
-let shareReplayPendingTerminalPlaceholders = [];
-let shareReplayDeltaFramePending = false;
-let shareReplayMutationPublisherPaused = false;
-let shareReplayLastDeltaBatch = null;
-let shareReplayLastReplayError = null;
-class ShareReplayState {
-  constructor() {
-    this.sequence = {epoch: 0, last: 0, dropped: 0, stale: 0};
-    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
-  }
-
-  sequenceSnapshot() { return {...this.sequence}; }
-  keyframeRequestSnapshot() { return {...this.keyframeRequest}; }
-  get currentEpoch() { return this.sequence.epoch; }
-  get lastSequence() { return this.sequence.last; }
-  get droppedFrames() { return this.sequence.dropped; }
-  get staleFrames() { return this.sequence.stale; }
-  get keyframeRequests() { return this.keyframeRequest.count; }
-  get keyframeRequestsSuppressed() { return this.keyframeRequest.suppressed; }
-  acceptSequence(epoch, sequence) {
-    this.sequence.epoch = Math.max(0, Math.round(Number(epoch) || 0));
-    this.sequence.last = Math.max(0, Math.round(Number(sequence) || 0));
-  }
-  recordDroppedFrame() { this.sequence.dropped += 1; }
-  recordStaleFrame() { this.sequence.stale += 1; }
-  resetKeyframeRequest() {
-    this.keyframeRequest.inFlight = false;
-    this.keyframeRequest.backoffMs = 0;
-  }
-  suppressKeyframeRequest() { this.keyframeRequest.suppressed += 1; }
-  beginKeyframeRequest(now, backoffMs) {
-    this.keyframeRequest.count += 1;
-    this.keyframeRequest.lastAt = now;
-    this.keyframeRequest.backoffMs = backoffMs;
-    this.keyframeRequest.inFlight = true;
-  }
-  resetViewerSequence(epoch = 0, sequence = 0) {
-    this.acceptSequence(epoch, sequence);
-    this.sequence.dropped = 0;
-    this.sequence.stale = 0;
-    this.keyframeRequest = {count: 0, suppressed: 0, lastAt: 0, backoffMs: 0, inFlight: false};
-  }
-}
-const shareReplayState = new ShareReplayState();
-let shareReplayHostKeyframeTimer = null;
-let shareReplayHostKeyframePendingReason = '';
-let shareReplayHostLastKeyframeAt = 0;
-let shareReplayHostLastKeyframeReason = '';
-let shareReplayHostKeyframeSuppressedCount = 0;
-let shareReplayTopologyKeyframeTimer = null;
-let shareReplayTopologyKeyframeQueuedAt = 0;
-let shareReplayTopologyMutationPauseTimer = null;
+const browserClientId = sessionScopedId('yolomux.browserClient', randomBrowserInstanceId);
+let yolomuxFontsReadyPromise = null;
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
@@ -647,10 +438,10 @@ const layoutUrlState = {
 };
 let activeFile = null;
 let sharedImageViewerPath = null;
-let fileExplorerRoot = shareBootstrapFinderRoot() || null;
+let fileExplorerRoot = null;
 let filesystemRefreshInFlight = false;
 let fileExplorerRepoInfoCacheLoaded = false;
-let fileExplorerRootMode = shareBootstrapFinderRootMode(readStoredFileExplorerRootMode());
+let fileExplorerRootMode = readStoredFileExplorerRootMode();
 let fileExplorerShowHidden = storageGet(fileExplorerHiddenStorageKey) === '1';
 const fileEditorThemeModeStorageKey = 'yolomux.fileEditorThemeMode.v1';
 const fileEditorPreviewDisplayModeStorageKey = 'yolomux.fileEditorPreviewDisplayMode.v1';
@@ -691,7 +482,6 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
   cost: 'cost',
   github: 'github',
   yoagent: 'yoagent',
-  share: 'share',
   yolo: 'yolo',
 });
 const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
@@ -717,7 +507,6 @@ const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   GitHub: PREFERENCE_SECTION_IDS.github,
   'YO!agent': PREFERENCE_SECTION_IDS.yoagent,
   'YO!chat': PREFERENCE_SECTION_IDS.chat,
-  'YO!share': PREFERENCE_SECTION_IDS.share,
   YOLO: PREFERENCE_SECTION_IDS.yolo,
 });
 let collapsedPreferenceSections = readStoredCollapsedPreferenceSections();
@@ -753,13 +542,13 @@ const fileExplorerSessionFilesState = {
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
 // A Finder/Differ click changes `item` but preserves the terminal context it is inspecting.
 const explicitPaneFocusState = {
-  item: shareBootstrapFinderSession(),
-  tmuxSession: shareBootstrapFinderSession(),
+  item: '',
+  tmuxSession: '',
 };
 // Finder's root synchronization and Differ's changed-files query are independent surfaces. Keep
 // their explicit selections separate so choosing a Finder root never silently changes the Differ.
-let fileExplorerFinderSelectedSession = shareBootstrapFinderSession();
-let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
+let fileExplorerFinderSelectedSession = '';
+let fileExplorerChangesSelectedSession = '';
 const fileExplorerSyncTargetRecords = new Map();
 // The one user-owned disclosure record for Finder Sync. `true` means the user
 // explicitly expanded the path; `false` means they explicitly collapsed it.
@@ -787,9 +576,9 @@ const tabLastActivatedAt = new Map();  // layout item -> last-activated timestam
 let diffRefFrom = readStoredDiffRef(diffRefFromStorageKey, 'HEAD');  // C6: global default FROM (per-repo fallback)
 let diffRefTo = readStoredDiffRef(diffRefToStorageKey, 'current');   // C6: global default TO (per-repo fallback)
 let diffRefsByRepo = readStoredDiffRefsByRepo();  // C6: {repoPath: {from, to}} — per-repo overrides
-// Legacy URL/share compatibility value while old clients are still in circulation. Live panels are
+// Legacy URL compatibility value while old clients are still in circulation. Live panels are
 // identified by one of the fixed triplet item IDs below; do not use this to render a panel.
-let fileExplorerMode = shareBootstrapFinderMode(readStoredFileExplorerMode());
+let fileExplorerMode = readStoredFileExplorerMode();
 let sidePaneLayoutWasConstrained = false;
 const commandPaletteState = {
   node: null,
@@ -853,7 +642,6 @@ const SETTING_FALLBACKS = Object.freeze({
   'uploads.max_bytes': 300 * 1024 * 1024,
 });
 let globalThemeMode = initialSetting('appearance.theme', defaultGlobalTheme);
-let shareResolvedGlobalThemeMode = '';
 let terminalThemeMode = initialSetting('appearance.terminal_theme', defaultTerminalTheme);
 let dateTimeHourCycle = initialSetting('appearance.date_time_hour_cycle') === '12' ? '12' : '24';
 fileEditorThemeMode = readConfiguredEditorScheme();
@@ -888,7 +676,6 @@ const pasteCountersStorageKey = 'yolomux.pasteCounters.v1';
 const pasteLockStorageKey = 'yolomux.pasteUploadLock.v1';
 const tabMetaStorageKey = 'yolomux.showTabMeta.v1';
 const pinnedTabsStorageKey = 'yolomux.pinnedTabs.v1';
-const shareViewFitStorageKey = 'yolomux.share.viewFit.v1';
 const startupHelperIndexStorageKey = 'yolomux.startupHelper.index.v1';
 // Legacy merged-pane sub-tab compatibility only. YO!info and YO!agent now have separate virtual tabs.
 const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
@@ -1076,7 +863,6 @@ const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
 ]);
 const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze([
   ...FILE_MENU_PANEL_DEFINITIONS.map(item => item.preferenceSectionId).filter(Boolean),
-  PREFERENCE_SECTION_IDS.share,
 ]);
 const emptyPaneParam = '__empty_pane__';
 const intentionalEmptyPaneParam = '__empty_pane_v2__';
@@ -1722,9 +1508,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  const items = [infoItemId, yoagentItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId];
-  if (!shareViewMode) items.splice(2, 0, chatItemId);
-  return [...items, ...dynamicVirtualLayoutItems];
+  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -2065,7 +1849,6 @@ function recordSessionNotificationSent(session, key, sentAt) {
   setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);
 }
 
-let shareInfoBranchRowsOverride = null;
 let attentionAlertSequence = 0;
 let stateTrackingReady = false;
 let focusedTerminal = null;

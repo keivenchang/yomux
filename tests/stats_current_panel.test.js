@@ -11,7 +11,6 @@ const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8'
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
@@ -59,7 +58,7 @@ function slice(text, startNeedle, endNeedle) {
 
 const clientCapabilityGuardSource = bootstrapSource.slice(
   bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()'),
-  bootstrapSource.indexOf('\nconst shareToken =', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
+  bootstrapSource.indexOf('\nfunction randomBrowserInstanceId()', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
 );
 
 function clientCapabilityFixtureSource(unscopedHostRequests) {
@@ -83,7 +82,7 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
 });
 
 test('Logs normalizes browser and server records without duplicate IDs or unsafe extra fields', () => {
-  const secret = 'fixture-share-token-never-log';
+  const secret = 'fixture-access-token-never-log';
   const tokenized = label => `${label}?token=${secret}`;
   const classifierContext = {result: null, jsDebugLogLevels: ['info', 'warning', 'debug', 'error']};
   vm.runInNewContext(`
@@ -104,7 +103,7 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
   const pacificTimeStart = coreSource.indexOf('const diagnosticPacificTimeFormatter');
   const pacificTimeSource = coreSource.slice(
     pacificTimeStart,
-    coreSource.indexOf('\nfunction recordJsDebugEvent(', pacificTimeStart),
+    coreSource.indexOf('\nfunction redactDiagnosticSecretText(', pacificTimeStart),
   );
   const context = {
     Date,
@@ -128,22 +127,16 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
     jsDebugEvents: [
       {id: 9, ts: '1970-01-01T00:01:41.000Z', type: 'stats_history', level: 'warning', source: '/stats/current', message: tokenized('graph stalled'), requestId: tokenized('r-graph'), route: tokenized('/stats/current'), eventType: tokenized('graph-activity'), deliveryOutcome: tokenized('stalled'), unsafe: secret},
     ],
-    shareDebugSecretValues: () => [],
     debugClientLogLevel: event => event.level,
     debugEventDetailText: event => event.message,
     debugEventStatusText: () => '',
     debugPhaseTimingText: () => '',
   };
-  const replayRedactorSource = shareSource.slice(
-    shareSource.indexOf('function shareReplayRedactText('),
-    shareSource.indexOf('\nfunction shareReplayAttributeIsTokenBearing('),
-  );
-  const diagnosticRedactorSource = shareSource.slice(
-    shareSource.indexOf('function shareRedactSecretText('),
-    shareSource.indexOf('\nfunction shareDebugNumber('),
+  const diagnosticRedactorSource = coreSource.slice(
+    coreSource.indexOf('function redactDiagnosticSecretText('),
+    coreSource.indexOf('\nfunction recordJsDebugEvent('),
   );
   vm.runInNewContext(`
-    ${replayRedactorSource}
     ${diagnosticRedactorSource}
     ${pacificTimeSource}
     ${modelSource}
@@ -154,10 +147,10 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
   assert.equal(context.result.records.length, 2);
   assert.deepEqual([...context.result.records.map(record => record.id)], ['client:9', 'server:7']);
   assert.equal(JSON.stringify(context.result).includes(secret), false);
-  assert.match(JSON.stringify(context.result.records), /\[redacted-share-token\]/);
+  assert.match(JSON.stringify(context.result.records), /\[redacted-secret\]/);
   for (const record of context.result.records) {
     for (const field of ['message', 'requestId', 'route', 'event', 'delivery']) {
-      assert.match(record[field], /\[redacted-share-token\]/, `${record.id} redacts ${field}`);
+      assert.match(record[field], /\[redacted-secret\]/, `${record.id} redacts ${field}`);
     }
   }
   assert.match(context.result.records[0].message, /^graph stalled\?token=/);
@@ -189,7 +182,7 @@ test('Logs formats failure evidence with an exact Pacific wall time', () => {
     jsDebugEventSeq: 0,
     jsDebugEvents: [],
     jsDebugEventLimit: 500,
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     scheduleJsDebugPanelRefresh: () => {},
     result: null,
   };
@@ -217,7 +210,7 @@ test('the mixed browser diagnostic ring retains the newest 500 records in exact 
     jsDebugEventSeq: 0,
     jsDebugEvents: [],
     jsDebugEventLimit: 500,
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     scheduleJsDebugPanelRefresh: () => {},
     result: null,
   };
@@ -348,7 +341,7 @@ test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall tim
     result: null, Number, Object, String, Set, Array, Date,
     jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
     jsDebugClientLogEpoch: 'client-1',
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     diagnosticPacificWallTime: () => '',
     debugClientLogLevel: event => event.level || 'info',
     debugEventDetailText: event => String(event.message || ''),
@@ -814,8 +807,8 @@ test('browser observation uploader emits a periodic heartbeat when the page is o
     return context;
   };
   const denied = runFixture(false);
-  assert.deepEqual(denied.calls, [], 'share-scoped clients do not queue host observation heartbeats');
-  assert.deepEqual(denied.timers, [], 'share-scoped clients do not install the host heartbeat timer');
+  assert.deepEqual(denied.calls, [], 'clients without host-request capability do not queue observation heartbeats');
+  assert.deepEqual(denied.timers, [], 'clients without host-request capability do not install the heartbeat timer');
   const context = runFixture(true);
   assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0]], 'boot queues an idle heartbeat immediately');
   assert.equal(context.timers.length, 1, 'boot owns exactly one periodic heartbeat timer');
@@ -855,7 +848,7 @@ test('client failure observations are signed, source-bounded, and omit arbitrary
     navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
     window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
     jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
   };
   vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:error:1',
@@ -931,7 +924,7 @@ test('typed YO!stats warnings use the same durable browser-observation path', ()
     navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
     window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
     jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
   };
   vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:stats:1',
@@ -1022,7 +1015,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       jsDebugFailureText: value => String(value || '').slice(0, 500),
       jsDebugFailureStack: value => String(value?.stack || '').slice(0, 4000),
       jsDebugFailureSource: value => String(value || '/').split('?', 1)[0],
-      shareRedactDiagnosticValue: value => value,
+      redactDiagnosticValue: value => value,
       reloadClientJourneyId: identity.journeyId || 'j-reload-test',
       bootstrap: {clientRevision: identity.codeRevision || 'test-revision'},
       navigator: {userAgent: identity.userAgent || 'Mozilla/5.0 Chrome/140.0'},

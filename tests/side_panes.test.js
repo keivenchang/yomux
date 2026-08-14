@@ -100,21 +100,6 @@ async function runSidePaneSuite() {
     assert.deepStrictEqual(canonical(api.paneRoleForState(decoded.get('left'))), canonical(api.genericPaneRoleDefinition));
   });
 
-  test('share seed and geometry digest carry explicit Side Pane role', () => {
-    const api = loadYolomux('', ['1']);
-    const slots = {
-      [api.layoutTreeKey]: api.splitNode('row', api.leafNode('side'), api.leafNode('main'), 22),
-      side: api.paneStateWithTabs([api.finderItemId], api.finderItemId, api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)),
-      main: api.paneStateWithTabs(['1'], '1'),
-    };
-    api.setLayoutSlotsForTest(slots);
-    assert.equal(api.shareLayoutSeed().tabs, 'side:@side-left,finder;main:1');
-    assert.deepStrictEqual(canonical(api.shareSlotDigestSnapshot().slots), [
-      {slot: 'side', placeholder: false, paneRole: 'side', side: 'left'},
-      {slot: 'main', placeholder: false, paneRole: 'generic', side: null},
-    ]);
-  });
-
   test('Dockview JSON adoption retains the prior explicit pane role', () => {
     const api = loadYolomux('', ['1']);
     const slots = {

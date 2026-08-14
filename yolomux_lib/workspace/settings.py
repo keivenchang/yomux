@@ -278,13 +278,6 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "image_action_order": list(DEFAULT_IMAGE_DROP_ACTION_ORDER),
         "custom_actions": [],
     },
-    "share": {
-        "ttl_seconds": 600,
-        "max_viewers": 2,
-        "read_only": True,
-        "scheme": "http",
-        "view_fit": "cover",
-    },
     "cost": {
         "openai_pricing_profile": "default",
         "anthropic_pricing_profile": "default",
@@ -375,7 +368,6 @@ STALE_DEFAULT_MIGRATIONS: dict[tuple[str, str], Any] = {
     ("performance", "server_background_file_event_poll_ms"): (5_000, 5_009),
     ("performance", "server_directory_event_poll_ms"): (5_000, 5_009),
     ("performance", "auto_approve_interval_seconds"): 2.0,
-    ("share", "max_viewers"): 5,
     ("performance", "agent_window_cooldown_seconds"): 0,
     ("uploads", "max_bytes"): 20 * 1024 * 1024,
     ("file_explorer", "index_refresh_seconds"): 120,
@@ -419,8 +411,6 @@ SETTING_LIMITS: dict[tuple[str, str], tuple[float, float]] = {
     ("file_explorer", "new_entry_highlight_ms"): (0, 600000),
     ("uploads", "max_bytes"): (1 * 1024 * 1024, 512 * 1024 * 1024),
     ("uploads", "retention_days"): (1, 365),
-    ("share", "ttl_seconds"): (60, 28800),
-    ("share", "max_viewers"): (1, 300),
     ("summary", "lookback_seconds"): (60, 24 * 3600),
     ("summary", "timeout_seconds"): (30, 3600),
 }
@@ -445,7 +435,6 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("appearance", "tmux_status_bar"): {"off", "top", "bottom"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
     ("stats", "prune_at_local_time"): set(PRUNE_LOCAL_TIME_CHOICES),
-    ("share", "view_fit"): {"cover", "contain"},
     ("appearance", "editor_color_scheme"): {
         "dark",
         "one-dark",
@@ -478,7 +467,6 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("appearance", "editor_cursor_color"): set(CURSOR_COLOR_CHOICES),
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
-    ("share", "scheme"): {"http", "https"},
     ("cost", "openai_pricing_profile"): {"default", "subscription"},
     ("cost", "anthropic_pricing_profile"): {"default", "subscription"},
     ("summary", "backend"): {"codex", "disabled"},
@@ -500,7 +488,6 @@ SETTING_PAYLOAD_CHOICE_ORDER: dict[tuple[str, str], tuple[str, ...]] = {
     ("appearance", "active_color"): UI_COLOR_CHOICES,
     ("appearance", "separator_color"): SEPARATOR_COLOR_CHOICES,
     ("appearance", "editor_cursor_color"): CURSOR_COLOR_CHOICES,
-    ("share", "view_fit"): ("cover", "contain"),
     ("cost", "openai_pricing_profile"): ("default", "subscription"),
     ("cost", "anthropic_pricing_profile"): ("default", "subscription"),
     ("summary", "backend"): ("codex", "disabled"),
@@ -603,11 +590,6 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("uploads", "suggestion_autorun"): "true/false. Default false. When true, read-only shell drop actions send Enter after inserting the generated command. Agent prompts and write-capable actions never autorun.",
     ("uploads", "image_action_order"): "Image paste/drop action order, one item per line. Prompt rows use 'Popup label: ; prompt text inserted after the image path'. Non-AI rows may use the popup label or a special name such as info. The popup assigns shortcut keys 1-n, up to 9.",
     ("uploads", "custom_actions"): "Custom file-drop actions, one per line: Label | prompt text or shell:command | optional comma-separated categories. Template fields: {path}, {qpath}, {paths}, {qpaths}, {name}, {count}, {category}.",
-    ("share", "ttl_seconds"): "Seconds, 60-28800. Default max time for new YO!share URLs.",
-    ("share", "max_viewers"): "Viewer websocket cap, 1-300. Default max viewers for new YO!share URLs.",
-    ("share", "read_only"): "true/false. Default true. When false, the modal requests write access and must use https.",
-    ("share", "scheme"): "http | https. Default http for read-only shares; write shares are forced to https.",
-    ("share", "view_fit"): "cover | contain. Default cover. Share viewers scale the host viewport as a mirror frame.",
     ("cost", "openai_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered OpenAI CLI usage. Direct API and Images usage stays default/API-priced.",
     ("cost", "anthropic_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered Anthropic CLI usage. Direct API usage stays default/API-priced.",
     ("summary", "backend"): "codex | disabled. Controls the AI summary tab provider. Codex requires the local codex CLI to be installed and logged in.",
@@ -691,10 +673,6 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("uploads", "image_action_order"): "Uploads/Downloads",
     ("uploads", "custom_actions"): "Uploads/Downloads",
     ("uploads", "max_bytes"): "Uploads/Downloads",
-    ("share", "ttl_seconds"): "YO!share",
-    ("share", "max_viewers"): "YO!share",
-    ("share", "read_only"): "YO!share",
-    ("share", "scheme"): "YO!share",
     ("cost", "openai_pricing_profile"): "YO!cost",
     ("cost", "anthropic_pricing_profile"): "YO!cost",
     ("performance", "server_event_poll_ms"): "Performance",
@@ -740,7 +718,6 @@ SETTING_GUI_SECTION_LOCALE_KEYS = {
     "YO!agent": "brand.tab.agent",
     "YO!chat": "brand.tab.chat",
     "YO!cost": "pref.section.cost",
-    "YO!share": "brand.share",
     "YOLO": "brand.yolo",
 }
 
@@ -759,8 +736,6 @@ SETTING_WRITE_CONFIRMATION: set[tuple[str, str]] = {
     ("file_explorer", "index_exclude_dir_names"),
     ("file_explorer", "companion_dirs"),
     ("file_explorer", "index_exclude_paths"),
-    ("share", "read_only"),
-    ("share", "scheme"),
 }
 
 SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
@@ -773,8 +748,6 @@ SETTING_SENSITIVITY: dict[tuple[str, str], str] = {
     ("file_explorer", "companion_dirs"): "path-list",
     ("file_explorer", "index_exclude_paths"): "path-list",
     ("github", "watched_prs"): "external-reference-list",
-    ("share", "read_only"): "share-access",
-    ("share", "scheme"): "share-access",
 }
 
 
@@ -1322,7 +1295,7 @@ def setting_units(section: str, key: str, default: Any) -> str:
         return "bytes"
     if key.endswith("_ms") or key == "dir_cache_ms":
         return "milliseconds"
-    if key.endswith("_seconds") or key.endswith("_interval_seconds") or (section, key) == ("share", "ttl_seconds"):
+    if key.endswith("_seconds") or key.endswith("_interval_seconds"):
         return "seconds"
     if key.endswith("_days"):
         return "days"
@@ -1330,8 +1303,6 @@ def setting_units(section: str, key: str, default: Any) -> str:
         return "pixels"
     if key.endswith("_opacity"):
         return "percent"
-    if key == "max_viewers":
-        return "viewers"
     if key == "max_tabs_per_pane":
         return "tabs"
     if key == "scrollback":

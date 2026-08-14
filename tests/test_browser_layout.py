@@ -1979,7 +1979,7 @@ def test_current_stats_api_sse_log_preserves_reader_scroll_in_place_and_on_rebui
 def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path, monkeypatch):
     journey = JourneySentinel(STATS_LOGS_PHASES)
     journey.enter("shared-runtime-setup")
-    secret = "fixture-share-token-never-log"
+    secret = "fixture-api-token-never-log"
     socket_path = tmp_path / "watchd-producer.sock"
     watchd_client = WatchClient(socket_path=socket_path)
     watchd_logs = ServerLogRing()
@@ -2048,7 +2048,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
         `;
         document.head.appendChild(style);
         const requests = {logs: 0, stats: 0, activity: 0};
-        const secret = 'fixture-share-token-never-log';
+        const secret = 'fixture-api-token-never-log';
         const tokenized = label => `${label}?token=${secret}`;
         const countSecret = value => JSON.stringify(value).split(secret).length - 1;
         const serverRecords = [];
@@ -2573,7 +2573,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
     journey.enter("stats-and-logs-observations")
     assert metrics.get("error") is None, metrics
     initial_phase = metrics["initialPhase"]
-    redacted = "[redacted-share-token]"
+    redacted = "[redacted-secret]"
     initial_producer_ids = initial_phase["clientProducerIds"]
     assert initial_producer_ids["fixture_error"] == initial_producer_ids["fixture_warning"] + 1, metrics
     expected_two_rows = [
@@ -2802,7 +2802,7 @@ def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(bro
               secretOccurrences: JSON.stringify({
                 local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
                 session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
-              }).split('fixture-share-token-never-log').length - 1,
+              }).split('fixture-api-token-never-log').length - 1,
             };
             """
         )
@@ -4976,7 +4976,6 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
         page.parent,
         page.name,
         page_html("""
-      <span id="share-banner" class="share-viewer-banner-text"></span>
       <span id="menu-setting" class="app-menu-setting-label"></span>
       <span id="status-label" class="status-indicator--label"></span>
       <span id="diff-description" class="diff-ref-suggestion-description"></span>
@@ -4996,9 +4995,6 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
       <button class="tmux-window-button"><span id="tmux-window-text" class="tmux-window-name-text"></span></button>
       <span id="editor-title" class="file-editor-title-name"></span>
       <div class="file-tree-row tabber-row"><span id="tabber-window-text" class="tabber-window-text"></span></div>
-      <div class="share-entry-heading"><strong id="share-heading"></strong></div>
-      <div class="share-url-primary-head"><span id="share-url"></span></div>
-      <div class="share-users-row"><span id="share-user"></span></div>
       <div id="terminal-drop-row" class="terminal-drop-suggestion" style="width:130px;"><span class="terminal-drop-suggestion-combo">1</span><span id="terminal-drop-label" class="terminal-drop-suggestion-label">Insert this deliberately long terminal drop action label</span></div>
       <div class="terminal-context-menu"><button id="context-disabled" disabled></button></div>
       <div class="file-editor-preview-zoom-toolbar"><button id="zoom-disabled" disabled></button></div>
@@ -5014,7 +5010,7 @@ def test_ellipsis_and_disabled_control_families_share_computed_state(browser, tm
     )
     metrics = browser.execute_script(
         """
-        const ellipsisIds = ['share-banner', 'menu-setting', 'status-label', 'diff-description', 'preferences-title', 'client-perf', 'chart-summary', 'x-axis', 'tmux-window-text', 'search-title', 'search-meta', 'recent-paths', 'transcript-value', 'compact-label', 'job-meta', 'job-text', 'info-label-line', 'info-label', 'editor-title', 'tabber-window-text', 'share-heading', 'share-url', 'share-user', 'terminal-drop-label'];
+        const ellipsisIds = ['menu-setting', 'status-label', 'diff-description', 'preferences-title', 'client-perf', 'chart-summary', 'x-axis', 'tmux-window-text', 'search-title', 'search-meta', 'recent-paths', 'transcript-value', 'compact-label', 'job-meta', 'job-text', 'info-label-line', 'info-label', 'editor-title', 'tabber-window-text', 'terminal-drop-label'];
         const disabledIds = ['context-disabled', 'zoom-disabled', 'find-disabled', 'font-disabled', 'find-panel-disabled'];
         return {
           ellipsis: Object.fromEntries(ellipsisIds.map(id => {
@@ -5146,7 +5142,6 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
       <section id="mermaid-preview" class="mermaid-preview"></section>
       <section id="zoom-viewport" class="file-editor-preview-zoom-viewport"></section>
       <button id="default-button">default</button>
-      <button id="share-control" class="share-view-fit-toggle">fit</button>
       <label class="info-tree-search-control"><input id="info-search-control"></label>
       <section id="terminal-surface" class="terminal-drop-suggestions"></section>
       <section id="preview-surface" class="file-editor-preview-fallback"></section>
@@ -5197,7 +5192,7 @@ def test_danger_status_and_light_panel_surface_paint_have_shared_computed_owners
           const expectedSurface = secondarySurface('secondary-surface-probe');
           surfaceProbe.remove();
           return {
-            controls: Object.fromEntries(['share-control', 'info-search-control'].map(id => [id, controlShell(id)])),
+            controls: Object.fromEntries(['info-search-control'].map(id => [id, controlShell(id)])),
             expectedControl,
             surfaces: Object.fromEntries(['default-button', 'terminal-surface', 'preview-surface'].map(id => [id, secondarySurface(id)])),
             expectedSurface,
@@ -7410,7 +7405,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         assert initial_payloads["codex"]["prompt"]["visible"] is False, initial_payloads["codex"]
         assert initial_payloads["claude"]["prompt"]["visible"] is False, initial_payloads["claude"]
 
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
         base_url = f"http://127.0.0.1:{server.server_address[1]}/"
         browser.get(base_url + "?" + urlencode({"sessions": ",".join(sessions.values())}))
         WebDriverWait(browser, 10).until(
@@ -7579,7 +7574,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         )
     finally:
         if server is not None and thread is not None:
-            stop_browser_share_server(server, thread, browser=browser)
+            stop_browser_server(server, thread, browser=browser)
         elif app is not None:
             app.control_server.stop()
         stop_isolated_tmux_runtime(tmux_runtime)
@@ -11101,7 +11096,7 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
             const rect = popover?.getBoundingClientRect?.();
             const style = popover ? getComputedStyle(popover) : null;
             const commands = Array.from(popover?.querySelectorAll?.('.app-menu-command') || []);
-            const activeCommands = commands.filter(command => command.classList.contains('share-mirror-active'));
+            const hoveredCommands = commands.filter(command => command.matches(':hover'));
             const openIds = Array.from(document.querySelectorAll('.app-menu.open')).map(menu => menu.dataset.appMenu || '');
             return {
               exists: Boolean(wrapper && button && popover),
@@ -11111,7 +11106,7 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
               visible: Boolean(popover && wrapper?.classList?.contains('open') && style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0.9 && rect.width > 20 && rect.height > 20),
               rect: rect ? {left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height)} : null,
               commandCount: commands.length,
-              activeCommandCount: activeCommands.length,
+              hoveredCommandCount: hoveredCommands.length,
               firstCommand: commands[0]?.textContent?.replace(/\\s+/g, ' ').trim() || '',
               commands: commands.map(command => ({
                 label: command.querySelector('.app-menu-label')?.textContent?.trim() || '',
@@ -11184,9 +11179,9 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
         first_command = browser.find_element("css selector", f'.app-menu[data-app-menu="{menu_id}"] > .app-menu-popover .app-menu-command:not([disabled])')
         fast_pointer_actions(browser).move_to_element(first_command).perform()
         hover = WebDriverWait(browser, 5).until(
-            lambda _driver: (state if (state := menu_metrics(menu_id))["activeCommandCount"] >= 1 else False)
+            lambda _driver: (state if (state := menu_metrics(menu_id))["hoveredCommandCount"] >= 1 else False)
         )
-        assert hover["activeCommandCount"] >= 1, hover
+        assert hover["hoveredCommandCount"] >= 1, hover
 
     browser.find_element("css selector", '.app-menu[data-app-menu="file"] > .app-menu-button').click()
     fast_pointer_actions(browser).move_to_element(browser.find_element("css selector", '.app-menu[data-app-menu="view"] > .app-menu-button')).perform()
@@ -13580,100 +13575,6 @@ def test_pane_tab_strip_hover_token_is_removed():
     # onto one token. Cheap string guard against its reintroduction — no browser needed (P3 demotion).
     css = app_css()
     assert "--pane-tab-strip-hover-bg" not in css
-
-
-def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return typeof fileEditorItemFor === 'function'
-              && typeof applyLayoutSlots === 'function'
-              && typeof shareUiStateSnapshot === 'function'
-              && document.querySelector('#grid') !== null;
-            """
-        )
-    )
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        (async () => {
-          autoFocusEnabled = false;
-          activeShares = [{
-            token: 'share-token',
-            shortId: 'share-token',
-            mode: 'ro',
-            scheme: 'http',
-            session: '1',
-            sessions: ['1'],
-            viewers: 1,
-            maxViewers: 5,
-            expiresAt: Math.floor(Date.now() / 1000) + 600,
-          }];
-          const path = '/home/test/yolomux.dev/docs/DONE.md';
-          const item = fileEditorItemFor(path);
-          const content = [
-            '# DONE',
-            '',
-            'First paragraph stays visible.',
-            'Second paragraph receives the typed text.',
-            'Third paragraph is only here to keep normal editor structure.',
-          ].join('\\n');
-          setFileState(path, {
-            kind: 'text',
-            content,
-            original: content,
-            dirty: false,
-            language: 'markdown',
-            gitRoot: '/home/test/yolomux.dev',
-            gitTracked: true,
-            gitHasHistory: true,
-            gitHistory: [{ref: 'HEAD'}],
-          });
-          setFileEditorViewMode(path, 'edit', item);
-          registerFileEditorLayoutItem(path, {item});
-          const next = emptyLayoutSlots();
-          next[layoutTreeKey] = leafNode('left');
-          next.left = paneStateWithTabs([item], item);
-          applyLayoutSlots(next, {focusSession: item, forceFull: true});
-          const {frame} = window.__yolomuxTestHelpers;
-          const waitFor = window.__yolomuxTestWaitFor;
-          const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
-          if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: jsDebugFailureEvents('error'), bootRejections: jsDebugFailureEvents('rejection')};
-          const panel = panelNodes.get(item);
-          const view = panel._cmView;
-          fileEditorViewState.set(item, {scrollTop: 0, scrollLeft: 0, anchor: 0, head: 0, scrollSnapshot: null});
-          const insertAt = content.indexOf('receives');
-          const insert = 'typed ';
-          view.focus();
-          view.dispatch({
-            changes: {from: insertAt, to: insertAt, insert},
-            selection: {anchor: insertAt + insert.length, head: insertAt + insert.length},
-          });
-          await frame();
-          await frame();
-          const cached = fileEditorViewState.get(item) || {};
-          const snapshot = shareUiStateSnapshot();
-          const modeEntry = (snapshot.editor?.modes || []).find(entry => entry.item === item || entry.path === path) || {};
-          return {
-            item,
-            expectedAnchor: insertAt + insert.length,
-            cachedAnchor: cached.anchor,
-            cachedHead: cached.head,
-            snapshotAnchor: modeEntry.viewState?.anchor,
-            snapshotHead: modeEntry.viewState?.head,
-            dirty: fileState.get(path)?.dirty === true,
-            sentSockets: window.__bootSockets || [],
-          };
-        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
-        """
-    )
-    assert "error" not in metrics, metrics
-    assert metrics["dirty"] is True, metrics
-    assert metrics["cachedAnchor"] == metrics["expectedAnchor"], metrics
-    assert metrics["cachedHead"] == metrics["expectedAnchor"], metrics
-    assert metrics["snapshotAnchor"] == metrics["expectedAnchor"], metrics
-    assert metrics["snapshotHead"] == metrics["expectedAnchor"], metrics
 
 
 def test_editor_right_click_preserves_existing_codemirror_diff_selection(browser, tmp_path):
@@ -16627,17 +16528,12 @@ def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tm
             assert metrics["surfaces"][name]["width"] > old_cap, (name, metrics)
 
 
-def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser):
+def test_dialog_capacity_tokens_keep_modal_geometry_in_sync(browser):
     page = serve_repo_fixture_page(
         "dialog-capacity-ownership.html",
         page_html(
             """
             <div id="host-about" class="modal app-modal-overlay open about-open"><div id="host-about-dialog" class="modal-dialog"></div></div>
-            <div id="host-share" class="modal app-modal-overlay open share-open"><div id="host-share-dialog" class="modal-dialog"></div></div>
-            <div id="replay" class="share-popup-mirror-item" style="inset:0;width:100%;height:100%">
-              <div class="modal app-modal-overlay open about-open"><div id="replay-about-dialog" class="modal-dialog"></div></div>
-              <div class="modal app-modal-overlay open share-open"><div id="replay-share-dialog" class="modal-dialog"></div></div>
-            </div>
             <div class="command-palette app-modal-overlay"><div id="command-dialog" class="command-palette-dialog"></div></div>
             <div class="keyboard-shortcuts-overlay app-modal-overlay"><div id="keyboard-dialog" class="keyboard-shortcuts-dialog"></div></div>
             <div class="file-editor-dialog-backdrop app-modal-overlay"><div id="editor-dialog" class="file-editor-dialog"></div></div>
@@ -16655,9 +16551,6 @@ def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser):
             return {
               viewport: innerWidth,
               hostAbout: width('host-about-dialog'),
-              replayAbout: width('replay-about-dialog'),
-              hostShare: width('host-share-dialog'),
-              replayShare: width('replay-share-dialog'),
               command: width('command-dialog'),
               keyboard: width('keyboard-dialog'),
               editor: width('editor-dialog'),
@@ -16670,14 +16563,11 @@ def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser):
         narrow = geometry(360, theme)
         wide = geometry(1400, theme)
         for metrics in (narrow, wide):
-            assert abs(metrics["hostAbout"] - metrics["replayAbout"]) <= 1, (theme, metrics)
-            assert abs(metrics["hostShare"] - metrics["replayShare"]) <= 1, (theme, metrics)
-            assert all(0 < metrics[key] <= metrics["viewport"] for key in ("hostAbout", "hostShare", "command", "keyboard", "editor")), (theme, metrics)
+            assert all(0 < metrics[key] <= metrics["viewport"] for key in ("hostAbout", "command", "keyboard", "editor")), (theme, metrics)
         assert abs(wide["command"] - wide["editor"]) <= 1, (theme, wide)
         assert wide["keyboard"] >= wide["command"], (theme, wide)
         assert wide["keyboard"] > narrow["keyboard"], (theme, narrow, wide)
         assert wide["hostAbout"] > narrow["hostAbout"], (theme, narrow, wide)
-        assert wide["hostShare"] > narrow["hostShare"], (theme, narrow, wide)
 
 
 def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp_path):

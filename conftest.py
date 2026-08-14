@@ -73,7 +73,6 @@ def _install_fallback_environment() -> None:
         "YOLOMUX_START_LOCK_DIR": process_root / "locks" / "start.lock",
         "YOLOMUX_TOOL_LOCK_PATH": process_root / "locks" / "expensive-tools.lock",
         "YOLOMUX_CA_DIR": process_root / "ca",
-        "YOLOMUX_SHARE_DEBUG_DIR": process_root / "share-debug",
         "YOLOMUX_LOG_DIR": process_root / "logs",
         "YOLOMUX_WORKSPACE_BASE": process_root / "workspaces",
         "YOLOMUX_TMUX_SOCKET": process_root / "tmux" / "socket",

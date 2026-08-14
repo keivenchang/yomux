@@ -10,10 +10,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
-from tests.browser_helpers.browser_layout import stop_browser_share_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import start_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.browser_helpers.browser_layout import stop_isolated_browser_app
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation
 from tests.helpers.browser_scenarios import terminal_wheel_observation
@@ -70,13 +70,13 @@ def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_error
 ):
     """A real tmux/xterm soft wrap preserves full path tokens without erroring on speculative misses."""
 
-    runtime = start_isolated_browser_share_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
+    runtime = start_isolated_browser_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
     session = runtime.sessions[0]
     existing_path = gate_runtime_paths.root / "workspace" / "terminal-wrap-existing.py"
     existing_path.parent.mkdir(parents=True)
     existing_path.write_text("print('fixture')\n", encoding="utf-8")
     missing_path = "/tmp/instruction-fleet-acceptance-bar-measurement.md"
-    server, thread = start_browser_share_server(
+    server, thread = start_browser_server(
         monkeypatch,
         runtime.paths.config_dir,
         runtime.app,
@@ -172,8 +172,8 @@ def test_n5_real_terminal_wrap_keeps_full_paths_and_passive_misses_are_not_error
         assert "/tmp/instruction-" not in paths, measured
         assert measured["clientFailures"] == [], measured
     finally:
-        stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
 
 
 @pytest.mark.browser

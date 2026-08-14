@@ -33,7 +33,7 @@ def test_server_log_ring_preserves_levels_order_and_metadata():
 
 
 def test_server_log_ring_redacts_recognized_fields_before_retention_and_emits_pt_wall_time(monkeypatch):
-    secret = "fixture-share-token-never-log"
+    secret = "fixture-secret-never-log"
     tokenized = lambda label: f"{label}?token={secret}"
     fixed_now = datetime(2026, 1, 15, 12, 34, 56, tzinfo=timezone.utc).timestamp()
     monkeypatch.setattr("yolomux_lib.server_logs.time.time", lambda: fixed_now)
@@ -60,7 +60,7 @@ def test_server_log_ring_redacts_recognized_fields_before_retention_and_emits_pt
     assert retained["source"] == "browser/api"
     assert retained["category"] == "browser"
     for field in ("message", "requestId", "route", "event", "delivery"):
-        assert retained[field].endswith("?token=[redacted-share-token]")
+        assert retained[field].endswith("?token=[redacted-secret]")
     assert secret not in json.dumps(ring.payload(), sort_keys=True)
 
 

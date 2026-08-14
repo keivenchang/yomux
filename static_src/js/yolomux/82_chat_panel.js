@@ -684,7 +684,7 @@ function chatMergeMessages(messages, options = {}) {
 }
 
 async function loadChatBootstrap(options = {}) {
-  if (shareViewMode || !authUsername || chatState.loadingRequest) return false;
+  if (!authUsername || chatState.loadingRequest) return false;
   const request = beginChatLoadingRequest('requestGeneration');
   try {
     const params = new URLSearchParams({browser_instance_id: chatBrowserInstanceId});
@@ -914,7 +914,7 @@ function submitChatDraft() {
     statusErr(localizedHtml('chat.error.tooLarge'));
     return false;
   }
-  const uuid = randomShareViewerId();
+  const uuid = randomBrowserInstanceId();
   const message = {
     id: `pending:${uuid}`,
     created_at_utc: Date.now() / 1000,
@@ -1303,7 +1303,6 @@ function createChatPanel() {
 }
 
 function mountChatPanel() {
-  if (shareViewMode) return false;
   chatRequestOptions();
   syncChatHistoryObserver();
   renderChatPanel();

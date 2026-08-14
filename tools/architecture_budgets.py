@@ -70,6 +70,34 @@ CONTROL_FAMILY_NAMES: Final[tuple[str, ...]] = (
     "segmentedControlHtml",
     "bindActionDispatcher",
 )
+RETIRED_SHARE_FILENAME_FRAGMENT: Final[str] = "sha" + "re"
+RETIRED_SHARE_CONTENT_TOKENS: Final[tuple[bytes, ...]] = (
+    ("yo" + "share").encode(),
+    ("share" + "_view").encode(),
+    ("share" + "view").encode(),
+    ("share" + "_token").encode(),
+    ("share" + "token").encode(),
+    ("/api/" + "share").encode(),
+    ("/ws/" + "share-").encode(),
+    ("share" + "_replay").encode(),
+    ("share" + "_mirror").encode(),
+    ("yo!" + "share").encode(),
+)
+RETIRED_SHARE_I18N_KEY_RE: Final[re.Pattern[bytes]] = re.compile(
+    rb"[\"']" + ("sha" + "re").encode() + rb"\.[A-Za-z0-9_.-]+[\"']",
+    re.I,
+)
+RETIRED_SHARE_FILENAME_EXCEPTIONS: Final[frozenset[str]] = frozenset((
+    "DOIT.075.2." + "yo" + "share-removal.md",
+    "yolomux_lib/infra/" + "shared_config_lock.py",
+    "tests/test_" + "shared_config_lock.py",
+))
+RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
+    "DOIT.075.2." + "yo" + "share-removal.md",
+))
+RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
+    ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+))
 
 
 @dataclass(frozen=True)
@@ -312,6 +340,35 @@ def _source_text_assertions(root: Path) -> dict[str, Any]:
     }
 
 
+def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
+    violations: list[str] = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = path.relative_to(root).as_posix()
+        parts = Path(relative).parts
+        if any(part in RETIRED_SHARE_SKIPPED_PARTS for part in parts):
+            continue
+        if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "DONE":
+            continue
+        if RETIRED_SHARE_FILENAME_FRAGMENT in relative.lower() and relative not in RETIRED_SHARE_FILENAME_EXCEPTIONS:
+            violations.append(f"retired_share_surface: forbidden filename {relative}")
+        if relative in RETIRED_SHARE_CONTENT_EXCEPTIONS:
+            continue
+        content = path.read_bytes()
+        lowered = content.lower()
+        matches: list[tuple[int, str]] = []
+        for token in RETIRED_SHARE_CONTENT_TOKENS:
+            offset = lowered.find(token.lower())
+            if offset >= 0:
+                matches.append((offset, token.decode("ascii")))
+        key_match = RETIRED_SHARE_I18N_KEY_RE.search(content)
+        if key_match:
+            matches.append((key_match.start(), "quoted retired i18n key"))
+        for offset, label in sorted(matches):
+            line = content.count(b"\n", 0, offset) + 1
+            violations.append(f"retired_share_surface: {relative}:{line}: forbidden {label}")
+    return tuple(violations)
+
+
 def capture(root: Path) -> dict[str, Any]:
     file_lines, test_owner_lines = _line_budget_categories(root)
     return {
@@ -408,7 +465,8 @@ def compare(expected: dict[str, Any], actual: dict[str, Any]) -> Comparison:
 
 def evaluate(root: Path, manifest: Path) -> Comparison:
     expected = json.loads(manifest.read_text(encoding="utf-8"))
-    return compare(expected, capture(root))
+    result = compare(expected, capture(root))
+    return Comparison(result.violations + _retired_share_surface_violations(root), result.stale)
 
 
 def write_current_manifest(manifest: Path, current: dict[str, Any]) -> None:
@@ -436,14 +494,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--print-current", action="store_true")
     parser.add_argument("--write-current", action="store_true")
     args = parser.parse_args(argv)
-    current = capture(args.root.resolve())
     if args.print_current:
+        current = capture(args.root.resolve())
         print(json.dumps(current, indent=2, sort_keys=True))
         return 0
     if args.write_current:
+        current = capture(args.root.resolve())
         write_current_manifest(args.manifest, current)
         return 0
-    result = compare(json.loads(args.manifest.read_text(encoding="utf-8")), current)
+    result = evaluate(args.root.resolve(), args.manifest)
     for message in result.violations:
         print(f"architecture budget violation: {message}", file=sys.stderr)
     for message in result.stale:

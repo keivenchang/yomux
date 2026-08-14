@@ -284,7 +284,6 @@ function setInfoSubTab(tab, options = {}) {
   } else {
     selectSession(infoItemId, {userInitiated: options.userInitiated === true});
   }
-  scheduleShareUiStatePublish();
 }
 
 function activateYoagentPanel(options = {}) {
@@ -297,7 +296,7 @@ function activateYoagentPanel(options = {}) {
   prewarmYoagent({scrollBottom});
 }
 
-// Legacy open helper kept for older tests/share replays. New menus target the standalone tab directly.
+// Legacy open helper kept for older tests. New menus target the standalone tab directly.
 async function openInfoSubTab(tab) {
   infoPanelSubTab = normalizedInfoSubTab(tab);
   writeStoredInfoSubTab(infoPanelSubTab);
@@ -306,7 +305,6 @@ async function openInfoSubTab(tab) {
   if (infoPanelSubTab === 'yoagent') {
     activateYoagentPanel({focusChat: true});
   }
-  scheduleShareUiStatePublish();
 }
 
 function rightmostLeafSlotWithRowSplit(node, insideRow = false, slots = layoutSlots, options = {}) {

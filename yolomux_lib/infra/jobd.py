@@ -659,6 +659,7 @@ class JobRecord:
     deadline_at: float = 0.0
     running_started_at: float = 0.0
     running_started_monotonic: float = 0.0
+    artifact_finalizing: bool = False
 
 
 class JobProductStore:
@@ -757,16 +758,36 @@ class JobProductStore:
         result: JobdArtifactResult,
         schedule: dict[str, object],
     ) -> dict[str, object]:
+        artifact = self.prepare_artifact(result)
+        return self.store_prepared_artifact(
+            key=key,
+            generation=generation,
+            artifact=artifact,
+            schedule=schedule,
+        )
+
+    def prepare_artifact(self, result: JobdArtifactResult) -> StoredArtifactProduct:
+        """Verify and unlink one worker artifact without touching the shared product index."""
+        return self._adopt_artifact(result)
+
+    def store_prepared_artifact(
+        self,
+        *,
+        key: str,
+        generation: int,
+        artifact: StoredArtifactProduct,
+        schedule: dict[str, object],
+    ) -> dict[str, object]:
+        """Publish one already-verified artifact while the broker state lock is held."""
         current_bytes = sum(
             int(entry.artifact.product["length"])
             for entry in self.entries.values()
             if entry.artifact is not None
         )
-        incoming_bytes = int(result.product.get("length") or 0)
+        incoming_bytes = int(artifact.product.get("length") or 0)
         if self.artifact_count() >= JOBD_MAX_ARTIFACTS or current_bytes + incoming_bytes > JOBD_MAX_ARTIFACT_BYTES:
-            self.discard_artifact_result(result)
+            self._close_artifact(artifact)
             raise ValueError("artifact capacity full")
-        artifact = self._adopt_artifact(result)
         artifact.generation = generation
         entry = self.entries.setdefault(key, StoredJobProduct())
         self._close_artifact(entry.artifact)
@@ -1176,10 +1197,11 @@ class PersistentJobBroker:
                 self._mark_terminal(record, "timed_out", "deadline exceeded while executing")
             self._bump_counter(record.task, "timed_out")
 
-    def _handle_finished_futures(self) -> None:
+    def _handle_finished_futures(self, *, finalize_artifacts: bool) -> list[tuple[JobRecord, JobdArtifactResult]]:
         restart_executors: set[str] = set()
+        pending_artifacts: list[tuple[JobRecord, JobdArtifactResult]] = []
         for record in self.records.values():
-            if record.future is None or not record.future.done():
+            if record.future is None or not record.future.done() or record.artifact_finalizing:
                 continue
             future = record.future
             if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}:
@@ -1196,17 +1218,10 @@ class PersistentJobBroker:
                 if isinstance(task_result, bytes):
                     task_result = JobdTaskResult(task_result, inline_json_product_metadata(task_result))
                 if isinstance(task_result, JobdArtifactResult):
-                    record.product = self.product_store.store_artifact(
-                        key=record.coalesce_key,
-                        generation=record.generation,
-                        result=task_result,
-                        schedule=self._record_schedule(record),
-                    )
-                    record.result = b""
-                    self._mark_terminal(record, "completed")
-                    self._bump_counter(record.task, "completed")
-                    if record.running_started_monotonic > 0:
-                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+                    if not finalize_artifacts:
+                        continue
+                    record.artifact_finalizing = True
+                    pending_artifacts.append((record, task_result))
                     continue
                 result = task_result.body
                 result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
@@ -1276,6 +1291,52 @@ class PersistentJobBroker:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
         for lane in restart_executors:
             self._shutdown_executor(lane=lane)
+        return pending_artifacts
+
+    def _finalize_artifact(self, record: JobRecord, task_result: JobdArtifactResult) -> None:
+        """Verify a large artifact off-lock, then publish its bounded descriptor atomically."""
+        artifact: StoredArtifactProduct | None = None
+        failure: Exception | None = None
+        try:
+            artifact = self.product_store.prepare_artifact(task_result)
+        except Exception as exc:
+            failure = exc
+        with self.state_lock:
+            record.artifact_finalizing = False
+            if failure is not None:
+                if record.status != "timed_out":
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        redact_local_service_text(failure),
+                        local_service_exception_cause(failure),
+                    )
+                    self._bump_counter(record.task, "failed")
+            elif artifact is not None and record.status != "timed_out":
+                try:
+                    record.product = self.product_store.store_prepared_artifact(
+                        key=record.coalesce_key,
+                        generation=record.generation,
+                        artifact=artifact,
+                        schedule=self._record_schedule(record),
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        redact_local_service_text(exc),
+                        local_service_exception_cause(exc),
+                    )
+                    self._bump_counter(record.task, "failed")
+                else:
+                    record.result = b""
+                    self._mark_terminal(record, "completed")
+                    self._bump_counter(record.task, "completed")
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+            elif artifact is not None:
+                self.product_store._close_artifact(artifact)
+            record.future = None
 
     def _next_queued_record(self, priorities: tuple[str, ...]) -> JobRecord | None:
         for priority in priorities:
@@ -1301,17 +1362,19 @@ class PersistentJobBroker:
             if self.coalesced.get((record.task, record.coalesce_key)) == record.job_id:
                 self.coalesced.pop((record.task, record.coalesce_key), None)
 
-    def _refresh_records(self) -> None:
+    def _refresh_records(self, *, finalize_artifacts: bool = False) -> list[tuple[JobRecord, JobdArtifactResult]]:
         now = time.monotonic()
         self._expire_deadlines(now)
-        self._handle_finished_futures()
+        pending_artifacts = self._handle_finished_futures(finalize_artifacts=finalize_artifacts)
         self._prune_records()
         self.product_store.prune_leases()
+        return pending_artifacts
 
     def _pump(self) -> None:
         dispatch: list[JobRecord] = []
+        pending_artifacts: list[tuple[JobRecord, JobdArtifactResult]] = []
         with self.state_lock:
-            self._refresh_records()
+            pending_artifacts = self._refresh_records(finalize_artifacts=True)
             now = time.monotonic()
             for lane, priorities in JOBD_LANE_PRIORITIES.items():
                 capacity = self._lane_capacity(lane)
@@ -1334,6 +1397,8 @@ class PersistentJobBroker:
                     record.running_started_monotonic = time.monotonic()
                     dispatch.append(record)
                     active += 1
+        for record, task_result in pending_artifacts:
+            self._finalize_artifact(record, task_result)
         for record in dispatch:
             try:
                 future = self._executor(record.priority).submit(run_registered_task_result, record.task, record.payload)

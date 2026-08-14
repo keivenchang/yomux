@@ -214,7 +214,6 @@ def test_sanitize_settings_clamps_numbers_and_choices():
             "terminal_editor": {"word_wrap": "yes", "line_numbers": "no"},
             "editor": {"autosave": "yes", "autosave_delay_seconds": 100, "trim_trailing_whitespace_on_save": "yes", "ensure_final_newline_on_save": "no"},
             "uploads": {"max_bytes": 999999999},
-            "share": {"ttl_seconds": 1_000_000, "max_viewers": 999, "scheme": "ftp", "read_only": "no"},
             "yoagent": {"backend": "wat", "invocation": "bad", "system_prompt": "Use facts", "intro": "Be terse", "format": "One line"},
             "yolo": {"prompt_source": "bad"},
         }
@@ -250,11 +249,6 @@ def test_sanitize_settings_clamps_numbers_and_choices():
     assert settings["editor"]["ensure_final_newline_on_save"] is False
     assert settings["uploads"]["filename_template"] == DEFAULT_UPLOAD_FILENAME_TEMPLATE
     assert settings["uploads"]["max_bytes"] == 512 * 1024 * 1024
-    assert settings["share"]["ttl_seconds"] == 28800
-    assert settings["share"]["max_viewers"] == 300
-    assert settings["share"]["read_only"] is False
-    assert settings["share"]["scheme"] == "http"
-    assert sanitize_settings({"share": {"scheme": "https"}})["share"]["scheme"] == "https"
     assert settings["notifications"]["notify_transitions"] == ["needs-input", "done"]
     assert settings["notifications"]["notify_working_attention"] is True
     assert settings["notifications"]["notify_working_done"] is False
@@ -326,14 +320,12 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
     assert payload["choices"]["appearance.active_color"] == ["green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.separator_color"] == ["theme", "green", "blue", "orange", "yellow", "purple", "white"]
     assert payload["choices"]["appearance.editor_cursor_color"] == ["green", "blue", "orange", "yellow", "purple", "white", "laser-lime", "neon-green", "neon-cyan", "neon-magenta", "neon-orange", "theme"]
-    assert payload["choices"]["share.view_fit"] == ["cover", "contain"]
     assert payload["choices"]["updates.notify_level"] == ["major", "minor", "patch", "none"]
     assert {".git", ".ssh", ".uploads", "__pycache__", "node_modules"} <= set(payload["settings"]["file_explorer"]["index_exclude_dir_names"])
     assert {"~/.config/gh", "~/.config/git", "~/.cache/huggingface"} <= set(payload["settings"]["file_explorer"]["index_exclude_paths"])
     assert payload["settings"]["general"]["startup_tips"] is True
     assert payload["catalog"]["general.default_sessions"]["gui"]["visible"] is False
     assert payload["settings"]["uploads"]["max_bytes"] == UPLOAD_MAX_BYTES
-    assert payload["settings"]["share"] == {"ttl_seconds": 600, "max_viewers": 2, "read_only": True, "scheme": "http", "view_fit": "cover"}
     assert payload["settings"]["summary"] == {
         "backend": "codex",
         "codex_model": "gpt-5.4-mini",
@@ -453,7 +445,6 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
         "section_locale_key": "pref.section.appearance",
         "visible": True,
     }
-    assert catalog["share.view_fit"]["gui"] == {"section": "", "section_locale_key": "", "visible": False}
     assert catalog["cost.openai_pricing_profile"]["choices"] == ["default", "subscription"]
     assert catalog["cost.openai_pricing_profile"]["gui"] == {
         "section": "YO!cost",
@@ -786,8 +777,6 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
     assert rounded_background_legacy["performance"]["server_background_file_event_poll_ms"] == defaults["performance"]["server_background_file_event_poll_ms"]
     rounded_directory_legacy = sanitize_settings({"performance": {"server_directory_event_poll_ms": 5000}})
     assert rounded_directory_legacy["performance"]["server_directory_event_poll_ms"] == defaults["performance"]["server_directory_event_poll_ms"]
-    stale_share = sanitize_settings({"share": {"max_viewers": 5}})
-    assert stale_share["share"]["max_viewers"] == defaults["share"]["max_viewers"]
     stale_index_refresh = sanitize_settings({"file_explorer": {"index_refresh_seconds": 120}})
     assert stale_index_refresh["file_explorer"]["index_refresh_seconds"] == 1800
 
@@ -799,14 +788,12 @@ def test_stale_saved_poll_defaults_migrate_to_current_defaults():
             "server_background_file_event_poll_ms": 253,
             "server_directory_event_poll_ms": 252,
         },
-        "share": {"max_viewers": 7},
     })
     assert custom["performance"]["latency_refresh_ms"] == 3002
     assert custom["performance"]["event_log_refresh_ms"] == 5004
     assert custom["performance"]["server_event_poll_ms"] == 251
     assert custom["performance"]["server_background_file_event_poll_ms"] == 253
     assert custom["performance"]["server_directory_event_poll_ms"] == 252
-    assert custom["share"]["max_viewers"] == 7
 
 
 def test_notify_transitions_accepts_pr_keys_and_drops_unknown():

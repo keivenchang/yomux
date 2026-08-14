@@ -16,8 +16,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
 from tests.browser_helpers.browser_layout import load_static_html_fixture
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import stop_browser_share_server
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import stop_browser_server
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import assert_browser_journey_error_free
 from tests.gate_harness import gate_http_port  # noqa: F401
@@ -471,12 +471,12 @@ def _seeded_stats_page(browser, monkeypatch, tmp_path: Path, state_dir: Path, *,
             ),
             client_events=ClientEventBroker(),
         )
-        http_server, http_thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+        http_server, http_thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
         browser.get(f"http://127.0.0.1:{http_server.server_address[1]}/static/{asset_name}")
         yield SimpleNamespace(service=service, client=client, app=app, clock_seconds=clock_seconds)
     finally:
         if http_server is not None and http_thread is not None:
-            stop_browser_share_server(http_server, http_thread, browser=browser)
+            stop_browser_server(http_server, http_thread, browser=browser)
         service.stop_event.set()
         service.work_event.set()
         service_thread.join(timeout=3)

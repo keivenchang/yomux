@@ -522,7 +522,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal((allSource.match(new RegExp(`^function ${name}\\(`, 'gm')) || []).length, 1, `${name} has one declaration`);
       assert.ok(coreSource.includes(`function ${name}(`), `${name} is owned by the earliest shared core partial`);
     }
-    for (const removed of ['readableParamComponentDecode', 'safeDecodePathComponent', 'safeDecodeMarkdownUrlPath', 'shareSerializedByteLength', 'shareReplayHostPerfNow', 'domBuilderDataAttributeName', 'dataAttributeName', 'terminalAttentionTextPart', 'infoSearchText', 'jsDebugByteLength', 'clientPerfNow']) {
+    for (const removed of ['readableParamComponentDecode', 'safeDecodePathComponent', 'safeDecodeMarkdownUrlPath', 'domBuilderDataAttributeName', 'dataAttributeName', 'terminalAttentionTextPart', 'infoSearchText', 'jsDebugByteLength', 'clientPerfNow']) {
       assert.equal(new RegExp(`^function ${removed}\\(`, 'm').test(allSource), false, `${removed} duplicate is removed`);
     }
     assert.equal(api.safeDecodeURIComponent('hello%20world'), 'hello world');
@@ -4208,7 +4208,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
-      assert.ok(catalog['brand.share'], `${file} localizes brand.share`);
       assert.ok(catalog['common.readOnly'], `${file} localizes common.readOnly`);
       assert.ok(catalog['common.result'], `${file} localizes common.result`);
       assert.ok(catalog['common.tmuxSession']?.includes('{label}'), `${file} localizes common.tmuxSession and preserves {label}`);
@@ -4815,7 +4814,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(row.path, '/repo/app');
     assert.equal(row.branch, 'main');
     assert.deepStrictEqual(canonical(row.tabAgents.map(item => item.label)), ['s1 / 0:claude', 's2 / 1:codex'], 'YO!info aggregates every Tab/AI pair for a path+branch row');
-    assert.equal(row.session, 's1 / 0:claude, s2 / 1:codex', 'the legacy sort/share text follows the aggregated Tab/AI labels');
+    assert.equal(row.session, 's1 / 0:claude, s2 / 1:codex', 'the legacy sort text follows the aggregated Tab/AI labels');
   });
 
   test('YO!info active sub-window follows tmux signals', () => {
@@ -4919,7 +4918,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setInfoSearchForTest('', {publish: false});
     api.setInfoSearchForTest('feature linked', {publish: false});
     assert.equal(api.currentInfoSearchForTest(), 'feature linked', 'YO!info stores the current search text');
-    assert.ok(api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(records, api.currentInfoSearchForTest()), ['path', 'branch']).includes('data-info-search="feature linked"'), 'YO!info tree html records the active search query for DOM/share diagnostics');
+    assert.ok(api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(records, api.currentInfoSearchForTest()), ['path', 'branch']).includes('data-info-search="feature linked"'), 'YO!info tree html records the active search query for DOM diagnostics');
     api.setInfoSearchForTest('', {publish: false});
 
     const tabTree = api.infoGroupTree(records, ['tab', 'ai', 'path', 'branch']);
@@ -5277,6 +5276,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/info-tree-ai-window-token[\s\S]*?info-tree-ai-pid">\(pid=2345\)<\/span>[\s\S]*?info-tree-ai-recency info-tree-trailing-meta">10 min ago<\/span>/.test(describedMain), 'YO!info keeps the PID inline after its tmux sub-window button and the recency trailing');
     assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>'), 'YO!info leaf rows render Linear before the PR');
     assert.ok(describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>') < describedMain.indexOf('info-tree-field-tab'), 'YO!info leaf rows render the PR before session/window and repository metadata');
+
+    const orderedApi = loadYolomux('', ['alpha', 'beta']);
+    orderedApi.setTranscriptInfoForTest('alpha', {project: {git: {root: '/repo/alpha', branch: 'zeta', other_branches: {branches: [
+      {name: 'zeta', current: true, updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
+    ]}}}});
+    orderedApi.setTranscriptInfoForTest('beta', {project: {git: {root: '/repo/beta', branch: 'alpha', other_branches: {branches: [
+      {name: 'alpha', current: true, updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
+    ]}}}});
+    assert.deepStrictEqual(canonical(orderedApi.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'YO!info relationship rows preserve newest-first repository ordering');
   });
 
   test('YO!info long relationship labels and shared tree styles remain complete', () => {
@@ -5289,6 +5297,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    const editorCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 	    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 	    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+	    const fullSource = fs.readFileSync('static/yolomux.js', 'utf8');
 	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
 	    assert.ok(/function infoGroupDimensionLabel\(key\)[\s\S]*infoFieldLabel\(key\)/.test(infoSource), 'YO!info group dimension labels reuse the same localized field label owner as leaf rows');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="tmux-window"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info tmux sub-window group labels preserve lowercase text');
@@ -5412,6 +5421,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
     assert.ok(/delegate\(panel, 'click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-refresh\]'[\s\S]*delegate\(panel, 'click', '\[data-info-preset\]'[\s\S]*delegate\(panel, 'click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
+    assert.ok(/panel\.addEventListener\('toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
+    assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(infoSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
+    assert.equal(/function bindInfoColumnResizers/.test(infoSource), false, 'old YO!info table column resizer owner is removed');
+    assert.equal(/dataset\.bound/.test(infoSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
+    assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
+    assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(infoSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
+    assert.equal(/function setInfoColumnWidth/.test(fullSource), false, 'deleted YO!info table column width code is not retained');
     assert.deepStrictEqual(canonical(api.infoSortFields().map(field => `${field.value}:${field.label}`)), ['name:asc:A-Z', 'name:desc:Z-A', 'date:desc:recent', 'date:asc:oldest'], 'YO!info exposes only A-Z, Z-A, recent, and oldest sort modes');
     api.setInfoSortForTest('name:desc');
     assert.deepStrictEqual(canonical(api.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'YO!info stores the selected sort mode');
@@ -5830,103 +5849,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.sessionActivitySummary('alpha').local, "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1).");
   });
 
-  test('YO!share mirrors host YO!info state and scroll position', () => {
-    const api = loadYolomux('', ['alpha', 'beta']);
-    api.setTranscriptInfoForTest('alpha', {
-      project: {
-        git: {
-          root: '/repo/alpha',
-          branch: 'zeta',
-          other_branches: {
-            branches: [
-              {name: 'zeta', current: true, updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
-            ],
-          },
-        },
-      },
-    });
-    api.setTranscriptInfoForTest('beta', {
-      project: {
-        git: {
-          root: '/repo/beta',
-          branch: 'alpha',
-          other_branches: {
-            branches: [
-              {name: 'alpha', current: true, updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
-            ],
-          },
-        },
-      },
-    });
-
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI']);
-    api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
-    api.setInfoSortForTest({key: 'name', dir: 'desc'});
-    api.setInfoSearchForTest('alpha pr', {publish: false});
-    api.setInfoTreeGroupCollapsedForTest('group:host-collapsed', true);
-    const shareInfoSnapshot = api.shareUiStateSnapshotForTest().info;
-    assert.equal('branchSort' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table branch-sort state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.grouping), ['pr', 'tab', 'path', 'branch'], 'YO!share snapshots the host YO!info grouping order');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
-    assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.collapsedGroupKeys), ['group:host-collapsed'], 'YO!share snapshots host-owned YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'YO!share snapshots host-owned YO!info rows');
-    assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
-    const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-info', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    const shareInfoScroller = shareApi.testElementForId('info-content');
-    shareInfoScroller.scrollTop = 0;
-    shareInfoScroller.scrollLeft = 0;
-    shareApi.setTranscriptInfoForTest('1', {
-      project: {
-        git: {
-          root: '/repo/client-only',
-          branch: 'client-local',
-          other_branches: {
-            branches: [
-              {name: 'client-local', current: true, updated: 'now', updated_ts: 999, subject: 'must not render'},
-            ],
-          },
-        },
-      },
-    });
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1 / no AI'], 'share client starts with local YO!info rows before a host snapshot arrives');
-    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, collapsedGroupKeys: shareInfoSnapshot.collapsedGroupKeys, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
-    assert.equal('branchSort' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table sort snapshots');
-    assert.deepStrictEqual(canonical(shareApi.currentInfoGroupingForTest()), ['pr', 'tab', 'path', 'branch'], 'share viewers apply host YO!info grouping state');
-    assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
-    assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
-    assert.deepStrictEqual(canonical(shareApi.infoCollapsedGroupKeysForTest()), ['group:host-collapsed'], 'share viewers preserve host YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
-    assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
-    shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
-    assert.equal(shareInfoScroller.scrollTop, 88, 'share viewers apply YO!info vertical host scroll');
-    assert.equal(shareInfoScroller.scrollLeft, 144, 'share viewers apply YO!info horizontal host scroll');
-    shareInfoScroller.scrollTop = 0;
-    shareInfoScroller.scrollLeft = 0;
-    shareApi.restoreShareReadonlyScrollTargetForTest(shareInfoScroller);
-    assert.equal(shareInfoScroller.scrollTop, 88, 'readonly YO!info local vertical scroll restores to the host position');
-    assert.equal(shareInfoScroller.scrollLeft, 144, 'readonly YO!info local horizontal scroll restores to the host position');
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-refresh\]'[\s\S]*delegate\(panel, 'click', '\[data-info-preset\]'[\s\S]*delegate\(panel, 'click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
-    assert.ok(/panel\.addEventListener\('toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
-    assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(terminalBootSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
-    assert.equal(/function bindInfoColumnResizers/.test(terminalBootSource), false, 'old YO!info table column resizer owner is removed');
-    assert.equal(/dataset\.bound/.test(terminalBootSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
-    assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
-    assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
-    assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
-    assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
-    assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
-    assert.ok(/function shareInfoRowSnapshot\(row = \{\}\)[\s\S]*branchState:\s*normalizeInfoBranchState\(row\.branchState\)/.test(source), 'YO!share preserves each path branch current/available state instead of downgrading it during replay');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)[\s\S]*collapsedGroupKeys/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, search, and collapse state');
-    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*collapsedGroupKeys[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info collapse state and rows without persisting or echo-publishing');
-  });
-
   await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
     const api = loadYolomux('', ['alpha'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {
@@ -6145,7 +6067,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux();
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
     const lines = [
-      terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123'),
+      terminalLine('• Documented it in tests/TERMINAL_INVENTORY.md:123'),
       terminalLine('Open https://example.com/guide here'),
     ];
     const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -6157,14 +6079,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       line: fileRef?.line,
       range: fileRef?.range,
     }), {
-      text: 'tests/SHARE_TEST_INVENTORY.md:123',
-      path: 'tests/SHARE_TEST_INVENTORY.md',
+      text: 'tests/TERMINAL_INVENTORY.md:123',
+      path: 'tests/TERMINAL_INVENTORY.md',
       line: 123,
-      range: {start: {x: 20, y: 1}, end: {x: 52, y: 1}},
+      range: {start: {x: 20, y: 1}, end: {x: 50, y: 1}},
     }, 'terminal output detects relative file:line references as context-menu references');
-    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
+    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/TERMINAL_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
     assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), true, 'file references are visually marked for right-click open/copy actions');
-    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/TERMINAL_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
     const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
     assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
     assert.equal(urlRef.href, 'https://example.com/guide');
@@ -7146,18 +7068,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
 
-  test('share host backup polling requires an active share', () => {
-    const api = loadYolomux();
-    api.setActiveSharesForTest([]);
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a host without shares never performs the recurring backup request');
-    api.setActiveSharesForTest([{active: true, token: 'active-token'}]);
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'an active share retains expiry and viewer-status backup polling');
-    api.setShareHostSocketForTest('active-token', {readyState: 1});
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a healthy share socket suppresses the host backup request');
-    api.setShareHostSocketForTest('active-token', {readyState: 3});
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'a closed share socket re-enables the bounded host repair request');
-  });
-
   await testAsync('background owner context menu claims follower leadership', async () => {
     const api = loadYolomux();
     const currentServer = {hostname: 'devhost', port: 8001, project_root: '/home/keivenc/yolomux.dev8001', pid: 101, generation_id: 'current-gen'};
@@ -7649,7 +7559,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(src.includes("active.matches?.('select, input, .topbar-language, .app-menu-button')") && /function renderSessionButtons[\s\S]*?topbarControlIsActive\(\)/.test(src), 'the topbar does not rebuild while a topbar control is focused/open');
     assert.ok(/function resolveLocalePref\(pref\)[\s\S]*i18nLocaleRegistry\.systemLocale/.test(src), 'Phase 1: system uses the server-resolved locale from the shared registry');
     assert.equal(/navigator\.language|nav\.startsWith\('zh'\)/.test(i18nRegistrySource), false, 'the client carries no parallel browser-language classifier');
-    assert.ok(/share\.ttl_seconds[\s\S]*suffix:\s*t\('unit\.minute\.short'\)/.test(src), 'YO!share Preferences minute suffix is localized');
     assert.ok(/function tmuxSessionNameError\(name\)[\s\S]*rename\.error\.required[\s\S]*rename\.error\.tooLong[\s\S]*rename\.error\.invalidChars/.test(src), 'session rename validation errors use locale keys');
     assert.ok(/function dropActionDisplayLabel\(action\)[\s\S]*action\.labelKey[\s\S]*t\(action\.labelKey\)/.test(src), 'drop action display labels use locale keys while canonical labels remain stable');
     assert.ok(/function showTerminalDropSuggestions[\s\S]*t\('drop\.pathInserted'\)[\s\S]*tPlural\('drop\.files'[\s\S]*t\('drop\.suggestionHint'/.test(src), 'terminal drop suggestion header is localized');
@@ -7752,7 +7661,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
         assert.notEqual(cat[key], en[key], `${loc} localizes ${key} instead of falling back to English`);
       }
-      for (const key of ['share.maxTime', 'share.maxViewers', 'share.newShare', 'share.readOnly', 'drop.pathInserted']) {
+      for (const key of ['drop.pathInserted']) {
         assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
         assert.notEqual(cat[key], en[key], `${loc} localizes ${key} instead of falling back to English`);
       }
@@ -8288,7 +8197,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setActiveLocaleForTest('en');
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'share', 'github', 'cost', 'yolo'];
+    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
     assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
@@ -8301,11 +8210,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(sectionHtml('notifications').includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
     assert.equal(sectionHtml('notifications').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check toggle is removed from Notifications');
     assert.ok(sectionHtml('notifications').includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
-    const shareHtml = sectionHtml('share');
-    assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
-    assert.ok(shareHtml.includes('data-setting-path="share.max_viewers"'), 'YO!share Preferences exposes the default viewer cap');
-    assert.ok(shareHtml.includes('data-setting-path="share.read_only"'), 'YO!share Preferences exposes the read-only default');
-    assert.ok(/type="radio"[^>]*value="http"[^>]*data-setting-path="share\.scheme"[\s\S]*type="radio"[^>]*value="https"[^>]*data-setting-path="share\.scheme"/.test(shareHtml), 'YO!share Preferences exposes http/https protocol defaults');
     assert.equal(sectionHtml('performance').includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
     assert.equal(sectionHtml('performance').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
     assert.equal(sectionHtml('yoagent').includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
@@ -8623,12 +8527,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.chatStatusMarkerHtmlForTest().includes('agent-window-status-dot--acknowledging'), false, 'a new message cancels an in-flight acknowledgement fade');
     assert.deepStrictEqual(canonical(api.chatStatusTonesForTest()), ['attention', 'working'], 'the new question restores red while typing remains green');
 
-    const bootstrap = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    const shared = fs.readFileSync('static_src/js/yolomux/79_conversation_shared.js', 'utf8');
+    const shared = fs.readFileSync('static_src/js/yolomux/79_conversation_common.js', 'utf8');
     const chat = fs.readFileSync('static_src/js/yolomux/82_chat_panel.js', 'utf8');
     const agent = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
     const conversationCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(bootstrap.includes("if (!shareViewMode) items.splice(2, 0, chatItemId)"), 'YO!share cannot enumerate YO!chat');
     assert.ok(shared.includes('function conversationMessageShellHtml('));
     assert.ok(agent.includes('return conversationMessageShellHtml({'), 'YO!agent routes through the shared message builder');
     assert.ok(chat.includes('return conversationMessageShellHtml({'), 'YO!chat routes through the shared message builder');

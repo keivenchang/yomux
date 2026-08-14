@@ -25,8 +25,6 @@ const actions = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'u
 const dockview = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
 const coreUtils = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const layoutState = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-const shareState = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
-const shareAdmin = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
 
 test('File submenu restores the desktop triplet through the layout owner', () => {
   assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
@@ -51,16 +49,7 @@ test('File destinations have a single-line icon label detail presentation', () =
 test('File navigation destinations share one localized alphabetical sort owner', () => {
   assert.match(menus, /function compareLocalizedMenuLabels\(left, right\)[\s\S]*localeCompare/);
   assert.match(menus, /function sortMenuCommandsByLabel\(commands\)[\s\S]*compareLocalizedMenuLabels\(left\?\.label, right\?\.label\)/);
-  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*menu\.file\.share[\s\S]*common\.preferences[\s\S]*\]\)/);
-});
-
-test('YO!share quarantine removes every host UI entry point behind one state owner', () => {
-  assert.match(shareState, /const shareFeatureQuarantined = true/);
-  assert.match(menus, /\.\.\.\(!shareFeatureQuarantined \? \[menuCommand\(t\('menu\.file\.share'/);
-  assert.match(layoutState, /\.\.\.\(!shareFeatureQuarantined \? \[\{label: t\('brand\.share'/);
-  assert.match(terminalBoot, /if \(key === 'k' && \(event\.shiftKey \|\| !shareFeatureQuarantined\)\)/);
-  assert.match(shareAdmin, /async function showShareModal\(\) \{\s+if \(shareFeatureQuarantined\) return;/);
-  assert.match(shareAdmin, /if \(shareFeatureQuarantined \|\| !shareHasActiveShare\(\)\)/);
+  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*common\.preferences[\s\S]*\]\)/);
 });
 
 test('Cmd/Ctrl+B delegates the triplet transaction without terminal fallback placement', () => {

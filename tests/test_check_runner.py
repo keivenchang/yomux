@@ -152,13 +152,9 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert node_lane.steps[0].args == ["node", "tests/layout_url.test.js", *check.NODE_LAYOUT_FILES]
     # The lane passes these as argv, which OVERRIDES the launcher's own default list, so a shard
     # missing here runs in no gate lane at all: test_node_suite.py runs the bare launcher but carries
-    # the node_bridge marker the default pytest lane excludes. share_theme owns quick-open, Finder,
-    # Differ, editor, terminal, and layout in addition to share, and was dropped from the gate for a
-    # share quarantine; share_file_surface_replay pins live 93_share_state.js/94_share_replay.js source.
-    assert "tests/share_theme.test.js" in check.NODE_LAYOUT_FILES
-    assert "tests/share_file_surface_replay.test.js" in check.NODE_LAYOUT_FILES
+    # the node_bridge marker the default pytest lane excludes.
+    assert "tests/cross_surface_state.test.js" in check.NODE_LAYOUT_FILES
     assert "tests/gate_panels.test.js" not in check.NODE_LAYOUT_FILES
-    assert "tests/test_browser_share.py" in check.pytest_files("browser")
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
     assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
@@ -731,7 +727,7 @@ def test_phase_catalog_and_runtime_share_slowest_first_owner_order(tmp_path):
     test_root = tmp_path / "tests"
     test_root.mkdir()
     for name, body in {
-        "test_browser_share.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_generated_share_link_mirrors_interactive_ui_surface_matrix(): pass\ndef test_after(): pass\n",
+        "test_browser_heavy.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_generated_surface_matrix(): pass\ndef test_after(): pass\n",
         "test_browser_dockview.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(): pass\ndef test_differ_reopen_keeps_dragged_file_tab_home(): pass\n",
         "test_plain.py": "def test_plain(): pass\n",
     }.items():
@@ -740,8 +736,8 @@ def test_phase_catalog_and_runtime_share_slowest_first_owner_order(tmp_path):
     catalog = discover_pytest_phase_files(test_root, repo_root=tmp_path)
 
     assert catalog["browser"] == (
-        "tests/test_browser_share.py",
         "tests/test_browser_dockview.py",
+        "tests/test_browser_heavy.py",
     )
     assert catalog["nonbrowser"] == ("tests/test_plain.py",)
 
@@ -750,7 +746,6 @@ def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
     paths = [
         REPO_ROOT / "tests" / "test_browser_layout.py",
         REPO_ROOT / "tests" / "test_browser_dockview.py",
-        REPO_ROOT / "tests" / "test_browser_share.py",
     ]
     direct_uses = []
     for path in paths:

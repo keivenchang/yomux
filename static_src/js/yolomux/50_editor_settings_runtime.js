@@ -22,7 +22,6 @@ function setFileEditorViewMode(path, mode, item = null) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
-  scheduleShareTopologySnapshot('editor-mode');
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -243,14 +242,12 @@ function setFileEditorThemeMode(mode) {
     writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   }
   applyEditorThemeMode({refreshEditors: true});
-  scheduleShareTopologySnapshot('editor-theme');
 }
 
 function setFileEditorPreviewDisplayMode(mode) {
   fileEditorPreviewDisplayMode = normalizeEditorPreviewDisplayMode(mode);
   writeStoredEditorPreviewDisplayMode(fileEditorPreviewDisplayMode);
   applyEditorThemeMode({refreshEditors: true});
-  scheduleShareTopologySnapshot('editor-preview-display');
 }
 
 function cycleEditorThemeMode(options = {}) {
@@ -688,7 +685,6 @@ function setEditorWrapEnabled(enabled) {
   fileEditorWrapEnabled = enabled === true;
   writeStoredEditorWrap(fileEditorWrapEnabled);
   applyEditorWrapPreference();
-  scheduleShareUiStatePublish();
 }
 
 // toggle inline git blame. Fetch the blame payload for each open text file first (so the
@@ -710,7 +706,6 @@ function setFileEditorBlameEnabled(enabled) {
   fileEditorBlameEnabled = enabled === true;
   storageSet('yolomux.editorBlame', fileEditorBlameEnabled ? '1' : '0');
   applyEditorBlamePreference();
-  scheduleShareUiStatePublish();
 }
 
 function toggleFileEditorBlame() {
@@ -737,7 +732,6 @@ function setDiffExpandUnchanged(enabled) {
       renderFileEditorPanel(panel, item);
     }
   });
-  scheduleShareUiStatePublish();
 }
 
 function fileEditorDiffExpandUnchangedForItem(item = null) {
@@ -754,7 +748,6 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
   }
-  scheduleShareUiStatePublish();
 }
 
 function toggleFileEditorDiffExpandUnchangedForItem(path, item) {
@@ -765,7 +758,6 @@ function setEditorLineNumbersEnabled(enabled) {
   fileEditorLineNumbersEnabled = enabled === true;
   writeStoredEditorLineNumbers(fileEditorLineNumbersEnabled);
   applyEditorWrapPreference();
-  scheduleShareUiStatePublish();
 }
 
 function toggleEditorLineNumbers() {
@@ -1052,10 +1044,6 @@ function applyGlobalThemeMode(options = {}) {
   applyActiveColor(initialSetting('appearance.active_color', 'green'));
   applySeparatorColor(initialSetting('appearance.separator_color', 'theme'));
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts();
-  scheduleShareTopologySnapshot('theme');
-  if (typeof scheduleShareAppearancePublish === 'function') {
-    scheduleShareAppearancePublish({reason: options.reason || 'theme', topology: false});
-  }
 }
 
 let globalThemeMediaListenerInstalled = false;
@@ -1169,11 +1157,6 @@ function applySettingsPayload(payload, options = {}) {
   reconcileIndexedDirsFromSetting({initial: options.initial === true});
   reconcileIndexExcludePathsFromSetting();
   uploadMaxBytes = numberSetting('uploads.max_bytes');
-  shareDefaultTtlSeconds = numberSetting('share.ttl_seconds', 600);
-  shareDefaultMaxViewers = numberSetting('share.max_viewers', 2);
-  shareDefaultReadOnly = boolSetting('share.read_only', true);
-  shareDefaultScheme = initialSetting('share.scheme', 'http') === 'https' ? 'https' : 'http';
-  shareViewFit = normalizeShareViewFit(storageGet(shareViewFitStorageKey) || initialSetting('share.view_fit', shareViewFit));
   terminalFontSize = numberSetting('appearance.terminal_font_size');
   editorFontSize = numberSetting('appearance.editor_font_size');
   editorPreviewFontSize = numberSetting('appearance.preview_font_size', editorFontSize + 1);
@@ -1236,13 +1219,12 @@ function applySettingsPayload(payload, options = {}) {
   if (nextLocale !== previousLocale) applyLocale(nextLocale);
   if (!options.initial) {
     installRuntimeIntervals();
-    scheduleShareAppearancePublish();
   }
   return true;
 }
 
 function scheduleDeferredSettingsMetadataRefresh() {
-  if (!clientSettingsMetadataDeferred || shareViewMode) return null;
+  if (!clientSettingsMetadataDeferred) return null;
   if (clientSettingsMetadataRefreshPromise) return clientSettingsMetadataRefreshPromise;
   if (clientSettingsMetadataRefreshTimer) return null;
   clientSettingsMetadataRefreshTimer = setTimeout(() => {
@@ -1295,9 +1277,7 @@ const runtimeIntervalCatalog = Object.freeze({
   'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
   'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
   'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
-  'share-geometry-digest': Object.freeze({classes: Object.freeze(['repair']), source: 'Host/viewer geometry comparison detects replay divergence; it is not state discovery.'}),
   'chat-relative-times': Object.freeze({classes: Object.freeze(['local-display']), source: 'Existing message timestamps are repainted locally; no request is made.'}),
-  'share-status': Object.freeze({classes: Object.freeze(['local-display', 'fallback']), source: 'The share socket pushes status while healthy; the loop repaints local countdowns and repairs status only after socket loss.'}),
 });
 
 function runtimeIntervalCatalogEntry(name) {
@@ -1424,4 +1404,55 @@ function installRuntimeIntervals() {
   } else {
     clearRuntimeInterval('file-index-refresh');
   }
+}
+
+function yolomuxFontSpecsForCurrentSettings() {
+  const uiSize = Math.max(6, Math.round(numberSetting('appearance.ui_font_size', 13)));
+  const monoSizes = [
+    uiSize,
+    terminalFontSize,
+    editorFontSize,
+    editorPreviewFontSize,
+    fileExplorerFontSize,
+  ].map(value => Math.max(6, Math.round(Number(value) || uiSize)));
+  return [
+    `${uiSize}px "YOLOmux UI"`,
+    ...monoSizes.map(size => `${size}px "YOLOmux Mono"`),
+  ].filter((spec, index, values) => values.indexOf(spec) === index);
+}
+
+function waitForYolomuxFontsReady(options = {}) {
+  const fonts = document.fonts;
+  if (!fonts?.load) return Promise.resolve(false);
+  if (!yolomuxFontsReadyPromise) {
+    const specs = yolomuxFontSpecsForCurrentSettings();
+    yolomuxFontsReadyPromise = Promise.all(specs.map(spec => fonts.load(spec).catch(() => [])))
+      .then(() => fonts.ready || true)
+      .then(() => true)
+      .catch(() => false);
+  }
+  const timeoutMs = Math.max(0, Math.round(Number(options.timeoutMs ?? yolomuxFontReadyTimeoutMs) || 0));
+  if (!timeoutMs) return yolomuxFontsReadyPromise;
+  return Promise.race([
+    yolomuxFontsReadyPromise,
+    new Promise(resolve => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
+function refreshLayoutAfterFontMetricsReady() {
+  applyCssSettings();
+  renderSessionButtons();
+  renderPaneTabStrips();
+  if (typeof autosizePreferenceTextareas === 'function') autosizePreferenceTextareas(document);
+  for (const session of terminals.keys()) fitTerminal(session);
+  document.querySelectorAll?.('.file-editor-panel').forEach(panel => {
+    try { panel._cmView?.requestMeasure?.(); } catch (_) {}
+  });
+}
+
+function installYolomuxFontMetricRefresh() {
+  if (!document.fonts?.ready) return;
+  waitForYolomuxFontsReady({timeoutMs: 0})
+    .then(() => refreshLayoutAfterFontMetricsReady())
+    .catch(() => {});
 }

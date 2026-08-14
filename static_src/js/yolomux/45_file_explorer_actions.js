@@ -496,17 +496,14 @@ async function setAllFileTreeDirectoriesExpanded(source, expand, options = {}) {
   const view = options.view || fileExplorerToolbarView(source);
   if (view === 'tabber') {
     setAllTabberCollapsed(!expand);
-    scheduleShareUiStatePublish();
     return;
   }
   if (view === 'differ' || source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
-    scheduleShareUiStatePublish();
     return;
   }
   if (expand) await expandAllFileExplorerDirectories();
   else await collapseAllFileExplorerDirectories();
-  scheduleShareUiStatePublish();
 }
 
 function handleFileExplorerTreeToolbarAction(container, event) {
@@ -719,7 +716,6 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
     else changesFolderCollapsed.add(fullPath);
     writeStoredChangesFolderCollapsed();
     renderFileExplorerChangesPanels({force: true});
-    scheduleShareUiStatePublish();
     return;
   }
   if (expand) expandDirectoryRow(row, fullPath, {manual: true});
@@ -2554,7 +2550,7 @@ function clientServerWatchState() {
   const state = {
     // This is the existing client-event identity, not a filesystem path. The
     // server unions simultaneous tabs and releases this descriptor on SSE close.
-    client_id: String(shareClientId || ''),
+    client_id: String(browserClientId || ''),
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),

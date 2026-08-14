@@ -279,7 +279,6 @@ def html_page(
     access_role: str = "admin",
     dev: bool = False,
     dangerously_yolo: bool = False,
-    share: dict | None = None,
     accept_language: str = "",
     auth_username: str = "",
     recent_sessions: list[str] | None = None,
@@ -309,7 +308,7 @@ def html_page(
         # agent in the new-session picker (cached server-side; not probed per request).
         "agentAuth": bootstrap_agent_auth_status(),
         "accessRole": access_role,
-        "authUsername": auth_username if not share else "",
+        "authUsername": auth_username,
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
@@ -348,7 +347,6 @@ def html_page(
         "strings": bootstrap_locale_catalogs(locale),
         "yoloRulesPayload": rules_status(),
         "codeMirrorAssetUrl": static_asset_url("codemirror.js"),
-        "share": share or None,
     }
     # Embed JSON in a <script> tag WITHOUT html.escape: a script element's text content is not
     # HTML-decoded, so html.escape would leave literal &lt;/&gt;/&amp; inside parsed strings (e.g. the

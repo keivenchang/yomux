@@ -940,7 +940,7 @@ def test_atomic_browser_retirement_snapshots_and_blanks_in_one_task(
     )
 
 
-def test_clean_browser_baseline_snapshot_and_retirement_share_one_browser_task():
+def test_clean_browser_baseline_snapshot_and_retirement_use_one_browser_task():
     calls = []
     event = {"id": 18, "type": "api", "level": "info", "message": "clean startup"}
 
@@ -961,7 +961,7 @@ def test_clean_browser_baseline_snapshot_and_retirement_share_one_browser_task()
     assert calls == ["paint", "atomic"]
 
 
-def test_share_browser_gate_uses_strict_in_process_ring_reader_without_opening_http_logs():
+def test_browser_gate_uses_strict_in_process_ring_reader_without_opening_http_logs():
     class Driver:
         ring_requests = 0
 
@@ -991,20 +991,20 @@ def test_share_browser_gate_uses_strict_in_process_ring_reader_without_opening_h
 
     payload = {
         "ok": True,
-        "epoch": "share-fixture-ring",
+        "epoch": "browser-fixture-ring",
         "sequence": 1,
         "capacity": 8,
         "logs": [{
             "id": 1,
             "level": "warning",
-            "source": "share-fixture",
+            "source": "browser-fixture",
             "category": "server",
-            "message": "share fixture retained ring warning",
+            "message": "browser fixture retained ring warning",
         }],
         "dropped": {"count": 0, "first_id": None, "last_id": None, "by_level": {}},
     }
     driver = Driver()
-    with pytest.raises(AssertionError, match="share fixture retained ring warning"):
+    with pytest.raises(AssertionError, match="browser fixture retained ring warning"):
         browser_console.assert_browser_journey_error_free(
             driver,
             server_log_reader=lambda: payload,
@@ -1899,7 +1899,7 @@ def test_browser_fixture_gate_failure_disconnects_before_app_cleanup_and_preserv
     )
 
     with pytest.raises(AssertionError) as caught:
-        browser_layout.stop_browser_share_server(server, thread, browser=browser)
+        browser_layout.stop_browser_server(server, thread, browser=browser)
 
     assert caught.value is gate_failure
     assert calls == [
@@ -2200,13 +2200,13 @@ def test_browser_fixture_finish_gates_and_blanks_every_owned_driver(monkeypatch)
     ]
 
 
-def test_share_fixture_finish_uses_process_ring_and_never_fetches_for_token_viewer():
+def test_browser_fixture_finish_uses_process_ring_and_never_fetches_for_off_origin_browser():
     ring = ServerLogRing(capacity=8)
     boundary = ring.payload()
-    ring.emit("warning", "share-server", "share teardown retained process warning")
+    ring.emit("warning", "fixture-server", "fixture teardown retained process warning")
 
-    class ShareViewer:
-        current_url = "http://127.0.0.1:43210/share/fixture#t=secret"
+    class FixtureViewer:
+        current_url = "http://127.0.0.1:43210/external/fixture#t=secret"
         ring_requests = 0
 
         def execute_script(self, source, *_args):
@@ -2238,9 +2238,9 @@ def test_share_fixture_finish_uses_process_ring_and_never_fetches_for_token_view
         def get(self, url):
             assert url == "about:blank"
 
-    viewer = ShareViewer()
+    viewer = FixtureViewer()
     stopped = []
-    with pytest.raises(AssertionError, match="share teardown retained process warning"):
+    with pytest.raises(AssertionError, match="fixture teardown retained process warning"):
         browser_layout.finish_browser_fixture_boundary(
             viewer,
             "http://127.0.0.1:43210",
@@ -2297,7 +2297,7 @@ def test_browser_fixture_start_boundary_warning_is_aggregated_with_exact_origin_
     assert "start-boundary warning survives off-origin browser" in str(caught.value.__cause__)
 
 
-def test_stop_browser_share_server_rejects_singular_and_plural_browser_inputs_after_cleanup(monkeypatch):
+def test_stop_browser_server_rejects_singular_and_plural_browser_inputs_after_cleanup(monkeypatch):
     cleaned = []
 
     class Server:
@@ -2314,7 +2314,7 @@ def test_stop_browser_share_server_rejects_singular_and_plural_browser_inputs_af
         lambda app, server, thread, *, label: cleaned.append((app, server, thread, label)),
     )
     with pytest.raises(ValueError, match="either browser or browsers"):
-        browser_layout.stop_browser_share_server(
+        browser_layout.stop_browser_server(
             Server(),
             object(),
             browser=object(),
@@ -2383,7 +2383,7 @@ def test_fixture_runtime_start_rolls_back_each_acquired_owner(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("failure_stage", ("bind", "request-tracker", "thread-start"))
-def test_share_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
+def test_browser_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
     calls = []
 
     class App:
@@ -2432,7 +2432,7 @@ def test_share_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
 
     with pytest.raises((OSError, RuntimeError), match=failure_stage.replace("-", " ")):
-        browser_layout.start_browser_share_server(monkeypatch, tmp_path, App())
+        browser_layout.start_browser_server(monkeypatch, tmp_path, App())
 
     assert calls[:4] == ["client-watcher", "jobd-operations", "background-owner", "auto-approve"]
     assert ("server-close" in calls) is (failure_stage != "bind")
@@ -3914,7 +3914,7 @@ def test_isolated_browser_app_stop_attempts_every_later_owner_after_one_phase_fa
     runtime = SimpleNamespace(app=object(), tmux=object(), paths=object())
 
     with pytest.raises(RuntimeError, match=f"injected {failure_phase} failure"):
-        browser_layout.stop_isolated_browser_share_app(runtime)
+        browser_layout.stop_isolated_browser_app(runtime)
 
     assert calls == ["app", "tmux", "paths"]
 
@@ -3933,7 +3933,6 @@ def test_browser_boot_scenario_facade_preserves_selected_fixture_bytes():
         "sessions": ["7", "8"],
         "auto_approve_payload": {"sessions": {"7": {"enabled": True}}},
         "access_role": "readonly",
-        "share_bootstrap": {"view": True},
         "wrap_app_root": True,
         "grid_width": 812,
         "grid_height": 477,
@@ -3943,7 +3942,6 @@ def test_browser_boot_scenario_facade_preserves_selected_fixture_bytes():
         sessions=tuple(kwargs["sessions"]),
         auto_approve_payload=kwargs["auto_approve_payload"],
         access_role=kwargs["access_role"],
-        share_bootstrap=kwargs["share_bootstrap"],
         wrap_app_root=kwargs["wrap_app_root"],
         grid_width=kwargs["grid_width"],
         grid_height=kwargs["grid_height"],
@@ -3957,8 +3955,8 @@ def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract()
         browser_layout.BROWSER_BOOT_PRESETS["default"]
     )
 
-    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 34
-    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 34
+    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 33
+    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 33
     for route in browser_layout.BROWSER_BOOT_ROUTES:
         assert fixture.count(f"url.pathname === '{route.path}'") == 1
         assert json.dumps(route.path) in fixture
@@ -3989,7 +3987,7 @@ def test_browser_bootstrap_represents_or_names_every_production_key():
     )
 
     assert browser_layout.browser_boot_production_contract_errors(bootstrap) == ()
-    assert set(browser_layout.BROWSER_BOOT_PRESETS) == {"default", "readonly", "share-view"}
+    assert set(browser_layout.BROWSER_BOOT_PRESETS) == {"default", "readonly"}
 
 
 def test_browser_boot_scenario_is_deeply_immutable_at_its_mapping_boundaries():

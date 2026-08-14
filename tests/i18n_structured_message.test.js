@@ -7,12 +7,10 @@ const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'ut
 const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
 const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
 const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
 const catalog = {
   'events.message.test': 'localized event {count}',
-  'share.error.test': 'localized share {reason}',
   'yolo.status.test': 'localized YOLO {state}',
 };
 const context = {
@@ -50,27 +48,7 @@ assert.equal(api.autoApproveOwnerLabel(yoloState), 'localized YOLO ready');
 assert.deepStrictEqual(
   JSON.parse(JSON.stringify(api.structuredMessageSnapshot(yoloState, 'last_action'))),
   yoloState,
-  'YO!share preserves the structured YOLO status and its raw classifier fallback',
-);
-assert.equal(
-  api.userMessageText(api.userMessageSnapshot({
-    payload: {
-      error: 'raw share diagnostic',
-      user_message: {key: 'share.error.test', params: {reason: 'failure'}, fallback: 'fallback'},
-    },
-  })),
-  'localized share failure',
-  'structured share errors resolve from the current catalog instead of storing rendered prose',
-);
-assert.match(
-  shareSource,
-  /shareCreateErrorPayload = userMessageSnapshot\(err\)/,
-  'the share modal stores its structured failure payload',
-);
-assert.doesNotMatch(
-  shareSource,
-  /querySelector\('\.share-error:not\(\[hidden\]\)'\)\?\.textContent/,
-  'locale changes do not carry already-rendered share error text into the next render',
+  'structured status snapshots preserve the YOLO classifier fallback',
 );
 
 assert.deepStrictEqual(

@@ -161,7 +161,6 @@ def test_operator_catalog_exposes_shared_locale_keys(tmp_path):
         "general.default_sessions",
         "appearance.editor_color_scheme",
         "updates.check_interval_minutes",
-        "share.view_fit",
         "summary.backend",
         "summary.codex_model",
         "summary.codex_effort",
@@ -494,7 +493,6 @@ def test_product_capability_registry_mentions_preferences_and_orchestration():
     for key in ["panesTabs", "finderDifferTabber", "uploads"]:
         assert product_capability_locale_key(by_key[key], "auth") == "yoagent.capability.auth.adminForWrites"
     assert product_capability_locale_key(preferences, "name") == "common.preferences"
-    assert product_capability_locale_key(by_key["share"], "name") == "brand.share"
     assert product_capability_locale_key(by_key["recentWork"], "write") == "common.readOnly"
     assert product_capability_locale_key(by_key["orchestration"], "name") == "yoagent.capability.orchestration.name"
 

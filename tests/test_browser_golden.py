@@ -1,7 +1,7 @@
 """Small local-only visual-regression matrix for the app's highest-level surfaces.
 
 These are intentionally not checked-in test fixtures.  The normal assertion compares each page to
-the baseline reviewed on this developer machine; `YOLOMUX_UPDATE_GOLDENS=1` refreshes all 20 images.
+the baseline reviewed on this developer machine; `YOLOMUX_UPDATE_GOLDENS=1` refreshes all 16 images.
 The pages still use the shipped CSS and bundle so this catches a bad layout, shadow, gradient, or
 whole-chrome regression that individual computed-style assertions can miss.
 """
@@ -11,7 +11,7 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 
 
 GOLDEN_PROFILES = (("dark", 1), ("dark", 2), ("light", 1), ("light", 2))
-GOLDEN_PAGES = ("grid", "dockview", "finder-differ", "preferences", "share-replay")
+GOLDEN_PAGES = ("grid", "dockview", "finder-differ", "preferences")
 
 
 def _golden_name(page, theme, dpr):
@@ -56,34 +56,6 @@ def _load_golden_page(browser, tmp_path, page):
             sessions=["1"],
         )
         WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return document.querySelector('#panel-__prefs__ .preferences-section')"))
-        return
-    if page == "share-replay":
-        share_bootstrap = {
-            "view": True,
-            "id": "golden-share-replay",
-            "mode": "ro",
-            "session": "1",
-            "sessions": ["1"],
-            "createdBy": "golden-host",
-            "expiresAt": 4102444800.0,
-            "maxViewers": 5,
-            "layout": "left",
-            "tabs": "left:1",
-            "uiState": {"layout": "left", "tabs": "left:1", "viewport": {"width": 1000, "height": 700}},
-        }
-        load_live_runtime_boot_fixture(
-            browser,
-            tmp_path,
-            search="#t=golden-share-token",
-            sessions=["1"],
-            access_role="readonly",
-            share_bootstrap=share_bootstrap,
-            share_status_payload={"ok": True, "active": True, "token": "golden-share-token", "mode": "ro", "expiresAt": 4102444800.0, "uiState": share_bootstrap["uiState"]},
-            wrap_app_root=True,
-        )
-        WebDriverWait(browser, 5).until(
-            lambda driver: driver.execute_script("return document.body.classList.contains('share-replay-shell') && document.querySelector('.share-replay-stage, #appRoot')")
-        )
         return
     raise ValueError(f"unknown golden page: {page}")
 

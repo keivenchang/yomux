@@ -39,12 +39,6 @@ RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
 # use a shared token or be added here with a reviewed reason; normalized identities make equivalent
 # hex/rgb spellings share one entry.
 NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
-    "static_src/css/yolomux/10_topbar_menus.css": (
-        frozenset({
-            "#041108", "rgb(255 255 255 / 0.42)", "rgb(255 255 255 / 0.66)",
-        }),
-        "reviewed pre-token component palette (2026-07-07)",
-    ),
     "static_src/css/yolomux/20_sessions_popovers.css": (
         frozenset({
             "#082014", "#10151f", "#3a3524", "#67d7ff", "#7a1020", "#9befad",
@@ -167,9 +161,6 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/20_layout_state.js": (
         ("editor state", "function applyEditorStateFields", "applyEditorStateFields("),
     ),
-    "static_src/js/yolomux/94_share_replay.js": (
-        ("shared editor replay", "applyEditorStateFields("),
-    ),
     "static_src/js/yolomux/84_stats_current.js": (
         (
             "current plot-ready series owner",
@@ -199,29 +190,8 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/86_changes_editor.js": (
         ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
     ),
-    # Socket and queue state are one token-keyed record.  A second map lets reconnect, close, and
-    # pruning disagree about ownership, which was the source of a prior share replay regression.
-    "static_src/js/yolomux/00_bootstrap_state.js": (
-        (
-            "share sender lifecycle-record owner",
-            "const shareSenderRecords = new Map()",
-        ),
-    ),
-    "static_src/js/yolomux/93_share_state.js": (
-        (
-            "share host connection-record operations",
-            "function shareHostConnectionRecord",
-            "function enqueueShareHostMessage",
-            "function sendOrQueueShareHostMessage",
-            "function ensureShareHostSocket",
-            "function ensureShareHostSockets",
-        ),
-    ),
 }
-SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = (
-    ("parallel share host socket map", "shareHostSockets"),
-    ("parallel share host queue map", "shareHostQueues"),
-)
+SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = ()
 # Exact normalized production clones are rare; each reviewed exception must name why the two
 # surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
 # normalized block digest emitted by lint_normalized_production_clones().
@@ -267,10 +237,6 @@ CUSTOM_BORDER_RADIUS_CLASSIFICATIONS = {
     "static_src/css/yolomux/50_terminal_file_tree.css:.file-image-preview-popover:7px": "image preview overlay",
     "static_src/css/yolomux/50_terminal_file_tree.css:.transcript-item:5px": "transcript message block",
     "static_src/css/yolomux/50_terminal_file_tree.css:.conversation-message:5px": "conversation message block",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-entry:7px": "share entry card",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-create-panel:7px": "share creation card",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-url-primary:7px": "primary share URL surface",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-protocol-group:7px": "share protocol fieldset",
     "static_src/css/yolomux/50_terminal_file_tree.css:.file-tree-date:5px": "file-tree date chip",
 }
 STANDARD_COMPONENT_FONT_SIZE_TOKENS = {
@@ -647,7 +613,7 @@ I18N_ALLOWED_IDENTICAL_TERMS = {
     "aa", "ai", "apache", "api", "ci", "claude", "cli", "codex", "cpu", "css", "csv", "geojson", "git", "github", "gitlab", "head", "html", "http",
     "graph", "id", "ip", "javascript", "json", "jsonl", "linear", "linkedin", "markdown", "mermaid", "mit", "ndjson", "ok", "openai", "pdf",
     "polyform", "pr", "readme", "rss", "sse", "ssh", "tmux", "toml", "tsv", "url", "websocket", "worktree", "xml", "yaml", "yo!agent",
-    "yo!info", "yo!share", "yo!stats", "yolo", "yolomux",
+    "yo!info", "yo!stats", "yolo", "yolomux",
 }
 I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "brand.marker",
@@ -711,7 +677,6 @@ I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
-    frozenset({"legend.icon.share.label", "share.create"}): "share legend noun and create-share action are different parts of speech",
     frozenset({"menu.view.theme", "pref.appearance.editor_cursor_color.theme"}): "theme heading and inherit-theme cursor option are different concepts",
     frozenset({"pr.approved", "pr.review.approvedShort"}): "full review state and compact badge have different display constraints",
     frozenset({"state.blocked", "state.short.blocked"}): "full and compact blocked states have different display constraints",
@@ -780,7 +745,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/76_panel_dom_actions.js",
         "static_src/js/yolomux/78_panel_shell.js",
-        "static_src/js/yolomux/79_conversation_shared.js",
+        "static_src/js/yolomux/79_conversation_common.js",
         "static_src/js/yolomux/80_info_panel.js",
         "static_src/js/yolomux/81_yoagent_panel.js",
         "static_src/js/yolomux/82_chat_panel.js",
@@ -795,9 +760,6 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/90_pane_popout.js",
         "static_src/js/yolomux/91_preview_popout.js",
         "static_src/js/yolomux/92_codemirror_editor.js",
-        "static_src/js/yolomux/93_share_state.js",
-        "static_src/js/yolomux/94_share_replay.js",
-        "static_src/js/yolomux/95_share_admin.js",
         "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],

@@ -43,7 +43,6 @@ PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = tuple(
 # start the longest units first. Static phase catalogs consume this same order;
 # otherwise a lane's argv and its runtime collection disagree about owner order.
 SLOWEST_FIRST_TESTS: Final[tuple[str, ...]] = (
-    "tests/test_browser_share.py::test_generated_share_link_mirrors_interactive_ui_surface_matrix",
     "tests/test_browser_dockview.py::test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid",
     "tests/test_browser_dockview.py::test_differ_reopen_keeps_dragged_file_tab_home",
     "tests/test_browser_layout.py::test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser",

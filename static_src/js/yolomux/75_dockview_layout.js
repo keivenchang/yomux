@@ -1093,7 +1093,7 @@ function dockviewHostCanAdoptLayout(host = dockviewLayoutState.host) {
 }
 
 function dockviewLayoutAdoptionAllowed() {
-  return !shareViewMode || shareWriteMode;
+  return true;
 }
 
 function dockviewInstallHostResizeObserver(host, api) {

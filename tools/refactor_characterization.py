@@ -30,7 +30,7 @@ PYTHON_INPUTS = (
 )
 FRONTEND_INPUTS = (
     "static_src/js/yolomux/00_bootstrap_state.js", "static_src/js/yolomux/20_layout_state.js",
-    "static_src/js/yolomux/40_file_explorer_files.js", "static_src/js/yolomux/75_share.js",
+    "static_src/js/yolomux/40_file_explorer_files.js",
     "static_src/js/yolomux/82_chat_panel.js", "static_src/js/yolomux/84_stats_current.js",
     "static_src/js/yolomux/85_debug_panel.js", "static_src/js/yolomux/89_preview_renderers.js",
     "static_src/js/yolomux/99_terminal_boot.js",

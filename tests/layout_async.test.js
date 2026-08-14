@@ -78,64 +78,6 @@ function summarizedHangingShard(closeOnSignal) {
 }
 
 async function runLayoutAsyncSuite() { await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
-  await testAsync('share viewers retain local diagnostics without scheduling unscoped host requests', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-diagnostic-capability', mode: 'ro', session: '1', sessions: ['1']},
-      fireTimeoutDelays: [10000],
-    });
-    const requests = [];
-    api.setFetchForTest(async (input, options = {}) => {
-      requests.push({url: String(input), method: String(options.method || 'GET')});
-      return {ok: true, status: 200, clone() { return this; }, json: async () => ({status: 'none'})};
-    });
-
-    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), false);
-    await api.refreshTmuxStatusModeForTest('1');
-    api.recordJsDebugEventForTest('error', {
-      level: 'error',
-      message: 'share-local diagnostic',
-      source: '/ws/share-view',
-      eventType: 'share-view',
-      deliveryOutcome: 'failed',
-    });
-    await new Promise(resolve => setImmediate(resolve));
-
-    assert.deepStrictEqual(requests, [], 'share viewers never request host-only tmux status or diagnostic upload routes');
-    assert.ok(api.jsDebugEventsForTest().some(event => event.message === 'share-local diagnostic'), 'the diagnostic remains locally observable');
-    assert.equal(api.debugEventCountsForTest().errors, 1, 'the local diagnostic remains visible to the stats summary');
-    assert.deepStrictEqual(
-      canonical(api.jsDebugCurrentObservationStateForTest()),
-      {queue: 0, receipts: 0, timerPending: false, livenessTimerPending: false},
-      'an ineligible share viewer creates no upload queue, pending receipt, or cadence timer',
-    );
-  });
-
-  await testAsync('a share-scoped terminal close issues no host-only /api/event or /api/tmux-session-exists', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-host-poller-guard', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    const requests = [];
-    api.setFetchForTest((url, options = {}) => {
-      requests.push({url: String(url), method: String(options.method || 'GET')});
-      return Promise.resolve(jsonResponse({exists: false}));
-    });
-    api.setShowToastForTest(() => {});
-    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), false, 'a read-only share viewer is not eligible for host-only requests');
-    const term = {write() {}, dispose() {}};
-    const item = api.registerTerminalForTest('1', term, {readyState: WebSocket.CLOSED, close() {}});
-    api.connectTerminalSocketForTest('1', item);
-    const socket = item.socket;
-    // A transient abnormal close (1006, not clean) is not "final": it drives the reconnect/confirm path,
-    // which for a host-scoped viewer would POST /api/event (terminal_disconnected) and GET
-    // /api/tmux-session-exists. A share viewer must issue NEITHER -- both are host-only (share_access=none)
-    // and the server returns 403 for a share token; a real 403 during teardown fails the strict browser
-    // server-log-ring gate. Both producers are gated on the shared clientCanUseUnscopedHostRequests() owner.
-    socket.onclose?.({target: socket, code: 1006, wasClean: false});
-    await flushAsyncWork();
-    assert.equal(requests.some(request => request.url.includes('/api/event')), false, 'a share viewer never posts terminal_disconnected to the host-only /api/event route');
-    assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), false, 'a share viewer never checks the host-only tmux roster');
-  });
-
   await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
     const api = loadYolomux('', ['1']);
     const requests = [];
@@ -824,55 +766,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.apiOperationStateForTest().handlerInvocations, 1);
   });
 
-  await testAsync('session retirement detaches the last share waiter without closing operation ownership', async () => {
-    const shareToken = 'retired session share token';
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-retired-session', mode: 'ro', session: '1', sessions: ['1']},
-      locationHash: `#t=${encodeURIComponent(shareToken)}`,
-    });
-    const controller = new AbortController();
-    const receipt = {
-      state: 'queued',
-      request: {id: 'r-retired-session'},
-      operation: {
-        id: 'op-retired-session',
-        kind: 'filesystem_operation',
-        context: {operation: 'diff', path: '/repo/retired.txt', session: '1'},
-        events_url: '/api/client-events?operation_id=op-retired-session',
-        cursor: {epoch: 'retired-session-epoch', seq: 0},
-      },
-    };
-    const record = api.registerApiOperationReceiptForTest(receipt);
-    const source = record.source;
-    const waiter = api.waitForApiOperationResultForTest(receipt, {
-      kind: 'filesystem_operation',
-      operation: 'diff',
-      signal: controller.signal,
-    }).then(() => null, error => error);
-    controller.abort(new DOMException('session retired', 'AbortError'));
-    assert.equal((await waiter)?.name, 'AbortError');
-    assert.equal(api.apiOperationStateForTest().pending, 1, 'session retirement cannot retire the backend operation');
-    assert.equal(api.apiOperationStateForTest().waiters, 0);
-    assert.equal(record.source, source, 'the exact-ID transport remains owned without a UI waiter');
-    assert.notEqual(source.readyState, 2, 'the exact-ID transport remains open');
-    source.listeners.get('operation_terminal')[0]({
-      data: JSON.stringify({
-        type: 'operation_terminal',
-        payload: {
-          operation: {id: 'op-retired-session', cursor: {epoch: 'retired-session-epoch', seq: 1}},
-          result: {state: 'ready', data: {diff: 'retained'}},
-          status: 200,
-        },
-      }),
-      type: 'operation_terminal',
-      lastEventId: '',
-    });
-    assert.equal(api.apiOperationStateForTest().pending, 0);
-    assert.equal(api.apiOperationStateForTest().terminal, 1);
-    assert.equal(api.apiOperationStateForTest().handlerInvocations, 1);
-    assert.equal(source.readyState, 2, 'the exact-ID transport closes only after terminal settlement');
-  });
-
   await testAsync('operation replay retention is bounded while preserving delayed terminal-before-receipt delivery', async () => {
     const api = loadYolomux('', ['1']);
     const retainedLimit = 128;
@@ -926,7 +819,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
 
   await testAsync('session-scoped operation terminal settles globally but skips stale same-name generation paint', async () => {
     const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-generation-operation', mode: 'ro', session: '1', sessions: ['1']},
       locationHash: '#t=session-generation-operation',
     });
     const receipt = {
@@ -940,7 +832,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       },
     };
     const record = api.registerApiOperationReceiptForTest(receipt);
-    const source = record.source;
     const waiter = api.waitForApiOperationResultForTest(receipt, {kind: 'filesystem_operation', operation: 'diff'});
     const killed = api.beginTmuxSessionLifecycleMutationForTest('kill', {session: '1'});
     api.commitTmuxSessionLifecycleMutationForTest(killed);
@@ -955,7 +846,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
     assert.equal(record.handlerInvocations, 0, 'the stale generation invokes no feature renderer');
-    assert.equal(source.readyState, 2, 'the exact-ID EventSource closes at terminal settlement');
 
     const nextReceipt = {
       state: 'queued',
@@ -1320,74 +1210,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.apiOperationStateForTest().handlerInvocations, 1, 'the shared terminal invokes the feature handler once');
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
-  });
-
-  await testAsync('a pre-receipt wrong epoch still opens the exact share-token operation stream', async () => {
-    const shareToken = 'share operation token';
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-operation', mode: 'ro', session: '1', sessions: ['1']},
-      locationHash: `#t=${encodeURIComponent(shareToken)}`,
-      fireTimeoutDelays: [25],
-    });
-    const acknowledgmentRequests = [];
-    api.setFetchForTest((url, options = {}) => {
-      acknowledgmentRequests.push({url: String(url), options});
-      const body = JSON.parse(options.body || '{}');
-      return Promise.resolve(jsonResponse({ok: true, acknowledged: body.acks.map(item => item.id)}));
-    });
-    const operationId = 'op-wrong-epoch-share-token';
-    const eventsUrl = `/api/client-events?operation_id=${operationId}`;
-    const receipt = {
-      state: 'queued',
-      request: {id: `r-${operationId}`},
-      operation: {
-        id: operationId,
-        kind: 'filesystem_operation',
-        context: {operation: 'read', path: '/tmp/share-token.txt'},
-        events_url: eventsUrl,
-        cursor: {epoch: 'expected-share-token', seq: 0},
-      },
-    };
-    assert.equal(api.applyApiOperationTerminalForTest({
-      operation: {id: operationId, cursor: {epoch: 'wrong-share-token', seq: 1}},
-      result: {state: 'ready', data: {wrong: true}},
-      status: 200,
-    }), true, 'an unknown wrong-epoch terminal is retained before share receipt admission');
-    let terminalEvents = 0;
-    api.addWindowEventListenerForTest('yolomux:operation-terminal', () => { terminalEvents += 1; });
-    api.clearJsDebugEventsForTest();
-    const record = api.registerApiOperationReceiptForTest(receipt);
-    assert.equal(api.apiOperationTerminalForTest(operationId), null, 'share receipt admission removes the mismatched retained terminal');
-    const resultPromise = api.waitForApiOperationResultForTest(receipt, {kind: 'filesystem_operation', operation: 'read'});
-    assert.ok(record.source, 'discarding a mismatched terminal still opens the feature-local share stream');
-    assert.equal(record.source.url, `${eventsUrl}&token=${encodeURIComponent(shareToken)}`, 'the feature-local source uses the exact receipt URL and share token');
-    record.source.listeners.get('operation_terminal')[0]({
-      data: JSON.stringify({
-        type: 'operation_terminal',
-        payload: {
-          operation: {id: operationId, cursor: {epoch: 'expected-share-token', seq: 1}},
-          result: {state: 'ready', data: {transport: 'share'}},
-          status: 200,
-        },
-      }),
-      type: 'operation_terminal',
-      lastEventId: '',
-    });
-    assert.deepStrictEqual(canonical(await resultPromise), {transport: 'share'});
-    assert.equal(canonical(api.apiOperationTerminalForTest(operationId).operation.cursor).epoch, 'expected-share-token');
-    assert.equal(terminalEvents, 1, 'the share terminal dispatches once');
-    assert.equal(api.jsDebugEventsForTest().filter(event => event.type === 'operation_wait').length, 1, 'the share terminal records one telemetry row');
-    assert.equal(api.apiOperationStateForTest().handlerInvocations, 1, 'the share terminal invokes the feature handler once');
-    assert.equal(api.apiOperationStateForTest().pending, 0);
-    assert.equal(api.apiOperationStateForTest().waiters, 0);
-    await flushAsyncWork();
-    assert.equal(acknowledgmentRequests.length, 1, 'share completion sends one application-level acknowledgment');
-    assert.equal(acknowledgmentRequests[0].url, '/api/operations/ack');
-    const acknowledgmentHeaders = acknowledgmentRequests[0].options.headers;
-    const shareHeader = typeof acknowledgmentHeaders?.get === 'function'
-      ? acknowledgmentHeaders.get('X-Share-Token')
-      : acknowledgmentHeaders?.['X-Share-Token'];
-    assert.equal(shareHeader, shareToken, 'the acknowledgment preserves the share-token transport boundary');
   });
 
   await testAsync('every ordinary filesystem route shares one cold receipt await owner', async () => {
@@ -4205,7 +4027,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.layoutUrlStateForTest().refreshTimer, null, 'firing consumes only the matching record timer');
   });
 
-  test('editor field application has one normalizer for URL restore and share replay', () => {
+  test('editor field application normalizes URL restore fields and delegates per-file modes', () => {
     const editor = {
       globalThemeMode: 'light',
       terminalThemeMode: 'light',
@@ -4218,13 +4040,12 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       previewFontSize: 27,
       modes: [{path: '/tmp/ignored.txt', mode: 'edit'}],
     };
-    const fromUrl = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1']);
     const urlModes = [];
-    fromUrl.applyEditorStateFieldsForTest(editor, {applyModeEntry: entry => urlModes.push(entry)});
-    const fromShare = loadYolomux('', ['1']);
-    fromShare.applyShareEditorStateForTest(editor);
-    assert.deepEqual(canonical(fromUrl.editorStateFieldsSnapshotForTest()), canonical(fromShare.editorStateFieldsSnapshotForTest()), 'URL and share apply every common editor field through the same normalizer');
-    assert.deepEqual(canonical(urlModes), canonical(editor.modes), 'the shared normalizer delegates each per-file mode to its transport-specific owner');
+    api.applyEditorStateFieldsForTest(editor, {applyModeEntry: entry => urlModes.push(entry)});
+    const {modes, ...expectedFields} = editor;
+    assert.deepEqual(canonical(api.editorStateFieldsSnapshotForTest()), canonical(expectedFields), 'URL restore applies every common editor field through one normalizer');
+    assert.deepEqual(canonical(urlModes), canonical(modes), 'the editor field normalizer delegates each per-file mode to its transport-specific owner');
   });
 
   await testAsync('session-files record lets an accepted push invalidate older HTTP work', async () => {
@@ -5308,59 +5129,6 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     }
 
     {
-      const scrollHostApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-      const prefsScroller = new TestElement('prefs-scroll');
-      prefsScroller.className = 'preferences-scroll';
-      prefsScroller.scrollTop = 444;
-      prefsScroller.scrollLeft = 12;
-      scrollHostApi.setDocumentQuerySelectorAllForTest(selector => selector === '.preferences-scroll' ? [prefsScroller] : []);
-      const hostScrollSnapshot = scrollHostApi.shareUiStateSnapshotForTest().scroll.find(entry => entry.target === 'preferences');
-      assert.deepStrictEqual(canonical(hostScrollSnapshot), {kind: 'preferences', left: 12, target: 'preferences', top: 444}, 'YO!share full UI snapshots include host Preferences scroll for late viewers');
-
-      const sharePrefsApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-prefs-scroll', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      const sharePrefsScroller = new TestElement('share-prefs-scroll');
-      sharePrefsScroller.className = 'preferences-scroll';
-      sharePrefsScroller.scrollTop = 0;
-      sharePrefsScroller.scrollLeft = 0;
-      sharePrefsApi.setDocumentQuerySelectorAllForTest(selector => selector === '.preferences-scroll' ? [sharePrefsScroller] : []);
-      await sharePrefsApi.applyShareUiStateForTest({scroll: [hostScrollSnapshot]});
-      assert.equal(sharePrefsScroller.scrollTop, 444, 'YO!share clients apply Preferences scroll from full UI snapshots');
-      assert.equal(sharePrefsScroller.scrollLeft, 12, 'YO!share clients apply Preferences horizontal scroll from full UI snapshots');
-
-      const shareTextarea = new TestElement('share-yoagent-format', 'textarea');
-      shareTextarea.dataset.settingPath = 'yoagent.format';
-      shareTextarea.value = 'Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics.';
-      shareTextarea.clientWidth = 200;
-      shareTextarea.clientHeight = 60;
-      shareTextarea.scrollHeight = 160;
-      sharePrefsApi.appRootForTest().appendChild(shareTextarea);
-      await sharePrefsApi.applyShareUiStateForTest({textWraps: [{
-        key: 'yoagent.format',
-        tag: 'textarea',
-        rect: {left: 40, top: 80, width: 640, height: 132},
-        scrollHeight: 160,
-      }]});
-      assert.equal(shareTextarea.style.width, '640px', 'YO!share clients pin native settings control width from host wrapped-text metrics');
-      assert.equal(shareTextarea.style.height, '132px', 'YO!share clients pin native settings control height from host wrapped-text metrics');
-      assert.equal(shareTextarea.style.overflowY, 'auto', 'YO!share clients preserve host textarea clipping/scrolling when content exceeds host height');
-    }
-
-    {
-      const hostTopbarApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-      hostTopbarApi.setAutoApproveStateForTest('1', {enabled: true, screen: {key: 'working'}});
-      const autoSnapshot = hostTopbarApi.shareUiStateSnapshotForTest().autoApprove;
-      const shareTopbarApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-yolo-badge', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'Tabs never shows a running-YOLO circle');
-      await shareTopbarApi.applyShareUiStateForTest({autoApprove: autoSnapshot});
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tabs').badgeText, undefined, 'host UI state cannot restore the removed Tabs circle in a share viewer');
-      assert.equal(shareTopbarApi.appMenuTree().find(menu => menu.id === 'tmux').items[0].label, 'YO (YOLO auto approve) tmux', 'share viewers mirror host tmux YO state from UI state');
-    }
-
-    {
       const api = loadYolomux('', ['1']);
       const path = '/repo/app/src/main.py';
       const item = api.fileEditorDiffPreviewItemFor(path);
@@ -5666,14 +5434,13 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
 
     {
       const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
-      const shareDifferApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
+      const differApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')), 'zh-Hant': zhHant},
-        share: {view: true, id: 'share123', mode: 'ro', session: '1', sessions: ['1']},
       });
-      shareDifferApi.i18nSetCatalogForTest('zh-Hant', zhHant);
-      shareDifferApi.setFileExplorerModeForTest('diff');
-      shareDifferApi.setFileExplorerChangesSelectedSessionForTest('1');
-      shareDifferApi.setSessionFilesPayloadForTest({
+      differApi.i18nSetCatalogForTest('zh-Hant', zhHant);
+      differApi.setFileExplorerModeForTest('diff');
+      differApi.setFileExplorerChangesSelectedSessionForTest('1');
+      differApi.setSessionFilesPayloadForTest({
         session: '1',
         loaded: true,
         errors: [],
@@ -5681,202 +5448,14 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         repos: [{repo: '/repo/app', count: 1, touched_count: 1, added: 2, removed: 1}],
         files: [{session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1}],
       });
-      const beforeLocaleFrame = shareDifferApi.fileExplorerChangesPanelHtml();
-      assert.ok(beforeLocaleFrame.includes('data-open-change-file="/repo/app/README.md"'), 'DOIT.67: Differ renders rows before a mirrored language frame');
-      shareDifferApi.applyShareAppearanceStateForTest({locale: 'zh-Hant', languagePref: 'zh-Hant'});
-      await flushAsyncWork();
-      await flushAsyncWork();
-      assert.equal(shareDifferApi.i18nActiveLocaleId(), 'zh-Hant', 'DOIT.67: mirrored appearance frames apply the host language to read-only viewers');
-      const afterLocaleFrame = shareDifferApi.fileExplorerChangesPanelHtml();
-      assert.ok(afterLocaleFrame.includes('data-open-change-file="/repo/app/README.md"'), 'DOIT.67: Differ rows stay visible after a mirrored language frame');
-      assert.ok(afterLocaleFrame.includes(zhHant['common.reload']), 'DOIT.67: Differ chrome is localized after a mirrored language frame');
-      assert.equal(afterLocaleFrame.includes('No Differ results for this session.'), false, 'DOIT.67: Differ does not blank to the empty-state during mirrored locale apply');
-    }
-
-    {
-      const shareEditorApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-diff', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      const path = '/repo/app/test_app.py';
-      const item = shareEditorApi.fileEditorItemFor(path);
-      shareEditorApi.registerFileEditorLayoutItemForTest(path, {item});
-      shareEditorApi.setOpenFileStateForTest(path, {
-        mtime: 1,
-        size: 180,
-        kind: 'text',
-        original: 'line 1\nline 2\n',
-        content: 'line 1\nline two\n',
-        dirty: false,
-        gitRoot: '/repo/app',
-        gitTracked: true,
-        gitHasHistory: true,
-        gitHistory: [{ref: 'HEAD', short: 'HEAD'}, {ref: 'abc1234', short: 'abc1234'}],
-        diffLoaded: false,
-      });
-      await shareEditorApi.applyShareUiStateForTest({editor: {modes: [{
-        path,
-        item,
-        mode: 'diff',
-        diffFromRef: 'abc1234',
-        diffToRef: 'current',
-        diffExpandUnchanged: true,
-        viewState: {top: 444, left: 9, anchor: 21, head: 25},
-      }]}});
-      assert.equal(shareEditorApi.editorViewModeFor(path, item), 'diff', 'DOIT.68: read-only share UI-state restores host editor diff mode');
-      assert.equal(shareEditorApi.openFileStateForTest(path).diffPinnedFromRef, 'abc1234', 'DOIT.68: read-only share UI-state restores host diff FROM ref');
-      assert.equal(shareEditorApi.openFileStateForTest(path).diffPinnedToRef, 'current', 'DOIT.68: read-only share UI-state restores host diff TO ref');
-      assert.equal(shareEditorApi.fileEditorViewStateForTest(item).scrollTop, 444, 'DOIT.68: read-only share UI-state seeds host editor scrollTop');
-      assert.equal(shareEditorApi.fileEditorViewStateForTest(item).scrollLeft, 9, 'DOIT.68: read-only share UI-state seeds host editor horizontal scroll');
-      const target = `editor:${item}:editor`;
-      shareEditorApi.applyShareScrollStateForTest({target, kind: 'editor', path, item, source: 'editor', top: 712, left: 13, anchor: 80, head: 81});
-      assert.deepStrictEqual({...shareEditorApi.shareScrollTargetPositionForTest(target)}, {top: 712, left: 13}, 'DOIT.68: host editor scroll frames are remembered before a DOM scroller exists');
-      assert.equal(shareEditorApi.fileEditorViewStateForTest(item).scrollTop, 712, 'DOIT.68: host editor scroll frames update the editor view-state cache');
-      assert.equal(shareEditorApi.fileEditorViewStateForTest(item).anchor, 80, 'DOIT.68: host editor scroll frames update the editor selection anchor');
-    }
-
-    {
-      const hostFinderDiffApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-      hostFinderDiffApi.setDiffRefsByRepoForTest('/repo/app', {from: 'abc1234', to: 'def5678'});
-      const finderSnapshot = hostFinderDiffApi.shareUiStateSnapshotForTest().finder;
-      assert.deepStrictEqual(canonical(finderSnapshot.diffRefsByRepo['/repo/app']), {from: 'abc1234', to: 'def5678'}, 'YO!share snapshots repo-scoped Differ FROM and TO refs');
-      const shareFinderDiffApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-finder-diff', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      // applyShareUiState -> applyShareFinderState -> openFileExplorerAt enqueues a BATCHED /api/fs/batch
-      // directory listing; the 8ms flush now fires via the harness setTimeout shim, so the apply settles
-      // instead of hanging. Stub /api/fs/batch so the auto-flushed listing resolves cleanly.
-      shareFinderDiffApi.setFetchForTest((url, options = {}) => {
-        if (String(url).startsWith('/api/fs/batch')) {
-          const requests = JSON.parse(options.body || '{}').requests || [];
-          return Promise.resolve(jsonResponse({responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: []}}))}));
-        }
-        return Promise.resolve(jsonResponse({items: [], session: '1'}));
-      });
-      await shareFinderDiffApi.applyShareUiStateForTest({finder: finderSnapshot});
-      assert.deepStrictEqual(canonical(shareFinderDiffApi.diffRefParams('/repo/app')), {from: 'abc1234', to: 'def5678'}, 'YO!share clients apply repo-scoped Differ TO refs instead of sticking on current');
-    }
-
-    {
-      const shareFinderJumpApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {
-          view: true,
-          id: 'share-finder-jump',
-          mode: 'ro',
-          session: '5',
-          sessions: ['5', '6'],
-          finder: {root: '/home/test/yolomux.dev1', rootMode: 'sync', mode: 'files', session: '5'},
-        },
-      });
-      shareFinderJumpApi.setTranscriptInfoForTest('5', {
-        project: {git: {cwd: '/home/test/yolomux.dev1/src', root: '/home/test/yolomux.dev1'}},
-        selected_pane: {current_path: '/home/test/yolomux.dev1/src'},
-      });
-      shareFinderJumpApi.setTranscriptInfoForTest('6', {
-        project: {git: {cwd: '/home/test/other.dev/src', root: '/home/test/other.dev'}},
-        selected_pane: {current_path: '/home/test/other.dev/src'},
-      });
-      shareFinderJumpApi.setFileExplorerDirListingForTest('/home/test/yolomux.dev1', [{name: 'src', kind: 'dir'}]);
-      shareFinderJumpApi.setFileExplorerDirListingForTest('/home/test/yolomux.dev1/src', [{name: 'main.js', kind: 'file'}]);
-      shareFinderJumpApi.setFileExplorerDirListingForTest('/home/test/other.dev', [{name: 'src', kind: 'dir'}]);
-      assert.equal(shareFinderJumpApi.shareReadOnlyFinderStateIsHostOwnedForTest(), true, 'read-only share clients treat Finder root and expansion as host-owned between host frames');
-
-      await shareFinderJumpApi.applyShareUiStateForTest({finder: {
-        root: '/home/test/yolomux.dev1',
-        rootMode: 'sync',
-        mode: 'files',
-        session: '5',
-        expanded: ['/home/test/yolomux.dev1/src'],
-      }});
-      assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'read-only share applies the host Finder root');
-      assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'read-only share applies the host Finder expansion');
-
-      shareFinderJumpApi.setSessionFilesPayloadForDestinationForTest({
-        session: '6',
-        loaded: true,
-        repos: [{repo: '/home/test/other.dev'}],
-        files: [{session: '6', agent: 'codex', status: 'M', repo: '/home/test/other.dev', path: 'src/main.js', abs_path: '/home/test/other.dev/src/main.js'}],
-        errors: [],
-      });
-      shareFinderJumpApi.scheduleFileExplorerActiveTabSyncForTest('6', {explicit: true});
-      assert.equal(await shareFinderJumpApi.openFileExplorerAtForTest('/home/test/other.dev'), false, 'read-only share local Finder opens are blocked outside host UI-state frames');
-      await Promise.resolve();
-      await Promise.resolve();
-      assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'read-only share local payloads cannot jump Finder to the client context');
-      assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'read-only share local payloads cannot collapse or replace the host expansion');
-
-      await shareFinderJumpApi.applyShareUiStateForTest({finder: {
-        root: '/home/test/yolomux.dev1',
-        rootMode: 'sync',
-        mode: 'files',
-        session: '5',
-        expanded: ['/home/test/yolomux.dev1/src'],
-      }});
-      assert.equal(shareFinderJumpApi.fileExplorerRootForTest(), '/home/test/yolomux.dev1', 'repeated same-root host frames keep the Finder on the host root');
-      assert.deepStrictEqual(canonical(shareFinderJumpApi.fileExplorerExpandedForTest()), ['/home/test/yolomux.dev1/src'], 'repeated same-root host frames keep the host expansion stable');
-    }
-
-    {
-      const hostChromeApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-      hostChromeApi.setInfoPanelSubTabForTest('yoagent');
-      await hostChromeApi.selectSession(hostChromeApi.yoagentItemId);
-      hostChromeApi.setTabMetaVisibleForTest(false);
-      const chromeSnapshot = hostChromeApi.shareUiStateSnapshotForTest().chrome;
-      assert.equal(chromeSnapshot.tabMetaVisible, false, 'YO!share snapshots host tab metadata state that is otherwise local-storage-backed');
-      assert.equal(chromeSnapshot.infoSubTab, 'yoagent', 'YO!share snapshots the host YO!agent tab as legacy chrome state');
-
-      const shareChromeApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-chrome', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      shareChromeApi.setInfoPanelSubTabForTest('info');
-      shareChromeApi.setTabMetaVisibleForTest(true);
-      await shareChromeApi.applyShareUiStateForTest({chrome: chromeSnapshot});
-      assert.equal(shareChromeApi.infoPanelSubTabForTest(), 'yoagent', 'YO!share clients preserve the legacy host YO!agent chrome marker');
-      assert.equal(shareChromeApi.tabMetaVisibleForTest(), false, 'YO!share clients mirror the host tab metadata toggle');
-    }
-
-    {
-      const hostDiffApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-      const path = '/repo/app/expand_me.py';
-      const item = hostDiffApi.registerFileEditorLayoutItemForTest(path);
-      hostDiffApi.setOpenFileStateForTest(path, {
-        mtime: 1,
-        size: 180,
-        kind: 'text',
-        original: 'line 1\nline 2\n',
-        content: 'line 1\nline two\n',
-        dirty: false,
-        gitRoot: '/repo/app',
-        gitTracked: true,
-        gitHasHistory: true,
-        gitHistory: [{ref: 'HEAD', short: 'HEAD'}, {ref: 'abc1234', short: 'abc1234'}],
-        diffLoaded: true,
-        diff: 'diff --git a/expand_me.py b/expand_me.py\n',
-      });
-      hostDiffApi.setFileEditorViewMode(path, 'diff', item);
-      hostDiffApi.setFileEditorDiffExpandUnchangedForItemForTest(path, item, true);
-      const modeEntry = hostDiffApi.shareUiStateSnapshotForTest().editor.modes.find(entry => entry.item === item);
-      assert.equal(modeEntry?.diffExpandUnchanged, true, 'YO!share snapshots per-editor diff expansion overrides');
-
-      const shareDiffApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-diff-expand', mode: 'ro', session: '1', sessions: ['1']},
-      });
-      shareDiffApi.registerFileEditorLayoutItemForTest(path, {item});
-      shareDiffApi.setOpenFileStateForTest(path, {
-        mtime: 1,
-        size: 180,
-        kind: 'text',
-        original: 'line 1\nline 2\n',
-        content: 'line 1\nline two\n',
-        dirty: false,
-        gitRoot: '/repo/app',
-        gitTracked: true,
-        gitHasHistory: true,
-        gitHistory: [{ref: 'HEAD', short: 'HEAD'}, {ref: 'abc1234', short: 'abc1234'}],
-        diffLoaded: true,
-        diff: 'diff --git a/expand_me.py b/expand_me.py\n',
-      });
-      await shareDiffApi.applyShareUiStateForTest({editor: {modes: [modeEntry]}});
-      assert.equal(shareDiffApi.fileEditorDiffExpandUnchangedForItemForTest(item), true, 'YO!share clients apply per-editor diff expansion overrides');
+      const beforeLocaleChange = differApi.fileExplorerChangesPanelHtml();
+      assert.ok(beforeLocaleChange.includes('data-open-change-file="/repo/app/README.md"'), 'Differ renders rows before a language change');
+      differApi.setActiveLocaleForTest('zh-Hant');
+      assert.equal(differApi.i18nActiveLocaleId(), 'zh-Hant', 'the active language changes to Traditional Chinese');
+      const afterLocaleChange = differApi.fileExplorerChangesPanelHtml();
+      assert.ok(afterLocaleChange.includes('data-open-change-file="/repo/app/README.md"'), 'Differ rows stay visible after a language change');
+      assert.ok(afterLocaleChange.includes(zhHant['common.reload']), 'Differ chrome localizes after a language change');
+      assert.equal(afterLocaleChange.includes('No Differ results for this session.'), false, 'Differ does not blank to the empty state during locale apply');
     }
 
     {

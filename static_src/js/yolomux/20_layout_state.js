@@ -1038,7 +1038,7 @@ function readableParamComponent(value) {
   return encodeURIComponent(String(value)).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-// Legacy compatibility: old share snapshots may still carry the merged-pane sub-tab marker. New
+// Legacy compatibility: old layout snapshots may still carry the merged-pane sub-tab marker. New
 // yoagent/yosup URL tokens resolve directly to the standalone YO!agent tab through TAB_TYPES.
 function maybeAdoptYoagentDeepLink(params) {
   const raw = [params.get('tabs') || '', params.get('sessions') || '', params.get('active') || ''].join(',');
@@ -1112,6 +1112,326 @@ function layoutUrlReplaceSet(target, values, limit = 1000) {
   for (const value of layoutUrlStringArray(values, limit)) target.add(value);
 }
 
+function layoutUrlSetSnapshot(set, limit = 1000) {
+  return Array.from(set || []).map(item => String(item || '')).filter(Boolean).slice(0, limit).sort();
+}
+
+function layoutUrlFinderSeed() {
+  const root = fileExplorerRoot || (typeof fileExplorerRootForOpen === 'function' ? fileExplorerRootForOpen() : '') || homePath || '/';
+  return {
+    root,
+    rootMode: fileExplorerRootMode === 'fixed' ? 'fixed' : 'sync',
+    session: typeof fileExplorerFinderTargetSession === 'function' ? fileExplorerFinderTargetSession() : '',
+    differSession: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
+  };
+}
+
+function layoutUrlDiffRefsByRepoSnapshot() {
+  const result = {};
+  for (const [repo, refs] of Object.entries(diffRefsByRepo || {})) {
+    const cleanRepo = String(repo || '').trim();
+    if (!cleanRepo || !refs || typeof refs !== 'object') continue;
+    result[cleanRepo] = {
+      from: cleanDiffRef(refs.from, 'HEAD'),
+      to: cleanDiffRef(refs.to, 'current'),
+    };
+  }
+  return result;
+}
+
+function layoutUrlCleanDiffRefsByRepo(value) {
+  const result = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+  for (const [repo, refs] of Object.entries(value)) {
+    const cleanRepo = String(repo || '').trim();
+    if (!cleanRepo || !refs || typeof refs !== 'object') continue;
+    result[cleanRepo] = {
+      from: cleanDiffRef(refs.from, 'HEAD'),
+      to: cleanDiffRef(refs.to, 'current'),
+    };
+  }
+  return result;
+}
+
+function layoutUrlEditorModesSnapshot() {
+  const modes = [];
+  const seen = new Set();
+  const addMode = (path, item = null, mode = '') => {
+    const cleanPath = String(path || '').trim();
+    const cleanItem = item && isFileEditorItem(item) ? item : '';
+    const cleanMode = editorViewModes.has(mode) ? mode : editorViewModeFor(cleanPath, cleanItem || null);
+    if (!cleanPath || !editorViewModes.has(cleanMode)) return;
+    const key = `${cleanPath}\n${cleanItem || cleanPath}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const entry = {path: cleanPath, item: cleanItem, mode: cleanMode};
+    const state = fileState.get(cleanPath);
+    const itemKey = cleanItem || fileEditorItemFor(cleanPath);
+    const viewState = fileEditorViewState.get(itemKey);
+    if (viewState) {
+      entry.viewState = {
+        top: Math.max(0, Math.round(Number(viewState.scrollTop || 0))),
+        left: Math.max(0, Math.round(Number(viewState.scrollLeft || 0))),
+        anchor: Math.max(0, Math.round(Number(viewState.anchor || 0))),
+        head: Math.max(0, Math.round(Number(viewState.head ?? viewState.anchor ?? 0))),
+        line: Math.max(0, Math.round(Number(viewState.line || 0))),
+      };
+    }
+    if (cleanMode === 'diff') {
+      const refs = diffRefParams(fileRepoForPath(cleanPath));
+      entry.diffFromRef = cleanDiffRef(state?.diffPinnedFromRef || state?.diffFromRef || refs.from || 'HEAD', 'HEAD');
+      entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
+      entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
+    }
+    modes.push(entry);
+  };
+  for (const item of paneItems(layoutSlots)) {
+    if (!isFileEditorItem(item)) continue;
+    const path = fileItemPath(item);
+    if (path) addMode(path, item, editorViewModeFor(path, item));
+  }
+  for (const [path, state] of fileState.entries()) {
+    const viewModes = state?.viewMode instanceof Map ? state.viewMode : fileEditorViewModesForPath(path);
+    for (const [key, mode] of viewModes.entries()) addMode(path, key === path ? '' : key, mode);
+  }
+  return modes;
+}
+
+function layoutUrlRememberEditorViewState(payload = {}, top = 0, left = 0) {
+  const path = String(payload.path || '').trim();
+  const item = String(payload.item || '').trim();
+  const key = item && isFileEditorItem(item) ? item : (path ? fileEditorItemFor(path) : '');
+  if (!key) return;
+  const previous = fileEditorViewState.get(key) || {};
+  fileEditorViewState.set(key, {
+    ...previous,
+    scrollTop: Math.max(0, Math.round(Number(top || 0))),
+    scrollLeft: Math.max(0, Math.round(Number(left || 0))),
+    anchor: Math.max(0, Math.round(Number(payload.anchor ?? previous.anchor ?? 0))),
+    head: Math.max(0, Math.round(Number(payload.head ?? payload.anchor ?? previous.head ?? previous.anchor ?? 0))),
+    line: Math.max(0, Math.round(Number(payload.line ?? previous.line ?? 0))),
+    scrollSnapshot: previous.scrollSnapshot || null,
+  });
+}
+
+function applyLayoutUrlEditorModeEntry(entry = {}) {
+  if (!entry || typeof entry !== 'object') return null;
+  const path = String(entry.path || '').trim();
+  const item = String(entry.item || '').trim();
+  const mode = String(entry.mode || '').trim();
+  if (!path || !editorViewModes.has(mode)) return null;
+  const cleanItem = item && isFileEditorItem(item) ? item : '';
+  if (cleanItem && !fileState.has(path) && typeof registerFileEditorLayoutItem === 'function') {
+    registerFileEditorLayoutItem(path, {item: cleanItem});
+  }
+  const key = cleanItem || path;
+  fileEditorViewModesForPath(path, true).set(key, mode);
+  const viewState = entry.viewState && typeof entry.viewState === 'object' ? entry.viewState : null;
+  if (viewState) {
+    layoutUrlRememberEditorViewState({path, item: cleanItem, anchor: viewState.anchor, head: viewState.head, line: viewState.line}, viewState.top, viewState.left);
+    const line = Math.floor(Number(viewState.line) || 0);
+    if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
+  }
+  if (mode === 'diff') {
+    const state = fileState.get(path) || (cleanItem ? ensureFileState(path) : null);
+    if (state) {
+      state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
+      state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
+    }
+    if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
+  }
+  return {path, item: cleanItem, mode};
+}
+
+function layoutUrlFinderStateSnapshot() {
+  return {
+    ...layoutUrlFinderSeed(),
+    showHidden: fileExplorerShowHidden === true,
+    treeDateMode: fileExplorerTreeDateModeForView('finder'),
+    treeSortMode: fileExplorerTreeSortModeForView('finder'),
+    sessionFilesSortMode: fileExplorerTreeSortModeForView('differ'),
+    viewSettings: fileExplorerViewSettings,
+    diffRefFrom: cleanDiffRef(diffRefFrom, 'HEAD'),
+    diffRefTo: cleanDiffRef(diffRefTo, 'current'),
+    expanded: layoutUrlSetSnapshot(fileExplorerExpanded),
+    syncUserExpansionState: typeof fileExplorerSyncUserExpansionEntries === 'function' ? fileExplorerSyncUserExpansionEntries() : [],
+    selectedPaths: layoutUrlSetSnapshot(fileExplorerSelectedPaths),
+    selectionAnchor: fileExplorerSelectionAnchor || '',
+    selectionLead: fileExplorerSelectionLead || '',
+    changesFolderCollapsed: layoutUrlSetSnapshot(changesFolderCollapsed),
+    changesRepoCollapsed: layoutUrlSetSnapshot(changesRepoCollapsed),
+    tabberCollapsed: layoutUrlSetSnapshot(fileExplorerTabberCollapsed),
+    diffRefsByRepo: layoutUrlDiffRefsByRepoSnapshot(),
+  };
+}
+
+function layoutUrlEditorStateSnapshot() {
+  return {
+    globalThemeMode: normalizeGlobalThemeMode(globalThemeMode),
+    terminalThemeMode: normalizeTerminalThemeMode(terminalThemeMode),
+    themeMode: normalizeEditorThemeMode(fileEditorThemeMode),
+    previewDisplayMode: normalizeEditorPreviewDisplayMode(fileEditorPreviewDisplayMode),
+    wrapEnabled: fileEditorWrapEnabled === true,
+    lineNumbersEnabled: fileEditorLineNumbersEnabled === true,
+    blameEnabled: fileEditorBlameEnabled === true,
+    diffExpandUnchanged: diffExpandUnchanged === true,
+    previewFontSize: clampEditorPreviewFontSize(editorPreviewFontSize),
+    modes: layoutUrlEditorModesSnapshot(),
+  };
+}
+
+function layoutUrlPreferencesStateSnapshot() {
+  return {
+    searchText: String(preferencesSearchText || '').slice(0, 2000),
+    collapsedSections: layoutUrlSetSnapshot(collapsedPreferenceSections, 200),
+    resetConfirmVisible: preferencesResetConfirmVisible === true,
+  };
+}
+
+function layoutUrlScrollTargetForElement(element) {
+  if (!element?.closest) return null;
+  const editorPanel = element.closest('.file-editor-panel');
+  if (editorPanel?.dataset?.filePath) {
+    const item = editorPanel.dataset.layoutItem || (typeof fileEditorPanelItem === 'function' ? fileEditorPanelItem(editorPanel) : '') || '';
+    const path = editorPanel.dataset.filePath || '';
+    const source = element.closest('.file-editor-preview-pane-panel') ? 'preview' : 'editor';
+    const scroller = source === 'preview'
+      ? editorPanel.querySelector('.file-editor-preview-pane-panel')
+      : (editorPanel._cmView?.scrollDOM || element.closest('.cm-scroller'));
+    if (scroller) return {target: `editor:${item || path}:${source}`, kind: 'editor', item, path, source, element: scroller, panel: editorPanel};
+  }
+  const finderScroller = element.closest('.file-explorer-tree-panel, .file-explorer-changes-panel');
+  if (finderScroller) {
+    const mode = normalizeFileExplorerMode(fileExplorerMode);
+    return {target: `finder:${mode}`, kind: 'finder', mode, element: finderScroller};
+  }
+  const preferencesScroller = element.closest('.preferences-scroll');
+  if (preferencesScroller) return {target: 'preferences', kind: 'preferences', element: preferencesScroller};
+  const infoScroller = element.closest('#info-content');
+  if (infoScroller) return {target: 'info', kind: 'info', element: infoScroller};
+  const terminal = element.closest('.terminal[id^="term-"]');
+  if (terminal) {
+    const session = terminal.id.slice('term-'.length);
+    const terminalItem = terminals.get(session);
+    const viewport = terminal.querySelector('.xterm-viewport') || element;
+    return {target: `terminal:${session}`, kind: 'terminal', session, element: viewport, term: terminalItem?.term || null};
+  }
+  return null;
+}
+
+function layoutUrlScrollPayloadForElement(element) {
+  const descriptor = layoutUrlScrollTargetForElement(element);
+  if (!descriptor?.target || !descriptor.element) return null;
+  const payload = {
+    target: descriptor.target,
+    kind: descriptor.kind,
+    top: Math.max(0, Math.round(Number(descriptor.element.scrollTop || 0))),
+    left: Math.max(0, Math.round(Number(descriptor.element.scrollLeft || 0))),
+  };
+  if (descriptor.kind === 'editor') {
+    payload.path = descriptor.path || '';
+    payload.item = descriptor.item || '';
+    payload.source = descriptor.source || 'editor';
+    const view = descriptor.panel?._cmView || null;
+    const selection = view?.state?.selection?.main;
+    if (selection) {
+      payload.anchor = Math.max(0, Number(selection.anchor || 0));
+      payload.head = Math.max(0, Number(selection.head ?? selection.anchor ?? 0));
+    }
+    if (typeof fileEditorVisibleLineNumber === 'function') {
+      const line = fileEditorVisibleLineNumber(view);
+      if (line > 0) payload.line = line;
+    }
+  } else if (descriptor.kind === 'finder') {
+    payload.mode = descriptor.mode || '';
+  } else if (descriptor.kind === 'terminal') {
+    payload.session = descriptor.session || '';
+    const viewportY = Number(descriptor.term?.buffer?.active?.viewportY);
+    if (Number.isFinite(viewportY)) payload.top = Math.max(0, Math.round(viewportY));
+  }
+  return payload;
+}
+
+function layoutUrlScrollStateSnapshot() {
+  const selectors = [
+    '.preferences-scroll',
+    '#info-content',
+    '.file-explorer-tree-panel',
+    '.file-explorer-changes-panel',
+    '.file-editor-preview-pane-panel',
+    '.file-editor-codemirror-panel .cm-scroller',
+    '.terminal[id^="term-"] .xterm-viewport',
+  ];
+  const byTarget = new Map();
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      const rect = element?.getBoundingClientRect?.();
+      if (rect && rect.width <= 0 && rect.height <= 0) continue;
+      const payload = layoutUrlScrollPayloadForElement(element);
+      if (payload?.target) byTarget.set(payload.target, payload);
+    }
+  }
+  return Array.from(byTarget.values()).slice(0, 100);
+}
+
+function layoutUrlScrollElementForPayload(payload = {}) {
+  const target = String(payload.target || '');
+  if (target.startsWith('editor:')) {
+    const path = String(payload.path || '');
+    const item = String(payload.item || '');
+    const source = String(payload.source || 'editor') === 'preview' ? 'preview' : 'editor';
+    const panels = Array.from(document.querySelectorAll('.file-editor-panel'));
+    const panel = panels.find(candidate => ((item && candidate.dataset?.layoutItem === item) || (path && candidate.dataset?.filePath === path)));
+    if (!panel) return null;
+    const element = source === 'preview'
+      ? panel.querySelector('.file-editor-preview-pane-panel')
+      : (panel._cmView?.scrollDOM || panel.querySelector('.cm-scroller'));
+    return element ? {kind: 'editor', element, panel} : null;
+  }
+  if (target.startsWith('finder:')) {
+    const mode = String(payload.mode || target.slice('finder:'.length) || '');
+    const selector = mode === 'diff' || mode === 'tabber' ? '.file-explorer-changes-panel' : '.file-explorer-tree-panel';
+    const element = Array.from(document.querySelectorAll(selector)).find(node => node.offsetParent !== null) || document.querySelector(selector);
+    return element ? {kind: 'finder', element} : null;
+  }
+  if (target === 'preferences') {
+    const element = Array.from(document.querySelectorAll('.preferences-scroll')).find(node => node.offsetParent !== null) || document.querySelector('.preferences-scroll');
+    return element ? {kind: 'preferences', element} : null;
+  }
+  if (target === 'info') {
+    const element = document.getElementById('info-content');
+    return element ? {kind: 'info', element} : null;
+  }
+  if (target.startsWith('terminal:')) {
+    const session = String(payload.session || target.slice('terminal:'.length) || '');
+    const terminalItem = terminals.get(session);
+    const element = terminalItem?.container?.querySelector?.('.xterm-viewport') || null;
+    return terminalItem ? {kind: 'terminal', term: terminalItem.term, element} : null;
+  }
+  return null;
+}
+
+function applyLayoutUrlScrollSnapshot(scroll = []) {
+  if (!Array.isArray(scroll)) return;
+  for (const payload of scroll.slice(0, 100)) {
+    if (!payload || typeof payload !== 'object') continue;
+    const top = Math.max(0, Math.round(Number(payload.top || 0)));
+    const left = Math.max(0, Math.round(Number(payload.left || 0)));
+    if (String(payload.kind || '') === 'editor' || String(payload.target || '').startsWith('editor:')) {
+      layoutUrlRememberEditorViewState(payload, top, left);
+    }
+    const descriptor = layoutUrlScrollElementForPayload(payload);
+    if (!descriptor) continue;
+    if (descriptor.kind === 'terminal' && typeof descriptor.term?.scrollToLine === 'function') {
+      descriptor.term.scrollToLine(top);
+      continue;
+    }
+    descriptor.element.scrollTop = top;
+    descriptor.element.scrollLeft = left;
+    if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
+  }
+}
+
 function applyLayoutUrlFinderSeed(finder = {}) {
   if (!finder || typeof finder !== 'object') return;
   if ('mode' in finder) fileExplorerMode = normalizeFileExplorerMode(finder.mode);
@@ -1131,11 +1451,7 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
-  if ('diffRefsByRepo' in finder) {
-    diffRefsByRepo = typeof shareCleanDiffRefsByRepo === 'function'
-      ? shareCleanDiffRefsByRepo(finder.diffRefsByRepo)
-      : {};
-  }
+  if ('diffRefsByRepo' in finder) diffRefsByRepo = layoutUrlCleanDiffRefsByRepo(finder.diffRefsByRepo);
   if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
   if ('syncUserExpansionState' in finder && typeof applyFileExplorerSyncUserExpansionState === 'function') {
     applyFileExplorerSyncUserExpansionState(finder.syncUserExpansionState);
@@ -1175,7 +1491,7 @@ function applyLayoutUrlPreferencesSeed(preferences = {}, options = {}) {
 function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
-  applyEditorStateFields(state.editor || {}, {applyModeEntry: typeof shareApplyEditorModeEntry === 'function' ? shareApplyEditorModeEntry : null});
+  applyEditorStateFields(state.editor || {}, {applyModeEntry: applyLayoutUrlEditorModeEntry});
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;
@@ -1197,20 +1513,12 @@ function layoutUrlCaptureCurrentPaneState() {
 function layoutUrlStateSnapshot() {
   layoutUrlCaptureCurrentPaneState();
   const state = {v: 1};
-  if (paneItems(layoutSlots).some(isFileExplorerItem) && typeof shareFinderStateSnapshot === 'function') {
-    state.finder = shareFinderStateSnapshot({compact: false});
-  }
-  if (typeof shareEditorStateSnapshot === 'function') {
-    const editor = shareEditorStateSnapshot({compact: false});
-    if (editor?.modes?.length) state.editor = editor;
-  }
-  if (paneItems(layoutSlots).includes(prefsItemId) && typeof sharePreferencesStateSnapshot === 'function') {
-    state.preferences = sharePreferencesStateSnapshot({compact: false});
-  }
-  if (typeof shareScrollStateSnapshot === 'function') {
-    const scroll = shareScrollStateSnapshot();
-    if (scroll.length) state.scroll = scroll;
-  }
+  if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
+  const editor = layoutUrlEditorStateSnapshot();
+  if (editor.modes.length) state.editor = editor;
+  if (paneItems(layoutSlots).includes(prefsItemId)) state.preferences = layoutUrlPreferencesStateSnapshot();
+  const scroll = layoutUrlScrollStateSnapshot();
+  if (scroll.length) state.scroll = scroll;
   return Object.keys(state).length > 1 ? state : null;
 }
 
@@ -1232,10 +1540,10 @@ function applyPendingLayoutUrlState() {
     return false;
   }
   applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
-  if (Array.isArray(state.scroll) && typeof applyShareScrollSnapshot === 'function') {
-    applyShareScrollSnapshot(state.scroll);
-    requestAnimationFrame(() => applyShareScrollSnapshot(state.scroll));
-    setTimeout(() => applyShareScrollSnapshot(state.scroll), 0);
+  if (Array.isArray(state.scroll)) {
+    applyLayoutUrlScrollSnapshot(state.scroll);
+    requestAnimationFrame(() => applyLayoutUrlScrollSnapshot(state.scroll));
+    setTimeout(() => applyLayoutUrlScrollSnapshot(state.scroll), 0);
   }
   layoutUrlState.applied = true;
   return true;
@@ -1248,7 +1556,6 @@ function schedulePendingLayoutUrlStateApply() {
 }
 
 function scheduleLayoutUrlStateRefresh() {
-  if (shareViewMode) return;
   if (layoutUrlState.refreshTimer) return;
   const timer = setTimeout(() => {
     if (layoutUrlState.refreshTimer !== timer) return;
@@ -1260,20 +1567,6 @@ function scheduleLayoutUrlStateRefresh() {
 
 function refreshLayoutUrlStateSoon() {
   scheduleLayoutUrlStateRefresh();
-}
-
-function shareBootstrapLayoutParams() {
-  if (!shareViewMode || !shareBootstrap) return null;
-  const params = new URLSearchParams();
-  const layout = String(shareBootstrap.layout || '').trim();
-  const tabs = String(shareBootstrap.tabs || '').trim();
-  const sharedSessions = Array.isArray(shareBootstrap.sessions)
-    ? shareBootstrap.sessions.map(session => String(session || '').trim()).filter(Boolean)
-    : [];
-  if (layout) params.set('layout', layout);
-  if (tabs) params.set('tabs', tabs);
-  if (sharedSessions.length) params.set('sessions', sharedSessions.join(','));
-  return layout || tabs || sharedSessions.length ? params : null;
 }
 
 function mobileRecentTmuxItems() {
@@ -1380,14 +1673,11 @@ function availableLayoutModes() {
 }
 
 function initialLayoutSlots() {
-  const shareParams = shareBootstrapLayoutParams();
-  const params = shareParams || new URLSearchParams(location.search);
-  if (!shareParams) maybeAdoptFileExplorerModeDeepLink(params);
-  if (!shareParams) maybeAdoptLayoutStateDeepLink(params);
+  const params = new URLSearchParams(location.search);
+  maybeAdoptFileExplorerModeDeepLink(params);
+  maybeAdoptLayoutStateDeepLink(params);
   maybeAdoptYoagentDeepLink(params);
-  const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '', {
-    preserveMissingSidePane: shareParams !== null,
-  });
+  const layoutFromUrl = layoutFromParam(params.get('layout') || '', params.get('tabs') || '');
   if (layoutFromUrl) return normalizeLayoutSlotsForViewport(migrateLegacyFileSurfaceLayout(layoutFromUrl, params));
   if (mobileSinglePaneMode()) return rememberInitialConstrainedLayout(mobileSinglePaneLayoutSlots());
   const raw = params.get('sessions') || params.get('active') || '';
@@ -3303,7 +3593,6 @@ function showBackgroundOwnerContextMenu(event) {
 }
 
 function topbarOwnerStatusHtml() {
-  if (shareViewMode) return '';
   if (backgroundOwnerStatusState.loading && !backgroundOwnerStatusState.payload) {
     return '<span class="topbar-owner-status-part topbar-owner-status-shared" data-owner-role="loading"><span class="topbar-owner-status-key">IDX|STATS|SESS</span><span class="topbar-owner-status-separator">:</span> <span class="topbar-owner-status-value">...</span></span>';
   }
@@ -3677,7 +3966,6 @@ function keyboardShortcutCatalog() {
     {section: t('shortcuts.section.app'), items: [
       {label: t('common.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
-      ...(!shareFeatureQuarantined ? [{label: t('brand.share'), keys: appShortcutText('K')}] : []),
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
@@ -3769,7 +4057,6 @@ function keyboardLegendCatalog() {
       {sampleHtml: appMenuUiIcon('robot'), label: yoagentTabLabel(), detail: t('legend.icon.yoagent.detail')},
       {sampleHtml: appMenuUiIcon('gear'), label: t('legend.icon.gear.label'), detail: t('legend.icon.gear.detail')},
       {sampleHtml: appMenuUiIcon('tab-meta'), label: t('legend.icon.tabMetadata.label'), detail: t('legend.icon.tabMetadata.detail')},
-      {sampleHtml: appMenuUiIcon('share'), label: t('legend.icon.share.label'), detail: t('legend.icon.share.detail')},
       {sampleHtml: '<span class="pane-tab-pin-icon keyboard-legend-pin" aria-hidden="true"></span>', label: t('legend.icon.pin.label'), detail: t('legend.icon.pin.detail')},
     ]},
     {section: t('legend.section.yo'), items: [
@@ -3984,7 +4271,6 @@ function commandPaletteKeybinding(label, detail = '') {
   const text = `${label} ${detail}`;
   if (/command palette/i.test(text)) return appShortcutText('P', {shift: true});
   if (/open file/i.test(text)) return appShortcutText('P');
-  if (/yo!share|sharing/i.test(text)) return appShortcutText('K');
   if (/toggle .*file explorer|toggle .*finder/i.test(text)) return appShortcutText('B');
   if (/preferences/i.test(text)) return appShortcutText(',');
   if (/keyboard shortcuts/i.test(text)) return '?';
@@ -6471,7 +6757,6 @@ function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
   const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
   runtimeState.consumePendingLayoutMutation(completionGeneration);
-  if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
   if (options.preserveFilledWorkspaceLayout !== true) filledWorkspaceLayout = null;
@@ -6486,7 +6771,6 @@ function applyLayoutSlots(nextSlots, options = {}) {
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
-  sharePublishLayout();
   requestLayoutRender({
     previousActive,
     prevShape,
@@ -6504,7 +6788,6 @@ function applyLayoutSlots(nextSlots, options = {}) {
   if (!dockviewLayoutActive()) {
     for (const session of activeSessions.filter(isTmuxSession)) ensureTerminalRunning(session);
   }
-  scheduleShareTopologySnapshot(options.shareReason || 'layout');
   // do NOT re-poll the server on a pure client-side layout change. refreshTranscripts()
   // fires 3..(3+N) network round-trips and a second full render wave gated behind their latency —
   // the bulk of the "moving a tab takes several seconds" delay. Freshness is already covered by the
@@ -6636,7 +6919,6 @@ function flushPendingLayoutRender(reason = 'drag-flush') {
 }
 
 function updateActiveSessionParam() {
-  if (shareViewMode) return `${location.pathname}${location.search || ''}${location.hash || ''}`;
   const params = new URLSearchParams(location.search);
   params.delete('active');
   params.delete('sessions');

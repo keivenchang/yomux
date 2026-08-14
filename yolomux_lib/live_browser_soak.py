@@ -1964,7 +1964,7 @@ def produce_negative_browser_failure(driver: Any) -> dict[str, Any]:
           }
           const originalFetch = window.fetch;
           const beforeId = Array.isArray(jsDebugEvents) && jsDebugEvents.length ? Number(jsDebugEvents.at(-1)?.id || 0) : 0;
-          const shareUrl = `https://localhost/share/${canary}?token=${canary}#token=${canary}`;
+          const diagnosticUrl = `https://localhost/api/diagnostic?token=${canary}#token=${canary}`;
           let intercepted = 0;
           window.fetch = (input, options = {}) => {
             const requestUrl = new URL(String(input), location.href);
@@ -1972,7 +1972,7 @@ def produce_negative_browser_failure(driver: Any) -> dict[str, Any]:
             intercepted += 1;
             return Promise.resolve(new Response(JSON.stringify({
               error: message,
-              diagnostic: {share_url: shareUrl, credentials: {password: canary, authorization: `Bearer ${canary}`}},
+              diagnostic: {diagnostic_url: diagnosticUrl, credentials: {password: canary, authorization: `Bearer ${canary}`}},
             }), {status: 500, statusText: 'Controlled Failure', headers: {'Content-Type': 'application/json'}}));
           };
           try {
@@ -2028,7 +2028,7 @@ def produce_negative_browser_failure(driver: Any) -> dict[str, Any]:
             upload: JSON.stringify(queued),
             storage: JSON.stringify([...storageValues(window.localStorage), ...storageValues(window.sessionStorage)]),
           };
-          const secrets = [canary, shareUrl, `token=${canary}`, `#token=${canary}`, `Bearer ${canary}`];
+          const secrets = [canary, diagnosticUrl, `token=${canary}`, `#token=${canary}`, `Bearer ${canary}`];
           const redaction = Object.fromEntries(Object.entries(channels).map(([name, value]) => [name, secrets.every(secret => !String(value).includes(secret))]));
           done({event: {...event}, projection, rendered, redaction});
         })().catch(error => done({error: String(error)}));

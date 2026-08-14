@@ -564,10 +564,10 @@ def test_dialog_capacities_have_one_content_relative_token_owner():
     assert "--dialog-compact-inline-size: 80ch" in tokens
     assert "--dialog-standard-inline-size: 112ch" in tokens
     assert "--dialog-wide-inline-size: 144ch" in tokens
-    assert topbar.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
-    assert topbar.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert "width: min(var(--dialog-compact-inline-size), 100%)" not in topbar
+    assert "width: min(var(--dialog-wide-inline-size), 100%)" not in topbar
     assert file_tree.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
-    assert file_tree.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert "width: min(var(--dialog-wide-inline-size), 100%)" not in file_tree
     assert "width: min(var(--dialog-standard-inline-size), var(--popover-max-inline-size))" in preferences
     assert preferences.count("width: min(var(--dialog-wide-inline-size), var(--popover-max-inline-size))") == 1
     assert "width: min(var(--dialog-standard-inline-size), 100%)" in panels
@@ -597,7 +597,6 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
         "tests/test_browser_layout.py",
         "tests/test_browser_editor.py",
         "tests/test_browser_finder.py",
-        "tests/test_browser_share.py",
     )
 
     def is_page_write(statement):
@@ -653,7 +652,6 @@ def test_browser_fixtures_use_one_read_only_english_catalog_owner():
     helper_path = "tests/browser_helpers/browser_layout.py"
     browser_fixture_paths = (
         "tests/test_browser_editor.py",
-        "tests/test_browser_share.py",
         helper_path,
     )
     direct_read = '(REPO_ROOT / "static" / "locales" / "en.json").read_text'
@@ -678,7 +676,6 @@ def test_event_rows_use_one_container_responsive_layout_owner():
 
 def test_browser_fixture_wait_loops_have_one_injected_owner():
     browser_fixture_paths = (
-        "tests/test_browser_share.py",
         "tests/test_browser_layout.py",
         "tests/test_browser_editor.py",
         "tests/test_browser_dockview.py",
@@ -924,25 +921,6 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
     assert "static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
 
 
-def test_shared_ui_ownership_lint_rejects_parallel_share_connection_maps(monkeypatch, tmp_path):
-    share_state = tmp_path / "93_share_state.js"
-    share_state.write_text(
-        "const shareHostConnectionRecords = new Map();\n"
-        "const shareHostSockets = new Map();\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
-        "93_share_state.js": (("share connection record", "shareHostConnectionRecords"),),
-    })
-    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES", (("parallel share host socket map", "shareHostSockets"),))
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["93_share_state.js"])
-    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
-
-    assert sb.lint_shared_ui_ownership() == [
-        "93_share_state.js: shared ownership forbids parallel share host socket map ('shareHostSockets')",
-    ]
-
-
 def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
     launcher = repo_path("tests/layout_url.test.js").read_text(encoding="utf-8")
     helper = repo_path("tests/browser_helpers/layout_test_helper.js").read_text(encoding="utf-8")
@@ -951,7 +929,7 @@ def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary()
 
     assert len(suite_files) == len(set(suite_files)) and set(suite_files) == {f"tests/{path.name}" for path in repo_path("tests").glob("*.test.js") if path.name != "layout_url.test.js"}
     assert "defaultGateExcludedSuiteFiles" in launcher
-    assert "tests/share_theme.test.js" in launcher
+    assert "tests/cross_surface_state.test.js" in launcher
     assert "tests/gate_panels.test.js" in launcher
     assert "allSuiteFiles.filter(file => !defaultGateExcludedSuiteFiles.has(file))" in launcher
     assert "layout suite shards:" in launcher
@@ -1233,7 +1211,6 @@ def test_linked_semantic_colors_alias_one_palette_owner():
         "--lt-code-comment: var(--lt-muted);",
         "--editor-preview-bg: var(--editor-scheme-preview-bg);",
         "--markdown-html-dark-border: var(--markdown-html-dark-bg);",
-        "--share-stage-bg: var(--paint-black);",
         "--pane-resizer-shadow: var(--pane-resizer-bg);",
     ):
         assert declaration in css

@@ -1136,7 +1136,7 @@ function recordJsDebugStatsDiagnostic(level, message, details = {}) {
 }
 
 function debugClientLogRecord(event, index = 0) {
-  const redacted = shareRedactDiagnosticValue(event);
+  const redacted = redactDiagnosticValue(event);
   const timestampMs = Date.parse(redacted?.ts || '');
   return {
     id: `client:${redacted?.id ?? index}`,
@@ -1156,7 +1156,7 @@ function debugClientLogRecord(event, index = 0) {
 }
 
 function debugServerLogRecord(entry, index = 0) {
-  const redacted = shareRedactDiagnosticValue(entry);
+  const redacted = redactDiagnosticValue(entry);
   const timestampMs = Date.parse(redacted?.ts || '');
   const timestamp = Number(redacted?.timestamp);
   return {
@@ -2027,8 +2027,8 @@ function jsDebugCurrentObservationReleaseBlocking(event) {
 }
 
 function jsDebugCurrentFailureCorrelation(event) {
-  const redacted = typeof shareRedactDiagnosticValue === 'function'
-    ? shareRedactDiagnosticValue(event || {})
+  const redacted = typeof redactDiagnosticValue === 'function'
+    ? redactDiagnosticValue(event || {})
     : (event || {});
   const route = jsDebugFailureSource(redacted.route || redacted.endpoint || redacted.url || redacted.source || '/');
   const source = jsDebugFailureSource(redacted.source || route);
@@ -9217,7 +9217,7 @@ async function pollDebugLogs({force = false} = {}) {
       jsDebugLogsState.error = envelope.reason;
       return false;
     }
-    jsDebugLogsState.payload = shareRedactDiagnosticValue(envelope.logs.slice(-500));
+    jsDebugLogsState.payload = redactDiagnosticValue(envelope.logs.slice(-500));
     jsDebugLogsState.serverEpoch = envelope.epoch;
     jsDebugLogsState.serverSequence = envelope.sequence;
     jsDebugLogsState.updatedAt = Date.now();

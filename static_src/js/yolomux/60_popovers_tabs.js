@@ -25,7 +25,6 @@ function renderExpandedDirectoryRowChildren(row, fullPath, entries) {
   renderTreeChildren(children, fullPath, entries, nextDepth, {view: 'finder'});
   if (!existingChildren) row.insertAdjacentElement('afterend', children);
   rememberFileExplorerSyncExpandedState();
-  scheduleShareUiStatePublish();
   refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
@@ -166,7 +165,6 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
   }
   collapseDirectoryRowsAcrossSurfaces(row, fullPath);
   rememberFileExplorerSyncExpandedState();
-  scheduleShareUiStatePublish();
   refreshLayoutUrlStateSoon();
   if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
@@ -296,7 +294,6 @@ function closeOtherSessionPopovers(current, options = {}) {
       delete other.dataset.popoverHoverState;
     }
   }
-  if (changed && typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
 function popoverLifecycleActive(anchor, popover) {
@@ -385,7 +382,6 @@ function createHoverPopover(options) {
     if (stateClass) anchor.classList.remove(stateClass);
     markState('');
     options.onClose?.(event);
-    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
   };
   const openNow = event => {
     cancelTimers();
@@ -396,7 +392,6 @@ function createHoverPopover(options) {
       options.position?.(event);
       options.onOpen?.(event);
       markState('open');
-      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
       return;
     }
     options.position?.(event);
@@ -404,7 +399,6 @@ function createHoverPopover(options) {
     options.onOpen?.(event);
     if (stateClass) anchor.classList.add(stateClass);
     markState('open');
-    if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
     const activePopover = popover();
     if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
       bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
@@ -435,7 +429,6 @@ function createHoverPopover(options) {
         hideTimer = null;
         if (stateClass) anchor.classList.remove(stateClass);
         options.onClose?.(event);
-        if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
         return;
       }
       if (stillActive(event)) {
@@ -447,7 +440,6 @@ function createHoverPopover(options) {
       markState('');
       hideTimer = null;
       options.onClose?.(event);
-      if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
     }, Math.max(0, delay));
   }
   const initialPopover = popover();

@@ -1,5 +1,5 @@
 {
-  "note": "W2 shared diagnostic-redaction contract. Generated from yolomux_lib/diagnostic_redaction.py (source of truth). Both the Python and JavaScript (94_share_replay.js shareRedactDiagnosticValue) conformance implementations must reproduce every expected value.",
+  "note": "W2 diagnostic-redaction contract generated from yolomux_lib/diagnostic_redaction.py. Python and JavaScript conformance implementations must reproduce every expected value.",
   "cases": [
     {
       "category": "credentials",
@@ -111,21 +111,41 @@
     },
     {
       "category": "urls",
-      "name": "share_url_query_fragment",
+      "name": "url_query_fragment",
       "input": "https://example.test/api?password=url-secret&mode=debug#token=fragment-secret",
-      "expected": "https://example.test/api?password=[redacted-secret]&mode=debug#token=[redacted-share-token]"
+      "expected": "https://example.test/api?password=[redacted-secret]&mode=debug#token=[redacted-secret]"
     },
     {
-      "category": "urls",
-      "name": "share_path",
-      "input": "opened /share/AbC-123_xyz for review",
-      "expected": "opened [redacted-share-url] for review"
+      "category": "upgrade",
+      "name": "archived_underscore_token_key",
+      "input": {
+        "archived_session_token": "upgrade-secret-a"
+      },
+      "expected": {
+        "archived_session_token": "[redacted-secret]"
+      }
     },
     {
-      "category": "urls",
-      "name": "share_token_query",
-      "input": "GET /api/thing?shareToken=qqq&ok=1 failed",
-      "expected": "GET /api/thing?shareToken=[redacted-share-token]&ok=1 failed"
+      "category": "upgrade",
+      "name": "archived_hyphen_token_key",
+      "input": {
+        "archived-session-token": "upgrade-secret-b"
+      },
+      "expected": {
+        "archived-session-token": "[redacted-secret]"
+      }
+    },
+    {
+      "category": "upgrade",
+      "name": "archived_token_assignment",
+      "input": "restored archived_session_token=upgrade-secret-c failed at /api/ping",
+      "expected": "restored archived_session_token=[redacted-secret] failed at /api/ping"
+    },
+    {
+      "category": "upgrade",
+      "name": "archived_camel_token_query",
+      "input": "GET /api/thing?archivedSessionToken=upgrade-secret-d&ok=1 failed",
+      "expected": "GET /api/thing?archivedSessionToken=[redacted-secret]&ok=1 failed"
     },
     {
       "category": "nested",
@@ -140,8 +160,8 @@
       "expected": {
         "tokenizer": "gpt2",
         "secretary": "alice",
-        "token": "[redacted-share-token]",
-        "Authorization": "[redacted-share-token]",
+        "token": "[redacted-secret]",
+        "Authorization": "[redacted-secret]",
         "message": "Bearer [redacted-secret]"
       }
     },
@@ -176,7 +196,7 @@
         "a": {
           "b": {
             "c": {
-              "token": "[redacted-share-token]",
+              "token": "[redacted-secret]",
               "note": "ok"
             }
           }
@@ -194,7 +214,7 @@
         ]
       },
       "expected": {
-        "token": "[redacted-share-token]"
+        "token": "[redacted-secret]"
       }
     },
     {
@@ -204,7 +224,7 @@
         "token": "matrix-secret"
       },
       "expected": {
-        "token": "[redacted-share-token]"
+        "token": "[redacted-secret]"
       }
     },
     {
@@ -214,7 +234,7 @@
         "TOKEN": "matrix-secret"
       },
       "expected": {
-        "TOKEN": "[redacted-share-token]"
+        "TOKEN": "[redacted-secret]"
       }
     },
     {
@@ -224,7 +244,7 @@
         "secret": "matrix-secret"
       },
       "expected": {
-        "secret": "[redacted-share-token]"
+        "secret": "[redacted-secret]"
       }
     },
     {
@@ -234,7 +254,7 @@
         "SECRET": "matrix-secret"
       },
       "expected": {
-        "SECRET": "[redacted-share-token]"
+        "SECRET": "[redacted-secret]"
       }
     },
     {
@@ -244,7 +264,7 @@
         "password": "matrix-secret"
       },
       "expected": {
-        "password": "[redacted-share-token]"
+        "password": "[redacted-secret]"
       }
     },
     {
@@ -254,7 +274,7 @@
         "PASSWORD": "matrix-secret"
       },
       "expected": {
-        "PASSWORD": "[redacted-share-token]"
+        "PASSWORD": "[redacted-secret]"
       }
     },
     {
@@ -264,7 +284,7 @@
         "passwd": "matrix-secret"
       },
       "expected": {
-        "passwd": "[redacted-share-token]"
+        "passwd": "[redacted-secret]"
       }
     },
     {
@@ -274,7 +294,7 @@
         "PASSWD": "matrix-secret"
       },
       "expected": {
-        "PASSWD": "[redacted-share-token]"
+        "PASSWD": "[redacted-secret]"
       }
     },
     {
@@ -284,7 +304,7 @@
         "authorization": "matrix-secret"
       },
       "expected": {
-        "authorization": "[redacted-share-token]"
+        "authorization": "[redacted-secret]"
       }
     },
     {
@@ -294,7 +314,7 @@
         "AUTHORIZATION": "matrix-secret"
       },
       "expected": {
-        "AUTHORIZATION": "[redacted-share-token]"
+        "AUTHORIZATION": "[redacted-secret]"
       }
     },
     {
@@ -304,7 +324,7 @@
         "proxy_authorization": "matrix-secret"
       },
       "expected": {
-        "proxy_authorization": "[redacted-share-token]"
+        "proxy_authorization": "[redacted-secret]"
       }
     },
     {
@@ -314,7 +334,7 @@
         "PROXY_AUTHORIZATION": "matrix-secret"
       },
       "expected": {
-        "PROXY_AUTHORIZATION": "[redacted-share-token]"
+        "PROXY_AUTHORIZATION": "[redacted-secret]"
       }
     },
     {
@@ -324,7 +344,7 @@
         "proxy-authorization": "matrix-secret"
       },
       "expected": {
-        "proxy-authorization": "[redacted-share-token]"
+        "proxy-authorization": "[redacted-secret]"
       }
     },
     {
@@ -334,7 +354,7 @@
         "PROXY-AUTHORIZATION": "matrix-secret"
       },
       "expected": {
-        "PROXY-AUTHORIZATION": "[redacted-share-token]"
+        "PROXY-AUTHORIZATION": "[redacted-secret]"
       }
     },
     {
@@ -344,7 +364,7 @@
         "cookie": "matrix-secret"
       },
       "expected": {
-        "cookie": "[redacted-share-token]"
+        "cookie": "[redacted-secret]"
       }
     },
     {
@@ -354,7 +374,7 @@
         "COOKIE": "matrix-secret"
       },
       "expected": {
-        "COOKIE": "[redacted-share-token]"
+        "COOKIE": "[redacted-secret]"
       }
     },
     {
@@ -364,7 +384,7 @@
         "set-cookie": "matrix-secret"
       },
       "expected": {
-        "set-cookie": "[redacted-share-token]"
+        "set-cookie": "[redacted-secret]"
       }
     },
     {
@@ -374,7 +394,7 @@
         "SET-COOKIE": "matrix-secret"
       },
       "expected": {
-        "SET-COOKIE": "[redacted-share-token]"
+        "SET-COOKIE": "[redacted-secret]"
       }
     },
     {
@@ -384,7 +404,7 @@
         "bearer": "matrix-secret"
       },
       "expected": {
-        "bearer": "[redacted-share-token]"
+        "bearer": "[redacted-secret]"
       }
     },
     {
@@ -394,7 +414,7 @@
         "BEARER": "matrix-secret"
       },
       "expected": {
-        "BEARER": "[redacted-share-token]"
+        "BEARER": "[redacted-secret]"
       }
     },
     {
@@ -404,7 +424,7 @@
         "api_key": "matrix-secret"
       },
       "expected": {
-        "api_key": "[redacted-share-token]"
+        "api_key": "[redacted-secret]"
       }
     },
     {
@@ -414,7 +434,7 @@
         "API_KEY": "matrix-secret"
       },
       "expected": {
-        "API_KEY": "[redacted-share-token]"
+        "API_KEY": "[redacted-secret]"
       }
     },
     {
@@ -424,7 +444,7 @@
         "api-key": "matrix-secret"
       },
       "expected": {
-        "api-key": "[redacted-share-token]"
+        "api-key": "[redacted-secret]"
       }
     },
     {
@@ -434,7 +454,7 @@
         "API-KEY": "matrix-secret"
       },
       "expected": {
-        "API-KEY": "[redacted-share-token]"
+        "API-KEY": "[redacted-secret]"
       }
     },
     {
@@ -444,7 +464,7 @@
         "client_secret": "matrix-secret"
       },
       "expected": {
-        "client_secret": "[redacted-share-token]"
+        "client_secret": "[redacted-secret]"
       }
     },
     {
@@ -454,7 +474,7 @@
         "CLIENT_SECRET": "matrix-secret"
       },
       "expected": {
-        "CLIENT_SECRET": "[redacted-share-token]"
+        "CLIENT_SECRET": "[redacted-secret]"
       }
     },
     {
@@ -464,7 +484,7 @@
         "access_token": "matrix-secret"
       },
       "expected": {
-        "access_token": "[redacted-share-token]"
+        "access_token": "[redacted-secret]"
       }
     },
     {
@@ -474,7 +494,7 @@
         "ACCESS_TOKEN": "matrix-secret"
       },
       "expected": {
-        "ACCESS_TOKEN": "[redacted-share-token]"
+        "ACCESS_TOKEN": "[redacted-secret]"
       }
     },
     {
@@ -484,7 +504,7 @@
         "refresh_token": "matrix-secret"
       },
       "expected": {
-        "refresh_token": "[redacted-share-token]"
+        "refresh_token": "[redacted-secret]"
       }
     },
     {
@@ -494,47 +514,7 @@
         "REFRESH_TOKEN": "matrix-secret"
       },
       "expected": {
-        "REFRESH_TOKEN": "[redacted-share-token]"
-      }
-    },
-    {
-      "category": "exact_key",
-      "name": "share_token",
-      "input": {
-        "share_token": "matrix-secret"
-      },
-      "expected": {
-        "share_token": "[redacted-share-token]"
-      }
-    },
-    {
-      "category": "exact_key_upper",
-      "name": "SHARE_TOKEN",
-      "input": {
-        "SHARE_TOKEN": "matrix-secret"
-      },
-      "expected": {
-        "SHARE_TOKEN": "[redacted-share-token]"
-      }
-    },
-    {
-      "category": "exact_key",
-      "name": "x_share_token",
-      "input": {
-        "x_share_token": "matrix-secret"
-      },
-      "expected": {
-        "x_share_token": "[redacted-share-token]"
-      }
-    },
-    {
-      "category": "exact_key_upper",
-      "name": "X_SHARE_TOKEN",
-      "input": {
-        "X_SHARE_TOKEN": "matrix-secret"
-      },
-      "expected": {
-        "X_SHARE_TOKEN": "[redacted-share-token]"
+        "REFRESH_TOKEN": "[redacted-secret]"
       }
     },
     {
@@ -544,7 +524,7 @@
         "x-api-key": "matrix-secret"
       },
       "expected": {
-        "x-api-key": "[redacted-share-token]"
+        "x-api-key": "[redacted-secret]"
       }
     },
     {
@@ -554,7 +534,7 @@
         "X-API-KEY": "matrix-secret"
       },
       "expected": {
-        "X-API-KEY": "[redacted-share-token]"
+        "X-API-KEY": "[redacted-secret]"
       }
     },
     {
@@ -718,38 +698,6 @@
       "expected": "refresh_tokenizer=ordinary-value failed at /api/ping"
     },
     {
-      "category": "near_name",
-      "name": "share_tokenizer_struct",
-      "input": {
-        "share_tokenizer": "ordinary-value"
-      },
-      "expected": {
-        "share_tokenizer": "ordinary-value"
-      }
-    },
-    {
-      "category": "near_name",
-      "name": "share_tokenizer_free",
-      "input": "share_tokenizer=ordinary-value failed at /api/ping",
-      "expected": "share_tokenizer=ordinary-value failed at /api/ping"
-    },
-    {
-      "category": "near_name",
-      "name": "x_share_tokenizer_struct",
-      "input": {
-        "x_share_tokenizer": "ordinary-value"
-      },
-      "expected": {
-        "x_share_tokenizer": "ordinary-value"
-      }
-    },
-    {
-      "category": "near_name",
-      "name": "x_share_tokenizer_free",
-      "input": "x_share_tokenizer=ordinary-value failed at /api/ping",
-      "expected": "x_share_tokenizer=ordinary-value failed at /api/ping"
-    },
-    {
       "category": "utf8",
       "name": "multibyte_passthrough",
       "input": "café résumé 日本語 emoji 😀 ok",
@@ -770,7 +718,7 @@
       },
       "expected": {
         "note": "日本語 ok",
-        "token": "[redacted-share-token]"
+        "token": "[redacted-secret]"
       }
     },
     {

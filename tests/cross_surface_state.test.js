@@ -33,13 +33,13 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
-async function runShareThemeSuite() {
+async function runCrossSurfaceStateSuite() {
   test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
     const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8')
       + fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')
       + fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')
       + fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')
-      + fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
+;
     assert.ok(source.includes("popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms')"), 'one JS owner reads the shared hover-open setting');
     assert.ok(source.includes("popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms')"), 'one JS owner reads the shared hover-close/follow setting');
     for (const retiredName of ['hoverCloseDelayMs', 'menuHoverOpenDelayMs', 'menuHoverCloseDelayMs', 'tabPopoverShowDelayMs', 'tabPopoverFollowDelayMs', 'fileImagePreviewMinShowDelayMs']) {
@@ -55,10 +55,10 @@ async function runShareThemeSuite() {
     assert.equal(popoverCss.includes('ease var(--popover-show-delay)'), false, 'CSS does not add a second hover-open wait');
     assert.equal(popoverCss.includes('ease var(--popover-hide-delay)'), false, 'CSS does not add a second hover-close wait');
   });
-  // 'cross-surface host state survives layout, share, and terminal transitions' used to be ONE
+  // 'cross-surface host state survives layout, overlays, and terminal transitions' used to be ONE
   // test() spanning 7068 lines, so node reported the whole block as a single result and the first
   // failed assertion silently discarded every later contract in the same body: '9 passed, 1 failed'
-  // for ~3500 top-level statements, with all of quick-open unreachable behind a stale share-menu
+  // for ~3500 top-level statements, with all of quick-open unreachable behind a stale menu
   // expectation. It is now an ordered sequence of named checkpoints. State that genuinely flows
   // between checkpoints is declared once in the block below rather than being implicit in one
   // function body; every other local stays inside its own checkpoint. A failed assertion now
@@ -757,27 +757,6 @@ async function runShareThemeSuite() {
     assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Differ interaction leaves Finder selected session intact');
     assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
   });
-  test('read-only shares accept only host-pinned Finder state', () => {
-    const shareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-finder', mode: 'ro', session: '5', sessions: ['5', '6'], finder: {session: '5', differSession: '5', mode: 'diff'}},
-    });
-    assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share Finder target starts from the host-pinned Finder session');
-    assert.equal(shareApi.noteFileExplorerChangesSessionInteractionForTest('6'), false, 'read-only share local session interactions cannot retarget Finder');
-    assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share local interaction leaves Finder on the host-pinned session');
-    shareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
-    assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share background session-files payloads do not retarget Finder');
-    shareApi.applyShareUiStateForTest({finder: {session: '6', mode: 'files'}});
-    assert.equal(shareApi.fileExplorerFinderTargetSessionForTest(), '6', 'read-only share follows the host-authored Finder session frame');
-    assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'host Finder frames do not retarget Differ');
-    shareApi.applyShareUiStateForTest({finder: {session: '6', differSession: '6', mode: 'diff'}});
-    assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'read-only share applies the host-authored Differ session separately');
-
-    const unpinnedShareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-unpinned-finder', mode: 'ro', session: '5', sessions: ['5', '6']},
-    });
-    unpinnedShareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
-    assert.equal(unpinnedShareApi.fileExplorerSessionFilesTargetSessionForTest(), '', 'read-only share without a host Finder pin does not fall back to payload session or sessions[0]');
-  });
   test('Finder sync prefers live tmux path over transcript metadata', () => {
     const signalPathApi = loadYolomux('', ['5']);
     signalPathApi.setTranscriptInfoForTest('5', {
@@ -1124,7 +1103,6 @@ async function runShareThemeSuite() {
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
     assert.ok(/\.badge-base,\s*\.chip-base\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;/.test(c9Css), 'D7: badge-base and chip-base own compact inline geometry');
     assert.ok(/\.badge-base\s*\{[\s\S]*justify-content:\s*center;/.test(c9Css), 'D7: badge-base owns centered badge content');
-    assert.ok(c9Src.includes("className: 'chip-base share-status-pill'"), 'D7: share status uses the shared chip base');
     assert.ok(c9Src.includes('badge-base app-menu-button-badge'), 'D7: menu count badge uses the shared badge base');
     assert.ok(c9Src.includes("['badge-base', 'session-state-badge', 'tab-symbol'"), 'D7: session-state badges use the shared badge base');
     assert.ok(c9Src.includes('chip-base command-palette-view-chip'), 'D7: command-palette view chips use the shared chip base');
@@ -1669,8 +1647,7 @@ async function runShareThemeSuite() {
     assert.equal(/switchFileExplorerChangesSession/.test(focusPanelBody), false, 'passive focus/hover no longer switches the Finder Modified-files session');
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
-    assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState[\s\S]*return false/.test(appSource), 'read-only share clients cannot locally commit a Finder/Differ session');
-    assert.ok(/function fileExplorerSelectedSessionForView\(view\)[\s\S]*surface === 'finder' \? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession[\s\S]*function fileExplorerFinderTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('finder'\)[\s\S]*function fileExplorerSessionFilesTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('differ'\)/.test(appSource), 'read-only share resolves Finder and Differ only from separately host-owned explicit state');
+    assert.ok(/function fileExplorerSelectedSessionForView\(view\)[\s\S]*surface === 'finder' \? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession[\s\S]*function fileExplorerFinderTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('finder'\)[\s\S]*function fileExplorerSessionFilesTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('differ'\)/.test(appSource), 'Finder and Differ resolve only from their separate explicit selection state');
     const dockviewActivePanelStart = appSource.indexOf('api.onDidActivePanelChange(panel => {');
     assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
     const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
@@ -2677,12 +2654,12 @@ async function runShareThemeSuite() {
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.ok(api.bodyClassListForTest().contains('theme-system'), 'system theme keeps the preference marker on the body');
     assert.ok(api.bodyClassListForTest().contains('theme-light'), 'system-resolved-light applies the same body class as explicit light');
-    assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'system-resolved-light keeps the resolved marker for share/editor logic');
+    assert.ok(api.bodyClassListForTest().contains('theme-resolved-light'), 'system-resolved-light keeps the resolved marker for editor logic');
     api.setSystemPrefersDarkForTest(true);
     api.applyGlobalThemeMode({updateEditor: true, updateTerminals: false});
     assert.ok(api.bodyClassListForTest().contains('theme-system'), 'system theme keeps the preference marker after OS dark changes');
     assert.ok(api.bodyClassListForTest().contains('theme-dark'), 'system-resolved-dark applies the same body class as explicit dark');
-    assert.ok(api.bodyClassListForTest().contains('theme-resolved-dark'), 'system-resolved-dark keeps the resolved marker for share/editor logic');
+    assert.ok(api.bodyClassListForTest().contains('theme-resolved-dark'), 'system-resolved-dark keeps the resolved marker for editor logic');
     api.setTerminalThemeModeForTest('dark');
     assert.equal(api.terminalThemeForGlobalTheme('dark').selectionBackground, UI_PINS.textSelectionBg, 'dark terminal selection uses a prominent blue fill');
     assert.equal(api.terminalThemeForGlobalTheme('dark').selectionForeground, '#ffffff', 'dark terminal selection forces readable selected text');
@@ -2841,7 +2818,7 @@ async function runShareThemeSuite() {
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
     assert.equal(popoverForPosition.style.width, '520px', 'session tab popovers may use a small amount beyond the owning pane when content needs it');
     assert.equal(popoverForPosition.style.maxWidth, '520px', 'the bounded session width remains the replayable inline maximum');
-    assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
+    assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry inline height so detached clients do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
     assert.ok(Number.parseInt(popoverForPosition.style.width, 10) > panelForPopover.getBoundingClientRect().width);
@@ -2975,16 +2952,7 @@ async function runShareThemeSuite() {
     assert.ok(/function paneDragPreviewMetrics[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: pane drag preview routes viewport width through the shared helper');
     assert.ok(/function positionDiffRefPopover[\s\S]*const viewportWidth = effectiveViewportWidth\(viewport\)/.test(uiSource), 'MV-7: diff-ref popover routes viewport width through the shared helper');
     assert.equal(/Math\.max\(320,\s*(?:Number\()?viewport\.width/.test(uiSource), false, 'MV-7: raw viewport width floors stay out of feature code');
-    api.setAppMirrorTransformForTest({scale: 2, tx: 10, ty: 20});
-    assert.deepEqual(canonical(api.appSpaceRect({left: 30, top: 50, right: 130, bottom: 150, width: 100, height: 100})), {left: 10, top: 15, width: 50, height: 50, right: 60, bottom: 65}, 'M2: appSpaceRect maps visual rects back into app space under a root transform');
-    assert.deepEqual(canonical(api.appSpacePoint(30, 50)), {x: 10, y: 15}, 'M7: appSpacePoint maps a visual point back into mirror app space');
-    assert.deepEqual(canonical(api.visualPointFromAppSpace(10, 15)), {x: 30, y: 50}, 'M7: visualPointFromAppSpace maps app-space back into visual mirror coordinates');
-    api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
     api.setAppViewportOverrideForTest(null);
-    assert.equal(api.normalizeShareViewFit('contain'), 'contain');
-    assert.equal(api.normalizeShareViewFit('bad'), 'cover');
-    assert.deepEqual(canonical(api.shareMirrorFitTransform({width: 1440, height: 900}, {width: 720, height: 900}, 'cover')), {fit: 'cover', scale: 1, tx: -360, ty: 0, hostWidth: 1440, hostHeight: 900, clientWidth: 720, clientHeight: 900}, 'M3: cover crops the long host axis and centers it');
-    assert.deepEqual(canonical(api.shareMirrorFitTransform({width: 1440, height: 900}, {width: 720, height: 900}, 'contain')), {fit: 'contain', scale: 0.5, tx: 0, ty: 225, hostWidth: 1440, hostHeight: 900, clientWidth: 720, clientHeight: 900}, 'M3: contain letterboxes the short axis and centers it');
     const hoverAnchor = new TestElement('hover-anchor');
     const hoverPopover = new TestElement('hover-popover');
     hoverAnchor.appendChild(hoverPopover);
@@ -3058,9 +3026,6 @@ async function runShareThemeSuite() {
     assert.equal(appMenuButton.title, undefined);
     assert.equal(appMenuButton.hasAttribute('title'), false);
     assert.equal(appMenuButton.getAttribute('aria-label'), 'Rename session - Focus a tmux session first');
-    const mirroredHoverButton = api.createAppMenuCommand({label: 'Mirror hover'});
-    mirroredHoverButton.listeners.get('pointerenter')[0]({type: 'pointerenter'});
-    assert.ok(mirroredHoverButton.classList.contains('share-mirror-active'), 'DOIT.68: host menu option hover writes a real class the share popup layer can mirror');
     const checkedAppMenuButton = api.createAppMenuCommand({label: 'Hide tab metadata', checked: true});
     assert.equal(checkedAppMenuButton.className.includes('has-check'), false);
     assert.equal(checkedAppMenuButton.innerHTML.includes('>*<'), false);
@@ -3149,14 +3114,10 @@ async function runShareThemeSuite() {
     assert.ok(/--app-modal-border-width:\s*max\(2px,\s*var\(--pane-split-gap\)\)/.test(preferencesCss), 'modal dialog borders use the shared pane-spacing-width token with a visible floor');
     assert.ok(/--app-modal-border-color:\s*color-mix\(in srgb,\s*var\(--pane-tab-panel-ring\) var\(--pane-active-ring-opacity\),\s*transparent\)/.test(preferencesCss), 'modal dialog borders use the same active pane ring color and opacity');
     assert.ok(/\.modal-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'shared app modal dialog uses the active-pane border token');
-    assert.ok(/\.modal\.share-open \.modal-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'YO!share modal dialog keeps the active-pane border token');
     assert.ok(/\.command-palette-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'command palette dialog uses the active-pane border token');
     assert.ok(/\.keyboard-shortcuts-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'keyboard shortcuts dialog uses the active-pane border token');
     assert.ok(/\.file-editor-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'file editor dialog uses the active-pane border token');
     assert.ok(/\.session-rename-dialog\s*\{[\s\S]*?border:\s*var\(--app-modal-border-width\) solid var\(--app-modal-border-color\)/.test(preferencesCss), 'rename dialog uses the active-pane border token');
-    assert.equal(/\.modal\.(?:about|share)-open::before/.test(preferencesCss), false, 'About and YO!share do not carry duplicate modal backdrop pseudo-elements');
-    assert.ok(/\.modal\.share-open \.modal-dialog\s*\{[\s\S]*?max-height:\s*min\(80vh/.test(preferencesCss), 'YO!share modal is bounded to the viewport so long active-share lists cannot push the create form offscreen');
-    assert.ok(/\.modal\.share-open #modalBody\s*\{[\s\S]*?overflow:\s*auto/.test(preferencesCss), 'YO!share modal body scrolls inside the shared modal panel');
     assert.ok(preferencesCss.includes('.about-brand-row'), 'About modal has a large brand row style');
     assert.equal(/\.about-brand-yo\s*\{[^}]*animation:\s*yolo-marker-rotate/.test(preferencesCss), false, 'About YO glyph is static — it no longer rotates (the working green ball is the only YO motion)');
     assert.ok(/\.about-brand-yo\s*\{[\s\S]*background:\s*var\(--pane-tab-yolo-bg\)/.test(preferencesCss), 'About YO glyph follows the active theme color');
@@ -3168,14 +3129,12 @@ async function runShareThemeSuite() {
     assert.equal(/--brand-primary-green:\s*var\(--active-control-bg/.test(brandCss), false, 'topbar YOLOmux LO is not routed through the active color preference');
     assert.equal(api.testElementForId('closeModal').textContent || 'X', 'X', 'About modal close button is an X');
     const shellHtml = fs.readFileSync('yolomux_lib/web.py', 'utf8');
-    assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About/share/transcript through the shared modal overlay parent');
+    assert.ok(shellHtml.includes('<section id="modal" class="modal app-modal-overlay">'), 'HTML shell routes About and transcript through the shared modal overlay parent');
     assert.ok(shellHtml.includes('<div class="modal-dialog">'), 'HTML shell gives the shared app modal a bounded dialog child');
     assert.ok(/<button id="closeModal"[^>]*>X<\/button>/.test(shellHtml) && shellHtml.includes('server_string(locale, "common.close")'), 'HTML shell renders the modal close button as X with localized title and aria-label');
   });
 
   test('cross-surface host state 17: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is', () => {
-    const facadeSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    assert.match(facadeSource, /class ShareReplayState[\s\S]*acceptSequence\(epoch, sequence\)[\s\S]*recordDroppedFrame\(\)[\s\S]*recordStaleFrame\(\)[\s\S]*beginKeyframeRequest\(now, backoffMs\)/, 'replay sequence and repair commands share one state facade');
     // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
     const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
@@ -3200,14 +3159,6 @@ async function runShareThemeSuite() {
     assert.ok(fileMenuLabels.includes('YO!info'));
     assert.ok(fileMenuLabels.includes('Search & Runs'));
     assert.ok(fileMenuLabels.includes('YO!agent'));
-    // YO!share is quarantined by product decision (static_src/js/yolomux/93_share_state.js:6,
-    // `const shareFeatureQuarantined = true`), so 30_app_menus.js:855 spreads no share command into
-    // File and 20_layout_state.js:3668 offers no share shortcut. These assertions pin the ABSENCE to
-    // that one owner: reviving the feature must flip the constant and these expectations together,
-    // and cannot reintroduce a share entry silently.
-    const shareQuarantineSource = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
-    assert.ok(/^const shareFeatureQuarantined = true;$/m.test(shareQuarantineSource), 'one owner declares the YO!share quarantine');
-    assert.equal(fileMenuLabels.includes('YO!share...'), false, 'the quarantined YO!share command is absent from the File menu');
     assert.ok(fileMenuLabels.includes('Preferences'));
     assert.ok(fileMenuLabels.includes('YO!stats'));
     assert.ok(fileMenuLabels.indexOf('Preferences') < fileMenuLabels.indexOf('Log out'));
@@ -3231,1243 +3182,32 @@ async function runShareThemeSuite() {
     const macFileMenuApi = loadYolomux('?platform=mac', ['1'], 'http:', 'MacIntel');
     const macFinderMenuItem = macFileMenuApi.appMenuTree().find(menu => menu.id === 'file')?.items.find(candidate => candidate.label === macFileMenuApi.t('yoagent.capability.finderDifferTabber.name'));
     assert.equal(macFinderMenuItem?.detail, macFileMenuApi.t('menu.file.browseFiles'), 'wide File navigation keeps the same compact triplet detail on Mac');
-    const shareMenuItem = fileMenu.items.find(candidate => candidate.label === 'YO!share...');
-    assert.equal(shareMenuItem, undefined, 'the quarantined YO!share row is not built at all, so it carries no detail line');
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!agent').iconHtml.includes('app-menu-ui-icon-robot'));
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!chat').iconHtml.includes('app-menu-ui-icon-chat-bubble'));
     assert.ok(fileMenu.items.find(candidate => candidate.label === 'YO!stats').iconHtml.includes('app-menu-ui-icon-chart'));
-    const shareCommandItem = api.commandPaletteCommandItems().find(candidate => candidate.label === 'File / YO!share...');
-    assert.equal(shareCommandItem, undefined, 'the quarantined YO!share command is absent from the command palette, not merely hidden in the menu');
-    const shareCreateHtml = api.shareCreateFormHtmlForTest();
-    assert.ok(/name="ttl_minutes"[^>]*type="number"[^>]*min="1"[^>]*max="480"[^>]*step="1"/.test(shareCreateHtml), 'YO!share max time is a typable minutes number field');
-    assert.equal(/<select[^>]*name="ttl_seconds"/.test(shareCreateHtml), false, 'YO!share max time is not a dropdown');
-    assert.ok(/name="debug_profile"[^>]*type="checkbox"/.test(shareCreateHtml), 'YO!share create form exposes the opt-in debug/profiling upload checkbox');
-    const sharePayload = api.shareCreatePayloadFromFormForTest({elements: {
-      ttl_minutes: {value: '15'},
-      max_viewers: {value: '7'},
-      read_only: {checked: true},
-      debug_profile: {checked: true},
-      scheme: {value: 'http'},
-    }});
-    assert.equal(sharePayload.ttl_seconds, 900, 'typed YO!share max-time minutes are converted to seconds for the API');
-    assert.equal(sharePayload.max_viewers, 7, 'YO!share create payload still reads the viewer cap');
-    assert.equal(sharePayload.debug_profile, true, 'YO!share create payload carries the debug/profiling upload opt-in');
-    assert.ok(sharePayload.ui_state?.finder, 'YO!share create payload builds UI state without stale Finder fields');
-    assert.equal('textWraps' in sharePayload.ui_state, false, 'YO!share create payload omits full wrapped-text metrics');
-    assert.equal('scroll' in sharePayload.ui_state, false, 'YO!share create payload omits full scroll replay frames');
-    assert.equal('branchRows' in sharePayload.ui_state.info, false, 'YO!share create payload omits bulky YO!info rows');
-    assert.equal('modes' in sharePayload.ui_state.editor, false, 'YO!share create payload omits bulky editor mode rows until the websocket full-state publish');
-    {
-      const heavyRoot = api.appRootForTest();
-      for (let index = 0; index < 80; index += 1) {
-        const heavyTextarea = new TestElement(`share-heavy-wrap-${index}`, 'textarea');
-        heavyTextarea.dataset.settingPath = `share.heavy.${index}`;
-        heavyTextarea.value = `wrapped ${index} ${'x'.repeat(1000)}`;
-        heavyTextarea.textContent = heavyTextarea.value;
-        heavyTextarea.clientWidth = 640;
-        heavyTextarea.clientHeight = 96;
-        heavyTextarea.scrollWidth = 644;
-        heavyTextarea.scrollHeight = 320 + index;
-        heavyTextarea.rect = {left: 20, top: 20 + index, right: 660, bottom: 116 + index, width: 640, height: 96};
-        heavyRoot.appendChild(heavyTextarea);
-      }
-      const fullUiStateBytes = JSON.stringify(api.shareUiStateSnapshotForTest()).length;
-      const createPayloadBytes = JSON.stringify(api.shareCreatePayloadFromFormForTest({elements: {
-        ttl_minutes: {value: '15'},
-        max_viewers: {value: '7'},
-        read_only: {checked: true},
-        debug_profile: {checked: false},
-        scheme: {value: 'http'},
-      }})).length;
-      assert.ok(fullUiStateBytes > 16 * 1024, 'test fixture produces a full YO!share UI snapshot larger than the /api/share create limit');
-      assert.ok(createPayloadBytes < 16 * 1024, 'YO!share create payload stays below the server body limit even when the live UI snapshot is large');
-    }
-    {
-      const shareSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
-      const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
-      const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-      const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-      assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*shareViewerStatusBackupRefresh:\s*30001[\s\S]*shareHostStatusBackupRefresh:\s*3001[\s\S]*shareRemoteResizeAfterSocketOpen:\s*50/.test(timingSource), 'R10/MV-3: backend-facing backup polls use odd cadences through the shared timing partial');
-      assert.equal(/serverWatchRenew/.test(timingSource), false, 'MV-3: SSE subscriber lifecycle owns watch-root retention, so the retired browser renewal cadence cannot return');
-      assert.ok(/serverWatchDebounce:\s*300[\s\S]*shareGeometryDigestPublish:\s*2001/.test(timingSource), 'MV-3: geometry repair stays on its odd publish cadence while UI delays stay round');
-      assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'MV-3: filesystem watch keyframes use an odd cadence');
-      assert.ok(/shareDebugProfileUploadMinIntervalMs:\s*5000/.test(timingSource) && /autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'R10: hardcoded debug upload and odd fallback poll timings are owned by the shared timing partial');
-      assert.equal(/const shareDebugProfileUploadMinIntervalMs = 5000|const autoApproveDisconnectedPollMs = 5003/.test(bootstrapSource), false, 'R10: bootstrap no longer owns hardcoded timing literals');
-      assert.equal(/const shareViewerStatusBackupRefreshMs = \d+|const shareHostStatusBackupRefreshMs = \d+|const shareReplayKeyframeRequestInitialBackoffMs = 5000|const shareGeometryResyncMinIntervalMs = 10000|scheduleRemoteResize\(session, 50\)/.test(terminalSource), false, 'R10: terminal boot no longer owns share/replay timing literals');
-      assert.ok(shareSource.includes("node.className = 'app-modal-overlay keyboard-shortcuts-overlay'"), 'keyboard shortcuts use the shared modal overlay parent');
-      assert.ok(shareSource.includes("node.className = 'app-modal-overlay command-palette'"), 'command palette uses the shared modal overlay parent');
-      assert.ok(/backdrop\.className = `app-modal-overlay file-editor-dialog-backdrop/.test(shareSource), 'file editor dialogs use the shared modal overlay parent');
-      assert.ok(shareSource.includes("overlay.className = 'app-modal-overlay session-rename-backdrop'"), 'rename dialog uses the shared modal overlay parent');
-      assert.equal(/uploadedFilesCollapsed/.test(shareSource), false, 'YO!share source has no stale uploadedFilesCollapsed state reference');
-      assert.ok(/const shareMenuActive = shareViewMode \|\| shareHasActiveShare\(\)/.test(shareSource), 'YO!share menu active state includes share-view and host active-share state');
-      assert.ok(/detail:\s*shareMenuActive \|\| shareCanOpen \? t\('share\.menu\.sharing'\) : t\('share\.noSession'\)/.test(shareSource), 'enabled YO!share menu row says only "sharing", with no count');
-      assert.ok(/function shareSessionsFromLayout\(slots = layoutSlots\)[\s\S]*paneItems\(slots\)[\s\S]*isTmuxSession/.test(shareSource), 'YO!share gathers every tmux session from the current pane/tab layout');
-      assert.ok(/function shareCreatePayloadFromForm[\s\S]*const sharedSessions = shareSessionsFromLayout\(\)[\s\S]*sessions:\s*sharedSessions\.length \? sharedSessions : \[targetSession\]\.filter\(Boolean\)[\s\S]*layout:\s*seed\.layout[\s\S]*tabs:\s*seed\.tabs[\s\S]*finder:\s*shareFinderSeed\(\)[\s\S]*ui_state:\s*shareCreateUiStateSnapshot\(\)/.test(shareSource), 'YO!share create payload carries all shared sessions plus layout/tabs/Finder and compact UI-state seed');
-      assert.ok(/function shareCreatePayloadFromForm[\s\S]*debug_profile:\s*form\?\.elements\?\.debug_profile\?\.checked === true/.test(shareSource), 'YO!share create payload includes only explicit debug/profiling upload opt-in');
-      assert.ok(/function shareDebugProfileUploadPayload[\s\S]*shareRedactDiagnosticValue[\s\S]*async function shareUploadDebugProfile[\s\S]*shareDebugProfileUploadEnabled\(\)[\s\S]*apiFetchJson\('\/api\/share\/debug-profile'/.test(shareSource), 'YO!share debug/profiling uploads are opt-in, sent to the share debug endpoint, and client-redacted');
-      assert.ok(/async function boot\(\)[\s\S]*shareBootstrap\?\.uiState[\s\S]*await applyShareUiState/.test(shareSource), 'share-view boot applies the server UI-state bootstrap after the initial panes render');
-      assert.ok(/function shareBootstrapLayoutParams\(\)[\s\S]*shareBootstrap\.layout[\s\S]*shareBootstrap\.tabs[\s\S]*shareBootstrap\.sessions[\s\S]*function initialLayoutSlots\(\)[\s\S]*const shareParams = shareBootstrapLayoutParams\(\)[\s\S]*const params = shareParams \|\| new URLSearchParams[\s\S]*preserveMissingSidePane: shareParams !== null/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot uses the server share bootstrap layout before the browser query string and preserves a host-minimized Side Pane');
-      assert.ok(/function paintInitialAppShell\(\)[\s\S]*renderSessionButtons\(\)[\s\S]*renderPanels\(\[\], \{prune: false\}\)[\s\S]*initialAppShellPainted = true[\s\S]*async function boot\(\)[\s\S]*bindClipboardPaste\(\);\s*paintInitialAppShell\(\);\s*scheduleDeferredSettingsMetadataRefresh\(\);\s*if \(!shareViewMode\) \{[\s\S]*await refreshTranscripts\(\{refreshAuto: false\}\)[\s\S]*\} else \{[\s\S]*setTranscriptMetadataPayload\(\{session_order: sessions\.slice\(\)[\s\S]*await refreshTranscripts\(\{refreshAuto: false, refreshActivity: false\}\)/.test(shareSource), 'boot paints the saved shell before transcript metadata loads, and share-view uses a guarded stub only until scoped metadata loads');
-      assert.ok(/function updateActiveSessionParam\(\)[\s\S]*if \(shareViewMode\) return/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'share-view boot does not rewrite the share URL from local layout state');
-      assert.ok(/function syncShareProtocolControls[\s\S]*!readOnly\.checked[\s\S]*https\.checked = true[\s\S]*http\.disabled = true/.test(shareSource), 'YO!share modal locks write mode to https');
-      assert.ok(/let activeShares = \[\]/.test(shareSource), 'YO!share tracks active shares as a list for concurrent shares');
-      assert.ok(/function refreshActiveShare\(options = \{\}\)[\s\S]*setActiveShares\(normalizeShareListPayload[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'YO!share status refresh consumes the active share list and opens per-token host sockets');
-      assert.ok(/function shareStatusSurfaceVisible\(\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*shareViewerBanner\?\.isConnected[\s\S]*shareStatusPill\?\.isConnected[\s\S]*shareModalIsVisible\(\)[\s\S]*data-share-viewer-duration/.test(shareSource), 'YO!share per-second status DOM updates are gated to visible share surfaces');
-      assert.ok(/function renderShareManageView\(\)[\s\S]*share-create-panel[\s\S]*shareCreateFormHtml[\s\S]*share-active-panel[\s\S]*share-entry-list/.test(shareSource), 'YO!share manage view sections New share before Active share URLs');
-      assert.ok(/function shareEntryHtml\(share\)[\s\S]*share-url-primary[\s\S]*share-url-primary-head[\s\S]*<span class="share-url-control">[\s\S]*<input type="text" readonly value="\$\{esc\(share\.url\)\}" data-share-secret>[\s\S]*share-url-copy-button[\s\S]*data-share-copy[\s\S]*data-share-secret/.test(shareSource), 'YO!share manage rows make the active URL prominent while keeping the copy icon immediately beside a redacted URL input');
-      const replayRegistrationFindings = source => {
-        const checks = [
-          ['private/redact flags are dropped', /function shareReplayElementRedactionAction\(element\)[\s\S]*data-share-private[\s\S]*data-share-redact/],
-          ['secret/password fields become placeholders', /function shareReplayElementRedactionAction\(element\)[\s\S]*data-share-secret[\s\S]*'placeholder'/],
-          ['mutation ignores private volatile terminal and Finder surfaces', /function shareReplayMutationNodeIsIgnored\(node\)[\s\S]*'\.terminal'[\s\S]*'\.xterm'[\s\S]*'\[data-share-private\]'[\s\S]*'\[data-share-redact\]'[\s\S]*'\[data-share-volatile\]'[\s\S]*'\.file-explorer-panel'/],
-          ['token-bearing attributes are rejected', /function shareReplayAttributeIsTokenBearing\(name = ''\)[\s\S]*token[\s\S]*sharetoken[\s\S]*secret[\s\S]*password/],
-          ['share URLs and dangerous schemes are rejected', /function shareReplayUrlAttributeIsUnsafe\(name = '', value = ''\)[\s\S]*share[\s\S]*#t=[\s\S]*javascript/],
-          ['terminal containers serialize as placeholders', /function shareReplayTerminalPlaceholderForElement\(element, nodeId\)[\s\S]*class:\s*'share-terminal-placeholder'[\s\S]*shareMirrorProtocol\.terminalPlaceholder\.dataset/],
-          ['share URL controls are marked secret', /function shareEntryHtml\(share\)[\s\S]*value="\$\{esc\(share\.url\)\}" data-share-secret/],
-          ['app-visible popup root is inside appRoot', /function appOverlayRootElement\(\)[\s\S]*overlay\.id = 'appOverlayRoot'[\s\S]*root\.appendChild\(overlay\)/],
-        ];
-        const findings = checks.filter(check => !check[1].test(source)).map(check => check[0]);
-        if (/document\.body\.appendChild\((?:menu|popover|overlay|backdrop|modal|palette)\)/.test(source)) findings.push('popup hosts use app overlay');
-        return findings;
-      };
-      const registeredReplayFixture = `
-        function shareReplayElementRedactionAction(element) { if (shareReplayElementHasFlag(element, 'data-share-private') || shareReplayElementHasFlag(element, 'data-share-redact')) return 'drop'; if ((tag === 'input' && type) || shareReplayElementHasFlag(element, 'data-share-secret')) return 'placeholder'; }
-        function shareReplayMutationNodeIsIgnored(node) { const selectors = ['.terminal', '.xterm', '[data-share-private]', '[data-share-redact]', '[data-share-volatile]', '.file-explorer-panel']; }
-        function shareReplayAttributeIsTokenBearing(name = '') { return /token|sharetoken|secret|password/.test(name); }
-        function shareReplayUrlAttributeIsUnsafe(name = '', value = '') { return /\\/share\\/[A-Za-z0-9_-]+/.test(value) || /#t=/.test(value) || /javascript/.test(value); }
-        function shareReplayTerminalPlaceholderForElement(element, nodeId) { return {node: {attrs: {class: 'share-terminal-placeholder', [shareMirrorProtocol.terminalPlaceholder.dataset]: '1'}}}; }
-        function shareEntryHtml(share) { return '<input type="text" readonly value="\${esc(share.url)}" data-share-secret>'; }
-        function appOverlayRootElement() { overlay.id = 'appOverlayRoot'; root.appendChild(overlay); }
-      `;
-      const unregisteredReplayFixture = `
-        function shareReplayElementRedactionAction(element) { return 'keep'; }
-        function shareReplayMutationNodeIsIgnored(node) { return false; }
-        function shareReplayAttributeIsTokenBearing(name = '') { return false; }
-        function shareReplayUrlAttributeIsUnsafe(name = '', value = '') { return false; }
-        function shareEntryHtml(share) { return '<input value="\${esc(share.url)}">'; }
-        document.body.appendChild(popover);
-      `;
-      assert.deepStrictEqual(replayRegistrationFindings(registeredReplayFixture), [], 'DOIT.72 P6.1: replay registration source guard accepts a fully registered fixture');
-      assert.ok(replayRegistrationFindings(unregisteredReplayFixture).length >= 7, 'DOIT.72 P6.1: replay registration source guard rejects missing redaction, terminal, token, and popup registration');
-      assert.deepStrictEqual(replayRegistrationFindings(shareSource), [], 'DOIT.72 P6.1: mirrored private surfaces, terminal containers, token-bearing fields, and app-visible popup hosts are registered for replay/redaction');
-      assert.ok(/function shareEntryHtml\(share\)[\s\S]*shareViewerListHtml\(share\)[\s\S]*function shareViewerListHtml\(share\)[\s\S]*share\.users\.duration[\s\S]*share\.users\.ip[\s\S]*share\.users\.browser/.test(shareSource), 'YO!share manage rows render a user list with connected time, IP, and browser columns');
-      assert.ok(/function normalizeSharePayload\(payload\)[\s\S]*viewerDetails:\s*normalizeShareViewerDetails\(payload\)/.test(shareSource), 'YO!share payload normalization preserves active viewer details for the manage modal');
-      assert.ok(/<button type="button" class="danger share-stop-inline" data-share-stop>/.test(shareSource), 'YO!share manage rows place Stop inline with mode/protocol metadata');
-      assert.ok(/async function stopActiveShare\(tokenOrShortId = ''\)[\s\S]*JSON\.stringify\(\{token: target\}\)/.test(shareSource), 'YO!share stop is scoped to a selected token when a row is stopped');
-      // One definition plus exactly one call site: apiFetchJsonQuiet now delegates to apiFetch instead of
-      // re-applying the header itself (323d1aad4), so every share-view request inherits X-Share-Token from
-      // the single apiFetch owner. A third occurrence would mean a second request path applying it again.
-      assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*X-Share-Token/.test(shareSource) && (shareSource.match(/applyShareTokenHeaders\(requestOptions\)/g) || []).length === 2, 'share-view API calls attach the fragment token through the one shared request-header helper');
-      assert.ok(/async function apiFetch\(url, options = \{\}, internalOptions = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)/.test(shareSource), 'the one surviving call site is apiFetch, so every request path inherits the share token');
-      assert.ok(/async function apiFetchJsonQuiet\(url, options = \{\}, phaseTimings = null\)[\s\S]*await apiFetch\(url, options, \{recordDebug: false\}\)/.test(shareSource), 'the quiet request path routes through apiFetch rather than carrying its own header copy');
-      assert.ok(/const shareWriteMode = shareViewMode && shareBootstrap\?\.mode === 'rw'/.test(shareSource), 'share-view write mode is explicit and token-driven');
-      assert.ok(/disableStdin:\s*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view terminals are created with stdin enabled');
-      assert.ok(/function insertIntoTerminal\(session, text\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can send terminal insertions while ro share-view stays blocked');
-      assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource) && shareSource.includes('term.onData(data => handleTerminalData(session, data));'), 'rw share-view can type into the focused terminal only through terminal input frames');
-      assert.ok(shareSource.includes('function renderShareStatusPill') && shareSource.includes('share.pill'), 'host topbar renders the YO!share status pill');
-      assert.ok(shareSource.includes('share.pillMultiple'), 'host topbar aggregates multiple active YO!share URLs into one status pill');
-      assert.ok(/function sessionScopedId\(key, create = randomShareViewerId\)[\s\S]*sessionStorage\.getItem\(key\)[\s\S]*sessionStorage\.setItem\(key, created\)/.test(shareSource), 'one shared session-storage transaction owns stable browser IDs');
-      assert.ok(/const shareViewerId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource) && /const shareClientId = \(\(\) => \{[\s\S]*sessionScopedId\(key\)/.test(shareSource), 'share-view and host clients use the shared stable-ID transaction');
-      assert.ok(/function wsUrl\(session\)[\s\S]*shareViewMode[\s\S]*URLSearchParams\(\{session, token: shareToken, viewer: shareViewerId\}\)[\s\S]*\/ws\/share-view\?/.test(shareSource), 'share-view terminals use /ws/share-view with the fragment token and shared viewer id');
-      assert.ok(/function terminalCanPublishRemoteSize\(\)[\s\S]*!shareViewMode/.test(shareSource), 'share-view terminals cannot send remote resize frames');
-      assert.ok(/function shareHostWsUrl\(token\)[\s\S]*URLSearchParams\(\{share: token, client: shareClientId\}\)[\s\S]*\/ws\/share-host\?\$\{params\.toString\(\)\}/.test(shareSource), 'share hosts publish UI state through /ws/share-host with a sender client id');
-      assert.ok(/function shareViewerUiWsUrl\(token\)[\s\S]*\/ws\/share-ui\?/.test(shareSource), 'share-view clients receive UI state through the share-scoped /ws/share-ui socket');
-      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'YO!share host socket and pending frames share one token-keyed sender lifecycle record owner');
-      assert.equal(/shareHostSockets|shareHostQueues/.test(shareSource), false, 'parallel YO!share socket and queue maps are removed');
-      assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
-      assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
-      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
-      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*shareViewMode \|\| shareHasActiveShare\(\)[\s\S]*!shareRuntimeActive[\s\S]*clearRuntimeInterval\('share-status'\)[\s\S]*clearRuntimeInterval\('share-geometry-digest'\)[\s\S]*if \(!shareViewMode\) installShareGeometryDigestLoop\(\)/.test(shareSource), 'T1: share timers start only for active hosts or viewers and both clear on host deactivation');
-      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
-      assert.ok(/function shareStatusSocketHealthy\(\)[\s\S]*WebSocket\.OPEN/.test(shareSource) && /shareViewMode && !shareStatusSocketHealthy\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource) && /function shareHostStatusBackupPollDue[\s\S]*!shareStatusSocketHealthy\(\)/.test(shareSource), 'YO!share uses pushed share-socket status while healthy and reserves host/viewer HTTP status refreshes for a disconnected repair path');
-      assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
-      assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
-      assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
-      assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*sendOrQueueShareHostMessage\(token, serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication through one serialized send-or-queue path');
-      const connectionApi = loadYolomux('', ['1'], 'https:');
-      connectionApi.setActiveSharesForTest([]);
-      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: a non-sharing host page keeps neither share timer active');
-      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), false, 'T1: inactive host has no share-status timer');
-      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), false, 'T1: inactive host has no share geometry timer');
-      connectionApi.setActiveSharesForTest([{token: 'timer-share'}]);
-      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), true, 'T1: active host starts share lifecycle timers');
-      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), true, 'T1: active host starts status timer');
-      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), true, 'T1: active host starts geometry timer');
-      connectionApi.setActiveSharesForTest([]);
-      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: stopped host clears share lifecycle timers');
-      connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
-      const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
-      assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
-      closedSocket.close();
-      assert.equal(connectionApi.shareHostConnectionCountForTest(), 1, 'socket close retains one reconnectable token record');
-      assert.equal(connectionApi.shareHostConnectionRecordForTest('closed-share').socket, null, 'socket close clears only the matching socket field');
-      assert.equal(connectionApi.shareHostQueueForTest('closed-share').length, 1, 'socket close preserves frames for an intended reconnect');
-      connectionApi.setActiveSharesForTest([]);
-      connectionApi.ensureShareHostSocketsForTest();
-      assert.equal(connectionApi.shareHostConnectionCountForTest(), 0, 'inactive-share reconciliation removes the socketless record and its queue');
-      connectionApi.setActiveSharesForTest([{token: 'retry-share'}]);
-      connectionApi.setShareHostSocketForTest('retry-share', {readyState: 3});
-      assert.equal(connectionApi.enqueueShareHostMessageForTest('retry-share', {type: 'queued-for-retry'}), true);
-      const retrySocket = connectionApi.ensureShareHostSocketForTest('retry-share');
-      retrySocket.onopen({target: retrySocket});
-      assert.deepStrictEqual(retrySocket.sent.map(JSON.parse), [{type: 'queued-for-retry'}], 'a replacement socket flushes the preserved queue once');
-      assert.deepStrictEqual([...connectionApi.shareHostQueueForTest('retry-share')], [], 'reconnect flush drains the record-owned queue');
-      assert.ok(/function shareBuildUiMessage\(type, payload = \{\}, options = \{\}\)[\s\S]*shareNextMirrorFrameMetadata\(type, options\)/.test(shareSource), 'DOIT.72 P0.1: sharePublish stamps mirror metadata through one message builder');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*shareDropStaleMirrorFrame\(message\)[\s\S]*return/.test(shareSource), 'DOIT.72 P0.1: share viewers drop stale sequenced mirror frames before applying payloads');
-      assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*viewport:\s*shareViewportSnapshot\(\)[\s\S]*appearance:\s*shareAppearanceSnapshot\(\)[\s\S]*terminalDims:\s*shareTerminalDimensionsSnapshot\(\)[\s\S]*chrome:[\s\S]*tabMetaVisible:[\s\S]*infoSubTab:[\s\S]*autoApprove:\s*shareAutoApproveStateSnapshot\(\)[\s\S]*info:\s*shareInfoStateSnapshot\(\{includeRows: !compact\}\)[\s\S]*finder:\s*shareFinderStateSnapshot\(\{compact\}\)[\s\S]*editor:\s*shareEditorStateSnapshot\(\{compact\}\)[\s\S]*preferences:\s*sharePreferencesStateSnapshot\(\{compact\}\)/.test(shareSource), 'YO!share snapshots chrome, YO!info, Finder/Differ/Tabber, editor, and Preferences state through shared compact/full helpers');
-      assert.ok(/function shareCreateUiStateSnapshot\(\)[\s\S]*shareBaseUiStateSnapshot\(\{compact: true\}\)/.test(shareSource), 'YO!share create uses a compact UI-state seed');
-      assert.ok(/function shareUiStateSnapshot\(\)[\s\S]*shareBaseUiStateSnapshot\(\{compact: false\}\)[\s\S]*textWraps:\s*shareWrappedTextDigestSnapshot\(\)[\s\S]*scroll:\s*shareScrollStateSnapshot\(\)/.test(shareSource), 'YO!share full UI snapshots include host YO state, wrapped-control metrics, and current scroll offsets for late viewers');
-      assert.ok(/function shareEditorModesSnapshot\(\)[\s\S]*entry\.viewState[\s\S]*entry\.diffFromRef[\s\S]*entry\.diffToRef[\s\S]*entry\.diffExpandUnchanged/.test(shareSource), 'DOIT.68: YO!share editor snapshots carry diff refs, expand state, and editor scroll state');
-      assert.ok(/function shareTerminalDimensionsSnapshot\(\)[\s\S]*term\?\.rows[\s\S]*term\?\.cols/.test(shareSource), 'M4: YO!share snapshots live host terminal dimensions for mirror viewers');
-      assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*viewport:\s*shareViewportSnapshot\(\)[\s\S]*appearance:\s*shareAppearanceSnapshot\(\)/.test(shareSource), 'M1: YO!share snapshots host viewport and appearance geometry inputs');
-      assert.ok(/function shareAppearanceSnapshot\(\)[\s\S]*locale:[\s\S]*i18nActiveLocaleId[\s\S]*languagePref:[\s\S]*initialSetting\('general\.language'/.test(shareSource), 'DOIT.67: YO!share appearance snapshots carry locale inputs for live and late-join viewers');
-      assert.ok(/function shareBaseUiStateSnapshot\(options = \{\}\)[\s\S]*terminalDims:\s*shareTerminalDimensionsSnapshot\(\)/.test(shareSource), 'M4: YO!share ui_state carries terminal dimensions for late-joining viewers');
-      assert.ok(/let shareViewFit = normalizeShareViewFit\(storageGet\(shareViewFitStorageKey\) \|\| initialSetting\('share\.view_fit', 'cover'\)\)/.test(shareSource), 'M3: share mirror fit defaults through share.view_fit with cover fallback');
-      assert.ok(/function shareMirrorFitTransform\(hostViewport, clientViewport, fit = shareViewFit\)[\s\S]*mode === 'contain' \? Math\.min\(scaleX, scaleY\) : Math\.max\(scaleX, scaleY\)[\s\S]*tx: \(client\.width - width\) \/ 2/.test(shareSource), 'M3: cover/contain transform math is centralized');
-      assert.ok(/function applyShareMirrorTransform\(\)[\s\S]*nativeViewport\(\)[\s\S]*--share-mirror-scale[\s\S]*--share-mirror-tx[\s\S]*--share-mirror-ty/.test(shareSource), 'M3: share view applies one root transform from host to client viewport');
-      assert.ok(/function scheduleShareUiStatePublish\(options = \{\}\)[\s\S]*shareUiStatePublishTimer[\s\S]*sharePublishUiState\(options\)/.test(shareSource), 'YO!share debounces host UI-state publication');
-      assert.ok(/function applyShareChromeState\(chrome = \{\}\)[\s\S]*tabMetaVisible = chrome\.tabMetaVisible !== false[\s\S]*infoPanelSubTab = normalizedInfoSubTab\(chrome\.infoSubTab\)[\s\S]*renderYoagentPanel/.test(shareSource), 'YO!share applies host-owned tab metadata and legacy YO!agent chrome state');
-      assert.ok(/function setFileEditorDiffExpandUnchangedForItem[\s\S]*fileEditorDiffExpandOverrides\.set[\s\S]*scheduleShareUiStatePublish\(\)/.test(shareSource), 'per-editor diff expansion changes publish the mirrored editor state');
-      assert.ok(/function setRepoDiffRefs\(repo, fromRef, toRef, options = \{\}\)[\s\S]*renderFileExplorerChangesPanels\(\{force: true\}\)[\s\S]*scheduleShareTopologySnapshot\('differ-refs'\)[\s\S]*return true/.test(shareSource), 'Differ FROM/TO changes schedule a full share UI-state snapshot through the topology scheduler');
-      assert.ok(/function scheduleShareViewportPublish\(\)[\s\S]*shareViewMode[\s\S]*sharePublish\('viewport', shareViewportSnapshot\(\)\)[\s\S]*}, 150\)/.test(shareSource), 'M1: host resize publishes a debounced viewport frame');
-      assert.ok(/function scheduleShareAppearancePublish\(options = \{\}\)[\s\S]*shareViewMode[\s\S]*sharePublish\('appearance', shareAppearanceSnapshot\(\)\)[\s\S]*scheduleShareTopologySnapshot\(options\.reason \|\| 'appearance'\)/.test(shareSource), 'M1: host settings apply publishes appearance geometry and a full topology snapshot');
-      assert.ok(/async function applyLocale\(locale\)[\s\S]*rerenderForLocale\(\{localeChange: true\}\)[\s\S]*scheduleShareAppearancePublish\(\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: host locale switches publish appearance and refreshed popup-layer frames');
-      assert.ok(/function installNativeAppViewportOwner\(\)[\s\S]*window\.addEventListener\('resize', resize\)[\s\S]*window\.visualViewport\?\.addEventListener\?\.\('resize', resize\)/.test(shareSource) && /window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleShareViewportPublish\(\)/.test(shareSource), 'M1: one viewport owner converts window/visual-viewport changes into downstream viewport publication');
-      assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareInfoState\(payload\.info \|\| \{\}\)[\s\S]*applyShareEditorState\(payload\.editor \|\| \{\}\)[\s\S]*applySharePreferencesState\(payload\.preferences \|\| \{\}\)[\s\S]*await applyShareFinderState\(payload\.finder \|\| \{\}\)/.test(shareSource), 'share viewers apply mirrored YO!info, editor, Preferences, and Finder/Differ/Tabber state');
-      assert.ok(/function shareReadOnlyFinderStateIsHostOwned\(\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState/.test(shareSource), 'read-only share clients treat Finder root and expansion as host-owned between host frames');
-      assert.ok(/function scheduleFileExplorerActiveTabSync\(preferredItem = null, options = \{\}\)[\s\S]*if \(shareReadOnlyFinderStateIsHostOwned\(\)\) return/.test(shareSource), 'read-only share clients ignore local active-tab sync that would jump Finder to the client context');
-      assert.ok(/async function applyShareFinderState\(finder = \{\}\)[\s\S]*previousRoot !== normalizedRoot[\s\S]*openFileExplorerAt\(normalizedRoot[\s\S]*else \{[\s\S]*refreshFileExplorerTreesInPlace/.test(shareSource), 'read-only share clients refresh same-root Finder frames in place instead of reopening and flashing collapsed');
-      assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareViewportState\(payload\.viewport \|\| \{\}\)[\s\S]*applyShareAppearanceState\(payload\.appearance \|\| \{\}\)/.test(shareSource), 'M1: share viewers apply geometry inputs before semantic UI state');
-      assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareTerminalDimensionsState\(payload\.terminalDims \|\| \[\]\)/.test(shareSource), 'M4: share viewers apply host terminal dimensions from the UI state');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'ui-state'[\s\S]*applyShareUiState\(payload\)/.test(shareSource), 'share viewers consume live ui-state frames');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'viewport'[\s\S]*applyShareViewportState\(payload\)[\s\S]*message\.type === 'appearance'[\s\S]*applyShareAppearanceState\(payload\)/.test(shareSource), 'M1: share viewers consume live viewport and appearance frames');
-      assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*applyShareAutoApproveState\(payload\.autoApprove \|\| \{\}\)[\s\S]*applyShareTextWrapMetrics\(payload\.textWraps \|\| \[\]\)[\s\S]*applyShareScrollSnapshot\(payload\.scroll \|\| \[\]\)/.test(shareSource), 'YO!share clients apply host YO state, wrapped-control metrics, and full-snapshot scroll after semantic panes render');
-      assert.ok(/shareReplayKeyframeRequestInitialBackoffMs:\s*5000/.test(timingSource), 'YO!share replay keyframe requests start with a five-second retry floor through the shared timing owner');
-      assert.ok(/shareReplayKeyframeRequestMinIntervalMs:\s*5000/.test(timingSource), 'YO!share replay keyframe requests are rate-limited to at most once every five seconds through the shared timing owner');
-      assert.ok(/const shareReplayHostKeyframeMinIntervalMs = shareReplayKeyframeRequestMinIntervalMs/.test(shareSource), 'YO!share hosts coalesce repair keyframes on the same five-second floor as viewer requests');
-      assert.ok(/function sharePublishDomKeyframe\(reason = 'manual-debug'\)[\s\S]*cleanReason === 'manual-debug' \|\| cleanReason === 'topology' \|\| cleanReason === 'join'[\s\S]*shareReplayHostKeyframeMinIntervalMs/.test(shareSource), 'YO!share topology and join keyframes bypass the repair floor while replay-error/backpressure repair stays throttled');
-      assert.equal(/targetViewer && reason === 'gap' \? 'join' : reason/.test(shareSource), false, 'YO!share viewer gap repair requests must not be rewritten to join and bypass the host repair floor');
-      assert.ok(/if \(message\.type === shareMirrorProtocol\.frames\.domKeyframeRequest\) \{[\s\S]*const reason = shareReplayKeyframeReason[\s\S]*sharePublishDomKeyframe\(reason\)/.test(shareSource), 'YO!share host keyframe-request handling preserves the repair reason so gap/backpressure repairs are throttled');
-      assert.ok(/shareGeometryResyncMinIntervalMs:\s*10000/.test(timingSource), 'YO!share semantic geometry resync is rate-limited to at most once every ten seconds through the shared timing owner');
-      // The share quarantine (93_share_state.js:6) narrows the Cmd/Ctrl-K branch to the Shift chord only,
-      // through the SAME constant, so Cmd/Ctrl-K no longer claims the key while YO!share is dormant.
-      assert.ok(/function handleGlobalShortcutKeydown\(event\)[\s\S]*if \(key === 'k' && \(event\.shiftKey \|\| !shareFeatureQuarantined\)\)[\s\S]*if \(event\.shiftKey\) startPinTabShortcutChord\(\);[\s\S]*else showShareModal\(\);/.test(shareSource), 'Shift+Cmd/Ctrl-K keeps the pin-tab chord while the quarantined YO!share direct shortcut is gated by the one quarantine constant');
-      assert.ok(/\.\.\.\(!shareFeatureQuarantined \? \[\{label: t\('brand\.share'\), keys: appShortcutText\('K'\)\}\] : \[\]\)/.test(shareSource), 'the keyboard-shortcut catalog hides the quarantined YO!share row through the same constant');
-      assert.ok(/function startPinTabShortcutChord\(\)[\s\S]*appShortcutText\('K', \{shift: true\}\)/.test(shareSource), 'pin-tab prompt moved off the YO!share shortcut');
-      assert.ok(/async function uploadFiles\(session, fileList, options = \{\}\)[\s\S]*refreshTerminalAfterUpload\(session\)/.test(shareSource), 'upload completion forces a terminal repaint after path insertion/toast rendering');
-      assert.ok(/function refreshTerminalAfterUpload\(session\)[\s\S]*scheduleFit\(session\)[\s\S]*refreshTerminal\(session\)[\s\S]*requestAnimationFrame/.test(shareSource), 'upload repaint uses the shared fit and xterm refresh helpers');
-      assert.ok(/async function resyncShareViewerUiState\(\)[\s\S]*now - lastStartedAt < shareGeometryResyncMinIntervalMs[\s\S]*shareGeometryResyncLastStartedAt = now[\s\S]*terminalDims:\s*payload\?\.terminalDims \|\| uiState\.terminalDims \|\| \[\]/.test(shareSource), 'DOIT.69: geometry drift resync also re-pins host terminal dimensions and is rate-limited');
-      assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*requestFloorMs = Math\.max\(shareReplayKeyframeRequestMinIntervalMs[\s\S]*now - keyframeRequest\.lastAt < requestFloorMs[\s\S]*shareReplayState\.suppressKeyframeRequest\(\)/.test(shareSource), 'YO!share replay keyframe repair requests share the five-second floor');
-      assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*shareReplayState\.beginKeyframeRequest\(now, shareReplayNextKeyframeRequestBackoff\(\)\)[\s\S]*shareReplaySendUiMessage/.test(shareSource), 'replay repair state advances before the existing keyframe request is published');
-      assert.ok(/function shareReplayDeltaSequenceStatus\(message = \{\}\)[\s\S]*epoch < currentEpoch \|\| sequence <= lastSequence[\s\S]*reason: 'stale'/.test(shareSource), 'DOM deltas from older epochs or already-applied sequences are stale, not viewer-behind gaps');
-      assert.ok(/function shareReplayDeltaCanApplyBestEffort\(sequenceStatus = \{\}\)[\s\S]*sequenceStatus\.reason !== 'gap'[\s\S]*epoch === currentEpoch[\s\S]*sequence > lastSequence/.test(shareSource), 'YO!share replay gaps keep applying same-epoch incremental updates while complete DOM replay is throttled');
-      assert.ok(/function shareNextMirrorFrameMetadata\(type, options = \{\}\)[\s\S]*shareMirrorFrameTypeIsDomReplayContent\(type\)[\s\S]*shareNextDomReplayFrameMetadata/.test(shareSource), 'YO!share DOM replay frames use a sequence stream independent from semantic mirror frames');
-      assert.ok(/function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*cancelsScheduledTopology[\s\S]*followsRecentTopology[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cancelsScheduledTopology \|\| followsRecentTopology \? 'topology' : cleanReason\)/.test(shareSource), 'a manual/debug keyframe that supersedes or follows topology keeps the topology mutation quiet window');
-      assert.ok(/function applyShareViewBodyClasses\(\)[\s\S]*share-view-mode[\s\S]*share-view-readonly[\s\S]*share-view-write/.test(shareSource), 'DOIT.69: share viewer body classes distinguish read-only from write share view');
-      assert.ok(/const preferencesReadOnlyVisual = readOnlyMode && !shareViewMode/.test(shareSource), 'DOIT.69: Preferences stay visually host-identical in read-only share view');
-      assert.ok(/const readonly = readOnlyMode && !shareViewMode \? `<span class="preferences-readonly">/.test(shareSource), 'DOIT.69: read-only Preferences chrome is suppressed inside mirrored share view');
-      assert.ok(/function renderSessionButtons\(options = \{\}\)[\s\S]*if \(openAppMenuId\) requestAnimationFrame\(\(\) => scheduleSharePopupLayerPublish\(\{immediate: true\}\)\)/.test(shareSource), 'DOIT.69: restored open topbar menus republish the popup layer after rerender');
-      assert.equal(/detail:\s*choice\.value/.test(shareSource), false, 'DOIT.67: topbar language menu does not print raw locale codes as visible detail text');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*layoutFromParam\(payload\.layout[\s\S]*applyLayoutSlots\(next/.test(shareSource), 'share-view UI frames apply layout through layoutFromParam');
-      assert.ok(shareSource.includes("'.pane-tab-detached-popover.popover-open'") && shareSource.includes("'.pane-tab.popover-open > .session-popover'") && shareSource.includes("'.dockview-pane-tab.popover-open > .session-popover'") && shareSource.includes("'.tabber-session-tab.popover-open > .session-popover'"), 'DOIT.68: popup-layer capture includes detached, inline, and Tabber tab hover popovers');
-      assert.ok(shareSource.includes("'.diff-ref-suggestion-popover:not([hidden])'"), 'DOIT.68: popup-layer capture includes custom diff-ref dropdowns');
-      assert.ok(/function bindAppMenuCommandMirrorActive[\s\S]*share-mirror-active/.test(shareSource), 'DOIT.68: menu option hover/focus gets a serializable mirror-active class');
-      assert.ok(/\.app-menu-command\.share-mirror-active:not\(:disabled\)/.test(fs.readFileSync('static/yolomux.css', 'utf8')), 'DOIT.68: mirrored menu option active class uses the same styling as local hover/focus');
-      assert.ok(/function sharePointerPayloadForPoint\(clientX, clientY, options = \{\}\)[\s\S]*appSpacePoint\(clientX, clientY\)[\s\S]*scope: 'viewport'[\s\S]*x: Math\.round\(point\.x \* 10\) \/ 10[\s\S]*y: Math\.round\(point\.y \* 10\) \/ 10/.test(shareSource), 'M7: share pointer publication sends app-space viewport coordinates through the single mirror transform');
-      assert.ok(/function sharePointFromPointerPayload\(payload = \{\}\)[\s\S]*if \(payload\.scope && payload\.scope !== 'viewport'\) return null[\s\S]*visualPointFromAppSpace\(x, y\)/.test(shareSource), 'M7: share pointer rendering maps app-space viewport coordinates through the local mirror transform');
-      assert.equal(shareSource.includes('shareSemanticPointerPayload'), false, 'M7: semantic pointer fallbacks are removed after mirror-frame geometry');
-      assert.equal(shareSource.includes('shareTerminalCellPointerPayload'), false, 'M7: terminal cell pointer fallback is removed after mirror-frame geometry');
-      assert.equal(shareReplaySource.includes("scope: 'pane'"), false, 'M7: pane-relative pointer fallback is removed after mirror-frame geometry');
-      assert.ok(/function shareScrollPayloadForElement\(element\)[\s\S]*target: descriptor\.target[\s\S]*anchor[\s\S]*head/.test(shareSource), 'M5: share scroll payloads carry editor scroll and selection state through one helper');
-      assert.ok(/function shareScrollTargetForElement\(element\)[\s\S]*element\.closest\('#info-content'\)[\s\S]*target: 'info'/.test(shareSource), 'YO!info scroll is a mirrored share scroll target');
-      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*applyingShareRemoteScroll = true[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*view\.dispatch\(\{selection/.test(shareSource), 'M5: share scroll apply sets scroll and editor selection under an echo guard');
-      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*shareScrollTargetRecord\(target\)[\s\S]*record\.payload = \{\.\.\.payload, target, top, left\}[\s\S]*shareRememberEditorViewState\(payload, top, left\)[\s\S]*shareScrollElementForPayload/.test(shareSource), 'DOIT.68: host scroll frames become authoritative before the client DOM scroller exists');
-      assert.ok(/const shareSenderRecords = new Map\(\)[\s\S]*function shareSenderRecord\(key, options = \{\}\)/.test(shareSource), 'share viewers own scroll payload and restore lifecycle in one sender-keyed record map');
-      assert.ok(/function shareReadonlyScrollStateForTarget\(target\)[\s\S]*shareScrollTargetForElement\(target\)[\s\S]*shareSenderRecord\(descriptor\.target, \{create: false\}\)\?\.scrollTarget[\s\S]*function restoreShareReadonlyScrollTarget\(target\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, top, left\)/.test(shareSource), 'DOIT.67: read-only local scroll restores the event target through the shared host-scroll snapshot');
-      assert.equal(shareSource.includes('shareLastAppliedScrollByTarget'), false, 'retired scroll-state map is absent');
-      assert.equal(shareSource.includes('shareScrollRestoreFrameTimers'), false, 'retired scroll-restore timer map is absent');
-      assert.ok(/function restoreShareScrollTargetByKey\(target\)[\s\S]*const state = shareSenderRecord\(cleanTarget, \{create: false\}\)\?\.scrollTarget[\s\S]*\.\.\.\(state\.payload \|\| \{\}\)[\s\S]*shareScrollElementForPayload\(payload\)[\s\S]*applyShareScrollDescriptorPosition\(descriptor, payload\.top, payload\.left\)/.test(shareSource), 'DOIT.69: pending host scroll frames replay from the full remembered payload after pane DOM rebuilds');
-      assert.ok(/function applyShareScrollDescriptorPosition\(descriptor, top, left\)[\s\S]*scrollTop = top[\s\S]*scrollLeft = left[\s\S]*requestMeasure/.test(shareSource), 'host editor scroll uses one shared setter that refreshes virtualized CodeMirror rows');
-      assert.ok(/function scheduleShareScrollRestoreByKey\(target, options = \{\}\)[\s\S]*record\.restoreGeneration = restoreGeneration[\s\S]*shareSenderRecord\(cleanTarget, \{create: false\}\)\?\.scrollTarget !== record[\s\S]*requestAnimationFrame\(run\)/.test(shareSource), 'readonly share scroll restore retries belong to the current target record generation');
-      assert.ok(/function applyShareScrollState\(payload = \{\}, options = \{\}\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'host scroll frames schedule replay even when the current DOM scroller is not ready');
-      assert.ok(/function shareScrollStateSnapshot\(\)[\s\S]*shareScrollPayloadForElement\(element\)/.test(shareSource), 'full UI-state snapshots reuse the shared scroll payload helper instead of inventing a second scroll format');
-      assert.ok(/function applyShareScrollSnapshot\(scroll = \[\]\)[\s\S]*snapshotGeneration = \+\+shareScrollSnapshotGeneration[\s\S]*shareSenderRecordEntries\('scrollTarget'\)[\s\S]*senderRecord\.scrollTarget = null[\s\S]*applyShareScrollState\(payload, \{snapshotGeneration\}\)/.test(shareSource), 'full UI-state scroll replaces absent targets and replays current targets through the shared apply path');
-      assert.ok(/function restoreShareScrollTargetsByPrefix\(prefix\)[\s\S]*shareSenderRecordEntries\('scrollTarget'\)[\s\S]*scheduleShareScrollRestoreByKey\(target\)/.test(shareSource), 'DOIT.69: editor scroll targets can replay as a group after editor rerender');
-      assert.ok(/function scheduleShareFileEditorScrollRestore\(item, path\)[\s\S]*editor:\$\{key\}:editor[\s\S]*editor:\$\{key\}:preview/.test(shareSource), 'file editor renders schedule host scroll replay for editor and preview scrollers');
-      assert.ok(/function shareCanPublishScroll\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*return false[\s\S]*return shareCanPublishUi\(\)/.test(shareSource), 'DOIT.69: read-only share viewers cannot publish scroll frames');
-      assert.ok(/function scheduleShareScrollPublishForElement\(element\)[\s\S]*!shareCanPublishScroll\(\)[\s\S]*restoreShareReadonlyScrollTarget\(element\)[\s\S]*if \(shareCanPublishScroll\(\)\) sharePublish\('scroll'/.test(shareSource), 'DOIT.69: scroll publish scheduling restores readonly local scroll and rechecks publish permission before sending');
-      assert.ok(/function installShareScrollPublisher\(\)[\s\S]*if \(shareViewMode && !shareWriteMode\) \{[\s\S]*restoreShareReadonlyScrollTarget\(event\.target\)[\s\S]*return;[\s\S]*scheduleShareScrollPublishForElement/.test(shareSource), 'M5: one document-level scroll publisher covers mirrored surfaces but read-only viewers never publish back');
-      assert.ok(/function shareGeometryDigestSnapshot\(\)[\s\S]*viewport[\s\S]*slots[\s\S]*tabStrips[\s\S]*terminalCells[\s\S]*editors[\s\S]*fonts[\s\S]*textWraps/.test(shareSource), 'M9: geometry digest measures mirror inputs, rendered outputs, and wrapped text/control layout');
-      assert.ok(/function shareEditorDigest\(panel\)[\s\S]*rect[\s\S]*contentHash[\s\S]*errorHash/.test(shareSource), 'M9: editor digest uses stable editor identity/content/error state rather than client scrollHeight jitter');
-      assert.equal(/scrollHeight:\s*Math\.round\(Number\(panel\._cmView/.test(shareSource), false, 'M9: editor digest does not compare CodeMirror scrollHeight across share clients');
-      assert.ok(/const shareWrappedTextDigestSelectors = \[[\s\S]*'textarea\[data-setting-path\]'[\s\S]*'\.app-menu-command-label'[\s\S]*'\.info-tree-record'/.test(shareSource), 'M9: wrapped text digest covers native controls, menus, and YO!info tree rows');
-      assert.ok(/function shareGeometryFirstDifference\(host = \{\}, local = \{\}\)[\s\S]*'textWraps'/.test(shareSource), 'M9: digest comparison names wrapped text/control drift separately');
-      assert.ok(/function shareHostConnectedViewerCount\(\)[\s\S]*share\?\.viewers[\s\S]*share\?\.viewerDetails/.test(shareSource), 'YO!share host perf gates count active viewers from status payloads');
-      assert.ok(/function publishShareGeometryDigest\(\)[\s\S]*!shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('geometryDigest'\)[\s\S]*shareGeometryDigestFrame\(\)/.test(shareSource), 'YO!share skips expensive geometry digest snapshots when an active share has no connected viewers');
-      assert.ok(/const shareGeometryDigestDirtyState = \{[\s\S]*revision:[\s\S]*publishedRevision:[\s\S]*function installShareGeometryDigestDirtyTracking\(\)[\s\S]*MutationObserver[\s\S]*ResizeObserver[\s\S]*function publishShareGeometryDigest\(\)[\s\S]*revision === shareGeometryDigestDirtyState\.publishedRevision[\s\S]*shareReplayRecordHostPerfUnchanged\('geometryDigest'\)/.test(shareSource), 'YO!share dirty-tracks layout and skips forced geometry snapshots when the layout has not changed');
-    assert.ok(/function shareReplayEnqueueMutationRecords\(records = \[\], options = \{\}\)[\s\S]*options\.requireViewers === true && !shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('mutationRecords'\)[\s\S]*shareReplayRecordHostPerf\('mutationRecords'/.test(shareSource), 'YO!share mutation replay batches record cost while observer-driven mutation publishing stops when no viewers are connected');
-      assert.ok(/function shareReplayRecordHostPerfEvent\(kind = '', payload = \{\}, durationMs = null\)[\s\S]*recordJsDebugEvent\('share-replay-perf'/.test(shareSource), 'YO!share replay performance samples reuse the JS debug event stream');
-      assert.ok(/async function boot\(\)[\s\S]*waitForYolomuxFontsReady\(\{timeoutMs: 0\}\)\.catch\(\(\) => \{\}\)[\s\S]*paintInitialAppShell\(\)[\s\S]*installYolomuxFontMetricRefresh\(\)/.test(shareSource), 'M9: first app render starts bundled font loading and corrects wrapped widgets after metrics settle');
-      assert.ok(/const shareAppliedTextWrapMetricsByKey = new Map\(\)/.test(shareSource), 'M9: share viewers retain host wrapped-text metrics for digest repair');
-      assert.ok(/function shareTextWrapDigestEntryWithHostMetrics\(entry, metric = null\)[\s\S]*clientWidth[\s\S]*scrollHeight/.test(shareSource), 'M9: wrapped text digest uses host-owned dimensions after metrics are applied');
-      assert.ok(/let shareGeometryRepairInFlight = false/.test(shareSource), 'M9: share geometry repair has an in-flight guard so repeated digest frames do not report stale buckets');
-      const shareProtocolSource = shareSource.slice(
-        shareSource.indexOf('// Share mirror protocol owner.'),
-        shareSource.indexOf('// End share mirror protocol owner.'),
-      );
-      assert.ok(/const shareMirrorProtocol = Object\.freeze\(\{[\s\S]*version:\s*1[\s\S]*frames:[\s\S]*replayFrameTypes:[\s\S]*sequencedFrameTypes:[\s\S]*keyframeReasons:[\s\S]*sequenceFields:[\s\S]*redaction:[\s\S]*terminalPlaceholder:[\s\S]*debugNames:/.test(shareProtocolSource), 'DOIT.72 P1.1: share mirror protocol owns frame names, version, sequencing, redaction, placeholder, and debug metadata');
-      for (const replayType of ['dom-keyframe', 'dom-delta', 'dom-keyframe-request', 'dom-keyframe-ack', 'dom-replay-error', 'terminal-host-resize']) {
-        assert.ok(shareProtocolSource.includes(`'${replayType}'`), `DOIT.72 P1.1: protocol owns ${replayType}`);
-        assert.equal(shareSource.replace(shareProtocolSource, '').includes(`'${replayType}'`), false, `DOIT.72 P1.1: ${replayType} is not scattered outside the protocol owner`);
-      }
-      assert.ok(/function shareGeometryRepairActionForDiff\(diff = ''\)[\s\S]*terminalCells[\s\S]*shareMirrorProtocol\.frames\.terminalHostResize[\s\S]*textWraps[\s\S]*shareMirrorProtocol\.frames\.textWrapMetrics[\s\S]*domDigest[\s\S]*shareMirrorProtocol\.frames\.domKeyframe[\s\S]*slots[\s\S]*tabStrips[\s\S]*editors[\s\S]*shareMirrorProtocol\.frames\.uiState/.test(shareSource), 'DOIT.72 P0.2/P1.1: geometry drift repair maps buckets through protocol-owned frame names');
-      assert.ok(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*repairShareGeometryBucket\(payload, diff\)[\s\S]*shareGeometryDigestCompare/.test(shareSource), 'M9: viewers repair and recheck geometry drift through the bucket-specific repair helper');
-      assert.equal(/async function repairShareGeometryDigest\(payload = \{\}, initialDiff = ''\)[\s\S]*else await resyncShareViewerUiState\(\)/.test(shareSource), false, 'DOIT.72 P0.2: geometry drift repair no longer blindly runs the generic semantic resync for every mismatch');
-      assert.ok(/function applyShareGeometryDigest\(payload = \{\}\)[\s\S]*shareGeometryDigestCompare\(payload\)[\s\S]*!shareGeometryRepairInFlight[\s\S]*repairShareGeometryDigest\(payload, diff\)/.test(shareSource), 'M9: viewers compare geometry digests and route mismatch through the guarded repair helper');
-      assert.ok(/shareGeometryDigestPublishMs:\s*uiDelayMs\.shareGeometryDigestPublish/.test(timingSource), 'M9/MV-3: the odd geometry digest cadence is owned by the shared timing partial');
-      assert.ok(/function installShareGeometryDigestLoop\(\)[\s\S]*resetRuntimeInterval\('share-geometry-digest', publishShareGeometryDigest, shareGeometryDigestPublishMs\)/.test(shareSource), 'M9: host publishes geometry digest through the shared scheduler and timing owner');
-      const digestApi = loadYolomux('?debug=1&shareReplay=1', ['1'], 'https:');
-      const digestFrames = [];
-      digestApi.setActiveSharesForTest([{token: 'idle-share', viewers: 0}]);
-      digestApi.setShareHostSocketForTest('idle-share', {readyState: 1, send(frame) { digestFrames.push(frame); }});
-      digestApi.publishShareGeometryDigestForTest();
-      let digestPerf = digestApi.shareReplayHostPerformanceForTest();
-      assert.equal(digestPerf.viewerCount, 0, 'YO!share host perf sees no connected viewers');
-      assert.equal(digestPerf.geometryDigest.count, 0, 'YO!share skips geometry digest snapshots before measuring layout when nobody is viewing');
-      assert.equal(digestPerf.geometryDigest.skippedNoViewers, 1, 'YO!share counts no-viewer digest skips');
-      assert.equal(digestFrames.length, 0, 'YO!share does not publish geometry frames with zero viewers');
-      digestApi.setActiveSharesForTest([{token: 'active-share', viewers: 2}]);
-      digestApi.setShareHostSocketForTest('active-share', {readyState: 1, send(frame) { digestFrames.push(frame); }});
-      digestApi.publishShareGeometryDigestForTest();
-      digestPerf = digestApi.shareReplayHostPerformanceForTest();
-      assert.equal(digestPerf.viewerCount, 2, 'YO!share host perf counts connected viewers from active share status');
-      assert.equal(digestPerf.geometryDigest.count, 1, 'YO!share records one measured geometry digest when viewers are connected');
-      assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
-      assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
-      assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
-      digestApi.publishShareGeometryDigestForTest();
-      digestPerf = digestApi.shareReplayHostPerformanceForTest();
-      assert.equal(digestPerf.geometryDigest.count, 1, 'an unchanged share layout skips the expensive geometry snapshot on the next cadence');
-      assert.equal(digestPerf.geometryDigest.skippedUnchanged, 1, 'the geometry digest diagnostics count unchanged-layout skips');
-      assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
-      assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
-      assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
-      assert.ok(/function renderSharePointerGhost\(payload = \{\}\)[\s\S]*payload\.sender === shareClientId[\s\S]*ensureSharePointerGhost\(sender\)[\s\S]*record\.hideTimer = timer[\s\S]*renderShareClickRipple/.test(shareSource), 'share participants render remote ghost cursors, replace one record-owned timer, and ignore their own echoed cursor');
-      const pointerTimers = new Map();
-      const clearedPointerTimers = [];
-      let nextPointerTimer = 1;
-      const pointerApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
-        bootstrapOverrides: {share: {view: true, id: 'pointer-test', mode: 'ro'}},
-        sessionStorage: {'yolomux.share.viewer.pointer-test': 'self-client'},
-        setTimeout(callback, milliseconds) {
-          const id = nextPointerTimer++;
-          pointerTimers.set(id, {callback, milliseconds});
-          return id;
-        },
-        clearTimeout(id) {
-          clearedPointerTimers.push(id);
-          pointerTimers.delete(id);
-        },
-      });
-      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 10, y: 20});
-      let pointerRecords = pointerApi.sharePointerRecordsForTest();
-      assert.equal(pointerRecords.length, 1, 'first remote sender creates one pointer record');
-      const firstGhost = pointerRecords[0].ghost;
-      const firstTimer = pointerRecords[0].hideTimer;
-      assert.equal(firstGhost.classList.contains('visible'), true, 'remote pointer is visible after its first frame');
-      assert.equal(pointerTimers.get(firstTimer).milliseconds, 1800, 'remote pointer uses the shared hide duration');
-      pointerApi.renderSharePointerGhostForTest({sender: 'remote-a', x: 30, y: 40});
-      pointerRecords = pointerApi.sharePointerRecordsForTest();
-      assert.equal(pointerRecords[0].ghost, firstGhost, 'the same sender reuses one ghost DOM node');
-      assert.notEqual(pointerRecords[0].hideTimer, firstTimer, 'a new frame replaces the sender hide timer');
-      assert.deepEqual(clearedPointerTimers, [firstTimer], 'timer replacement clears the prior sender timer exactly once');
-      pointerApi.renderSharePointerGhostForTest({sender: 'remote-b', x: 50, y: 60});
-      pointerRecords = pointerApi.sharePointerRecordsForTest();
-      assert.equal(pointerRecords.length, 2, 'different senders retain isolated pointer records');
-      assert.notEqual(pointerRecords[0].ghost, pointerRecords[1].ghost, 'different senders retain isolated ghost DOM nodes');
-      pointerApi.renderSharePointerGhostForTest({sender: 'self-client', x: 70, y: 80});
-      assert.equal(pointerApi.sharePointerRecordsForTest().length, 2, 'the client ignores its own echoed pointer frame');
-      const remoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
-      const remoteATimer = pointerTimers.get(remoteA.hideTimer);
-      remoteATimer.callback();
-      const hiddenRemoteA = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-a');
-      const visibleRemoteB = pointerApi.sharePointerRecordsForTest().find(record => record.sender === 'remote-b');
-      assert.equal(hiddenRemoteA.hideTimer, null, 'the active hide callback clears only its record timer');
-      assert.equal(hiddenRemoteA.ghost.classList.contains('visible'), false, 'the active hide callback hides its sender ghost');
-      assert.equal(visibleRemoteB.ghost.classList.contains('visible'), true, 'one sender hide callback does not hide another sender');
-      assert.ok(/function shareHostTerminalSize\(session\)[\s\S]*shareSenderRecord\(session, \{create: false\}\)\?\.dimensions[\s\S]*rawRows <= 0 \|\| rawCols <= 0[\s\S]*return null/.test(shareSource), 'share viewers size xterm only from positive host terminal dimensions');
-      assert.ok(/function fitTerminal\(session, options = \{\}\)[\s\S]*if \(shareViewMode\) \{[\s\S]*if \(!hostSize\) return[\s\S]*item\.term\.resize\(hostSize\.cols, hostSize\.rows\)[\s\S]*item\.term\.reset\(\)[\s\S]*return;[\s\S]*estimateTerminalSize/.test(shareSource), 'DOIT.69: share-view fitting uses host dims only, resets on host dim changes, and never reflows from the client pane box');
-      const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
-      assert.ok(/function dockviewSyncHeaderActionReservations\(\)[\s\S]*appSpaceRect\(actions\)[\s\S]*appSpaceRect\(tabsContainer\)/.test(dockviewSource), 'M2/M3: Dockview tab fitting measures the shared tab surface in app-space under the mirror transform');
-      const shareCss = fs.readFileSync('static/yolomux.css', 'utf8');
-      assert.ok(/body\.app-vw-lte-1500 \.app-menu-button/.test(shareCss), 'M0/M2: responsive topbar chrome is keyed by appViewport classes, not native media width');
-      assert.equal(/@media \(max-width: (1500|1280|1100|1080|980|760|720)px\)/.test(shareCss), false, 'M0/M2: mirror-sensitive breakpoints do not use native viewport media queries');
-      assert.ok(/body\.share-view-mode\.share-view-readonly \.share-mirror-stage \.preferences-scroll[\s\S]*\.share-mirror-stage \.info-list[\s\S]*overflow:\s*hidden !important[\s\S]*scrollbar-width:\s*none/.test(shareCss), 'read-only share mirrors disable local Preferences and YO!info scrollbar dragging while host scroll remains programmatic');
-      assert.ok(/body\.share-view-mode\.share-view-readonly \.share-mirror-stage \.xterm-viewport::-webkit-scrollbar[\s\S]*width:\s*0/.test(shareCss), 'DOIT.69: read-only share mirrors hide WebKit terminal scrollbar thumbs');
-      assert.equal(shareSource.includes('applyShareTerminalScale'), false, 'M4: share terminals no longer have a per-pane scale path');
-      assert.equal(shareCss.includes('--share-terminal-scale'), false, 'M4: share terminal scale CSS is removed; root transform owns mirror scaling');
-      assert.ok(/@font-face\s*\{[\s\S]*font-family:\s*"YOLOmux UI"[\s\S]*yolomux-ui\.woff2/.test(shareCss), 'M8: bundled UI font is declared');
-      assert.ok(/@font-face\s*\{[\s\S]*font-family:\s*"YOLOmux Mono"[\s\S]*yolomux-mono\.woff2/.test(shareCss), 'M8: bundled mono font is declared');
-      assert.ok(/@font-face\s*\{[\s\S]*font-family:\s*"YOLOmux UI"[\s\S]*font-display:\s*block/.test(shareCss), 'M9: bundled UI font blocks fallback-font layout during first paint');
-      assert.ok(/@font-face\s*\{[\s\S]*font-family:\s*"YOLOmux Mono"[\s\S]*font-display:\s*block/.test(shareCss), 'M9: bundled mono font blocks fallback-font layout during first paint');
-      assert.ok(/--ui-font:\s*"YOLOmux UI",/.test(shareCss) && /--mono-font:\s*"YOLOmux Mono",/.test(shareCss), 'M8: bundled fonts are first in the shared font tokens');
-      assert.ok(/\.share-viewer-mirror-status\.match\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'M9: mirror match status is visible in the share banner');
-      assert.ok(/message\.type === 'host-resize' \|\| message\.type === shareMirrorProtocol\.frames\.terminalHostResize[\s\S]*updateShareHostTerminalSize/.test(shareSource), 'share viewers apply host-resize and terminal-host-resize UI events');
-      assert.ok(/const sharePointerPublishIntervalMs = 50/.test(shareSource), 'share hosts throttle pointer publication to about 20Hz before latest-wins server coalescing');
-      assert.ok(/function installSharePointerPublisher\(\)[\s\S]*pointermove[\s\S]*queueSharePointerMove[\s\S]*pointerdown[\s\S]*sharePublishPointerEvent/.test(shareSource), 'share hosts publish throttled pointer movement and click events');
-      assert.ok(/function sharePublishPointerEvent\(event, options = \{\}\)[\s\S]*shareReplayFeatureEnabled\(\)[\s\S]*sharePublish\('pointer', \{\.\.\.payload, visible: true\}\)[\s\S]*return[\s\S]*sharePublish\('pointer', payload\)/.test(shareSource), 'default DOM replay shares publish pointer through one unsequenced pointer frame instead of double-sending sequenced replay deltas');
-      assert.ok(/function queueSharePointerMove\(event\)[\s\S]*if \(!shareCanPublishUi\(\)\) return/.test(shareSource), 'share pointer publishing is shared by hosts and rw viewers');
-      assert.ok(/function shareReadOnlyReplayModeEnabled\(\)[\s\S]*shareViewMode && !shareWriteMode && shareReplayFeatureEnabled/.test(shareSource), 'DOIT.72 P4.2: read-only replay mode has one shared predicate');
-      assert.ok(/function shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode && shareReplayFeatureEnabled/.test(shareSource), 'DOIT.72 P5.2: write and read-only replay viewers share one replay shell predicate');
-      assert.ok(/function shareSemanticReadOnlyMirrorEnabled\(\)[\s\S]*!shareReplayViewerModeEnabled\(\)/.test(shareSource), 'DOIT.72 P5.2: semantic read-only mirror mode is the explicit replay opt-out path');
-      assert.ok(/async function applyShareUiState\(payload = \{\}\)[\s\S]*!shareSemanticMirrorApplyAllowed\(\)/.test(shareSource), 'DOIT.72 P4.2: semantic UI-state apply is guarded away from read-only replay mode');
-      assert.ok(/function applySharePopupLayer\(payload = \{\}, sender = ''\)[\s\S]*shareReadOnlyReplayModeEnabled\(\)/.test(shareSource), 'DOIT.72 P4.2: legacy popup-layer apply is guarded away from read-only replay mode');
-      assert.ok(/function appOverlayRootElement\(\)[\s\S]*overlay\.id = 'appOverlayRoot'[\s\S]*root\.appendChild\(overlay\)/.test(shareSource), 'DOIT.72 P4.3: host-visible overlay DOM lives under #appRoot so read-only replay serializes it normally');
-      assert.ok(/\.app-overlay-root\s*\{[\s\S]*position:\s*fixed[\s\S]*z-index:\s*var\(--z-share-presence\)[\s\S]*pointer-events:\s*none/.test(shareCss), 'DOIT.72 P4.3: app overlay root is fixed app-space chrome and does not resize the layout grid');
-      assert.ok(/function createContextMenuController\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(menu\)/.test(shareSource), 'DOIT.72 P4.3: context menus mount under the replayed app overlay root');
-      assert.ok(/function detachPaneTabPopover\(tab, popover\)[\s\S]*const host = appOverlayRootElement\(\)[\s\S]*host\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: detached tab popovers mount under the replayed app overlay root');
-      assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: diff ref popovers mount under the replayed app overlay root');
-      assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: repo hover popovers mount under the replayed app overlay root');
-      assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null, options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(shareSource), 'DOIT.72 P4.3: local and external image preview popovers mount under the replayed app overlay root');
-      assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(shareSource), 'DOIT.72 P4.3: rename dialogs mount under the replayed app overlay root');
-      assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(shareSource), 'DOIT.72 P4.3: editor decision dialogs mount under the replayed app overlay root');
-      assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(shareSource), 'DOIT.72 P4.3: command palette modal DOM mounts under the replayed app overlay root');
-      assert.ok(/function shareReplayTerminalPlaceholderDiagnostics\(\)[\s\S]*healthy: connected === entries\.length/.test(shareSource), 'DOIT.72 P4.4: replay health names terminal placeholder health directly');
-      assert.ok(/function shareReplayHealthDiagnostics\(\)[\s\S]*match: shareReplayShellState\.status === 'mirrored' && terminalPlaceholders\.healthy[\s\S]*domDigest: shareReplayCurrentDomDigest\(\)/.test(shareSource), 'DOIT.72 P4.4: read-only replay parity is reported through replay health and DOM digest');
-      assert.ok(/function applyShareReplayShellMessage\(message = \{\}\)[\s\S]*message\.type === shareMirrorProtocol\.frames\.geometryDigest[\s\S]*exposeShareDebugApi\(\)[\s\S]*return true/.test(shareSource), 'DOIT.72 P4.4: replay viewers consume legacy geometry digest frames without semantic geometry repair');
-      assert.ok(/function installShareReadonlyInteractionBlocker\(\)[\s\S]*shareSemanticReadOnlyMirrorEnabled\(\)[\s\S]*window\.addEventListener\(name, blockShareReadonlyInteraction/.test(shareSource), 'semantic read-only share viewers install a capture-phase UI interaction blocker');
-      assert.ok(/'touchstart'[\s\S]*'touchmove'[\s\S]*'wheel'/.test(shareSource.slice(shareSource.indexOf('function installShareReadonlyInteractionBlocker'))), 'DOIT.67: read-only share blocker captures touch/wheel before mirrored panes can scroll locally');
-      assert.ok(/function shareReadonlyPointerEventHitsScrollContainer\(event\)[\s\S]*shareScrollTargetForElement\(event\.target\)[\s\S]*descriptor\.element === event\.target/.test(shareSource), 'read-only share pointerdown on native scroll containers is blocked so scrollbar drags cannot mutate local scroll');
-      assert.ok(/function blockShareReadonlyInteraction\(event\)[\s\S]*shareSemanticReadOnlyMirrorEnabled\(\)[\s\S]*\[data-share-viewer-control\][\s\S]*preventDefault/.test(shareSource), 'semantic read-only share blocking exempts only viewer chrome controls');
-      assert.ok(/installShareReadonlyInteractionBlocker\(\);[\s\S]*window\.addEventListener\('keydown', handleGlobalShortcutKeydown, true\)/.test(shareSource), 'read-only share interaction blocking is installed before global shortcuts can mutate local UI');
-      assert.ok(/function openAppMenu\(wrapper, options = \{\}\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: top-level app menu opens immediately publish the host-owned popup layer');
-      assert.ok(/function closeAppMenus\(keepOpen = null\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)/.test(shareSource), 'DOIT.67: top-level app menu closes immediately clear the host-owned popup layer');
-      assert.ok(/function sharePopupLayerElements\(\)[\s\S]*'\.app-menu\.open \.app-menu-popover'/.test(shareSource), 'topbar File/tmux/Tabs/language dropdowns are captured through the shared popup-layer selector');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'menu'[\s\S]*return;/.test(shareSource), 'share viewers ignore legacy menu-id frames instead of re-rendering local menus');
-      assert.ok(/function applyShareUiMessage\(message\)[\s\S]*message\.type === 'popup-layer'[\s\S]*applySharePopupLayer/.test(shareSource), 'share viewers apply inert host-owned popup-layer frames');
-      assert.ok(/function sharePopupLayerPayload\(\)[\s\S]*seq: sharePopupLayerSequence[\s\S]*owner: shareClientId/.test(shareSource), 'DOIT.67: popup-layer frames carry sequence and owner metadata');
-      assert.ok(/function applySharePopupLayer\(payload = \{\}, sender = ''\)[\s\S]*seq <= previousSeq[\s\S]*return/.test(shareSource), 'DOIT.67: stale popup-layer frames cannot resurrect closed popup HTML');
-      assert.ok(/function shareSanitizePopupHtml\(html = ''\)[\s\S]*data-share-secret[\s\S]*input\[value\*="\/share\/"\]/.test(shareSource), 'popup-layer serialization redacts marked share secrets and share URL inputs');
-      assert.ok(/\.share-popup-mirror-layer\s*\{[\s\S]*pointer-events:\s*none/.test(shareCss), 'mirrored popup layer is inert on share viewers');
-      assert.ok(/\.share-popup-mirror-layer\s*\{[\s\S]*position:\s*absolute/.test(shareCss), 'DOIT.67: mirrored popup layer lives in scaled app space, not native viewport space');
-      const popupChildRule = shareCss.match(/\.share-popup-mirror-item > \*\s*\{(?<body>[^}]*)\}/)?.groups?.body || '';
-      assert.equal(/transform:\s*scale/.test(popupChildRule), false, 'DOIT.67: mirrored popup content is not double-scaled inside the root mirror transform');
-      assert.ok(/top:\s*0\s*!important/.test(popupChildRule) && /left:\s*0\s*!important/.test(popupChildRule), 'DOIT.67: mirrored popup children are anchored to the host-measured shell');
-      assert.ok(/visibility:\s*visible\s*!important/.test(popupChildRule) && /opacity:\s*1\s*!important/.test(popupChildRule), 'DOIT.67: mirrored popup children stay visible without host-only open ancestors');
-      const popupModalRule = shareCss.match(/\.share-popup-mirror-item > \.modal\s*\{(?<body>[^}]*)\}/)?.groups?.body || '';
-      assert.ok(/width:\s*100%\s*!important/.test(popupModalRule) && /height:\s*100%\s*!important/.test(popupModalRule) && /max-height:\s*none\s*!important/.test(popupModalRule), 'mirrored modal overlays fill the host-measured shell without using client viewport dimensions');
-      assert.ok(/\.share-popup-mirror-item > \.modal\.share-open \.modal-dialog\s*\{[\s\S]*width:\s*min\(var\(--dialog-wide-inline-size\),\s*100%\)\s*!important/.test(shareCss), 'mirrored YO!share dialog width uses the shared host/replay capacity token relative to the measured shell');
-      assert.ok(/function shareTerminalBytesFromMessage\(session, message\)[\s\S]*message\.ch !== 'term'[\s\S]*atob\(message\.data\)/.test(shareSource), 'share-view terminal output is decoded from tagged terminal frames');
-  	    assert.ok(/function scheduleShareTopologySnapshot\(reason = 'topology'\)[\s\S]*scheduleShareUiStatePublish\(\{reason: `topology:\$\{cleanReason\}`\}\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'DOIT.72 P0.3: topology changes route through one full UI-state snapshot scheduler and a replay keyframe scheduler');
-  	    assert.ok(/shareTopologyKeyframePointerQuietMs:\s*500/.test(timingSource) && /const shareTopologyKeyframeMaxDeferralMs = shareReplayHostKeyframeMinIntervalMs/.test(shareSource) && /function shareTopologyDomKeyframeDelayMs\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayHostLastKeyframeAt[\s\S]*sharePointerQuietDelayMs\(\)/.test(shareSource), 'topology replay keyframes wait for a pointer-quiet window and respect the host keyframe floor');
-  	    assert.ok(/function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*const cleanReason = shareReplayKeyframeReason\(reason\)[\s\S]*if \(cleanReason !== 'topology'\) clearScheduledShareTopologyDomKeyframe\(\)/.test(shareSource), 'manual/debug/join keyframes cancel redundant pending topology keyframes after they capture the current DOM');
-  	    assert.ok(/function scheduleShareTopologyDomKeyframe\(\)[\s\S]*!shareHasActiveShare\(\)[\s\S]*shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayTopologyKeyframeQueuedAt[\s\S]*shareReplayTopologyKeyframeTimer = setTimeout\(runScheduledShareTopologyDomKeyframe, 0\)/.test(shareSource) && /function runScheduledShareTopologyDomKeyframe\(\)[\s\S]*shareTopologyDomKeyframeDelayMs\(\)[\s\S]*requestAnimationFrame[\s\S]*sharePublishDomKeyframe\('topology'\)/.test(shareSource), 'default DOM replay shares pause topology mutations and coalesce delayed topology keyframes after layout render so Finder minimize/restore cannot leave stale panes');
-  	    assert.ok(/shareReplayPostTopologyKeyframeQuietExtraMs:\s*1000/.test(timingSource) && /const shareReplayPostTopologyKeyframeQuietMs = shareReplayHostKeyframeMinIntervalMs \+ yolomuxTiming\.shareReplayPostTopologyKeyframeQuietExtraMs/.test(shareSource) && /function shareReplayDrainMutationPublisher\(\)[\s\S]*takeRecords[\s\S]*shareReplayPendingMutations\.splice\(0, shareReplayPendingMutations\.length\)[\s\S]*shareReplayDeltaFramePending = false/.test(shareSource) && /function shareReplayPauseMutationPublisherForTopology\(\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*shareReplayTopologyMutationPauseTimer = setTimeout/.test(shareSource) && /function shareReplayResetMutationPublisherForKeyframe\(reason = 'manual-debug'\)[\s\S]*shareReplayMutationPublisherPaused = true[\s\S]*shareReplayDrainMutationPublisher\(\)[\s\S]*cleanReason === 'join' \|\| cleanReason === 'topology'[\s\S]*shareReplayResumeMutationPublisherAfterFrames\(quietMs\)/.test(shareSource) && /function sharePublishDomKeyframeNow\(reason = 'manual-debug'\)[\s\S]*followsRecentTopology[\s\S]*shareReplayResetMutationPublisherForKeyframe\(cancelsScheduledTopology \|\| followsRecentTopology \? 'topology' : cleanReason\)[\s\S]*sharePublish\(shareMirrorProtocol\.frames\.domKeyframe/.test(shareSource), 'DOM keyframes discard pending mutation deltas and join/topology resets keep a keyframe-floor quiet window so boot/layout churn cannot immediately stale the viewer');
-  	    assert.ok(/let shareReplayHostMirroredNodes = new WeakSet\(\)/.test(shareSource) && /function shareReplayHostMutationTargetIsMirrored\(node\)[\s\S]*const disconnected = element\.isConnected === false[\s\S]*const outsideRoot = typeof root\?\.contains === 'function' && !root\.contains\(element\)[\s\S]*shareReplayHostMirroredNodes\.has/.test(shareSource) && /function shareCreateDomKeyframePayload\(reason = 'manual-debug'\)[\s\S]*mirroredNodes: \[\][\s\S]*shareReplayHostMirroredNodes = shareReplayHostMirroredNodeSet\(context\.mirroredNodes\)/.test(shareSource) && /function shareReplayMutationEntries\(records = \[\]\)[\s\S]*!shareReplayHostMutationTargetIsMirrored\(target\)[\s\S]*continue/.test(shareSource), 'DOM replay host only publishes mutation deltas for nodes serialized into the current mirror keyframe');
-  	    assert.ok(/function shareReplayMutationEntries\(records = \[\]\)[\s\S]*let needsKeyframe = false[\s\S]*shareReplayMutationNodeIsIgnored\(node\)[\s\S]*needsKeyframe = true[\s\S]*entries\.splice\(0, entries\.length\)[\s\S]*scheduleShareTopologyDomKeyframe\(\)/.test(shareSource), 'child-list mutations touching ignored Finder/private nodes do not emit partial deltas that can duplicate Finder and Differ panes');
-  	    assert.ok(/const shareReplayHostDeltaMaxBytes = 48 \* 1024/.test(shareSource) && /function shareReplayFlushMutationDeltas\(\)[\s\S]*shareReplayPublishDeltaPayload\(payload, 'mutation', \{maxBytes: shareReplayHostDeltaMaxBytes\}\)[\s\S]*published\?\.skipped[\s\S]*sharePublishDomKeyframe\('backpressure'\)[\s\S]*return null[\s\S]*return published/.test(shareSource), 'oversized DOM delta batches request a throttled keyframe through the single-serialize publish path instead of creating replay sequence gaps');
-  	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
-      assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
-      assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
-      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
-      assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
-      assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
-      assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
-      assert.ok(/function applyGlobalThemeMode\(options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('theme'\)[\s\S]*scheduleShareAppearancePublish\(\{reason: options\.reason \|\| 'theme', topology: false\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'all host theme applications publish appearance frames through the shared apply parent');
-      assert.ok(/function installGlobalThemeMediaListener\(\)[\s\S]*applyGlobalThemeMode\(\{updateEditor: true, updateTerminals: true, reason: 'theme-system'\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'system OS theme changes identify their appearance publish reason through the shared parent');
-      assert.ok(/function openAppMenu\(wrapper, options = \{\}\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)[\s\S]*scheduleShareTopologySnapshot\('popup-open'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'popup opens schedule a full topology snapshot');
-      assert.ok(/function closeAppMenus\(keepOpen = null\)[\s\S]*scheduleSharePopupLayerPublish\(\{immediate: true\}\)[\s\S]*scheduleShareTopologySnapshot\('popup-close'\)/.test(fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')), 'popup closes schedule a full topology snapshot');
-      assert.ok(/function createShareFromForm\(form\)[\s\S]*sharePublishLayout\(\)[\s\S]*sharePublishUiState\(\)/.test(shareSource), 'newly-created shares immediately receive the full host UI state');
-      assert.ok(/function setFocusedPanelItem\(item, options = \{\}\)[\s\S]*sharePublish\('focus', \{item\}\)/.test(shareSource), 'focused-pane changes publish share focus updates');
-      assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)/.test(shareSource), 'pane tab activation publishes share active-tab updates');
-      assert.ok(shareCss.includes('--z-share-presence: 320'), 'share presence has a dedicated z-index above menus');
-      assert.ok(/\.share-ghost-cursor\s*\{[\s\S]*z-index:\s*var\(--z-share-presence\)[\s\S]*pointer-events:\s*none/.test(shareCss), 'share ghost cursor overlays the UI without taking pointer input');
-      assert.ok(/\.share-ghost-cursor\s*\{[\s\S]*border-radius:\s*50%[\s\S]*box-shadow:/.test(shareCss), 'remote share cursor renders as a target, not a native pointer arrow');
-      assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*height:\s*36px[\s\S]*background:\s*var\(--share-cursor-color/.test(shareCss), 'remote share cursor has a vertical target crosshair');
-      assert.ok(/\.share-ghost-cursor::after\s*\{[\s\S]*width:\s*36px[\s\S]*background:\s*var\(--share-cursor-color/.test(shareCss), 'remote share cursor has a horizontal target crosshair');
-      assert.ok(/\.share-click-ripple\s*\{[\s\S]*animation:\s*share-click-ripple/.test(shareCss), 'share click ripples are transient CSS animations');
-      assert.ok(/function renderShareClickRipple\(x, y, sender = ''\)[\s\S]*addEventListener\('animationend', \(\) => ripple\.remove\(\), \{once: true\}\)[\s\S]*addEventListener\('animationcancel', \(\) => ripple\.remove\(\), \{once: true\}\)/.test(shareSource), 'CSS-JS-1: share click ripple cleanup is owned by CSS animation events');
-      assert.equal(/renderShareClickRipple[\s\S]*setTimeout\([\s\S]*ripple\.remove\(\)[\s\S]*560/.test(shareSource), false, 'CSS-JS-1: share click ripple cleanup has no JS duration literal');
-      assert.ok(/\.share-status-pill\.share-mode-read\s*\{[\s\S]*var\(--good\)/.test(shareCss), 'read share status uses the green/good mode color');
-      assert.ok(/\.share-status-pill\.share-mode-write\s*\{[\s\S]*var\(--bad\)/.test(shareCss), 'write share status uses the red/bad mode color');
-      assert.ok(/\.share-ghost-cursor::before\s*\{[\s\S]*--share-cursor-color/.test(shareCss), 'share cursor color is participant-specific');
-      assert.ok(/--share-stage-bg:\s*var\(--paint-black\)/.test(shareCss), 'M3: share view keeps one shared black stage token for letterbox/crop bands');
-      assert.equal(/body\.theme-light\s*\{[\s\S]*--share-stage-bg:/.test(shareCss), false, 'M3: light mode inherits the single black share-stage owner');
-      assert.ok(/\.share-mirror-stage\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*hidden[\s\S]*background:\s*var\(--share-stage-bg\)/.test(shareCss), 'M3: share view has a fixed black clipping stage for letterbox/crop bands');
-      assert.ok(/body\.share-view-mode \.share-mirror-stage \.app-root\s*\{[\s\S]*position:\s*absolute[\s\S]*transform:\s*translate3d\(var\(--share-mirror-tx/.test(shareCss), 'M3: share view transforms the app root inside the mirror stage');
-      assert.ok(/\.share-viewer-banner\s*\{[\s\S]*position:\s*fixed[\s\S]*bottom:\s*8px/.test(shareCss), 'M3: share viewer banner is fixed outside the mirror root');
-    }
+    const renderedSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    assert.ok(renderedSource.includes("node.className = 'app-modal-overlay keyboard-shortcuts-overlay'"), 'keyboard shortcuts use the shared modal overlay parent');
+    assert.ok(renderedSource.includes("node.className = 'app-modal-overlay command-palette'"), 'command palette uses the shared modal overlay parent');
+    assert.ok(/backdrop\.className = `app-modal-overlay file-editor-dialog-backdrop/.test(renderedSource), 'file editor dialogs use the shared modal overlay parent');
+    assert.ok(renderedSource.includes("overlay.className = 'app-modal-overlay session-rename-backdrop'"), 'rename dialog uses the shared modal overlay parent');
+    assert.ok(/function appOverlayRootElement\(\)[\s\S]*overlay\.id = 'appOverlayRoot'[\s\S]*root\.appendChild\(overlay\)/.test(renderedSource), 'app-visible overlay DOM lives under #appRoot');
+    assert.ok(/function createContextMenuController\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(menu\)/.test(renderedSource), 'context menus mount under the app overlay root');
+    assert.ok(/function detachPaneTabPopover\(tab, popover\)[\s\S]*const host = appOverlayRootElement\(\)[\s\S]*host\.appendChild\(popover\)/.test(renderedSource), 'detached tab popovers mount under the app overlay root');
+    assert.ok(/function ensureDiffRefPopover\(\)[\s\S]*appOverlayRootElement\(\)\?\.appendChild\(popover\)/.test(renderedSource), 'diff ref popovers mount under the app overlay root');
+    assert.ok(/function fileTreeRepoPopoverNode\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(renderedSource), 'repo hover popovers mount under the app overlay root');
+    assert.ok(/function openFileImagePreview\(anchor, path, entry, point = null, options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(popover\)/.test(renderedSource), 'image preview popovers mount under the app overlay root');
+    assert.ok(/function showSessionRenameDialog\(session\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(overlay\)/.test(renderedSource), 'rename dialogs mount under the app overlay root');
+    assert.ok(/function showFileEditorDecisionDialog\(options = \{\}\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(backdrop\)/.test(renderedSource), 'editor decision dialogs mount under the app overlay root');
+    assert.ok(/function ensureCommandPalette\(\)[\s\S]*appOverlayRootElement\(\)\.appendChild\(node\)/.test(renderedSource), 'command palette DOM mounts under the app overlay root');
+    const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.equal(/serverWatchRenew/.test(timingSource), false, 'SSE subscriber lifecycle owns watch-root retention; browser renewal cannot return');
+    assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'filesystem watch keyframes retain their odd cadence');
+    assert.ok(/autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'the disconnected auto-approve fallback poll stays in the shared timing owner');
+    assert.equal(/const autoApproveDisconnectedPollMs = 5003/.test(bootstrapSource), false, 'bootstrap does not duplicate the fallback timing literal');
   });
 
-  test('share replay protocol keeps its frame vocabulary and semantic state isolated', () => {
-    const metaApi = loadYolomux('', ['1'], 'https:');
-    const protocol = metaApi.shareMirrorProtocolForTest;
-    assert.equal(protocol.version, 1, 'DOIT.72 P1.1: replay frames carry protocol version 1');
-    assert.deepStrictEqual([...protocol.replayFrameTypes].sort(), [
-      'dom-delta',
-      'dom-keyframe',
-      'dom-keyframe-ack',
-      'dom-keyframe-request',
-      'dom-replay-error',
-      'terminal-host-resize',
-    ].sort(), 'DOIT.72 P1.1: replay frame vocabulary is centralized');
-    assert.deepStrictEqual([...protocol.keyframeReasons], ['join', 'gap', 'digest', 'replay-error', 'backpressure', 'topology', 'manual-debug'], 'DOIT.72 P1.1: keyframe request reasons are centralized');
-    assert.deepStrictEqual([...protocol.sequenceFields], ['epoch', 'sequence', 'baseSequence'], 'DOIT.72 P1.1: replay sequence fields are centralized');
-    assert.deepStrictEqual([...protocol.terminalPlaceholder.fields], ['placeholderId', 'session', 'rows', 'cols', 'terminalEpoch'], 'DOIT.72 P1.1: terminal placeholder metadata fields are centralized');
-    assert.equal(protocol.frames.inputIntent, 'input-intent', 'DOIT.72 P5.1: write-mode input intents use a protocol-owned frame name');
-    assert.deepStrictEqual(canonical(protocol.inputIntentTypes), {
-      hostCommand: 'host-command',
-      menuCommand: 'menu-command',
-      tabActivate: 'tab-activate',
-      terminalInput: 'terminal-input',
-      terminalPaste: 'terminal-paste',
-      terminalScroll: 'terminal-scroll',
-    }, 'DOIT.72 P5.1: write-mode input intent type names are centralized');
-    assert.equal(protocol.redaction.policyVersion, 1, 'DOIT.72 P1.1: redaction policy version is centralized');
-    assert.equal(protocol.debugNames.domKeyframe, 'DOM keyframe', 'DOIT.72 P1.1: debug names are centralized');
-    assert.equal(metaApi.shareGeometryRepairActionForDiffForTest('domDigest'), protocol.frames.domKeyframe, 'DOIT.72 P1.1: dom digest repair asks for the protocol keyframe frame');
-    assert.equal(metaApi.shareGeometryRepairActionForDiffForTest('terminalCells'), protocol.frames.terminalHostResize, 'DOIT.72 P1.1: terminal drift repair uses the protocol resize frame');
-    const sequencedTypes = ['layout', 'viewport', 'appearance', 'popup-layer', 'geometry-digest', 'host-resize'];
-    const frames = sequencedTypes.map(type => metaApi.shareBuildUiMessageForTest(type, {kind: type}, {reason: `test-${type}`}));
-    frames.forEach((frame, index) => {
-      assert.equal(frame.epoch, 1, `${frame.type} carries the current mirror epoch`);
-      assert.equal(frame.sequence, index + 1, `${frame.type} carries a monotonic mirror sequence`);
-      assert.equal(frame.reason, `test-${frame.type}`, `${frame.type} carries a mirror reason`);
-      assert.equal(frame.sender.length > 0, true, `${frame.type} carries a sender id`);
-    });
-    const uiStateFrame = metaApi.shareBuildUiMessageForTest('ui-state', {layout: 'left'}, {reason: 'full-reset'});
-    assert.ok(uiStateFrame.epoch > frames[frames.length - 1].epoch, 'full ui-state frames advance the mirror epoch');
-    assert.equal(uiStateFrame.sequence, frames.length + 1, 'full ui-state frames continue the sender sequence');
-    assert.equal(uiStateFrame.reason, 'full-reset', 'ui-state frames carry the reset reason');
-    const keyframeFrame = metaApi.shareBuildUiMessageForTest(protocol.frames.domKeyframe, {root: {}}, {reason: 'join'});
-    assert.equal(keyframeFrame.version, protocol.version, 'DOIT.72 P1.1: replay frames carry the protocol version');
-    assert.equal(keyframeFrame.reason, 'join', 'DOIT.72 P1.1: replay frames carry protocol-owned reason metadata');
-    assert.equal(keyframeFrame.epoch, 2, 'YO!share replay keyframes use a replay-only epoch that semantic frames cannot advance');
-    assert.equal(keyframeFrame.sequence, 1, 'YO!share replay keyframes use a replay-only sequence that semantic frames cannot advance');
-    const interleavedUiStateFrame = metaApi.shareBuildUiMessageForTest('ui-state', {layout: 'left'}, {reason: 'finder-semantic'});
-    const interleavedGeometryFrame = metaApi.shareBuildUiMessageForTest('geometry-digest', {digest: 'safari-jitter'}, {reason: 'safari-cadence'});
-    const deltaFrame = metaApi.shareBuildUiMessageForTest(protocol.frames.domDelta, {mutations: []}, {reason: 'mutation'});
-    assert.ok(interleavedUiStateFrame.sequence > frames.length + 1, 'semantic frames continue their own mirror sequence between replay frames');
-    assert.equal(interleavedGeometryFrame.type, 'geometry-digest', 'Safari cadence geometry frames are semantic frames');
-    assert.ok(interleavedGeometryFrame.sequence > interleavedUiStateFrame.sequence, 'geometry digest frames continue the semantic sequence between replay frames');
-    assert.equal(deltaFrame.epoch, keyframeFrame.epoch, 'YO!share replay deltas stay in the keyframe replay epoch despite interleaved semantic frames');
-    assert.equal(deltaFrame.baseSequence, keyframeFrame.sequence, 'YO!share replay delta base points at the previous replay frame, not the previous semantic frame');
-    assert.equal(deltaFrame.sequence, keyframeFrame.sequence + 1, 'YO!share replay delta sequence is contiguous with the replay keyframe');
-
-    const replayOffApi = loadYolomux('', ['1']);
-    assert.equal(replayOffApi.shareReplayFeatureEnabledForTest(), false, 'DOIT.72 P1.2: DOM replay keyframes are feature-flagged off by default');
-    assert.equal(replayOffApi.shareCreateDomKeyframePayloadForTest('join'), null, 'DOIT.72 P1.2: disabled replay flag prevents host keyframe serialization');
-
-    const replayShellApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-replay-shell', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    assert.equal(replayShellApi.shareReplayFeatureEnabledForTest(), true, 'DOIT.72 P4.1: read-only share viewers enable replay by default');
-    assert.equal(replayShellApi.shareReplayShellEnabledForTest(), true, 'DOIT.72 P4.1: read-only share viewers boot the replay shell without shareReplay=1');
-    const replayWriteApi = loadYolomux('?shareReplay=1', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-replay-write', mode: 'rw', session: '1', sessions: ['1']},
-    });
-    assert.equal(replayWriteApi.shareReplayShellEnabledForTest(), true, 'DOIT.72 P5.2: write shares boot the replay shell once input forwarding exists');
-    assert.equal(replayWriteApi.shareCanPublishUiForTest(), false, 'DOIT.72 P5.3: write replay viewers do not publish semantic UI-state/layout/popup frames');
-    const replayDisabledShellApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-replay-off', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    assert.equal(replayDisabledShellApi.shareReplaySemanticEscapeEnabledForTest(), true, 'DOIT.72 P4.1: shareReplay=0 is the temporary semantic escape hatch');
-    assert.equal(replayDisabledShellApi.shareReplayShellEnabledForTest(), false, 'DOIT.72 P4.1: the semantic escape hatch disables the read-only replay shell');
-    const replayStorageEscapeApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      localStorage: {'yolomux.shareReplaySemantic': '1'},
-      share: {view: true, id: 'share-replay-storage-off', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    assert.equal(replayStorageEscapeApi.shareReplayShellEnabledForTest(), false, 'DOIT.72 P4.1: the stored semantic escape hatch disables default read-only replay');
-
-    const replayApi = loadYolomux('?shareReplay=1', ['1'], 'https:');
-    assert.equal(replayApi.shareReplayFeatureEnabledForTest(), true, 'DOIT.72 P1.2: shareReplay=1 enables host keyframe serialization');
-    const replayRoot = replayApi.appRootForTest();
-    replayRoot.replaceChildren();
-    const finder = new TestElement('finder-fixture', 'section');
-    finder.className = 'file-explorer-panel';
-    finder.dataset.shareSurface = 'finder';
-    finder.textContent = 'Finder files';
-    const editor = new TestElement('editor-fixture', 'article');
-    editor.className = 'file-editor-panel';
-    editor.dataset.item = 'file:/repo/README.md';
-    editor.textContent = 'Editor body';
-    const prefs = new TestElement('prefs-fixture', 'section');
-    prefs.className = 'preferences-panel';
-    prefs.textContent = 'Preferences body';
-	    const popup = new TestElement('popup-fixture', 'div');
-	    popup.className = 'app-menu-popover open';
-	    popup.textContent = 'Popup body';
-	    const customTag = new TestElement('custom-think', 'think');
-	    customTag.textContent = 'custom think marker';
-	    const privateNode = new TestElement('private-fixture', 'div');
-	    privateNode.dataset.sharePrivate = '1';
-	    privateNode.textContent = 'private token text';
-    const terminal = new TestElement('term-1', 'div');
-    terminal.className = 'terminal';
-    const terminalInternal = new TestElement('xterm-internal', 'div');
-    terminalInternal.className = 'xterm-screen';
-    terminalInternal.textContent = 'xterm internal text';
-    terminal.appendChild(terminalInternal);
-    const terminalTwo = new TestElement('term-2', 'div');
-    terminalTwo.className = 'terminal';
-    const terminalTwoInternal = new TestElement('xterm-internal-2', 'div');
-    terminalTwoInternal.className = 'xterm-screen';
-    terminalTwoInternal.textContent = 'xterm second internal text';
-    terminalTwo.appendChild(terminalTwoInternal);
-    const hiddenTerminal = new TestElement('term-hidden', 'div');
-    hiddenTerminal.className = 'terminal';
-    hiddenTerminal.setAttribute('hidden', '');
-    hiddenTerminal.rect = {width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0};
-    const hiddenTerminalInternal = new TestElement('xterm-hidden-internal', 'div');
-    hiddenTerminalInternal.className = 'xterm-screen';
-    hiddenTerminalInternal.textContent = 'hidden xterm internal text';
-    hiddenTerminal.appendChild(hiddenTerminalInternal);
-    const panelPoolNode = replayApi.testElementForId('panelPool');
-    panelPoolNode.replaceChildren();
-    const pooledTerminal = new TestElement('term-pooled', 'div');
-    pooledTerminal.className = 'terminal';
-    const pooledTerminalInternal = new TestElement('xterm-pooled-internal', 'div');
-    pooledTerminalInternal.className = 'xterm-screen';
-    pooledTerminalInternal.textContent = 'pooled xterm internal text';
-    pooledTerminal.appendChild(pooledTerminalInternal);
-    panelPoolNode.appendChild(pooledTerminal);
-	    replayRoot.append(finder, editor, prefs, popup, customTag, privateNode, terminal, terminalTwo, hiddenTerminal, panelPoolNode);
-    replayApi.registerTerminalForTest('1', {rows: 28, cols: 106, focus() {}});
-    replayApi.registerTerminalForTest('2', {rows: 31, cols: 120, focus() {}});
-    replayApi.registerTerminalForTest('hidden', {rows: 40, cols: 140, focus() {}});
-    replayApi.registerTerminalForTest('pooled', {rows: 50, cols: 150, focus() {}});
-    const replayMessage = replayApi.shareCreateDomKeyframeMessageForTest('join');
-    assert.equal(replayMessage.type, replayApi.shareMirrorProtocolForTest.frames.domKeyframe, 'DOIT.72 P1.2: serializer returns a dom-keyframe message');
-    assert.equal(replayMessage.version, replayApi.shareMirrorProtocolForTest.version, 'DOIT.72 P1.2: keyframe message carries replay protocol version');
-    assert.equal(replayMessage.reason, 'join', 'DOIT.72 P1.2: keyframe message carries the requested keyframe reason');
-    const replayPayload = replayMessage.payload;
-    assert.equal(replayPayload.root.tag, 'div', 'DOIT.72 P1.2: keyframe root serializes #appRoot');
-    assert.equal(replayPayload.root.attrs.id, 'appRoot', 'DOIT.72 P1.2: root attributes are captured');
-    assert.deepStrictEqual(Object.keys(replayPayload.assets).sort(), ['css', 'fonts', 'js'], 'DOIT.72 P1.2: keyframe captures asset and font fingerprints');
-    assert.deepStrictEqual(Object.keys(replayPayload.viewport).sort(), ['height', 'width'], 'DOIT.72 P1.2: keyframe captures host viewport');
-    const walkReplayNodes = node => [node, ...(node.children || []).flatMap(walkReplayNodes)];
-    const replayNodes = walkReplayNodes(replayPayload.root);
-    assert.deepStrictEqual(replayNodes.map(node => node.nodeId), replayNodes.map((_node, index) => index + 1), 'DOIT.72 P1.2: node ids are stable and sequential within each keyframe');
-	    const replayJson = JSON.stringify(replayPayload.root);
-	    assert.ok(replayJson.includes('Finder files') && replayJson.includes('Editor body') && replayJson.includes('Preferences body') && replayJson.includes('Popup body'), 'DOIT.72 P1.2: representative app surfaces are serialized');
-	    assert.ok(replayJson.includes('custom think marker'), 'YO!share keyframes preserve text from browser-created custom tags');
-	    const customReplayNode = replayNodes.find(node => node.attrs?.id === 'custom-think');
-	    assert.equal(customReplayNode?.tag, 'span', 'YO!share keyframes coerce unsupported custom tags to inert spans');
-	    assert.equal(replayJson.includes('"tag":"think"'), false, 'YO!share keyframes never emit unsupported custom tag names');
-	    assert.equal(replayJson.includes('private token text'), false, 'DOIT.72 P1.2: private nodes are excluded from the keyframe');
-    assert.equal(replayJson.includes('xterm internal text'), false, 'DOIT.72 P1.2: terminal internals are excluded from the keyframe');
-    assert.equal(replayJson.includes('xterm second internal text'), false, 'DOIT.72 P3.1: second visible terminal internals are excluded from the keyframe');
-    assert.equal(replayJson.includes('hidden xterm internal text'), false, 'DOIT.72 P3.1: hidden terminal internals are excluded from the keyframe');
-    assert.equal(replayJson.includes('pooled xterm internal text'), false, 'DOIT.72 P3.1: pooled terminal internals are excluded from the keyframe');
-    const terminalPlaceholderNodes = replayNodes.filter(node => node.attrs?.['data-share-terminal-placeholder']);
-    assert.deepStrictEqual(canonical(terminalPlaceholderNodes.map(node => ({
-      session: node.attrs['data-share-terminal-placeholder'],
-      rows: node.attrs['data-rows'],
-      cols: node.attrs['data-cols'],
-    }))), [
-      {session: '1', rows: '28', cols: '106'},
-      {session: '2', rows: '31', cols: '120'},
-    ], 'DOIT.72 P3.1: visible terminal DOM is replaced with one placeholder node per live terminal');
-    assert.deepStrictEqual(Array.from(replayPayload.terminals, entry => ({...entry})), [
-      {placeholderId: 'term-ph-1', session: '1', rows: 28, cols: 106, terminalEpoch: 1},
-      {placeholderId: 'term-ph-2', session: '2', rows: 31, cols: 120, terminalEpoch: 1},
-    ], 'DOIT.72 P3.1: terminal placeholder metadata records host terminal dimensions for visible terminals only');
-    assert.equal(replayPayload.terminals.some(entry => entry.session === 'hidden' || entry.session === 'pooled'), false, 'DOIT.72 P3.1: hidden and pooled terminals do not create stale placeholder metadata');
-    assert.deepStrictEqual({...replayPayload.redaction}, {policyVersion: 1, removedCount: 3}, 'DOIT.72 P3.1: keyframe records redaction metadata for private, hidden terminal, and pooled terminal exclusions');
-    const replayPayloadAgain = replayApi.shareCreateDomKeyframePayloadForTest('join');
-    assert.equal(replayApi.stableDigestJson(replayPayloadAgain.root), replayApi.stableDigestJson(replayPayload.root), 'DOIT.72 P1.2: unchanged DOM serializes with stable per-keyframe ids');
-
-    const scopedReplayApi = loadYolomux('?shareReplay=1', ['allowed-session', 'blocked-session'], 'https:');
-    scopedReplayApi.setActiveSharesForTest([{token: 'share-token', session: 'allowed-session', sessions: ['allowed-session']}]);
-    const scopedRoot = scopedReplayApi.appRootForTest();
-    scopedRoot.replaceChildren();
-    const allowedTerminal = new TestElement('term-allowed-session', 'div');
-    allowedTerminal.className = 'terminal';
-    allowedTerminal.appendChild(new TestElement('allowed-internal', 'div'));
-    allowedTerminal.children[0].textContent = 'allowed terminal internals';
-    const blockedTerminal = new TestElement('term-blocked-session', 'div');
-    blockedTerminal.className = 'terminal';
-    blockedTerminal.appendChild(new TestElement('blocked-internal', 'div'));
-    blockedTerminal.children[0].textContent = 'blocked terminal internals';
-    scopedRoot.append(allowedTerminal, blockedTerminal);
-    scopedReplayApi.registerTerminalForTest('allowed-session', {rows: 24, cols: 80, focus() {}});
-    scopedReplayApi.registerTerminalForTest('blocked-session', {rows: 24, cols: 80, focus() {}});
-    const scopedPayload = scopedReplayApi.shareCreateDomKeyframePayloadForTest('join');
-    const scopedNodes = walkReplayNodes(scopedPayload.root);
-    assert.deepStrictEqual([...scopedPayload.terminals.map(entry => entry.session)], ['allowed-session'], 'DOIT.0: replay terminal metadata is filtered to the active share session scope');
-    assert.deepStrictEqual([...scopedNodes.filter(node => node.attrs?.['data-share-terminal-placeholder']).map(node => node.attrs['data-share-terminal-placeholder'])], ['allowed-session'], 'DOIT.0: unauthorized terminal DOM is not serialized as a healthy placeholder');
-    assert.equal(JSON.stringify(scopedPayload.root).includes('blocked terminal internals'), false, 'DOIT.0: unauthorized terminal internals are dropped with the placeholder');
-
-    replayRoot.replaceChildren();
-    const scrollSurface = new TestElement('replay-scroll-surface', 'div');
-    scrollSurface.className = 'preferences-scroll';
-    scrollSurface.scrollTop = 321;
-    scrollSurface.scrollLeft = 17;
-    scrollSurface.scrollHeight = 900;
-    scrollSurface.clientHeight = 200;
-    scrollSurface.scrollWidth = 640;
-    scrollSurface.clientWidth = 300;
-    const terminalViewport = new TestElement('terminal-viewport', 'div');
-    terminalViewport.className = 'xterm-viewport';
-    terminalViewport.scrollTop = 222;
-    terminalViewport.scrollHeight = 900;
-    terminalViewport.clientHeight = 200;
-    const terminalShell = new TestElement('term-2', 'div');
-    terminalShell.className = 'terminal';
-    terminalShell.appendChild(terminalViewport);
-    replayRoot.append(scrollSurface, terminalShell);
-    const scrollPayload = replayApi.shareCreateDomKeyframePayloadForTest('scroll');
-    const scrollPayloadNodes = walkReplayNodes(scrollPayload.root);
-    const scrollPayloadNode = scrollPayloadNodes.find(node => node.attrs?.id === 'replay-scroll-surface');
-    assert.ok(scrollPayloadNode?.nodeId, 'DOIT.72 P2.4: scroll surface is present in the serialized replay root');
-    assert.deepStrictEqual(canonical(scrollPayload.scroll.map(entry => ({nodeId: entry.nodeId, target: entry.target, kind: entry.kind, top: entry.top, left: entry.left}))), [
-      {nodeId: scrollPayloadNode.nodeId, target: 'preferences', kind: 'preferences', top: 321, left: 17},
-    ], 'DOIT.72 P2.4: keyframes capture scrollable mirrored nodes by replay node id');
-    assert.equal(replayApi.shareReplayScrollEntryForElementForTest(terminalViewport), null, 'DOIT.72 P2.4: terminal internals are excluded from replay scroll capture');
-    const hostPointer = replayApi.sharePointerPayloadForPointForTest(123, 456, {click: true});
-    assert.deepStrictEqual(canonical(hostPointer), {scope: 'viewport', x: 123, y: 456, click: true}, 'DOIT.72 P2.4: host pointer payload stays in app-space coordinates for replay deltas');
-    assert.deepStrictEqual(canonical(replayApi.shareReplayPointerPayloadForTest({...hostPointer, visible: true}, 'host-browser')), {scope: 'viewport', x: 123, y: 456, visible: true, click: true, sender: 'host-browser'}, 'DOIT.72 P2.4: replay pointer payload preserves sender, click, and app-space coordinates');
-
-    replayRoot.replaceChildren();
-    const unsafeLink = new TestElement('unsafe-link', 'a');
-    unsafeLink.setAttribute('href', 'javascript:alert(1)');
-    unsafeLink.setAttribute('onclick', 'window.bad=1');
-    unsafeLink.textContent = 'Open https://host.example/share/abc123#t=secret-token token=secret-token';
-    const tokenAttrs = new TestElement('token-attrs', 'div');
-    tokenAttrs.setAttribute('data-share-token', 'secret-token');
-    tokenAttrs.setAttribute('shareToken', 'secret-token');
-    tokenAttrs.setAttribute('title', '/share/abc123#t=secret-token');
-    tokenAttrs.textContent = 'visible title';
-    const passwordInput = new TestElement('password-fixture', 'input');
-    passwordInput.setAttribute('type', 'password');
-    passwordInput.setAttribute('value', 'secret-token');
-    const scriptNode = new TestElement('script-fixture', 'script');
-    scriptNode.textContent = 'window.bad = true';
-    const redactedNode = new TestElement('redacted-fixture', 'div');
-    redactedNode.dataset.shareRedact = '1';
-    redactedNode.textContent = 'hidden redacted node';
-    replayRoot.append(unsafeLink, tokenAttrs, passwordInput, scriptNode, redactedNode);
-    const redactedPayload = replayApi.shareCreateDomKeyframePayloadForTest('manual-debug');
-    const redactedNodes = walkReplayNodes(redactedPayload.root);
-    const redactedJson = JSON.stringify(redactedPayload.root);
-    assert.equal(redactedJson.includes('secret-token'), false, 'DOIT.72 P1.3: keyframe sanitizer removes token values');
-    assert.equal(redactedJson.includes('/share/abc123'), false, 'DOIT.72 P1.3: keyframe sanitizer removes share URLs');
-    assert.equal(redactedJson.includes('onclick'), false, 'DOIT.72 P1.3: keyframe sanitizer removes inline event handlers');
-    assert.equal(redactedJson.includes('javascript:'), false, 'DOIT.72 P1.3: keyframe sanitizer removes dangerous URL schemes');
-    assert.equal(redactedJson.includes('data-share-token'), false, 'DOIT.72 P1.3: keyframe sanitizer removes token-bearing attributes');
-    assert.equal(redactedJson.includes('shareToken'), false, 'DOIT.72 P1.3: keyframe sanitizer removes camelCase token attributes');
-    assert.equal(redactedJson.includes('window.bad'), false, 'DOIT.72 P1.3: keyframe sanitizer removes script execution content');
-    assert.equal(redactedJson.includes('hidden redacted node'), false, 'DOIT.72 P1.3: keyframe sanitizer excludes data-share-redact nodes');
-    assert.ok(redactedNodes.some(node => node.attrs?.['data-share-redacted'] === 'secret'), 'DOIT.72 P1.3: password/secret fields serialize as placeholders');
-    assert.equal(replayApi.shareReplayRedactTextForTest('/share/abc123#t=secret-token').includes('/share/abc123'), false, 'DOIT.72 P1.3: direct redactor removes share paths');
-    assert.equal(replayApi.shareReplaySanitizeAttributeForTest('href', 'javascript:alert(1)'), null, 'DOIT.72 P1.3: attribute sanitizer rejects dangerous href');
-    assert.equal(replayApi.shareReplaySanitizeAttributeForTest('shareToken', 'secret-token'), null, 'DOIT.72 P1.3: attribute sanitizer rejects token attributes');
-    const debugCopy = replayApi.shareDebugTextForClipboardForTest({
-      url: 'https://host.example/share/abc123#t=secret-token',
-      token: 'secret-token',
-      nested: {shareToken: 'secret-token', text: 'token=secret-token'},
-    });
-    assert.equal(debugCopy.includes('secret-token'), false, 'DOIT.72 P1.3: debug copy redacts token values through the shared sanitizer');
-    assert.equal(debugCopy.includes('/share/abc123'), false, 'DOIT.72 P1.3: debug copy redacts share URLs through the shared sanitizer');
-    assert.ok(debugCopy.includes('[redacted-share-token]') || debugCopy.includes('[redacted-share-url]'), 'DOIT.72 P1.3: debug copy includes explicit redaction markers');
-    const debugUpload = JSON.stringify(replayApi.shareDebugProfileUploadPayloadForTest('share-replay-health', {
-      url: 'https://host.example/share/abc123#t=secret-token',
-      token: 'secret-token',
-      nested: {shareToken: 'secret-token', text: 'token=secret-token'},
-    }));
-    assert.equal(debugUpload.includes('secret-token'), false, 'YO!share debug/profiling upload payload redacts token values before POST');
-    assert.equal(debugUpload.includes('/share/abc123'), false, 'YO!share debug/profiling upload payload redacts share URLs before POST');
-
-    const deltaApi = loadYolomux('?shareReplay=1', ['1'], 'https:');
-    const deltaRoot = deltaApi.appRootForTest();
-    deltaRoot.replaceChildren();
-    const deltaTarget = new TestElement('delta-target', 'div');
-    deltaTarget.textContent = '';
-    const textNode = {
-      nodeType: 3,
-      textContent: 'old target',
-      parentElement: null,
-      contains(node) { return node === this; },
-      matches() { return false; },
-      closest() { return null; },
-    };
-    deltaTarget.appendChild(textNode);
-    deltaRoot.append(deltaTarget);
-    deltaTarget.setAttribute('title', 'Open /share/abc123#t=secret-token token=secret-token');
-    const titleRecord = {type: 'attributes', target: deltaTarget, attributeName: 'title'};
-    deltaTarget.setAttribute('href', 'javascript:alert(1)');
-    const hrefRecord = {type: 'attributes', target: deltaTarget, attributeName: 'href'};
-    deltaTarget.setAttribute('onclick', 'window.bad = true');
-    const onclickRecord = {type: 'attributes', target: deltaTarget, attributeName: 'onclick'};
-    deltaApi.shareCreateDomKeyframePayloadForTest('join');
-    textNode.textContent = 'Changed token=secret-token /share/abc123#t=secret-token';
-    const addedNode = new TestElement('delta-added', 'span');
-    addedNode.setAttribute('onclick', 'window.bad = true');
-    addedNode.textContent = 'Added /share/abc123#t=secret-token';
-    const volatileNode = new TestElement('delta-volatile', 'span');
-    volatileNode.className = 'share-replay-volatile';
-    volatileNode.textContent = 'volatile timer text';
-    const terminalNode = new TestElement('term-1', 'div');
-    terminalNode.className = 'terminal';
-    terminalNode.textContent = 'terminal internal text';
-    const terminalWrapper = new TestElement('terminal-wrapper', 'section');
-    const movedTerminalNode = new TestElement('term-1', 'div');
-    movedTerminalNode.className = 'terminal';
-    terminalWrapper.append(movedTerminalNode);
-	    const records = [
-	      {type: 'characterData', target: textNode},
-	      titleRecord,
-	      hrefRecord,
-	      onclickRecord,
-	      {type: 'childList', target: deltaRoot, addedNodes: [addedNode, terminalWrapper], removedNodes: []},
-	    ];
-	    const deltaEntries = deltaApi.shareReplayMutationEntriesForTest(records);
-	    const deltaJson = JSON.stringify(deltaEntries);
-	    assert.equal(deltaJson.includes('secret-token'), false, 'DOIT.72 P2.1: mutation delta redacts token values');
-	    assert.equal(deltaJson.includes('/share/abc123'), false, 'DOIT.72 P2.1: mutation delta redacts share URLs');
-	    assert.equal(deltaJson.includes('javascript:'), false, 'DOIT.72 P2.1: mutation delta removes dangerous URL values');
-	    assert.equal(deltaJson.includes('onclick'), false, 'DOIT.72 P2.1: mutation delta drops inline handler attributes');
-	    assert.ok(deltaEntries.some(entry => entry.kind === 'characterData' && entry.text.includes('[redacted-share-token]')), 'DOIT.72 P2.1: characterData mutations are captured and redacted');
-	    assert.ok(deltaEntries.some(entry => entry.kind === 'attributes' && entry.name === 'title' && entry.value.includes('[redacted-share-url]')), 'DOIT.72 P2.1: attribute mutations are captured and redacted');
-	    assert.ok(deltaEntries.some(entry => entry.kind === 'attributes' && entry.name === 'href' && entry.value === null && entry.removed === true), 'DOIT.72 P2.1: unsafe URL attribute mutations become removals');
-	    const childListEntry = deltaEntries.find(entry => entry.kind === 'childList');
-	    assert.equal(childListEntry.added.length, 2, 'DOIT.72 P2.1: childList mutations include safe added nodes and terminal placeholder wrappers');
-	    assert.equal(childListEntry.added[0].attrs.onclick, undefined, 'DOIT.72 P2.1: added node serialization sanitizes attributes');
-	    const unsupportedAddedNode = new TestElement('delta-think', 'think');
-	    unsupportedAddedNode.textContent = 'delta custom marker';
-	    const unsupportedDeltaEntries = deltaApi.shareReplayMutationEntriesForTest([
-	      {type: 'childList', target: deltaRoot, addedNodes: [unsupportedAddedNode], removedNodes: []},
-	    ]);
-	    assert.equal(unsupportedDeltaEntries[0].added[0].tag, 'span', 'YO!share deltas coerce unsupported custom tags to inert spans');
-	    assert.equal(unsupportedDeltaEntries[0].added[0].text, 'delta custom marker', 'YO!share deltas preserve unsupported custom tag text');
-	    assert.equal(JSON.stringify(unsupportedDeltaEntries).includes('"tag":"think"'), false, 'YO!share deltas never emit unsupported custom tag names');
-	    assert.deepStrictEqual(JSON.parse(JSON.stringify(deltaEntries.terminals)), [{placeholderId: 'term-ph-1', session: '1', rows: 0, cols: 0, terminalEpoch: 1}], 'YO!share DOM deltas carry terminal placeholder metadata for moved terminal subtrees');
-	    const ignoredChildListEntries = deltaApi.shareReplayMutationEntriesForTest([
-	      {type: 'childList', target: deltaRoot, addedNodes: [volatileNode, terminalNode], removedNodes: []},
-	    ]);
-	    const ignoredJson = JSON.stringify(ignoredChildListEntries);
-	    assert.equal(ignoredChildListEntries.length, 0, 'DOIT.72 P2.1: childList mutations touching ignored nodes wait for a keyframe instead of emitting partial deltas');
-	    assert.equal(ignoredJson.includes('volatile timer text'), false, 'DOIT.72 P2.1: mutation delta suppresses volatile nodes');
-	    assert.equal(ignoredJson.includes('terminal internal text'), false, 'DOIT.72 P2.1: mutation delta suppresses terminal internals');
-    deltaApi.setActiveSharesForTest([{token: 'idle-delta-share', viewers: 0}]);
-    const idleDeltaEntries = deltaApi.shareReplayEnqueueMutationRecordsForTest(records, {requireViewers: true});
-    assert.equal(idleDeltaEntries.length, 0, 'YO!share skips observer-driven mutation delta work while an active share has no connected viewers');
-    assert.equal(deltaApi.shareReplayHostPerformanceForTest().mutationRecords.skippedNoViewers, 1, 'YO!share counts no-viewer mutation skips');
-    deltaApi.setActiveSharesForTest([{token: 'delta-share', viewers: 1}]);
-    deltaApi.setShareHostSocketForTest('delta-share', {readyState: 1, send() {}});
-	    deltaApi.shareReplayEnqueueMutationRecordsForTest(records);
-    const deltaBatch = deltaApi.shareReplayLastDeltaBatchForTest();
-    assert.equal(deltaBatch.count, deltaEntries.length, 'DOIT.72 P2.1: mutation records coalesce into one dom-delta batch');
-    assert.deepStrictEqual(deltaBatch.mutations, deltaEntries, 'DOIT.72 P2.1: coalesced batch preserves sanitized mutation entries');
-    const mutationPerf = deltaApi.shareReplayHostPerformanceForTest();
-    assert.equal(mutationPerf.mutationRecords.count, 1, 'YO!share measures mutation record processing with connected viewers');
-    assert.equal(mutationPerf.mutationFlush.count, 1, 'YO!share measures mutation delta flush cost with connected viewers');
-
-    const rwApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-rw-meta', mode: 'rw', session: '1', sessions: ['1']},
-    });
-    const writeViewerFrame = rwApi.shareBuildUiMessageForTest('viewport', {width: 900, height: 600}, {reason: 'writer-viewport'});
-    assert.equal(Number.isFinite(writeViewerFrame.epoch), true, 'rw viewers use the same sequenced frame builder as hosts');
-    assert.equal(writeViewerFrame.reason, 'writer-viewport', 'rw viewer frames carry the shared mirror reason');
-
-    const staleApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-stale-meta', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'ui-state', sender: 'host-a', epoch: 4, sequence: 9}), false, 'first host frame applies');
-    assert.deepStrictEqual({...staleApi.shareMirrorLastFrameForTest('host-a')}, {epoch: 4, sequence: 9}, 'viewer records last mirror frame per sender');
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'layout', sender: 'host-a', epoch: 3, sequence: 99}), true, 'lower-epoch layout frame is stale even with a higher sequence');
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'viewport', sender: 'host-a', epoch: 4, sequence: 8}), true, 'same-epoch lower sequence frame is stale');
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'dom-keyframe', sender: 'host-a', epoch: 2, sequence: 1}), false, 'DOM replay keyframes are not dropped by newer semantic frame metadata from the same sender');
-    assert.deepStrictEqual({...staleApi.shareMirrorLastFrameForTest('host-a', 'dom-replay')}, {epoch: 2, sequence: 1}, 'viewer records DOM replay stale state separately from semantic state');
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'appearance', sender: 'host-b', epoch: 1, sequence: 1}), false, 'different sender has an independent sequence');
-    assert.equal(staleApi.shareDropStaleMirrorFrameForTest({type: 'layout', sender: 'host-a'}), false, 'legacy unsequenced frames still apply during migration');
-  });
-  test('read-only semantic shares protect the mirrored surface and repair geometry', () => {
-    const roApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share123', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    assert.equal(roApi.shareReadOnlyReplayModeEnabledForTest(), false, 'DOIT.72 P4.2: shareReplay=0 opts read-only viewers into the semantic mirror path');
-    assert.equal(roApi.shareSemanticReadOnlyMirrorEnabledForTest(), true, 'DOIT.72 P4.2: the semantic read-only escape hatch keeps legacy semantic guards active');
-    const stage = roApi.ensureShareMirrorStageForTest();
-    assert.equal(stage.id, 'shareMirrorStage', 'read-only share view creates the mirror stage');
-    assert.equal(roApi.testElementForId('appRoot').parentElement, stage, 'read-only share view moves appRoot under the mirror stage');
-    const target = activates => ({
-      closest(selector) {
-        if (selector === '[data-share-viewer-control]') return null;
-        return activates ? {nodeType: 1} : null;
-      },
-    });
-    const viewerControlTarget = {
-      closest(selector) {
-        return selector === '[data-share-viewer-control]' ? {nodeType: 1} : null;
-      },
-    };
-    const eventFor = (type, options = {}) => ({
-      type,
-      key: options.key || '',
-      ctrlKey: options.ctrlKey === true,
-      metaKey: options.metaKey === true,
-      shiftKey: options.shiftKey === true,
-      target: options.viewerControl ? viewerControlTarget : target(options.activates === true),
-      defaultPrevented: false,
-      stopped: false,
-      immediateStopped: false,
-      preventDefault() { this.defaultPrevented = true; },
-      stopPropagation() { this.stopped = true; },
-      stopImmediatePropagation() { this.immediateStopped = true; },
-    });
-    const replayReadOnlyApi = loadYolomux('', ['1', '2'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-replay-semantic-guard', mode: 'ro', session: '1', sessions: ['1', '2']},
-    });
-    assert.equal(replayReadOnlyApi.shareReadOnlyReplayModeEnabledForTest(), true, 'DOIT.72 P4.2: default read-only viewers are replay viewers');
-    assert.equal(replayReadOnlyApi.shareSemanticReadOnlyMirrorEnabledForTest(), false, 'DOIT.72 P4.2: default replay viewers do not enable the semantic read-only path');
-    const replayClick = eventFor('click', {activates: true});
-    replayReadOnlyApi.blockShareReadonlyInteraction(replayClick);
-    assert.equal(replayClick.defaultPrevented, false, 'DOIT.72 P4.2: replay viewers do not run the semantic readonly blocker');
-    assert.equal(replayClick.immediateStopped, false, 'DOIT.72 P4.2: replay viewers do not stop mirrored DOM events through the semantic blocker');
-    const replayTabsBefore = replayReadOnlyApi.layoutTabsParamValue(replayReadOnlyApi.currentSlots());
-    replayReadOnlyApi.applyShareUiStateForTest({layout: 'row@50(left,slot1)', tabs: 'left:1;slot1:2', viewport: {width: 900, height: 600}});
-    assert.equal(replayReadOnlyApi.layoutTabsParamValue(replayReadOnlyApi.currentSlots()), replayTabsBefore, 'DOIT.72 P4.2: replay viewers ignore direct semantic ui-state apply calls');
-    replayReadOnlyApi.applyShareUiMessageForTest({ch: 'ui', type: 'layout', sender: 'host', payload: {layout: 'row@50(left,slot1)', tabs: 'left:1;slot1:2'}});
-    assert.equal(replayReadOnlyApi.layoutTabsParamValue(replayReadOnlyApi.currentSlots()), replayTabsBefore, 'DOIT.72 P4.2: replay viewers ignore semantic layout UI messages');
-    replayReadOnlyApi.applySharePopupLayerForTest({seq: 7, owner: 'host', items: [{rect: {left: 1, top: 1, width: 2, height: 2}, html: '<div>legacy popup</div>'}]}, 'host');
-    assert.equal(replayReadOnlyApi.sharePopupLayerNodeForTest(), null, 'DOIT.72 P4.2: replay viewers ignore legacy popup-layer frames');
-    replayReadOnlyApi.setShareReplaySequenceStateForTest(7, 121);
-    const staleDeltaStatus = replayReadOnlyApi.shareReplayDeltaSequenceStatusForTest({epoch: 7, sequence: 121, baseSequence: 120});
-    assert.equal(staleDeltaStatus.reason, 'stale', 'YO!share replay drops late same-epoch deltas after a newer keyframe');
-    replayReadOnlyApi.applyShareReplayDeltaForTest({mutations: [], digest: ''}, {type: 'dom-delta', sender: 'host', epoch: 7, sequence: 121, baseSequence: 120});
-    assert.equal(replayReadOnlyApi.shareReplaySequenceStateForTest().stale, 1, 'YO!share replay records stale deltas separately');
-    assert.equal(replayReadOnlyApi.shareReplaySequenceStateForTest().dropped, 0, 'stale replay deltas do not mark the viewer behind');
-    assert.equal(replayReadOnlyApi.shareReplaySequenceStateForTest().requests, 0, 'stale replay deltas do not request another keyframe');
-    const futureDeltaStatus = replayReadOnlyApi.shareReplayDeltaSequenceStatusForTest({epoch: 7, sequence: 124, baseSequence: 123});
-  assert.equal(futureDeltaStatus.reason, 'gap', 'YO!share replay still treats truly missing deltas as a repair gap');
-  assert.equal(futureDeltaStatus.lastSequence, 121, 'YO!share replay gap diagnostics include the local sequence cursor');
-  assert.equal(replayReadOnlyApi.shareReplayDeltaCanApplyBestEffortForTest(futureDeltaStatus), true, 'YO!share replay can apply same-epoch gap deltas while it waits for throttled keyframe repair');
-    const replayRoot = replayReadOnlyApi.testElementForId('appRoot');
-    const replayTab = new TestElement('replay-tab');
-    replayTab.className = 'pane-tab';
-    replayTab.dataset.paneTab = '1';
-    const replayPopover = new TestElement('replay-popover');
-    replayPopover.className = 'session-popover';
-    replayTab.appendChild(replayPopover);
-    replayRoot.appendChild(replayTab);
-    assert.equal(replayReadOnlyApi.bindShareReplayPaneTabPopoversForTest(replayRoot), 0, 'read-only YO!share DOM replay does not create client-local hover popovers');
-    assert.equal(replayTab.dataset.shareReplayPopoverBound, undefined, 'read-only YO!share leaves host-owned popover state unbound on the viewer');
-    assert.equal((replayTab.listeners.get('pointerenter') || []).length, 0, 'read-only YO!share tab popovers do not install viewer-local hover listeners');
-    assert.equal(replayReadOnlyApi.bindShareReplayPaneTabPopoversForTest(replayRoot), 0, 'YO!share replay tab popover binding is idempotent');
-    const selectionDown = eventFor('mousedown');
-    roApi.blockShareReadonlyInteraction(selectionDown);
-    assert.equal(selectionDown.defaultPrevented, false, 'read-only share mousedown keeps native text selection default');
-    assert.equal(selectionDown.immediateStopped, true, 'read-only share mousedown still stops app handlers');
-    const contextMenu = eventFor('contextmenu');
-    roApi.blockShareReadonlyInteraction(contextMenu);
-    assert.equal(contextMenu.defaultPrevented, false, 'read-only share contextmenu keeps native browser copy menu');
-    assert.equal(contextMenu.immediateStopped, true, 'read-only share contextmenu suppresses YOLOmux context menus');
-    const copyKey = eventFor('keydown', {ctrlKey: true, key: 'c'});
-    roApi.blockShareReadonlyInteraction(copyKey);
-    assert.equal(copyKey.defaultPrevented, false, 'read-only share Ctrl/Cmd-C keeps browser copy default');
-    const arrowKey = eventFor('keydown', {key: 'ArrowDown'});
-    roApi.blockShareReadonlyInteraction(arrowKey);
-    assert.equal(arrowKey.defaultPrevented, true, 'read-only share navigation keys cannot scroll mirrored panes locally');
-    const typingKey = eventFor('keydown', {key: 'x'});
-    roApi.blockShareReadonlyInteraction(typingKey);
-    assert.equal(typingKey.defaultPrevented, true, 'read-only share typing is blocked');
-    const paste = eventFor('paste');
-    roApi.blockShareReadonlyInteraction(paste);
-    assert.equal(paste.defaultPrevented, true, 'read-only share paste mutation is blocked');
-    const buttonClick = eventFor('click', {activates: true});
-    roApi.blockShareReadonlyInteraction(buttonClick);
-    assert.equal(buttonClick.defaultPrevented, true, 'read-only share button/link activation is blocked');
-    const textClick = eventFor('click');
-    roApi.blockShareReadonlyInteraction(textClick);
-    assert.equal(textClick.defaultPrevented, false, 'read-only share plain text click keeps harmless browser default');
-    const viewerFitClick = eventFor('click', {viewerControl: true});
-    roApi.blockShareReadonlyInteraction(viewerFitClick);
-    assert.equal(viewerFitClick.immediateStopped, false, 'share viewer chrome controls remain usable');
-    const appRoot = roApi.testElementForId('appRoot');
-    appRoot.classList.add('app-root');
-    const editorPanel = new TestElement('', 'article');
-    editorPanel.classList.add('file-editor-panel');
-    editorPanel.dataset.filePath = '/tmp/a.md';
-    editorPanel.dataset.layoutItem = 'file:/tmp/a.md';
-    const scroller = new TestElement('', 'div');
-    scroller.classList.add('cm-scroller');
-    editorPanel.appendChild(scroller);
-    appRoot.appendChild(editorPanel);
-    assert.equal(roApi.shareCanPublishScrollForTest(), false, 'read-only share viewers cannot publish scroll frames');
-    roApi.applyShareViewBodyClassesForTest();
-    assert.equal(roApi.testElementForId('body').classList.contains('share-view-readonly'), true, 'read-only share view marks the body for hidden local scrollbars');
-    roApi.setClientSettingsPatchForTest({general: {auto_focus: true}});
-    const prefsHtml = roApi.preferencesPanelHtmlForTest('');
-    assert.equal(prefsHtml.includes('preferences-readonly'), false, 'read-only share Preferences do not add client-only readonly chrome');
-    assert.equal(/data-setting-path="general\.auto_focus"[^>]* disabled/.test(prefsHtml), false, 'read-only share Preferences controls stay visually host-identical');
-    assert.equal(/data-setting-reset="general\.auto_focus"[^>]* disabled/.test(prefsHtml), false, 'read-only share Preferences reset buttons stay visually host-identical when the host would enable them');
-    assert.equal(roApi.shareReadonlyTargetIsMirroredSurfaceForTest(scroller), true, 'read-only scroll target detection finds mirrored editor surfaces');
-    const wheel = eventFor('wheel');
-    wheel.target = scroller;
-    roApi.blockShareReadonlyInteraction(wheel);
-    assert.equal(wheel.defaultPrevented, true, 'read-only share wheel input is blocked on mirrored editor surfaces');
-    const scrollbarPointer = eventFor('pointerdown');
-    scrollbarPointer.target = scroller;
-    roApi.blockShareReadonlyInteraction(scrollbarPointer);
-    assert.equal(scrollbarPointer.defaultPrevented, true, 'read-only share pointerdown on the scroller itself cannot start a scrollbar drag');
-    const editorText = new TestElement('', 'span');
-    scroller.appendChild(editorText);
-    const textPointer = eventFor('pointerdown');
-    textPointer.target = editorText;
-    roApi.blockShareReadonlyInteraction(textPointer);
-    assert.equal(textPointer.defaultPrevented, false, 'read-only share pointerdown inside scroll content still allows text selection defaults');
-    scroller.scrollTop = 999;
-    scroller.scrollLeft = 17;
-    roApi.setShareScrollTargetRecordForTest('editor:file:/tmp/a.md:editor', {top: 123, left: 4}, {
-      kind: 'editor',
-      path: '/tmp/a.md',
-      item: 'file:/tmp/a.md',
-      source: 'editor',
-    });
-    const scroll = eventFor('scroll');
-    scroll.target = scroller;
-    roApi.blockShareReadonlyInteraction(scroll);
-    assert.equal(scroller.scrollTop, 123, 'read-only local scroll is restored to the last host scrollTop');
-    assert.equal(scroller.scrollLeft, 4, 'read-only local scroll is restored to the last host scrollLeft');
-    assert.equal(scroll.immediateStopped, true, 'read-only local scroll is stopped before mirrored widgets consume it');
-    const hostScroll = eventFor('scroll');
-    hostScroll.target = scroller;
-    roApi.blockShareReadonlyInteraction(hostScroll);
-    assert.equal(hostScroll.immediateStopped, false, 'host-authored scroll at the mirrored position reaches virtualized widgets');
-    assert.deepStrictEqual({...roApi.shareScrollTargetPayloadForTest('editor:file:/tmp/a.md:editor')}, {
-      kind: 'editor',
-      path: '/tmp/a.md',
-      item: 'file:/tmp/a.md',
-      source: 'editor',
-      target: 'editor:file:/tmp/a.md:editor',
-      top: 123,
-      left: 4,
-    }, 'read-only local scroll restore keeps a full target-key payload for later DOM replay');
-    const diffScroller = new TestElement('', 'div');
-    diffScroller.classList.add('file-explorer-changes-panel');
-    diffScroller.scrollTop = 0;
-    diffScroller.scrollLeft = 0;
-    roApi.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-changes-panel' ? [diffScroller] : []);
-    roApi.applyShareScrollStateForTest({target: 'finder:diff', kind: 'finder', mode: 'diff', top: 345, left: 6});
-    diffScroller.scrollTop = 0;
-    diffScroller.scrollLeft = 0;
-    assert.equal(roApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'pending Differ scroll schedules replay by target key after the pane appears');
-    assert.equal(diffScroller.scrollTop, 345, 'pending Differ scroll replay restores the host scrollTop');
-    assert.equal(diffScroller.scrollLeft, 6, 'pending Differ scroll replay restores the host horizontal scroll');
-    const queuedScrollFrames = [];
-    const snapshotApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-scroll-snapshot', mode: 'ro', session: '1', sessions: ['1']},
-      requestAnimationFrame(callback) {
-        queuedScrollFrames.push(callback);
-        return queuedScrollFrames.length;
-      },
-    });
-    queuedScrollFrames.length = 0;
-    const snapshotDiffScroller = new TestElement('', 'div');
-    snapshotDiffScroller.classList.add('file-explorer-changes-panel');
-    snapshotApi.setDocumentQuerySelectorAllForTest(selector => selector === '.file-explorer-changes-panel' ? [snapshotDiffScroller] : []);
-    const drainScrollFrames = () => {
-      let guard = 32;
-      while (queuedScrollFrames.length && guard > 0) {
-        queuedScrollFrames.shift()();
-        guard -= 1;
-      }
-      assert.ok(guard > 0, 'scroll restore frames settle within their bounded retry count');
-    };
-    snapshotApi.applyShareScrollSnapshotForTest([
-      {target: 'preferences', kind: 'preferences', top: 11, left: 0},
-      {target: 'finder:diff', kind: 'finder', mode: 'diff', top: 222, left: 7},
-    ]);
-    drainScrollFrames();
-    assert.equal(snapshotApi.scheduleShareScrollRestoreByKeyForTest('finder:diff', {frames: 2}), true, 'current snapshot target schedules a restore generation');
-    const retiredDiffRestore = queuedScrollFrames.shift();
-    assert.equal(typeof retiredDiffRestore, 'function', 'scheduled target owns a pending restore callback');
-    snapshotApi.applyShareScrollSnapshotForTest([
-      {target: 'preferences', kind: 'preferences', top: 19, left: 0},
-    ]);
-    assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff'), null, 'authoritative full snapshot retires an absent target record');
-    snapshotDiffScroller.scrollTop = 0;
-    snapshotDiffScroller.scrollLeft = 0;
-    retiredDiffRestore();
-    assert.equal(snapshotDiffScroller.scrollTop, 0, 'retired target restore callback cannot resurrect its old scrollTop');
-    assert.equal(snapshotDiffScroller.scrollLeft, 0, 'retired target restore callback cannot resurrect its old scrollLeft');
-    snapshotApi.applyShareScrollStateForTest({target: 'finder:diff', kind: 'finder', mode: 'diff', top: 444, left: 9});
-    assert.equal(snapshotDiffScroller.scrollTop, 444, 'a later delta recreates the retired target with current scrollTop');
-    assert.equal(snapshotDiffScroller.scrollLeft, 9, 'a later delta recreates the retired target with current scrollLeft');
-    retiredDiffRestore();
-    assert.equal(snapshotDiffScroller.scrollTop, 444, 'an old generation cannot overwrite a recreated target');
-    assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames > 0, true, 'recreated target owns its own bounded restore work');
-    drainScrollFrames();
-    assert.equal(snapshotApi.shareScrollTargetRecordForTest('finder:diff').remainingFrames, 0, 'current restore generation cleans up its frame count');
-    const termCalls = [];
-    roApi.registerTerminalForTest('1', {
-      cols: 80,
-      rows: 24,
-      resize(cols, rows) { termCalls.push(['resize', cols, rows]); this.cols = cols; this.rows = rows; },
-      reset() { termCalls.push(['reset']); },
-      refresh(start, end) { termCalls.push(['refresh', start, end]); },
-    });
-    assert.equal(roApi.shareHostTerminalSizeForTest('missing'), null, 'share terminal sizing has no client-estimate fallback when host dims are absent');
-    roApi.updateShareHostTerminalSizeForTest('1', 33, 111);
-    assert.deepStrictEqual(termCalls.slice(0, 2), [['resize', 111, 33], ['reset']], 'host-resize applies host cols/rows then resets the viewer xterm buffer');
-    termCalls.length = 0;
-    const repairFrames = roApi.shareMirrorProtocolForTest.frames;
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('slots'), repairFrames.uiState, 'slot drift requests the semantic ui-state reset bucket while replay is not default');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('tabStrips'), repairFrames.uiState, 'tab-strip drift requests the semantic ui-state reset bucket while replay is not default');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('editors'), repairFrames.uiState, 'editor drift requests the semantic ui-state reset bucket while replay is not default');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('textWraps'), repairFrames.textWrapMetrics, 'wrapped text drift uses host metrics repair');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('terminalCells'), repairFrames.terminalHostResize, 'terminal-cell drift uses the host-resize/repaint repair path');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('popup-layer'), repairFrames.popupLayer, 'popup drift has its own repair action');
-    assert.equal(roApi.shareGeometryRepairActionForDiffForTest('domDigest'), repairFrames.domKeyframe, 'future DOM digest drift requests a replay keyframe');
-    assert.equal(roApi.applyShareTerminalCellsRepairForTest([{session: '1', rows: 36, cols: 120}]), true, 'terminal-cell repair consumes host digest dimensions');
-    assert.deepStrictEqual(termCalls.slice(0, 3), [['resize', 120, 36], ['reset'], ['refresh', 0, 35]], 'terminal-cell repair uses the same resize, reset, repaint ordering as host-resize frames');
-    roApi.applySharePopupLayerForTest({seq: 2, owner: 'host', items: []}, 'host');
-    assert.equal(roApi.sharePopupLayerLastSeqForTest('host'), 2, 'popup-layer applies the newest host frame sequence');
-    assert.equal(roApi.sharePopupLayerNodeForTest().parentElement, appRoot, 'popup-layer mirror is mounted inside the scaled app root');
-    roApi.applySharePopupLayerForTest({seq: 1, owner: 'host', items: [{rect: {left: 1, top: 1, width: 2, height: 2}, html: '<div>stale</div>'}]}, 'host');
-    assert.equal(roApi.sharePopupLayerLastSeqForTest('host'), 2, 'stale popup-layer frames are ignored after a newer close frame');
-  });
-  test('cross-surface host state 18: share appearance snapshot includes the active locale', () => {
-    api.setActiveLocaleForTest('ja');
-    appearance = api.shareAppearanceSnapshotForTest();
-    assert.equal(appearance.locale, 'ja', 'share appearance snapshot includes the active locale');
-    assert.equal(appearance.languagePref, 'system', 'share appearance snapshot includes the persisted language preference');
-    api.setActiveLocaleForTest('en');
-
-  });
-
-  test('share appearance frames apply the host-resolved theme and repaint terminals', () => {
-  const shareThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
-    shareReplay: true,
-    share: {view: true, id: 'share-theme', mode: 'ro', session: '1', sessions: ['1']},
-  });
-  const shareTermCalls = [];
-  let shareTextureClears = 0;
-  shareThemeApi.registerTerminalForTest('1', {
-    rows: 24,
-    cols: 80,
-    options: {},
-    refresh(start, end) { shareTermCalls.push(['refresh', start, end]); },
-    clearTextureAtlas() { shareTextureClears += 1; },
-  });
-  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'light', terminalTheme: 'follow-app'});
-  assert.equal(shareThemeApi.globalThemeModeForTest(), 'system', 'share viewers preserve the host theme preference value');
-  assert.equal(shareThemeApi.shareResolvedGlobalThemeModeForTest(), 'light', 'share viewers store the host resolved system theme');
-  assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'share viewers resolve system theme from the host frame, not local matchMedia');
-  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'share viewer body uses the host-resolved light class');
-  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-light'), 'share viewer body applies normal light CSS for host-resolved System light');
-  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-system'), 'share viewer body preserves the host System preference marker');
-  assert.equal(shareThemeApi.terminalThemeModeForTest(), 'follow-app', 'share viewers keep the real terminal theme setting value');
-  assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'share appearance applies a terminal repaint');
-  assert.equal(shareTextureClears, 1, 'share appearance clears cached terminal glyph colors');
-  shareThemeApi.applyShareAppearanceStateForTest({theme: 'system', resolvedTheme: 'dark', terminalTheme: 'follow-app'});
-  assert.equal(shareThemeApi.resolvedGlobalThemeModeForTest(), 'dark', 'a later host OS flip updates the share viewer resolved theme');
-  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-resolved-dark'), 'share viewer body follows the later host-resolved dark class');
-  assert.ok(shareThemeApi.testElementForId('body').classList.contains('theme-dark'), 'share viewer body applies normal dark CSS for host-resolved System dark');
-  assert.equal(shareTermCalls.at(-1)?.join(':'), 'refresh:0:23', 'later share appearance frames repaint terminal cells too');
-  assert.equal(shareTextureClears, 2, 'later share appearance frames clear cached glyph colors too');
-  });
-
-  test('replay-shell share appearance frames update the viewer theme', () => {
-  const replayThemeApi = loadYolomux('', ['1'], 'https:', 'MacIntel', 'readonly', {
-    shareReplay: true,
-    share: {view: true, id: 'share-replay-theme', mode: 'ro', session: '1', sessions: ['1']},
-  });
-  replayThemeApi.setShareReplaySequenceStateForTest(1, 0);
-  replayThemeApi.applyShareUiMessageForTest({
-    ch: 'ui',
-    type: replayThemeApi.shareMirrorProtocolForTest.frames.appearance,
-    sender: 'host',
-    epoch: 1,
-    sequence: 1,
-    payload: {theme: 'system', resolvedTheme: 'light', terminalTheme: 'follow-app'},
-  });
-  assert.equal(replayThemeApi.resolvedGlobalThemeModeForTest(), 'light', 'replay-shell share viewers apply live appearance frames instead of swallowing them');
-  assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-resolved-light'), 'replay-shell appearance frames repaint the viewer body');
-  assert.ok(replayThemeApi.testElementForId('body').classList.contains('theme-light'), 'replay-shell appearance frames activate normal light CSS for System light');
-  });
-
-  test('topology keyframes defer for pointer activity but respect the maximum delay', () => {
-  const topologyDelayApi = loadYolomux('', ['1']);
-  topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now());
-  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(0);
-  topologyDelayApi.setSharePointerLastPublishedAtForTest(-100);
-  const pointerQuietDelay = topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest();
-  assert.ok(pointerQuietDelay >= 350 && pointerQuietDelay <= 500, `topology replay waits for pointer quiet instead of serializing during active cursor movement (${pointerQuietDelay})`);
-  topologyDelayApi.setSharePointerLastPublishedAtForTest(-1000);
-  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now() - 1000);
-  const keyframeFloorDelay = topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest();
-  assert.ok(keyframeFloorDelay >= 3500 && keyframeFloorDelay <= 5000, `topology replay respects the host keyframe floor after a recent keyframe (${keyframeFloorDelay})`);
-  topologyDelayApi.setShareReplayTopologyKeyframeQueuedAtForTest(Date.now() - 6000);
-  topologyDelayApi.setShareReplayHostLastKeyframeAtForTest(Date.now());
-  topologyDelayApi.setSharePointerLastPublishedAtForTest(0);
-  assert.equal(topologyDelayApi.shareTopologyDomKeyframeDelayMsForTest(), 0, 'topology replay max deferral eventually permits a keyframe even under continuous pointer movement');
-  });
-
-  test('cross-surface host state 19: M7: host pointer publishes raw app-space viewport coordinates', () => {
-    const sharePointerSlots = api.emptyLayoutSlots();
-    sharePointerSlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 50);
-    sharePointerSlots.left = api.paneStateWithTabs(['1'], '1');
-    sharePointerSlots.slot1 = api.paneStateWithTabs(['2'], '2');
-    api.setLayoutSlotsForTest(sharePointerSlots);
-    api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
-    hostPointer = api.sharePointerPayloadForPoint(600, 40);
-    assert.deepStrictEqual(canonical(hostPointer), {scope: 'viewport', x: 600, y: 40}, 'M7: host pointer publishes raw app-space viewport coordinates');
-    api.setAppMirrorTransformForTest({scale: 0.5, tx: 20, ty: 30});
-    const viewerPointer = api.sharePointerPayloadForPoint(320, 230, {click: true});
-    assert.equal(viewerPointer.scope, 'viewport');
-    assert.equal(viewerPointer.x, 600, 'M7: share-view pointer visual x maps back through the mirror transform before publish');
-    assert.equal(viewerPointer.y, 400, 'M7: share-view pointer visual y maps back through the mirror transform before publish');
-    assert.equal(viewerPointer.click, true);
-    const viewerPoint = api.sharePointFromPointerPayload({scope: 'viewport', x: 600, y: 400});
-    assert.equal(viewerPoint.x, 320, 'M7: received app-space pointer maps into the local visual mirror x');
-    assert.equal(viewerPoint.y, 230, 'M7: received app-space pointer maps into the local visual mirror y');
-    assert.equal(api.sharePointFromPointerPayload({scope: 'pane', x: 600, y: 400}), null, 'M7: old pane-relative pointer payloads are rejected');
-
-  });
-
-  test('host pointer publication emits replay coordinates', () => {
-  const pointerPublishApi = loadYolomux('', ['1']);
-  pointerPublishApi.setActiveSharesForTest([{token: 'share-token'}]);
-  const pointerFrames = [];
-  pointerPublishApi.setShareHostSocketForTest('share-token', {
-    readyState: 1,
-    send(message) { pointerFrames.push(JSON.parse(message)); },
-  });
-  pointerPublishApi.sharePublishPointerEventForTest({clientX: 44, clientY: 55, isPrimary: true});
-  assert.equal(pointerFrames.length, 1, 'DOM replay pointer publication sends one frame per host pointer tick');
-  assert.equal(pointerFrames[0].type, 'pointer');
-  assert.deepStrictEqual(canonical(pointerFrames[0].payload), {scope: 'viewport', visible: true, x: 44, y: 55});
-  });
   test('cross-surface host state 20: New-session items use explicit commands in File; Tabs is only the sorted tab navigator', () => {
-    api.setAppMirrorTransformForTest({scale: 1, tx: 0, ty: 0});
-    const digestA = {snapshot: {viewport: {width: 1, height: 2}, fonts: {ui: 12}, slots: [], tabStrips: [], terminalCells: [], editors: []}};
-    const digestB = {snapshot: {editors: [], terminalCells: [], tabStrips: [], slots: [], fonts: {ui: 12}, viewport: {height: 2, width: 1}}};
-    assert.equal(api.stableDigestJson(digestA.snapshot), api.stableDigestJson(digestB.snapshot), 'M9: digest JSON is stable across object key order');
-    assert.equal(api.shareGeometryDigestValue(digestA.snapshot), api.shareGeometryDigestValue(digestB.snapshot), 'M9: digest hash is stable across object key order');
-    assert.equal(api.shareGeometryFirstDifference(digestA, {snapshot: {...digestA.snapshot, fonts: {ui: 13}}}), 'fonts', 'M9: digest comparison names the first differing top-level component');
-    const wrapApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64');
-    const wrapRoot = wrapApi.appRootForTest();
-    const wrapTextarea = new TestElement('yoagent-format', 'textarea');
-    wrapTextarea.dataset.settingPath = 'yoagent.format';
-    wrapTextarea.value = 'Reply in Markdown. Default shape: a short direct answer, then optional bullets for the top relevant topics.';
-    wrapTextarea.textContent = wrapTextarea.value;
-    wrapTextarea.clientWidth = 640;
-    wrapTextarea.clientHeight = 96;
-    wrapTextarea.scrollWidth = 642;
-    wrapTextarea.scrollHeight = 132;
-    wrapTextarea.rect = {left: 40, top: 100, right: 680, bottom: 196, width: 640, height: 96};
-    wrapRoot.appendChild(wrapTextarea);
-    const wrapDigest = wrapApi.shareWrappedTextDigestSnapshotForTest();
-    assert.equal(wrapDigest.length, 1, 'M9: wrapped text digest includes Preferences textareas');
-    assert.equal(wrapDigest[0].key, 'yoagent.format', 'M9: wrapped text digest keys controls by setting path');
-    assert.equal(wrapDigest[0].scrollHeight, 132, 'M9: wrapped text digest records native control scrollHeight so line-wrap drift is detected');
-    assert.equal(wrapApi.shareGeometryFirstDifference(
-      {snapshot: {...digestA.snapshot, textWraps: [{key: 'yoagent.format', scrollHeight: 132}]}},
-      {snapshot: {...digestA.snapshot, textWraps: [{key: 'yoagent.format', scrollHeight: 96}]}},
-    ), 'textWraps', 'M9: wrapped text/control drift is named separately from generic geometry drift');
     const tmuxMenu = menus.find(menu => menu.id === 'tmux');
     const tmuxMenuLabels = tmuxMenu.items.map(item => item.label).filter(Boolean);
     const launchMenuLabels = fileMenu.items.flatMap(menuLabels).filter(Boolean);
@@ -5143,7 +3883,7 @@ async function runShareThemeSuite() {
     assert.equal(stoppedImmediate, 1, 'focused terminal Cmd-Left stops sibling handlers');
     assert.equal(terminalNavApi.currentSessionActionTarget(), '1', 'Mac Cmd-Left moves back to the previous visible pane tab');
     screenshotNavApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
-    screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/tests/SHARE_TEST_INVENTORY.md');
+    screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/tests/TERMINAL_INVENTORY.md');
     screenshotNavSlots = screenshotNavApi.emptyLayoutSlots();
     screenshotNavSlots[screenshotNavApi.layoutTreeKey] = screenshotNavApi.splitNode(
       'row',
@@ -5182,7 +3922,7 @@ async function runShareThemeSuite() {
     });
     assert.equal(fileBackResult, false, 'stale terminal capture handles Cmd-Left from an active file tab');
     assert.equal(prevented, 1, 'stale terminal capture prevents the terminal default from an active file tab');
-    assert.equal(screenshotNavApi.activeItemForSide('slot1'), '8001', 'Cmd-Left from SHARE_TEST_INVENTORY goes to 8001, not the previous pane boundary');
+    assert.equal(screenshotNavApi.activeItemForSide('slot1'), '8001', 'Cmd-Left from TERMINAL_INVENTORY goes to 8001, not the previous pane boundary');
     screenshotNavApi.setFocusedPanelItem(screenshotNavApi.infoItemId);
     screenshotNavShortcutHandler = null;
     screenshotNavApi.installTerminalCopyShortcutForTest('8003', {
@@ -6029,8 +4769,8 @@ async function runShareThemeSuite() {
     api.fitTerminalForTest('stable');
     assert.equal(stableFits.length, 2, 'a real pane width change still resizes the terminal');
     assert.ok(/function terminalCanPublishRemoteSize\(\)\s*\{[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'hidden/background browser tabs cannot publish terminal resize authority');
-    assert.ok(/function wsUrl\(session\)[\s\S]*new URLSearchParams\(\{session, client: shareClientId\}\)/.test(source), 'terminal sockets carry a stable browser client id for resize authority');
-    assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = shareClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
+    assert.ok(/function wsUrl\(session\)[\s\S]*new URLSearchParams\(\{session, client: browserClientId\}\)/.test(source), 'terminal sockets carry a stable browser client id for resize authority');
+    assert.ok(/function sendRemoteResize\(session, options = \{\}\)[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*foreground:\s*true[\s\S]*message\.activate = true[\s\S]*message\.client = browserClientId/.test(source), 'terminal resize frames carry explicit foreground authority and browser identity');
     assert.ok(/function claimVisibleTerminalResizeAuthority\(reason = '', options = \{\}\)[\s\S]*visibleTerminalResizeAuthorityEntries\(\)[\s\S]*fitTerminal\(session, \{claim: true\}\)/.test(source), 'browser activation claims every visible xterm pane through the shared fit path');
     assert.ok(/function installTerminalResizeAuthorityHandlers\(\)[\s\S]*window\.addEventListener\('focus'[\s\S]*document\.addEventListener\('visibilitychange'/.test(source), 'browser focus/visibility activates visible xterm resize authority');
     assert.ok(/function scheduleRemoteResize\(session,[\s\S]*terminalCanPublishRemoteSize\(\)[\s\S]*item\.resizeTimer = null/.test(source), 'hidden/background tabs cancel pending terminal resize timers instead of shrinking tmux later');
@@ -7426,8 +6166,8 @@ async function runShareThemeSuite() {
   });
 }
 
-module.exports = {runShareThemeSuite};
+module.exports = {runCrossSurfaceStateSuite};
 
 if (require.main === module) {
-  runSuites([runShareThemeSuite]);
+  runSuites([runCrossSurfaceStateSuite]);
 }

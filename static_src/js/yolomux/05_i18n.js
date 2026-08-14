@@ -236,8 +236,6 @@ async function applyLocale(locale) {
     document.documentElement.setAttribute('lang', next);
   }
   rerenderForLocale({localeChange: true});
-  if (typeof scheduleShareAppearancePublish === 'function') scheduleShareAppearancePublish();
-  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish({immediate: true});
 }
 
 // The real (non-pseudo) locales in the Python registry's product-priority order.

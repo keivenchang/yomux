@@ -64,7 +64,6 @@ PUBLIC_ROUTES_BEFORE_LIVENESS = {
     ("GET", "/login"),
     ("GET", "/logout"),
     ("POST", "/login"),
-    ("GET", "/share/*"),
 }
 EXPECTED_PUBLIC_ROUTES = PUBLIC_ROUTES_BEFORE_LIVENESS | {("GET", "/healthz")}
 
@@ -336,7 +335,6 @@ def test_public_route_set_contains_exactly_one_liveness_route():
     assert liveness[0].method == "GET"
     assert liveness[0].role == http_routes.PUBLIC
     assert "*" not in liveness[0].path
-    assert liveness[0].share_access == http_routes.SHARE_ACCESS_NONE
     assert liveness[0].normal_session_local_service is False
 
 

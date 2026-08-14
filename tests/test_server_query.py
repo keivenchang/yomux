@@ -159,14 +159,6 @@ def test_route_micro_helpers_keep_session_scope_body_and_client_address_contract
     assert http_routes.client_ip(SimpleNamespace(client_address=None)) == ""
     assert http_routes.client_ip(SimpleNamespace(client_address=())) == ""
 
-    request = SimpleNamespace(share_sessions=lambda: ["one", "two"])
-    allowed, blocked = http_routes.check_share_session_scope(request, ["two"])
-    assert allowed == ["two"] and blocked is None
-    defaulted, blocked = http_routes.check_share_session_scope(request, [], default_to_shared_sessions=True)
-    assert defaulted == ["one", "two"] and blocked is None
-    denied, blocked = http_routes.check_share_session_scope(request, ["other"])
-    assert denied == [] and blocked is not None and blocked[1] == HTTPStatus.FORBIDDEN
-
     calls = []
     request = SimpleNamespace(read_json_body=lambda limit, **kwargs: calls.append((limit, kwargs)) or {"ok": True})
     route = http_routes.Route(
@@ -227,11 +219,6 @@ def test_unexpected_server_error_keeps_the_standard_traceback_path(monkeypatch):
     assert delegated == [(request, ("127.0.0.1", 4321))]
 
 
-def init_share_replay_state(server):
-    server.share_replay_lock = server_module.threading.Lock()
-    server.share_replay_records = {}
-
-
 def test_get_agent_auth_honors_force_query():
     writes = []
     calls = []
@@ -263,7 +250,7 @@ def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monk
     assert first == {"session": ["one", "two"]}
     assert calls == ["session=one&session=two"]
     source = inspect.getsource(http_routes)
-    assert source.count("request_query(request, parsed)") == 36
+    assert source.count("request_query(request, parsed)") == 35
     assert source.count("parse_qs(parsed.query)") == 1
 
 
@@ -283,7 +270,7 @@ def test_chat_send_route_uses_authenticated_username_and_allows_readonly():
         "username": "mallory", "created_at_utc": 0, "is_question": True,
     }
     request = SimpleNamespace(
-        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        server=SimpleNamespace(app=app),
         client_address=("10.1.2.3", 12345),
         auth_identity=lambda: SimpleNamespace(username="readonly-user", role="readonly"), request_locale_pref=lambda: "en",
         read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
@@ -292,7 +279,7 @@ def test_chat_send_route_uses_authenticated_username_and_allows_readonly():
 
     http_routes.post_chat_send(request, SimpleNamespace(query=""), route)
 
-    assert route.role == "readonly" and route.share_access == http_routes.SHARE_ACCESS_NONE
+    assert route.role == "readonly"
     assert calls == [("readonly-user", "10.1.2.3", payload, "en")]
     assert writes[0][0] == HTTPStatus.CREATED
     assert writes[0][1]["message"] == {"id": 1, "username": "readonly-user", "body": "<b>exact text</b>"}
@@ -310,7 +297,6 @@ def test_chat_bootstrap_includes_server_observed_client_ip():
     request = SimpleNamespace(
         server=SimpleNamespace(app=app),
         client_address=("10.1.123.12", 54321),
-        share_token_text=lambda: "",
         auth_identity=lambda: SimpleNamespace(username="alice", role="readonly"),
         write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
     )
@@ -336,7 +322,7 @@ def test_chat_yoagent_route_uses_authenticated_identity_and_stored_source():
         }
     )
     request = SimpleNamespace(
-        server=SimpleNamespace(app=app), share_token_text=lambda: "",
+        server=SimpleNamespace(app=app),
         auth_identity=lambda: SimpleNamespace(username="guest", role="readonly"), request_locale_pref=lambda: "en",
         read_json_body=lambda _limit: payload, write_json=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
     )
@@ -352,17 +338,14 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     html_calls = []
     clock = iter([100.0, 100.037])
 
-    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, share=None, accept_language="", auth_username="", recent_sessions=None):
-        html_calls.append((sessions, access_role, dev, dangerously_yolo, share, accept_language, auth_username, recent_sessions))
+    def fake_html_page(sessions, access_role="admin", dev=False, dangerously_yolo=False, accept_language="", auth_username="", recent_sessions=None):
+        html_calls.append((sessions, access_role, dev, dangerously_yolo, accept_language, auth_username, recent_sessions))
         return "<html>boot</html>"
 
     monkeypatch.setattr(http_routes, "html_page", fake_html_page)
     monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
     request = SimpleNamespace(
         server=SimpleNamespace(app=SimpleNamespace(sessions=["5"], dangerously_yolo=True, tmux_recency_ordered_sessions=lambda sessions: list(sessions)), dev=True),
-        share_sessions=lambda: [],
-        share_record=lambda: None,
-        share_bootstrap_payload=lambda record: {"record": record},
         auth_identity=lambda: SimpleNamespace(role="admin", username="alice"),
         write_html=lambda body: writes.append(body),
     )
@@ -370,13 +353,12 @@ def test_get_home_records_html_page_compute_time(monkeypatch):
     http_routes.get_home(request, SimpleNamespace(query=""), route_by_path("GET", "/"))
 
     assert writes == ["<html>boot</html>"]
-    assert html_calls == [(["5"], "admin", True, True, None, "", "alice", ["5"])]
+    assert html_calls == [(["5"], "admin", True, True, "", "alice", ["5"])]
     assert request._http_response_compute_ms == pytest.approx(37.0)
     assert request._http_response_performance_details == {
         "html_page": True,
         "bootstrap_bytes": len("<html>boot</html>".encode("utf-8")),
         "session_count": 1,
-        "share": False,
     }
 
 
@@ -475,7 +457,7 @@ def test_keepalive_homepage_profile_cannot_leak_to_api_endpoints(monkeypatch):
     handler = object.__new__(Handler)
     handler.command = "GET"
     handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
-    paths = iter(["/", "/api/ping", "/api/share", "/api/stats-sample"])
+    paths = iter(["/", "/api/ping", "/api/settings", "/api/stats-sample"])
 
     def fake_handle_one_request(request):
         request.path = next(paths)
@@ -490,7 +472,7 @@ def test_keepalive_homepage_profile_cannot_leak_to_api_endpoints(monkeypatch):
     for _ in range(4):
         Handler.handle_one_request(handler)
 
-    assert [args[1] for args, _kwargs in records] == ["GET /", "GET /api/ping", "GET /api/share", "GET /api/stats-sample"]
+    assert [args[1] for args, _kwargs in records] == ["GET /", "GET /api/ping", "GET /api/settings", "GET /api/stats-sample"]
     assert records[0][1]["compute_ms"] == 37.0
     assert all(kwargs["compute_ms"] != 37.0 for _args, kwargs in records[1:])
     assert all("html_page" not in kwargs["details"] for _args, kwargs in records[1:])
@@ -613,28 +595,6 @@ def test_route_to_representation_ready_is_absent_without_a_dispatch_timer(monkey
     assert "route_to_representation_ready_ms" not in kwargs["details"]
 
 
-class FakeShareConnection:
-    def __init__(self) -> None:
-        self.sent: list[bytes] = []
-
-    def sendall(self, frame: bytes) -> None:
-        self.sent.append(frame)
-
-
-class TimeoutShareConnection(FakeShareConnection):
-    def __init__(self) -> None:
-        super().__init__()
-        self.timeout = 1.25
-        self.timeouts: list[float | None] = []
-
-    def gettimeout(self) -> float | None:
-        return self.timeout
-
-    def settimeout(self, timeout: float | None) -> None:
-        self.timeout = timeout
-        self.timeouts.append(timeout)
-
-
 def test_parse_repo_refs_param_decodes_per_repo_overrides():
     # C6: decode the per-repo FROM/TO JSON map; keep only well-formed string ref pairs.
     raw = json.dumps({"/repo/a": {"from": "abc123", "to": "current"}, "/repo/b": {"from": "  ", "to": "HEAD"}})
@@ -671,62 +631,6 @@ def test_error_payload_reuses_typed_message_metadata_and_keeps_diagnostic():
         "path": "/private",
         "status": 403,
     }
-
-
-def test_share_ui_frame_redacts_share_urls_and_tokens():
-    frame = server_module.share_ui_frame({
-        "type": "popup-layer",
-        "payload": {
-            "token": "secret-token",
-            "html": '<input value="https://host.example/share/abc123#t=secret-token">',
-            "items": [{"url": "/share/abc123#t=secret-token", "share_token": "secret-token"}],
-        },
-    })
-
-    assert b"secret-token" not in frame
-    assert b"/share/abc123" not in frame
-    assert b"..." in frame
-
-
-def test_verify_share_token_snapshots_viewer_ids_before_status_iteration():
-    app = object.__new__(app_module.TmuxWebtermApp)
-    app.sessions = ["6"]
-    app.share_tokens_lock = app_module.threading.Lock()
-    app.share_tokens = {
-        "share-token": {
-            "session": "6",
-            "sessions": ["6"],
-            "created_at": app_module.time.time(),
-            "expires_at": app_module.time.time() + 60,
-            "revoked": False,
-            "mode": "ro",
-            "scheme": "http",
-            "short_id": "abc",
-            "max_viewers": 5,
-            "viewer_ids": {"viewer-1": {"count": 1, "connected_at": 10.0, "last_seen_at": 10.0}},
-            "ui_state": {},
-        },
-    }
-
-    snapshot = app.verify_share_token("share-token")
-    app.share_tokens["share-token"]["viewer_ids"]["viewer-2"] = {"count": 1, "connected_at": 20.0, "last_seen_at": 20.0}
-    payload = app.share_status_frame_for_record(snapshot)
-
-    assert snapshot is not app.share_tokens["share-token"]
-    assert snapshot["viewer_ids"] is not app.share_tokens["share-token"]["viewer_ids"]
-    assert sorted(snapshot["viewer_ids"]) == ["viewer-1"]
-    assert payload["viewers"] == 1
-
-
-def test_share_viewer_send_frame_restores_bounded_timeout():
-    connection = TimeoutShareConnection()
-    viewer = server_module.ShareViewerConnection(connection, "viewer-timeout")
-
-    viewer.send_frame(b"frame")
-
-    assert connection.sent == [b"frame"]
-    assert connection.timeouts == [server_module.SHARE_VIEWER_SEND_TIMEOUT_SECONDS, 1.25]
-    assert connection.timeout == 1.25
 
 
 def test_parse_repo_refs_param_rejects_garbage():
@@ -805,20 +709,6 @@ def test_activity_hours_routes_share_float_validation_owner():
         assert "ACTIVITY_MAX_HOURS" in body
         assert "parse_query_float(qs, \"hours\"" not in body
         assert "24.0 * 365.0" not in body
-
-
-def test_session_files_route_validates_hours_before_share_scope():
-    app = SimpleNamespace(session_files_payload=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("app should not run")))
-    handler, _calls, writes = route_handler("/api/session-files", app)
-    handler.share_sessions = lambda: ["allowed"]
-
-    http_routes.get_session_files(handler, SimpleNamespace(query="session=blocked&hours=nope"), None)
-
-    assert writes[0][2]["user_message"] == {
-        "key": "request.error.number",
-        "params": {"field": "hours"},
-        "fallback": "hours must be a number",
-    }
 
 
 def test_write_int_query_app_result_parses_and_validates_once():
@@ -1048,25 +938,19 @@ def test_claim_tmux_resize_authority_noop_when_active_is_widest(monkeypatch):
     assert calls == []
 
 
-def test_both_attach_paths_route_through_shared_tmux_options():
-    # The host-browser and share-upstream attach paths must both go through the one shared option
-    # helper, so the window-size smear fix can't regress by re-introducing an inline set-clipboard
-    # block (which omits window-size) on either path.
+def test_tmux_attach_routes_through_shared_options():
+    # The browser attach path must go through the shared option helper so the window-size fix
+    # cannot regress by re-introducing an inline set-clipboard block.
     bridge_body = inspect.getsource(Handler.bridge_tmux)
-    upstream_body = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
 
     assert "configure_session_tmux_options(session)" in bridge_body
-    assert "configure_session_tmux_options(self.session)" in upstream_body
     assert "set-clipboard" not in bridge_body
-    assert "set-clipboard" not in upstream_body
 
 
-def test_tmux_attach_paths_refresh_clients_after_attach():
+def test_tmux_attach_refreshes_clients_after_attach():
     bridge_body = inspect.getsource(Handler.bridge_tmux)
-    upstream_body = inspect.getsource(server_module.ShareTerminalUpstream.start_locked)
 
     assert "refresh_tmux_session_clients_after_attach(session)" in bridge_body
-    assert "refresh_tmux_session_clients_after_attach(self.session)" in upstream_body
 
 
 def test_configure_session_tmux_options_uses_bounded_tmux_helper():
@@ -1165,41 +1049,6 @@ def test_request_body_reader_owns_content_length_validation():
         ({"Content-Length": "1"}, b"{", HTTPStatus.BAD_REQUEST, "invalid JSON", "request.error.invalidJson"),
     ),
 )
-def test_do_post_share_stop_rejects_invalid_requests_before_downstream_handler(headers, body, status, reason, reason_key):
-    app_calls = []
-    app = SimpleNamespace(stop_active_share=lambda target="": app_calls.append(target) or ({"ok": True}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/share/stop", app)
-    handler.headers = headers
-    handler.rfile = io.BytesIO(body)
-    handler.server.close_inactive_share_upstreams = lambda: app_calls.append("closed-upstreams")
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "admin")]
-    assert len(writes) == 1
-    write_kind, actual_status, payload = writes[0]
-    assert write_kind == "json"
-    assert actual_status == status
-    assert payload["error"] == reason
-    assert payload["status"] == status.value
-    assert payload["user_message"]["key"] == reason_key
-    assert app_calls == []
-
-
-def test_do_post_share_stop_invalid_request_matrix_rejects_injected_parser_bypass(monkeypatch):
-    app_calls = []
-    app = SimpleNamespace(stop_active_share=lambda target="": app_calls.append(target) or ({"ok": True}, HTTPStatus.OK))
-    handler, _calls, _writes = route_handler("/api/share/stop", app)
-    handler.headers = {"Content-Length": "bad"}
-    handler.rfile = io.BytesIO(b"")
-    handler.server.close_inactive_share_upstreams = lambda: app_calls.append("closed-upstreams")
-    monkeypatch.setattr(http_routes, "require_json_body", lambda *_args, **_kwargs: {})
-
-    with pytest.raises(AssertionError):
-        Handler.do_POST(handler)
-        assert app_calls == []
-
-
 def route_handler(path, app=None, readonly=False):
     calls = []
     writes = []
@@ -1210,9 +1059,6 @@ def route_handler(path, app=None, readonly=False):
     handler.require_auth = lambda role="readonly": calls.append(("require_auth", role)) or True
     handler.auth_readonly = lambda: readonly
     handler.auth_identity = lambda: SimpleNamespace(role="readonly" if readonly else "admin")
-    handler.share_readonly_api_allowed = lambda parsed: False
-    handler.share_token_text = lambda: ""
-    handler.share_token = lambda: ""
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_json_bytes = lambda value, status=HTTPStatus.OK: writes.append(("json_bytes", status, value))
     handler.write_product_bytes = lambda data, product, promise=None: writes.append(("product", HTTPStatus.OK, data))
@@ -1258,7 +1104,7 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert 'dispatch_http_route(self, "POST")' in post_body
     assert "if parsed.path" not in get_body
     assert "if parsed.path" not in post_body
-    assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "chat", "filesystem", "tmux"}
+    assert set(http_routes.ROUTE_GROUPS) == {"core", "yoagent", "chat", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
     assert http_routes.route_for_request("GET", "/api/stats-sample") is None
     assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
@@ -1266,74 +1112,15 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("GET", "/api/logs").handler is http_routes.get_server_logs
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
     assert http_routes.route_for_request("POST", "/api/stats-history") is None
-    assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
-    assert route_by_path("POST", "/api/share/extend").body_limit == 4096
     assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
-    assert route_by_path("POST", "/api/fs/batch").role is http_routes.share_token_readonly_role
+    assert route_by_path("POST", "/api/fs/batch").role == "admin"
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
     assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
     assert route_by_path("GET", "/api/fs/count").handler is http_routes.get_fs_count
     assert route_by_path("GET", "/api/tmux-session-exists").role == "readonly"
-
-
-def test_http_route_registry_owns_the_complete_share_policy_matrix():
-    expected = {
-        ("GET", "/static/*", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/ping", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/client-events", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/operations/*", http_routes.SHARE_ACCESS_READONLY),
-        ("POST", "/api/operations/ack", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/session-metadata", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/transcripts", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/activity", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/session-files-batch", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/session-files", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/share/*", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/share", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/ws/share-ui", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/ws/share-view", http_routes.SHARE_ACCESS_READONLY),
-        ("POST", "/api/share/debug-profile", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/fs/list", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/fs/index-status", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/fs/read", http_routes.SHARE_ACCESS_SCOPED_FILE),
-        ("GET", "/api/fs/info", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/fs/diff", http_routes.SHARE_ACCESS_SCOPED_FILE),
-        ("GET", "/api/fs/watch-diff", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/api/fs/raw", http_routes.SHARE_ACCESS_SCOPED_FILE),
-        ("POST", "/api/fs/batch", http_routes.SHARE_ACCESS_READONLY),
-        ("GET", "/ws", http_routes.SHARE_ACCESS_READONLY),
-    }
-    actual = {
-        (route.method, route.path, route.share_access)
-        for route in http_routes.ALL_ROUTES
-        if route.share_access != http_routes.SHARE_ACCESS_NONE
-    }
-    assert actual == expected
-    assert len({(route.method, route.path) for route in http_routes.ALL_ROUTES}) == len(http_routes.ALL_ROUTES)
-
-    no_share = SimpleNamespace(share_token_text=lambda: "")
-    with_share = SimpleNamespace(share_token_text=lambda: "share-token")
-    for route in http_routes.ALL_ROUTES:
-        parsed = SimpleNamespace(path=route.path, query="")
-        assert http_routes.route_required_role(route, no_share, parsed) in {None, "readonly", "admin"}
-        assert http_routes.route_required_role(route, with_share, parsed) in {None, "readonly", "admin"}
-
-
-def test_share_policy_consumers_have_no_parallel_api_path_lists():
-    policy_source = "\n".join((
-        inspect.getsource(Handler.share_request_allowed),
-        inspect.getsource(Handler.share_readonly_api_allowed),
-        inspect.getsource(Handler.plaintext_share_scope_allowed),
-    ))
-    assert "/api/" not in policy_source
-    assert not hasattr(Handler, "SHARE_READONLY_GET_PATHS")
-    assert not hasattr(Handler, "SHARE_SCOPED_FILE_GET_PATHS")
-    assert not hasattr(Handler, "SHARE_READONLY_POST_PATHS")
-    assert not hasattr(Handler, "require_auth_for_post")
 
 
 def test_do_get_routes_authenticated_json_and_stream_handlers():
@@ -1489,17 +1276,6 @@ def test_do_get_fs_routes_reject_readonly_before_file_handlers():
     assert writes == [("forbidden", HTTPStatus.FORBIDDEN, "readonly", "admin")]
 
 
-def test_do_get_fs_routes_allow_share_scoped_readonly_file_handlers():
-    handler, calls, writes = route_handler("/api/fs/diff?path=/repo/README.md&token=share", readonly=True)
-    handler.share_readonly_api_allowed = lambda parsed: parsed.path == "/api/fs/diff"
-    handler.handle_fs_diff = lambda parsed: writes.append(("fs-diff", parsed.path))
-
-    Handler.do_GET(handler)
-
-    assert calls == [("require_auth", "readonly")]
-    assert writes == [("fs-diff", "/api/fs/diff")]
-
-
 def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients():
     requests = []
     app = SimpleNamespace(
@@ -1524,117 +1300,6 @@ def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients()
         "force_full": False,
         "request_id": "r-web-watch-diff",
     })]
-
-
-def test_share_scoped_transcripts_payload_filters_to_shared_sessions():
-    handler, _calls, _writes = route_handler("/", SimpleNamespace())
-    handler.share_sessions = lambda: ["6", "8"]
-    payload = {
-        "session_order": ["5", "6", "7", "8"],
-        "sessions": {"5": {"target": "5"}, "6": {"target": "6"}, "8": {"target": "8"}},
-        "cache": {"hit": True},
-    }
-
-    scoped = Handler.share_scoped_transcripts_payload(handler, payload)
-
-    assert scoped["session_order"] == ["6", "8"]
-    assert scoped["sessions"] == {"6": {"target": "6"}, "8": {"target": "8"}}
-    assert scoped["cache"] == {"hit": True}
-
-
-def share_token_auth_handler(path, method="POST"):
-    writes = []
-    record = {"token": "share-token", "mode": "ro", "session": "5", "sessions": ["5"]}
-    app = SimpleNamespace(verify_share_token=lambda token: record if token == "share-token" else None)
-    handler = object.__new__(Handler)
-    handler.path = path
-    handler.command = method
-    handler.headers = {"X-Share-Token": "share-token", "Content-Length": "12", "User-Agent": "pytest"}
-    handler.server = SimpleNamespace(app=app, tls_context=object(), server_address=("127.0.0.1", 19001))
-    handler.close_connection = False
-    handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
-    handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
-    handler.write_redirect = lambda value, status=HTTPStatus.SEE_OTHER: writes.append(("redirect", status, value))
-    handler.send_header = lambda *_args, **_kwargs: None
-    return handler, writes
-
-
-def test_share_token_post_auth_uses_registry_roles_for_readonly_and_mutating_routes(monkeypatch):
-    monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
-
-    allowed_handler, allowed_writes = share_token_auth_handler("/api/fs/batch")
-    allowed_route = http_routes.route_for_request("POST", "/api/fs/batch")
-    assert http_routes.route_required_role(allowed_route, allowed_handler, urlparse(allowed_handler.path)) == "readonly"
-    assert Handler.require_auth(allowed_handler, "readonly") is True
-    assert allowed_writes == []
-    assert allowed_handler.auth_identity().role == "readonly"
-    assert allowed_handler.share_token() == "share-token"
-    assert allowed_handler.close_connection is False
-
-    debug_handler, debug_writes = share_token_auth_handler("/api/share/debug-profile")
-    debug_route = http_routes.route_for_request("POST", "/api/share/debug-profile")
-    assert http_routes.route_required_role(debug_route, debug_handler, urlparse(debug_handler.path)) == "readonly"
-    assert Handler.require_auth(debug_handler, "readonly") is True
-    assert debug_writes == []
-    assert debug_handler.auth_identity().role == "readonly"
-    assert debug_handler.share_token() == "share-token"
-    assert debug_handler.close_connection is False
-
-    mutating_paths = [
-        "/api/event",
-        "/api/settings",
-        "/api/share",
-        "/api/share/stop",
-        "/api/share/extend",
-        "/api/upload",
-        "/api/tmux-window",
-        "/api/watch/roots",
-        "/api/drop-action/run",
-        "/api/yoagent/chat",
-        "/api/yoagent/intent",
-        "/api/yoagent/jobs",
-        "/api/chat/send",
-        "/api/chat/typing",
-        "/api/chat/read",
-        "/api/fs/write",
-        "/api/fs/delete",
-        "/api/fs/rename",
-        "/api/fs/mkdir",
-        "/api/fs/unindex",
-    ]
-    for path in mutating_paths:
-        handler, writes = share_token_auth_handler(path)
-        route = http_routes.route_for_request("POST", path)
-        assert route is not None, path
-        assert route.share_access == http_routes.SHARE_ACCESS_NONE, path
-        required_role = http_routes.route_required_role(route, handler, urlparse(path))
-        assert required_role in {"readonly", "admin"}, path
-        assert Handler.require_auth(handler, required_role) is False, path
-        assert writes and writes[0][0] == "json" and writes[0][1] == HTTPStatus.FORBIDDEN, (path, writes)
-        assert handler.close_connection is True, path
-
-
-def test_test_auth_bypass_does_not_escalate_share_token_to_admin(monkeypatch):
-    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
-
-    handler, writes = share_token_auth_handler("/api/settings")
-
-    assert Handler.require_auth(handler, "admin") is False
-    assert writes == [(
-        "json",
-        HTTPStatus.FORBIDDEN,
-        {
-            "error": "share token is limited to the shared page and websocket",
-            "user_message": {
-                "key": "share.error.pageScope",
-                "params": {},
-                "fallback": "share token is limited to the shared page and websocket",
-            },
-            "role": "readonly",
-        },
-    )]
-    assert handler.auth_identity().role == "readonly"
-    assert handler.share_token() == "share-token"
 
 
 def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
@@ -1898,32 +1563,6 @@ def test_operation_filtered_client_event_stream_releases_on_peer_half_close_unde
     assert len(consumed) <= 1
 
 
-def test_share_client_event_stream_cannot_replay_other_operation_ids():
-    streamed = []
-    request = SimpleNamespace(
-        share_sessions=lambda: ["shared-session"],
-        server=SimpleNamespace(app=SimpleNamespace(
-            operation_access_allowed=lambda operation_id, sessions: (
-                operation_id == "allowed-operation" and sessions == ["shared-session"]
-            ),
-        )),
-        stream_client_events=lambda **kwargs: streamed.append(kwargs),
-        reject_share_forbidden=lambda: pytest.fail("allowed operation stream was rejected"),
-    )
-    parsed = urlparse(
-        "/api/client-events?operation_id=allowed-operation&operations=other-operation"
-    )
-
-    http_routes.get_client_events(request, parsed, route_by_path("GET", "/api/client-events"))
-
-    assert streamed == [{
-        "channels": "",
-        "client_id": "",
-        "operation_id": "allowed-operation",
-        "replay_operation_ids": (),
-    }]
-
-
 @pytest.mark.parametrize("payload", [
     {},
     {"acks": []},
@@ -1941,7 +1580,6 @@ def test_operation_acknowledgment_route_rejects_invalid_batches(payload):
     request = SimpleNamespace(
         read_json_body=lambda _limit: payload,
         write_json=lambda value, status=HTTPStatus.OK: writes.append((value, status)),
-        share_sessions=lambda: [],
         server=SimpleNamespace(app=SimpleNamespace(
             acknowledge_operation_deliveries=lambda _items: pytest.fail("invalid acknowledgments reached the app"),
         )),
@@ -1956,38 +1594,6 @@ def test_operation_acknowledgment_route_rejects_invalid_batches(payload):
     assert writes[0][1] == HTTPStatus.BAD_REQUEST
 
 
-def test_operation_acknowledgment_route_batches_and_preserves_share_scope():
-    acknowledgments = [
-        {"id": "op-a", "cursor": {"epoch": "epoch-a", "seq": 1}},
-        {"id": "op-b", "cursor": {"epoch": "epoch-b", "seq": 2}},
-    ]
-    calls = []
-    writes = []
-    rejected = []
-    app = SimpleNamespace(
-        operation_access_allowed=lambda operation_id, sessions: operation_id == "op-a" and sessions == ["shared"],
-        acknowledge_operation_deliveries=lambda items: calls.append(items) or ({"ok": True, "acknowledged": [item["id"] for item in items]}, HTTPStatus.OK),
-    )
-    request = SimpleNamespace(
-        read_json_body=lambda _limit: {"acks": acknowledgments[:1]},
-        share_sessions=lambda: ["shared"],
-        reject_share_forbidden=lambda: rejected.append(True),
-        server=SimpleNamespace(app=app),
-        write_json=lambda value, status=HTTPStatus.OK: writes.append((value, status)),
-        write_app_result=lambda result: writes.append(result),
-    )
-    route = route_by_path("POST", "/api/operations/ack")
-
-    http_routes.post_operation_acknowledgments(request, urlparse("/api/operations/ack"), route)
-
-    assert calls == [acknowledgments[:1]]
-    assert writes == [({"ok": True, "acknowledged": ["op-a"]}, HTTPStatus.OK)]
-    request.read_json_body = lambda _limit: {"acks": acknowledgments}
-    http_routes.post_operation_acknowledgments(request, urlparse("/api/operations/ack"), route)
-    assert rejected == [True]
-    assert calls == [acknowledgments[:1]]
-
-
 def test_server_bind_failure_preserves_original_os_error():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
@@ -1998,54 +1604,6 @@ def test_server_bind_failure_preserves_original_os_error():
             server_module.TmuxWebtermHTTPServer(("127.0.0.1", port), object())
 
     assert info.value.errno == errno.EADDRINUSE
-
-
-def test_share_request_allowed_route_matrix(monkeypatch):
-    monkeypatch.setattr(server_auth_module, "auth_setup_required", lambda: False)
-    allowed_requests = [
-        ("GET", "/"),
-        ("GET", "/share/abc"),
-        ("GET", "/static/yolomux.js"),
-        ("GET", "/api/ping"),
-        ("GET", "/api/activity"),
-        ("POST", "/api/fs/batch"),
-        ("POST", "/api/operations/ack"),
-        ("POST", "/api/share/debug-profile"),
-        ("GET", "/api/fs/diff?path=/repo/README.md"),
-        ("GET", "/api/fs/watch-diff?since=old-token"),
-        ("GET", "/api/fs/read?path=/repo/README.md"),
-        ("GET", "/api/fs/raw?path=/repo/README.md"),
-        ("GET", "/api/session-metadata"),
-        ("GET", "/api/session-files"),
-        ("GET", "/api/transcripts"),
-        ("GET", "/ws/share-ui"),
-        ("GET", "/ws/share-view"),
-    ]
-    denied_paths = [
-        "/api/event",
-        "/api/settings",
-        "/api/upload",
-        "/api/watch/roots",
-        "/api/drop-action/run",
-        "/api/yoagent/chat",
-        "/api/yoagent/intent",
-        "/api/yoagent/jobs",
-        "/api/fs/write",
-        "/api/fs/delete",
-        "/api/fs/rename",
-        "/api/fs/mkdir",
-        "/api/fs/unindex",
-    ]
-
-    for method, path in allowed_requests:
-        handler, _writes = share_token_auth_handler(path, method=method)
-        assert Handler.share_request_allowed(handler) is True, path
-    for path in denied_paths:
-        handler, _writes = share_token_auth_handler(path, method="POST")
-        assert Handler.share_request_allowed(handler) is False, path
-
-    unknown_handler, _writes = share_token_auth_handler("/api/share-stream", method="GET")
-    assert Handler.share_request_allowed(unknown_handler) is False
 
 
 def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
@@ -2207,59 +1765,6 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
     assert writes == [("json", HTTPStatus.OK, {"session": "6", "copied": True})]
 
 
-def test_do_post_share_stop_passes_query_target_to_app():
-    app_calls = []
-    app = SimpleNamespace(stop_active_share=lambda target="": app_calls.append(target) or ({"ok": True, "stopped": 1}, HTTPStatus.OK))
-    handler, calls, writes = route_handler("/api/share/stop?id=short123", app)
-    handler.headers = {"Content-Length": "0"}
-    handler.server.close_inactive_share_upstreams = lambda: app_calls.append("closed-upstreams")
-    handler.write_app_result = lambda result: writes.append(("app", result))
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "admin")]
-    assert writes == [("app", ({"ok": True, "stopped": 1}, HTTPStatus.OK))]
-    assert app_calls == ["short123", "closed-upstreams"]
-
-
-def test_do_post_share_extend_broadcasts_status():
-    app_calls = []
-    app = SimpleNamespace(
-        extend_share_token=lambda target, add_seconds, **kwargs: app_calls.append((target, add_seconds, kwargs)) or ({"ok": True, "token": "share-token-1"}, HTTPStatus.OK),
-    )
-    handler, calls, writes = route_handler("/api/share/extend", app)
-    handler.headers = {"Content-Length": "52"}
-    handler.read_json_body = lambda limit: {"token": "share-token-1", "add_seconds": 600}
-    handler.request_base_url = lambda: "http://127.0.0.1:9998"
-    handler.server.broadcast_share_status = lambda token: app_calls.append(("broadcast", token))
-    handler.write_app_result = lambda result: writes.append(("app", result))
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "admin")]
-    assert writes == [("app", ({"ok": True, "token": "share-token-1"}, HTTPStatus.OK))]
-    assert app_calls == [("share-token-1", 600, {"base_url": "http://127.0.0.1:9998"}), ("broadcast", "share-token-1")]
-
-
-def test_do_post_share_debug_profile_records_with_share_token():
-    app_calls = []
-    app = SimpleNamespace(
-        record_share_debug_profile=lambda token, payload, **kwargs: app_calls.append((token, payload, kwargs)) or ({"ok": True, "stored": True}, HTTPStatus.OK),
-    )
-    handler, calls, writes = route_handler("/api/share/debug-profile", app)
-    handler.headers = {"Content-Length": "35", "User-Agent": "Safari"}
-    handler.client_address = ("203.0.113.9", 4444)
-    handler.share_token = lambda: "share-token-1"
-    handler.read_json_body = lambda limit: {"kind": "share-replay-health"}
-    handler.write_app_result = lambda result: writes.append(("app", result))
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "admin")]
-    assert writes == [("app", ({"ok": True, "stored": True}, HTTPStatus.OK))]
-    assert app_calls == [("share-token-1", {"kind": "share-replay-health"}, {"ip": "203.0.113.9", "user_agent": "Safari"})]
-
-
 def batch_handler(payload, app=None):
     body = json.dumps(payload).encode("utf-8")
     writes = []
@@ -2295,7 +1800,6 @@ def test_handle_fs_batch_submits_one_product_without_request_thread_filesystem(m
         ],
         "client_scope": "browser",
     }, app=app)
-    handler.share_sessions = lambda: []
     monkeypatch.setattr(
         server_module.filesystem,
         "list_directory",
@@ -2316,7 +1820,7 @@ def test_handle_fs_batch_submits_one_product_without_request_thread_filesystem(m
             {"id": "info", "type": "info", "path": "/repo", "trigger_counts": {"tree-render": 1}},
         ],
         "client_scope": "browser",
-    }, {"shared_sessions": []})]
+    }, {})]
 
 
 def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
@@ -2403,8 +1907,6 @@ def test_handle_fs_batch_sets_one_privacy_safe_endpoint_record():
         "client_scope": "browser",
         "requests": [{"id": "root", "type": "list", "path": path_canary, "trigger": "watch-diff-fallback"}],
     }, app=app)
-    handler.share_sessions = lambda: []
-
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
     assert writes == [(HTTPStatus.ACCEPTED, receipt)]
@@ -2614,19 +2116,6 @@ def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatc
     Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "resize", "rows": 30, "cols": 100}).encode(), readonly=True)
 
     assert calls == []
-
-
-def test_websocket_rejects_share_token_for_other_session():
-    writes = []
-    handler = SimpleNamespace(
-        share_sessions=lambda: ["6"],
-        server=SimpleNamespace(app=SimpleNamespace(sessions=["6", "7"])),
-        write_text=lambda value, status=HTTPStatus.OK: writes.append((status, value)),
-    )
-
-    Handler.websocket(handler, SimpleNamespace(query="session=7"))
-
-    assert writes == [(HTTPStatus.FORBIDDEN, "share token is scoped to a different session\n")]
 
 
 def test_write_sse_json_formats_event_stream():
@@ -2929,1127 +2418,12 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     assert 'message.get("activate") is True' in payload_body
 
 
-def _bridge_share_terminal_input(
-    *,
-    https: bool,
-    mode: str,
-    monkeypatch,
-    authorization_https: bool | None = None,
-) -> tuple[bytes, list[tuple[str, int, str, str]]]:
-    """Drive terminal frames through the websocket bridge to a real PTY write fd."""
-
-    read_fd, write_fd = os.pipe()
-    os.set_blocking(read_fd, False)
-    input_records = []
-    record = {"mode": mode}
-    app = SimpleNamespace(
-        verify_share_token=lambda token: record if token == "share-token" else None,
-        record_user_input=lambda session, size, *, source, data: input_records.append((session, size, source, data)),
-        unregister_share_viewer=lambda *_args: None,
-    )
-    server = SimpleNamespace(
-        app=app,
-        share_terminal_upstream=lambda _token, _session: upstream,
-        release_share_terminal_upstream=lambda *_args: None,
-        broadcast_share_status=lambda _token: None,
-    )
-    upstream = server_module.ShareTerminalUpstream(server, "share-token", "6")
-    upstream.master_fd = write_fd
-    upstream.add_viewer = lambda _viewer: None
-    handler = object.__new__(Handler)
-    handler.connection = FakeShareConnection()
-    handler.rfile = io.BytesIO()
-    handler.server = server
-    handler.request_is_https = lambda: https if authorization_https is None else authorization_https
-    frames = iter(
-        (
-            (1, b'{"type":"refresh"}'),
-            (1, b'{"type":"input","data":"date\\n"}'),
-            (8, b""),
-        )
-    )
-    handler.read_ws_frame_with_timeout = lambda: next(frames)
-    monkeypatch.setattr(server_module, "wait_for_ws_frame", lambda *_args: True, raising=False)
-    monkeypatch.setattr(server_module.select, "select", lambda read, _write, _error, _timeout: (read, [], []))
-    try:
-        Handler.bridge_shared_tmux(handler, "share-token", "6", "viewer-1")
-        try:
-            written = os.read(read_fd, 4096)
-        except BlockingIOError:
-            written = b""
-    finally:
-        os.close(read_fd)
-        if upstream.master_fd is not None:
-            os.close(upstream.master_fd)
-            upstream.master_fd = None
-    return written, input_records
-
-
 @pytest.mark.parametrize(
     ("https", "mode", "expected"),
     ((True, "rw", b"date\n"), (True, "ro", b""), (False, "rw", b""), (False, "ro", b"")),
 )
-def test_share_terminal_input_requires_https_and_readwrite_mode(https: bool, mode: str, expected: bytes, monkeypatch):
-    written, input_records = _bridge_share_terminal_input(https=https, mode=mode, monkeypatch=monkeypatch)
-
-    assert written == expected
-    assert input_records == ([("6", 5, "share", "date\n")] if expected else [])
-
-
-def test_share_terminal_input_matrix_rejects_injected_plaintext_write(monkeypatch):
-    with pytest.raises(AssertionError):
-        written, _records = _bridge_share_terminal_input(
-            https=False,
-            mode="rw",
-            authorization_https=True,
-            monkeypatch=monkeypatch,
-        )
-        assert written == b""
-
-
 @pytest.mark.skipif(not hasattr(server_module, "wait_for_ws_frame"), reason="requires buffered websocket readiness")
-def test_share_ui_socket_wires_write_clients_and_host_broadcasts():
-    """A buffered close frame must not hide the preceding terminal input."""
-
-    server_connection, client_connection = socket.socketpair()
-    stream = server_connection.makefile("rb")
-    received = []
-    record = {"mode": "rw"}
-    upstream = SimpleNamespace(add_viewer=lambda _viewer: None, write_input=received.append)
-    handler = object.__new__(Handler)
-    handler.connection = server_connection
-    handler.rfile = stream
-    handler.request_is_https = lambda: True
-    handler.server = SimpleNamespace(
-        app=SimpleNamespace(
-            verify_share_token=lambda token: record if token == "share-token" else None,
-            unregister_share_viewer=lambda *_args: None,
-        ),
-        share_terminal_upstream=lambda _token, _session: upstream,
-        release_share_terminal_upstream=lambda *_args: None,
-        broadcast_share_status=lambda _token: None,
-    )
-    try:
-        client_connection.sendall(
-            server_module.make_ws_frame(b'{"type":"input","data":"date\\n"}', opcode=1)
-            + server_module.make_ws_frame(b"", opcode=8)
-        )
-
-        Handler.bridge_shared_tmux(handler, "share-token", "6", "viewer-1")
-
-        assert received == [b'{"type":"input","data":"date\\n"}']
-    finally:
-        stream.close()
-        server_connection.close()
-        client_connection.close()
-
-
 @pytest.mark.parametrize(("mode", "readonly"), (("ro", True), ("rw", False)))
-def test_share_terminal_upstream_attaches_with_the_share_mode(monkeypatch, mode: str, readonly: bool):
-    raw_master, raw_slave = os.open(os.devnull, os.O_RDONLY), os.open(os.devnull, os.O_RDONLY)
-    master_fd = fcntl.fcntl(raw_master, fcntl.F_DUPFD, 128)
-    slave_fd = fcntl.fcntl(raw_slave, fcntl.F_DUPFD, 129)
-    os.close(raw_master)
-    os.close(raw_slave)
-    attach_commands = []
-
-    class FakeProcess:
-        pid = 123
-
-        def poll(self):
-            return None
-
-    class FakeThread:
-        def __init__(self, **_kwargs):
-            pass
-
-        def start(self):
-            return None
-
-    upstream = server_module.ShareTerminalUpstream(
-        SimpleNamespace(
-            app=SimpleNamespace(verify_share_token=lambda _token: {"mode": mode}),
-            host_pty_dimensions_for_session=lambda _session: (24, 80),
-        ),
-        "share-token",
-        "6",
-    )
-    monkeypatch.setattr(server_module.pty, "openpty", lambda: (master_fd, slave_fd))
-    monkeypatch.setattr(server_module, "set_pty_size", lambda *_args: None)
-    monkeypatch.setattr(server_module, "configure_session_tmux_options", lambda _session: None)
-    monkeypatch.setattr(server_module, "refresh_tmux_session_clients_after_attach", lambda _session: None)
-    monkeypatch.setattr(server_module, "record_owned_process_group", lambda _process: None)
-    monkeypatch.setattr(server_module, "terminate_process_group", lambda _process: None)
-    monkeypatch.setattr(
-        server_module,
-        "tmux_attach_command",
-        lambda *, readonly: ["tmux", "attach-session", *( ["-r"] if readonly else [])],
-    )
-    monkeypatch.setattr(server_module.subprocess, "Popen", lambda args, **_kwargs: attach_commands.append(args) or FakeProcess())
-    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
-    try:
-        upstream.start_locked()
-    finally:
-        upstream.stop()
-
-    assert ("-r" in attach_commands[0]) is readonly
-
-
-def test_share_pointer_events_are_coalesced_server_side():
-    ui_body = inspect.getsource(Handler.handle_share_ui_message)
-    queue_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.queue_share_pointer)
-    loop_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.share_pointer_loop)
-    hz_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.share_pointer_hz)
-
-    assert "if msg_type == SHARE_MIRROR_FRAME_POINTER:" in ui_body
-    assert "self.server.queue_share_pointer(token, payload, sender=sender)" in ui_body
-    assert "self.share_pointer_records.setdefault(clean_token, SharePointerRecord())" in queue_body
-    assert "SHARE_POINTER_CLICK_QUEUE_LIMIT" in queue_body
-    assert "threading.Thread(target=self.share_pointer_loop" in queue_body
-    assert "self.share_pointer_records.get(token) is not record" in loop_body
-    assert "signature != last_sent" in loop_body
-    assert '"type": SHARE_MIRROR_FRAME_POINTER' in loop_body
-    assert "skip_client_id=sender" in loop_body
-    assert "SHARE_POINTER_MAX_WRITES_PER_SECOND / viewers" in hz_body
-    assert "self.share_ui_client_count(token)" in hz_body
-    assert server_module.SHARE_POINTER_MAX_HZ == 30
-
-
-def test_share_pointer_record_coalesces_motion_bounds_clicks_and_reuses_thread(monkeypatch):
-    threads = []
-
-    class FakeThread:
-        def __init__(self, *, target, args, name, daemon):
-            self.target = target
-            self.args = args
-            self.name = name
-            self.daemon = daemon
-            self.started = False
-            threads.append(self)
-
-        def start(self):
-            self.started = True
-
-        def is_alive(self):
-            return self.started
-
-    monkeypatch.setattr(server_module.threading, "Thread", FakeThread)
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
-    server.share_pointer_lock = server_module.threading.Lock()
-    server.share_pointer_records = {}
-
-    server.queue_share_pointer("share-token", {"x": 1, "y": 2}, sender="host")
-    for index in range(server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 3):
-        server.queue_share_pointer("share-token", {"x": index, "y": 3, "click": True}, sender="host")
-
-    record = server.share_pointer_records["share-token"]
-    assert len(threads) == 1
-    assert threads[0].args == ("share-token", record)
-    assert record.thread is threads[0]
-    assert record.latest == {"x": server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2, "y": 3, "sender": "host"}
-    assert len(record.clicks) == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT
-    assert record.clicks[0]["x"] == 3
-    assert record.clicks[-1]["x"] == server_module.SHARE_POINTER_CLICK_QUEUE_LIMIT + 2
-
-
-def test_share_pointer_loop_coalesces_unchanged_motion_and_cleans_record():
-    class TwoTicks:
-        def __init__(self):
-            self.ticks = 0
-
-        def is_set(self):
-            return self.ticks >= 2
-
-        def wait(self, _timeout):
-            self.ticks += 1
-            return False
-
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
-    server.share_pointer_lock = server_module.threading.Lock()
-    server.share_pointer_stop = TwoTicks()
-    server.share_pointer_hz = lambda _token: 30
-    broadcasts = []
-    server.broadcast_share_ui = lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id))
-    record = server_module.SharePointerRecord(
-        latest={"x": 2, "sender": "host"},
-        clicks=[{"x": 1, "sender": "host", "click": True}, {"x": 2, "sender": "host", "click": True}],
-    )
-    server.share_pointer_records = {"share-token": record}
-
-    server.share_pointer_loop("share-token", record)
-
-    assert [message["payload"] for _token, message, _skip in broadcasts] == [
-        {"x": 2, "sender": "host"},
-        {"x": 1, "sender": "host", "click": True},
-        {"x": 2, "sender": "host", "click": True},
-    ]
-    assert all(skip == "host" for _token, _message, skip in broadcasts)
-    assert server.share_pointer_records == {}
-
-
-def test_share_pointer_invalid_token_is_rejected_without_retained_state():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.app = SimpleNamespace(verify_share_token=lambda _token: None)
-    server.share_pointer_lock = server_module.threading.Lock()
-    server.share_pointer_records = {"share-token": server_module.SharePointerRecord()}
-
-    server.queue_share_pointer("share-token", {"x": 1}, sender="host")
-
-    assert server.share_pointer_records == {}
-
-
-def test_share_pointer_old_loop_cannot_delete_replacement_record():
-    class AlreadyStopped:
-        @staticmethod
-        def is_set():
-            return True
-
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
-    server.share_pointer_lock = server_module.threading.Lock()
-    server.share_pointer_stop = AlreadyStopped()
-    old_record = server_module.SharePointerRecord(latest={"x": 1})
-    replacement = server_module.SharePointerRecord(latest={"x": 2})
-    server.share_pointer_records = {"share-token": replacement}
-
-    server.share_pointer_loop("share-token", old_record)
-
-    assert server.share_pointer_records == {"share-token": replacement}
-
-
-def test_share_pointer_parallel_state_maps_are_retired():
-    source = Path(server_module.__file__).read_text(encoding="utf-8")
-
-    assert "self.share_pointer_latest" not in source
-    assert "self.share_pointer_clicks" not in source
-    assert "self.share_pointer_threads" not in source
-
-
-def test_share_ui_socket_source_wiring_remains_explicit():
-    share_ui_route = route_by_path("GET", "/ws/share-ui")
-    share_status_route = route_by_path("GET", "/api/share")
-    host_body = inspect.getsource(Handler.websocket_share_host)
-    viewer_body = inspect.getsource(Handler.websocket_share_ui)
-    bridge_body = inspect.getsource(Handler.bridge_share_ui_socket)
-    handle_body = inspect.getsource(Handler.handle_share_ui_message)
-    server_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.broadcast_share_ui)
-
-    assert share_ui_route.handler is http_routes.get_share_ui_websocket
-    assert http_routes.route_required_role(share_status_route, SimpleNamespace(share_token_text=lambda: "share-token"), SimpleNamespace(path="/api/share")) == "readonly"
-    assert http_routes.route_required_role(share_status_route, SimpleNamespace(share_token_text=lambda: ""), SimpleNamespace(path="/api/share")) == "admin"
-    assert "self.bridge_share_ui_socket(token, client_id)" in host_body
-    assert 'write_enabled = self.request_is_https() and str(record.get("mode") or "ro") == "rw"' in viewer_body
-    assert 'registered_viewer_id = ""' in viewer_body
-    assert 'register(token, "", viewer_id, client_ip, self.headers.get("User-Agent", ""))' in viewer_body
-    assert "receive_only=not write_enabled" in viewer_body
-    assert "viewer_id=registered_viewer_id" in viewer_body
-    assert "self.server.register_share_ui_client(token, client)" in bridge_body
-    assert "self.server.enqueue_share_replay_frames_for_viewer(token, client)" in bridge_body
-    assert "threading.Thread(target=client.write_loop" in bridge_body
-    assert "accept_semantic_state=False" in viewer_body
-    assert "self.handle_share_ui_message(token, message, clean_client_id, accept_semantic_state=accept_semantic_state)" in bridge_body
-    assert "receive_only and not share_replay_viewer_control_frame_allowed" in bridge_body
-    assert "not accept_semantic_state and share_viewer_semantic_mutation_frame_disallowed(msg_type)" in handle_body
-    assert bridge_body.index('json.loads(payload.decode("utf-8"))') < bridge_body.index("receive_only and not share_replay_viewer_control_frame_allowed")
-    assert "self.server.broadcast_share_status(token)" in inspect.getsource(Handler.websocket_share_view)
-    assert "self.server.broadcast_share_status(token)" in inspect.getsource(Handler.bridge_shared_tmux)
-    assert "self.server.app.unregister_share_viewer(token, viewer_id)" in bridge_body
-    assert "skip_client_id=sender" in handle_body
-    assert "share_mirror_frame_type_allowed(msg_type)" in handle_body
-    assert "msg_type == SHARE_MIRROR_FRAME_INPUT_INTENT" in handle_body
-    assert "self.normalize_share_input_intent_for_handler(token, payload)" in handle_body
-    assert "self.server.record_share_replay_keyframe(token, relay_message)" in handle_body
-    assert "self.server.record_share_replay_delta(token, relay_message)" in handle_body
-    assert "msg_type in {SHARE_MIRROR_FRAME_VIEWPORT, SHARE_MIRROR_FRAME_APPEARANCE}" in handle_body
-    assert '"uiStatePatch": {msg_type: payload}' in handle_body
-    assert "msg_type == SHARE_MIRROR_FRAME_SCROLL" in handle_body
-    assert '"uiStateScroll": payload' in handle_body
-    assert callable(getattr(server_module.TmuxWebtermHTTPServer, "broadcast_share_status", None))
-    assert "self.share_ui_clients" in server_body
-    assert "ui_client_ids" in server_body
-    assert "viewer.client_id in ui_client_ids" in server_body
-    assert "self.request_share_replay_keyframe(str(token or \"\"), reason=\"backpressure\")" in server_body
-
-
-def test_share_ui_message_relay_preserves_mirror_metadata():
-    updates = []
-    broadcasts = []
-    app = SimpleNamespace(update_share_record_ui_state=lambda token, payload: updates.append((token, payload)))
-    handler = SimpleNamespace(
-        server=SimpleNamespace(
-            app=app,
-            record_share_replay_keyframe=lambda _token, _message: None,
-            broadcast_share_ui=lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id)),
-        )
-    )
-
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "layout",
-        "payload": {"layout": "left", "tabs": "left:1"},
-        "sender": "host-browser",
-        "epoch": 7,
-        "sequence": 12,
-        "reason": "layout-after-resize",
-    }, "client-a")
-
-    assert updates == [("share-token", {"layout": "left", "tabs": "left:1"})]
-    assert broadcasts == [("share-token", {
-        "type": "layout",
-        "payload": {"layout": "left", "tabs": "left:1"},
-        "sender": "host-browser",
-        "epoch": 7,
-        "sequence": 12,
-        "reason": "layout-after-resize",
-    }, "host-browser")]
-
-
-def test_share_ui_message_rejects_viewer_authored_semantic_state_frames():
-    updates = []
-    broadcasts = []
-    app = SimpleNamespace(update_share_record_ui_state=lambda token, payload: updates.append((token, payload)))
-    handler = SimpleNamespace(
-        server=SimpleNamespace(
-            app=app,
-            record_share_replay_keyframe=lambda _token, _message: None,
-            record_share_replay_delta=lambda _token, _message: None,
-            broadcast_share_ui=lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id)),
-        )
-    )
-
-    for message in [
-        {"type": "layout", "payload": {"layout": "left", "tabs": "left:1"}, "sender": "writer-a"},
-        {"type": "ui-state", "payload": {"layout": "left", "tabs": "left:1", "finder": {"root": "/tmp/client"}, "editor": {"modes": [{"item": "client"}]}}, "sender": "writer-a"},
-        {"type": "popup-layer", "payload": {"items": [{"html": "<div>client popup</div>"}]}, "sender": "writer-a"},
-    ]:
-        Handler.handle_share_ui_message(handler, "share-token", message, "writer-a", accept_semantic_state=False)
-
-    assert updates == []
-    assert broadcasts == []
-
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "layout",
-        "payload": {"layout": "left", "tabs": "left:1"},
-        "sender": "host-browser",
-    }, "host-browser", accept_semantic_state=True)
-
-    assert updates == [("share-token", {"layout": "left", "tabs": "left:1"})]
-    assert broadcasts == [("share-token", {
-        "type": "layout",
-        "payload": {"layout": "left", "tabs": "left:1"},
-        "sender": "host-browser",
-    }, "host-browser")]
-
-
-def test_share_replay_protocol_constants_and_frame_allowlist():
-    assert server_module.SHARE_MIRROR_PROTOCOL_VERSION == 1
-    assert server_module.SHARE_MIRROR_REPLAY_FRAME_TYPES == frozenset({
-        "dom-keyframe",
-        "dom-delta",
-        "dom-keyframe-request",
-        "dom-keyframe-ack",
-        "dom-replay-error",
-        "terminal-host-resize",
-    })
-    assert server_module.SHARE_MIRROR_REPLAY_VIEWER_CONTROL_FRAME_TYPES == frozenset({
-        "dom-keyframe-request",
-        "dom-keyframe-ack",
-        "dom-replay-error",
-    })
-    assert {"ui-state", "layout", "popup-layer"} <= server_module.SHARE_MIRROR_VIEWER_SEMANTIC_MUTATION_FRAME_TYPES
-    assert server_module.share_viewer_semantic_mutation_frame_disallowed("ui-state")
-    assert not server_module.share_viewer_semantic_mutation_frame_disallowed("input-intent")
-    assert server_module.SHARE_MIRROR_SEQUENCE_FIELDS == ("epoch", "sequence", "baseSequence")
-    assert server_module.SHARE_MIRROR_KEYFRAME_REASONS == frozenset({"join", "gap", "digest", "replay-error", "backpressure", "topology", "manual-debug"})
-    assert server_module.SHARE_TERMINAL_PLACEHOLDER_FIELDS == ("placeholderId", "session", "rows", "cols", "terminalEpoch")
-    assert server_module.SHARE_MIRROR_REDACTION_POLICY_VERSION == 1
-    assert server_module.SHARE_REPLAY_DELTA_RING_LIMIT == 128
-    assert server_module.share_replay_frame_type_allowed("dom-keyframe")
-    assert server_module.share_replay_frame_type_allowed("dom-keyframe-request")
-    assert not server_module.share_replay_frame_type_allowed("dom-keyframe-evil")
-    assert server_module.share_replay_viewer_control_frame_allowed("dom-keyframe-request")
-    assert not server_module.share_replay_viewer_control_frame_allowed("dom-delta")
-
-
-def test_share_input_intent_protocol_constants_and_normalization():
-    assert server_module.SHARE_MIRROR_FRAME_INPUT_INTENT == "input-intent"
-    assert server_module.SHARE_INPUT_INTENT_TYPES == frozenset({
-        "terminal-input",
-        "terminal-paste",
-        "terminal-scroll",
-        "tab-activate",
-        "menu-command",
-        "host-command",
-    })
-    assert server_module.share_mirror_frame_type_allowed("input-intent")
-    assert server_module.share_input_intent_type_allowed("terminal-input")
-    assert not server_module.share_input_intent_type_allowed("filesystem-write")
-
-    sessions = ["6", "8"]
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-input", "session": "6", "data": "ls\x00\n"}, sessions) == {"intent": "terminal-input", "session": "6", "data": "ls\n"}
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-paste", "session": "8", "data": "paste"}, sessions) == {"intent": "terminal-paste", "session": "8", "data": "paste"}
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-scroll", "session": "6", "direction": "up", "lines": 5000}, sessions) == {"intent": "terminal-scroll", "session": "6", "direction": "up", "lines": server_module.SHARE_INPUT_INTENT_MAX_LINES}
-    assert server_module.normalize_share_input_intent_payload({"intent": "tab-activate", "session": "6", "item": "file:/repo/README.md"}, sessions) == {"intent": "tab-activate", "item": "file:/repo/README.md", "session": "6"}
-    assert server_module.normalize_share_input_intent_payload({"intent": "menu-command", "session": "6", "command": "tab-close", "target": "6"}, sessions) == {"intent": "menu-command", "command": "tab-close", "target": "6", "session": "6"}
-    assert server_module.normalize_share_input_intent_payload({"intent": "host-command", "command": "request-keyframe"}, sessions) == {"intent": "host-command", "command": "request-keyframe"}
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-input", "session": "9", "data": "ls"}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-input", "session": "6", "data": ""}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-scroll", "session": "6", "direction": "left", "lines": 5}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "terminal-scroll", "session": "6", "direction": "up", "lines": True}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "tab-activate", "item": "bad\nitem"}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "menu-command", "command": "run-arbitrary-js"}, sessions) is None
-    assert server_module.normalize_share_input_intent_payload({"intent": "host-command", "command": "shutdown"}, sessions) is None
-
-
-def test_share_ui_message_relay_accepts_only_valid_write_input_intents():
-    broadcasts = []
-    applied = []
-    record = {"mode": "rw", "session": "6", "sessions": ["6", "8"]}
-    app = SimpleNamespace(
-        verify_share_token=lambda token: record if token == "share-token" else None,
-        share_record_sessions=lambda share_record: share_record.get("sessions", []),
-        update_share_record_ui_state=lambda _token, _payload: None,
-    )
-    handler = SimpleNamespace(
-        server=SimpleNamespace(
-            app=app,
-            record_share_replay_keyframe=lambda _token, _message: None,
-            record_share_replay_delta=lambda _token, _message: None,
-            broadcast_share_ui=lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id)),
-        ),
-        request_is_https=lambda: True,
-    )
-    handler.share_record_sessions_for_handler = lambda share_record: Handler.share_record_sessions_for_handler(handler, share_record)
-    handler.normalize_share_input_intent_for_handler = lambda token, payload: Handler.normalize_share_input_intent_for_handler(handler, token, payload)
-    handler.apply_share_input_intent_for_handler = lambda token, payload: applied.append((token, payload)) or True
-
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "input-intent",
-        "payload": {"intent": "terminal-input", "session": "6", "data": "date\x00\n"},
-        "sender": "writer-a",
-        "epoch": 3,
-        "sequence": 4,
-    }, "client-a")
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "input-intent",
-        "payload": {"intent": "host-command", "command": "request-keyframe"},
-        "sender": "writer-a",
-    }, "client-a")
-    Handler.handle_share_ui_message(handler, "share-token", {"type": "input-intent", "payload": {"intent": "terminal-input", "session": "9", "data": "bad"}, "sender": "writer-a"}, "client-a")
-    Handler.handle_share_ui_message(handler, "bad-token", {"type": "input-intent", "payload": {"intent": "terminal-input", "session": "6", "data": "bad"}, "sender": "writer-a"}, "client-a")
-
-    record["mode"] = "ro"
-    Handler.handle_share_ui_message(handler, "share-token", {"type": "input-intent", "payload": {"intent": "terminal-input", "session": "6", "data": "readonly"}, "sender": "writer-a"}, "client-a")
-    record["mode"] = "rw"
-    handler.request_is_https = lambda: False
-    Handler.handle_share_ui_message(handler, "share-token", {"type": "input-intent", "payload": {"intent": "terminal-input", "session": "6", "data": "http"}, "sender": "writer-a"}, "client-a")
-
-    assert broadcasts == [
-        ("share-token", {
-            "type": "input-intent",
-            "payload": {"intent": "terminal-input", "session": "6", "data": "date\n"},
-            "sender": "writer-a",
-            "epoch": 3,
-            "sequence": 4,
-        }, "writer-a"),
-        ("share-token", {
-            "type": "input-intent",
-            "payload": {"intent": "host-command", "command": "request-keyframe"},
-            "sender": "writer-a",
-        }, "writer-a"),
-    ]
-    assert applied == [
-        ("share-token", {"intent": "terminal-input", "session": "6", "data": "date\n"}),
-        ("share-token", {"intent": "host-command", "command": "request-keyframe"}),
-    ]
-
-
-def test_share_input_intent_applies_terminal_paths_to_existing_share_upstream():
-    writes = []
-    scrolls = []
-    upstream = SimpleNamespace(write_input=lambda payload: writes.append(json.loads(payload.decode("utf-8"))) or True)
-    app = SimpleNamespace(tmux_scroll=lambda session, direction, lines: scrolls.append((session, direction, lines)))
-    handler = SimpleNamespace(server=SimpleNamespace(
-        app=app,
-        share_terminal_upstream=lambda token, session: upstream if (token, session) == ("share-token", "6") else None,
-    ))
-
-    assert Handler.apply_share_input_intent_for_handler(handler, "share-token", {"intent": "terminal-input", "session": "6", "data": "abc"}) is True
-    assert Handler.apply_share_input_intent_for_handler(handler, "share-token", {"intent": "terminal-paste", "session": "6", "data": "paste"}) is True
-    assert Handler.apply_share_input_intent_for_handler(handler, "share-token", {"intent": "terminal-scroll", "session": "6", "direction": "up", "lines": 12}) is True
-    assert Handler.apply_share_input_intent_for_handler(handler, "share-token", {"intent": "tab-activate", "item": "6"}) is False
-    assert writes == [{"type": "input", "data": "abc"}, {"type": "input", "data": "paste"}]
-    assert scrolls == [("6", "up", 12)]
-
-
-def test_share_ui_message_relay_accepts_known_replay_frames_only():
-    broadcasts = []
-    recorded = []
-    app = SimpleNamespace(update_share_record_ui_state=lambda _token, _payload: None)
-    handler = SimpleNamespace(
-        server=SimpleNamespace(
-            app=app,
-            record_share_replay_keyframe=lambda token, message: recorded.append((token, message)),
-            record_share_replay_delta=lambda token, message: recorded.append((token, message)),
-            broadcast_share_ui=lambda token, message, skip_client_id="": broadcasts.append((token, message, skip_client_id)),
-        )
-    )
-
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "dom-keyframe",
-        "version": 1,
-        "payload": {"root": {"nodeId": 1}},
-        "sender": "host-browser",
-        "epoch": 9,
-        "sequence": 42,
-        "reason": "join",
-    }, "client-a")
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "dom-delta",
-        "version": 1,
-        "payload": {"mutations": []},
-        "sender": "host-browser",
-        "epoch": 9,
-        "sequence": 43,
-        "baseSequence": 42,
-        "reason": "gap",
-    }, "client-a")
-    Handler.handle_share_ui_message(handler, "share-token", {
-        "type": "dom-keyframe-evil",
-        "payload": {"root": {"nodeId": 2}},
-        "sender": "host-browser",
-    }, "client-a")
-
-    assert broadcasts == [
-        ("share-token", {
-            "type": "dom-keyframe",
-            "payload": {"root": {"nodeId": 1}},
-            "sender": "host-browser",
-            "version": 1,
-            "epoch": 9,
-            "sequence": 42,
-            "reason": "join",
-        }, "host-browser"),
-        ("share-token", {
-            "type": "dom-delta",
-            "payload": {"mutations": []},
-            "sender": "host-browser",
-            "version": 1,
-            "epoch": 9,
-            "sequence": 43,
-            "baseSequence": 42,
-            "reason": "gap",
-        }, "host-browser"),
-    ]
-    assert recorded == [("share-token", broadcasts[0][1]), ("share-token", broadcasts[1][1])]
-
-
-def test_share_replay_keyframe_cache_fans_out_to_late_viewers_and_prunes():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    active_tokens = {"share-token"}
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    init_share_replay_state(server)
-
-    server.record_share_replay_keyframe("share-token", {
-        "type": "dom-keyframe",
-        "version": 1,
-        "payload": {
-            "digest": "sha256:abc",
-            "root": {"nodeId": 1, "tag": "div", "attrs": {"id": "appRoot"}, "children": []},
-            "url": "/share/abc123#t=secret-token",
-        },
-        "sender": "host-browser",
-        "epoch": 4,
-        "sequence": 9,
-        "reason": "join",
-    })
-
-    latest = server.latest_share_replay_keyframe("share-token")
-    assert latest["type"] == "dom-keyframe"
-    assert latest["version"] == 1
-    assert latest["epoch"] == 4
-    assert latest["sequence"] == 9
-    assert latest["payload"]["digest"] == "sha256:abc"
-    assert latest["payload"]["url"] == "..."
-
-    viewer = server_module.ShareViewerConnection(object(), "viewer-b")
-    assert server.enqueue_latest_share_replay_keyframe("share-token", viewer)
-    queued = viewer.frames.get_nowait()
-    assert b'"ch":"ui"' in queued
-    assert b'"type":"dom-keyframe"' in queued
-    assert b'"digest":"sha256:abc"' in queued
-    assert b"secret-token" not in queued
-    assert b"/share/abc123" not in queued
-
-    active_tokens.clear()
-    assert server.latest_share_replay_keyframe("share-token") is None
-    assert server.share_replay_records == {}
-
-    active_tokens.add("share-token")
-    server.record_share_replay_keyframe("share-token", {"type": "dom-keyframe", "payload": {"digest": "sha256:def"}})
-    active_tokens.clear()
-    server.prune_inactive_share_replay_records()
-    assert server.share_replay_records == {}
-
-
-def test_share_replay_delta_ring_replays_contiguous_frames_to_late_viewer():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    active_tokens = {"share-token"}
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    init_share_replay_state(server)
-    requests = []
-    server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
-
-    server.record_share_replay_keyframe("share-token", {
-        "type": "dom-keyframe",
-        "version": 1,
-        "payload": {"digest": "sha256:key", "root": {"nodeId": 1}},
-        "sender": "host-browser",
-        "epoch": 7,
-        "sequence": 10,
-    })
-    server.record_share_replay_delta("share-token", {
-        "type": "dom-delta",
-        "version": 1,
-        "payload": {"mutations": [{"type": "text", "value": "/share/abc123#t=secret-token"}]},
-        "sender": "host-browser",
-        "epoch": 7,
-        "sequence": 11,
-        "baseSequence": 10,
-    })
-    server.record_share_replay_delta("share-token", {
-        "type": "dom-delta",
-        "version": 1,
-        "payload": {"mutations": [{"type": "attribute", "name": "class", "value": "ready"}]},
-        "sender": "host-browser",
-        "epoch": 7,
-        "sequence": 12,
-        "baseSequence": 11,
-    })
-
-    viewer = server_module.ShareViewerConnection(object(), "viewer-b")
-    assert server.enqueue_share_replay_frames_for_viewer("share-token", viewer)
-    queued = [server_ws_json(viewer.frames.get_nowait()) for _ in range(3)]
-
-    assert [frame["type"] for frame in queued] == ["dom-keyframe", "dom-delta", "dom-delta"]
-    assert [frame.get("sequence") for frame in queued] == [10, 11, 12]
-    assert queued[1]["payload"]["mutations"][0]["value"] == "..."
-    assert requests == []
-
-
-def test_share_replay_snapshot_never_mixes_keyframe_generations():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token})
-    init_share_replay_state(server)
-    snapshot_inside_lock = server_module.threading.Event()
-    release_snapshot = server_module.threading.Event()
-    writer_started = server_module.threading.Event()
-    writer_done = server_module.threading.Event()
-    first_snapshot = []
-    original_contiguous = server.contiguous_share_replay_deltas
-
-    server.record_share_replay_keyframe("share-token", {
-        "type": "dom-keyframe",
-        "payload": {"generation": "old"},
-        "epoch": 1,
-        "sequence": 10,
-    })
-    server.record_share_replay_delta("share-token", {
-        "type": "dom-delta",
-        "payload": {"generation": "old"},
-        "epoch": 1,
-        "sequence": 11,
-        "baseSequence": 10,
-    })
-
-    def hooked_contiguous(record, keyframe):
-        snapshot_inside_lock.set()
-        assert release_snapshot.wait(timeout=1)
-        return original_contiguous(record, keyframe)
-
-    def read_snapshot():
-        first_snapshot.append(server.share_replay_frames_snapshot("share-token"))
-
-    def replace_generation():
-        writer_started.set()
-        server.record_share_replay_keyframe("share-token", {
-            "type": "dom-keyframe",
-            "payload": {"generation": "new"},
-            "epoch": 2,
-            "sequence": 20,
-        })
-        server.record_share_replay_delta("share-token", {
-            "type": "dom-delta",
-            "payload": {"generation": "new"},
-            "epoch": 2,
-            "sequence": 21,
-            "baseSequence": 20,
-        })
-        writer_done.set()
-
-    server.contiguous_share_replay_deltas = hooked_contiguous
-    reader = server_module.threading.Thread(target=read_snapshot)
-    reader.start()
-    assert snapshot_inside_lock.wait(timeout=1)
-    writer = server_module.threading.Thread(target=replace_generation)
-    writer.start()
-    assert writer_started.wait(timeout=1)
-    assert not writer_done.is_set()
-
-    release_snapshot.set()
-    reader.join(timeout=1)
-    writer.join(timeout=1)
-    assert not reader.is_alive()
-    assert not writer.is_alive()
-    assert writer_done.is_set()
-
-    old_keyframe, old_deltas, old_contiguous = first_snapshot[0]
-    assert old_contiguous
-    assert old_keyframe["sequence"] == 10
-    assert [delta["sequence"] for delta in old_deltas] == [11]
-
-    server.contiguous_share_replay_deltas = original_contiguous
-    new_keyframe, new_deltas, new_contiguous = server.share_replay_frames_snapshot("share-token")
-    assert new_contiguous
-    assert new_keyframe["sequence"] == 20
-    assert [delta["sequence"] for delta in new_deltas] == [21]
-
-
-def test_share_replay_parallel_state_maps_are_retired():
-    source = Path(server_module.__file__).read_text(encoding="utf-8")
-
-    assert "self.share_replay_keyframes" not in source
-    assert "self.share_replay_keyframes_lock" not in source
-    assert "self.share_replay_deltas" not in source
-    assert "self.share_replay_deltas_lock" not in source
-    assert "share_replay_deltas_after_keyframe" not in source
-
-
-def test_share_replay_delta_ring_overflow_requests_keyframe_without_partial_deltas():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    active_tokens = {"share-token"}
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    init_share_replay_state(server)
-    requests = []
-    server.broadcast_share_ui = lambda token, message, skip_client_id="": requests.append((token, message, skip_client_id))
-
-    server.record_share_replay_keyframe("share-token", {
-        "type": "dom-keyframe",
-        "version": 1,
-        "payload": {"digest": "sha256:key", "root": {"nodeId": 1}},
-        "sender": "host-browser",
-        "epoch": 3,
-        "sequence": 0,
-    })
-    for sequence in range(1, server_module.SHARE_REPLAY_DELTA_RING_LIMIT + 3):
-        server.record_share_replay_delta("share-token", {
-            "type": "dom-delta",
-            "version": 1,
-            "payload": {"mutations": [{"type": "text", "value": str(sequence)}]},
-            "sender": "host-browser",
-            "epoch": 3,
-            "sequence": sequence,
-            "baseSequence": sequence - 1,
-        })
-
-    viewer = server_module.ShareViewerConnection(object(), "viewer-overflow")
-    assert not server.enqueue_share_replay_frames_for_viewer("share-token", viewer)
-    assert viewer.frames.empty()
-    assert requests == [("share-token", {
-        "type": "dom-keyframe-request",
-        "payload": {"reason": "join", "viewerId": "viewer-overflow"},
-        "sender": "__server__",
-        "version": 1,
-        "reason": "join",
-    }, "viewer-overflow")]
-
-
-def test_share_replay_delta_ring_prunes_stopped_shares():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    active_tokens = {"share-token"}
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    init_share_replay_state(server)
-
-    server.record_share_replay_keyframe("share-token", {
-        "type": "dom-keyframe",
-        "payload": {"digest": "sha256:key"},
-        "epoch": 1,
-        "sequence": 1,
-    })
-    server.record_share_replay_delta("share-token", {
-        "type": "dom-delta",
-        "payload": {"mutations": []},
-        "epoch": 1,
-        "sequence": 2,
-        "baseSequence": 1,
-    })
-    assert server.share_replay_records["share-token"].deltas_by_epoch
-
-    active_tokens.clear()
-    server.prune_inactive_share_replay_records()
-
-    assert server.share_replay_records == {}
-
-
-def test_share_replay_live_delta_overflow_requests_keyframe():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    active_tokens = {"share-token"}
-    server.app = SimpleNamespace(verify_share_token=lambda token: {"token": token} if token in active_tokens else None)
-    server.share_ui_clients_lock = server_module.threading.Lock()
-    viewer = server_module.ShareViewerConnection(object(), "viewer-slow")
-    viewer.queued_bytes = server_module.SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES - 4
-    server.share_ui_clients = {"share-token": {viewer}}
-    server.share_upstreams_lock = server_module.threading.Lock()
-    upstream = server_module.ShareTerminalUpstream(server, "share-token", "6")
-    terminal_viewer = server_module.ShareViewerConnection(object(), "viewer-slow")
-    upstream.viewers.add(terminal_viewer)
-    server.share_upstreams = {("share-token", "6"): upstream}
-    requests = []
-    server.request_share_replay_keyframe = lambda token, reason="gap", skip_client_id="", viewer_id="": requests.append((token, reason, skip_client_id, viewer_id))
-
-    server_module.TmuxWebtermHTTPServer.broadcast_share_ui(server, "share-token", {
-        "type": "dom-delta",
-        "payload": {"mutations": [{"type": "text", "value": "large-enough"}]},
-        "sender": "host-browser",
-        "epoch": 1,
-        "sequence": 2,
-        "baseSequence": 1,
-    })
-
-    assert viewer.frames.empty()
-    assert requests == [("share-token", "backpressure", "", "")]
-    assert terminal_viewer.frames.empty()
-    assert not terminal_viewer.is_closed()
-
-    upstream.broadcast(b"terminal bytes continue")
-
-    assert not terminal_viewer.frames.empty()
-    assert not terminal_viewer.is_closed()
-
-
-def test_share_viewer_connection_coalesces_latest_pointer_frames():
-    connection = FakeShareConnection()
-    viewer = server_module.ShareViewerConnection(connection, "viewer-pointer")
-    first = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 1, "y": 1}})
-    second = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 2, "y": 2}})
-
-    assert viewer.enqueue(first) == "queued"
-    assert viewer.enqueue(second) == "queued"
-    viewer.close("done")
-    viewer.write_loop()
-
-    assert [server_ws_json(frame)["payload"] for frame in connection.sent] == [{"x": 2, "y": 2}]
-    assert viewer.queued_bytes == 0
-
-    replay_viewer = server_module.ShareViewerConnection(object(), "viewer-replay-pointer")
-    replay_first = server_module.share_ui_frame({"type": "dom-delta", "payload": {"pointer": {"x": 3, "y": 3}}, "sequence": 3})
-    replay_second = server_module.share_ui_frame({"type": "dom-delta", "payload": {"pointer": {"x": 4, "y": 4}}, "sequence": 4})
-    assert replay_viewer.enqueue(replay_first) == "queued"
-    assert replay_viewer.enqueue(replay_second) == "queued"
-    assert [server_ws_json(replay_viewer.frames.get_nowait())["sequence"] for _ in range(2)] == [3, 4]
-
-    click_connection = FakeShareConnection()
-    click_viewer = server_module.ShareViewerConnection(click_connection, "viewer-pointer-click")
-    click_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 5, "y": 5, "click": True}})
-    move_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 6, "y": 6}})
-    assert click_viewer.enqueue(click_frame) == "queued"
-    assert click_viewer.enqueue(move_frame) == "queued"
-    click_viewer.close("done")
-    click_viewer.write_loop()
-    assert [server_ws_json(frame)["payload"]["x"] for frame in click_connection.sent] == [5, 6]
-
-
-def test_share_viewer_connection_prioritizes_latest_pointer_around_keyframes():
-    connection = FakeShareConnection()
-    viewer = server_module.ShareViewerConnection(connection, "viewer-priority-pointer")
-    keyframe = server_module.share_ui_frame({
-        "type": "dom-keyframe",
-        "payload": {"digest": "sha256:pending", "root": {"nodeId": 1}},
-        "epoch": 4,
-        "sequence": 23,
-    })
-    pointer = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 7, "y": 8}})
-
-    assert viewer.enqueue_reset_frame(keyframe) == "queued"
-    assert viewer.enqueue(pointer) == "queued"
-    assert viewer.queued_bytes == len(keyframe)
-    viewer.close("done")
-    viewer.write_loop()
-
-    sent = [server_ws_json(frame) for frame in connection.sent]
-    assert [frame["type"] for frame in sent] == ["pointer", "dom-keyframe"]
-    assert sent[0]["payload"] == {"x": 7, "y": 8}
-    assert sent[1]["payload"]["digest"] == "sha256:pending"
-
-
-def test_share_replay_keyframe_broadcast_resets_backlogged_viewer_queue():
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.share_ui_clients_lock = server_module.threading.Lock()
-    viewer = server_module.ShareViewerConnection(object(), "viewer-backlogged")
-    assert viewer.enqueue(b"x" * (server_module.SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES - 4)) == "queued"
-    server.share_ui_clients = {"share-token": {viewer}}
-    server.share_upstreams_lock = server_module.threading.Lock()
-    server.share_upstreams = {}
-    requests = []
-    server.request_share_replay_keyframe = lambda token, reason="gap", skip_client_id="", viewer_id="": requests.append((token, reason, skip_client_id, viewer_id))
-
-    server_module.TmuxWebtermHTTPServer.broadcast_share_ui(server, "share-token", {
-        "type": "dom-keyframe",
-        "payload": {
-            "digest": "sha256:key",
-            "root": {"nodeId": 1, "tag": "div", "attrs": {"id": "appRoot"}, "children": []},
-        },
-        "sender": "host-browser",
-        "epoch": 4,
-        "sequence": 22,
-        "reason": "gap",
-    })
-
-    queued = server_ws_json(viewer.frames.get_nowait())
-    assert queued["type"] == "dom-keyframe"
-    assert queued["sequence"] == 22
-    assert queued["payload"]["digest"] == "sha256:key"
-    assert viewer.frames.empty()
-    assert requests == []
-    assert not viewer.is_closed()
-
-    protected_connection = FakeShareConnection()
-    protected_viewer = server_module.ShareViewerConnection(protected_connection, "viewer-protected-keyframe")
-    keyframe = server_module.share_ui_frame({
-        "type": "dom-keyframe",
-        "payload": {"digest": "sha256:pending", "root": {"nodeId": 1}},
-        "epoch": 4,
-        "sequence": 23,
-    })
-    replacement_keyframe = server_module.share_ui_frame({
-        "type": "dom-keyframe",
-        "payload": {"digest": "sha256:replacement", "root": {"nodeId": 1}},
-        "epoch": 5,
-        "sequence": 24,
-    })
-    assert protected_viewer.enqueue_reset_frame(keyframe) == "queued"
-    assert protected_viewer.enqueue_reset_frame(replacement_keyframe) == "queued"
-    pointer_frame = server_module.share_ui_frame({"type": "pointer", "payload": {"x": 9, "y": 10}})
-    assert protected_viewer.enqueue(pointer_frame) == "queued"
-    assert protected_viewer.enqueue(b"x" * server_module.SHARE_VIEWER_QUEUE_HIGH_WATER_BYTES) == "overflow"
-    queued = server_ws_json(protected_viewer.frames.get_nowait())
-    assert queued["type"] == "dom-keyframe"
-    assert queued["sequence"] == 24
-    assert queued["payload"]["digest"] == "sha256:replacement"
-    protected_viewer.close("done")
-    protected_viewer.write_loop()
-    sent = [server_ws_json(frame) for frame in protected_connection.sent]
-    assert [frame["type"] for frame in sent] == ["pointer"]
-    assert sent[0]["payload"] == {"x": 9, "y": 10}
-
-
-def test_share_viewers_receive_host_terminal_dimensions():
-    bootstrap_body = inspect.getsource(Handler.share_bootstrap_payload)
-    resize_body = inspect.getsource(server_module.TmuxWebtermHTTPServer.record_host_pty_dimensions)
-    upstream_resize_body = inspect.getsource(server_module.ShareTerminalUpstream.update_dimensions)
-
-    assert "host_pty_dimensions_for_session(session)" in bootstrap_body
-    assert '"hostDims": {"rows": rows, "cols": cols}' in bootstrap_body
-    assert '"type": SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE' in resize_body
-    assert '"rows": dimensions[0]' in resize_body
-    assert '"cols": dimensions[1]' in resize_body
-    assert "upstream.update_dimensions(*dimensions, refresh=False)" in resize_body
-    assert "upstream.request_refresh_client()" in resize_body
-    assert resize_body.index("self.broadcast_share_ui") < resize_body.index("upstream.request_refresh_client()")
-    assert "refresh: bool = True" in upstream_resize_body
-    assert "self.request_refresh_client()" in upstream_resize_body
-    server = object.__new__(server_module.TmuxWebtermHTTPServer)
-    server.host_pty_dimensions_lock = server_module.threading.Lock()
-    server.host_pty_dimensions = {}
-    server.share_upstreams_lock = server_module.threading.Lock()
-    order = []
-    upstream = SimpleNamespace(
-        update_dimensions=lambda rows, cols, refresh=True: order.append(("update", rows, cols, refresh)),
-        request_refresh_client=lambda: order.append(("refresh",)),
-    )
-    server.share_upstreams = {("share-token", "6"): upstream}
-    server.broadcast_share_ui = lambda token, message: order.append(("broadcast", token, message["type"], message["payload"]))
-
-    server_module.TmuxWebtermHTTPServer.record_host_pty_dimensions(server, "6", 33, 111)
-
-    assert order == [
-        ("update", 33, 111, False),
-        ("broadcast", "share-token", "terminal-host-resize", {"session": "6", "rows": 33, "cols": 111}),
-        ("refresh",),
-    ]
-
-
-def test_share_terminal_upstream_resize_uses_shared_live_process_signal_guard(monkeypatch):
-    calls = []
-    upstream = server_module.ShareTerminalUpstream(SimpleNamespace(), "share-token", "6")
-    upstream.slave_fd = 11
-    upstream.process = SimpleNamespace(pid=123, poll=lambda: None)
-    _record_fixture_process_group(monkeypatch, upstream.process)
-    upstream.request_refresh_client = lambda: calls.append(("refresh",))
-    monkeypatch.setattr(server_module, "set_pty_size", lambda fd, rows, cols: calls.append(("size", fd, rows, cols)))
-    monkeypatch.setattr(server_module.os, "killpg", lambda pid, sig: calls.append(("signal", pid, sig)))
-
-    upstream.update_dimensions(24, 80)
-
-    assert calls == [("size", 11, 24, 80), ("signal", 123, server_module.signal.SIGWINCH), ("refresh",)]
-    calls.clear()
-    upstream.process = SimpleNamespace(pid=456, poll=lambda: 0)
-
-    upstream.update_dimensions(31, 101, refresh=False)
-
-    assert calls == [("size", 11, 31, 101)]
-
-
-def test_share_terminal_upstream_refreshes_existing_viewer_attach():
-    upstream = server_module.ShareTerminalUpstream(SimpleNamespace(), "token", "6")
-    upstream.reader_thread = object()
-    calls = []
-    upstream.request_refresh_client = lambda: calls.append("refresh")
-    viewer = object()
-
-    upstream.add_viewer(viewer)
-
-    assert viewer in upstream.viewers
-    assert calls == ["refresh"]
-
-
-def test_share_terminal_upstream_start_closes_openpty_fds_on_setup_error(monkeypatch):
-    # Avoid the busy low descriptor range used by concurrent server fixtures: an unrelated
-    # background socket can otherwise reuse a just-closed descriptor before this assertion.
-    raw_master_fd = os.open(os.devnull, os.O_RDONLY)
-    raw_slave_fd = os.open(os.devnull, os.O_RDONLY)
-    master_fd = fcntl.fcntl(raw_master_fd, fcntl.F_DUPFD, 128)
-    slave_fd = fcntl.fcntl(raw_slave_fd, fcntl.F_DUPFD, 129)
-    os.close(raw_master_fd)
-    os.close(raw_slave_fd)
-    upstream = server_module.ShareTerminalUpstream(
-        SimpleNamespace(host_pty_dimensions_for_session=lambda _session: (24, 80)),
-        "token",
-        "6",
-    )
-    monkeypatch.setattr(server_module.pty, "openpty", lambda: (master_fd, slave_fd))
-    monkeypatch.setattr(server_module, "set_pty_size", lambda *_args: (_ for _ in ()).throw(OSError("pty failed")))
-
-    with pytest.raises(OSError):
-        upstream.start_locked()
-
-    assert upstream.master_fd is None
-    assert upstream.slave_fd is None
-    for fd in (master_fd, slave_fd):
-        with pytest.raises(OSError):
-            os.fstat(fd)
-
-
-def test_share_terminal_reader_uses_owned_fd_duplicate_before_reading():
-    body = inspect.getsource(server_module.ShareTerminalUpstream.reader_loop)
-
-    assert "reader_fd = os.dup(master_fd)" in body
-    assert "if self.stop_event.is_set():" in body
-    assert "os.read(reader_fd" in body
-    assert "os.close(reader_fd)" in body
-
-
 def _api_response_capturing_handler(method: str = "GET", path: str = "/api/fs/list"):
     """Return one Handler whose real ``write_api_response`` writes through a capture."""
 
@@ -4154,24 +2528,3 @@ def test_write_api_response_keeps_a_malformed_outcome_record_an_error():
         handler.write_json(envelope, status=HTTPStatus.NOT_FOUND)
 
     assert [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before] == []
-
-
-def test_bridge_shared_tmux_cleans_registration_when_add_viewer_fails():
-    calls = []
-    upstream = SimpleNamespace(add_viewer=lambda _viewer: (_ for _ in ()).throw(OSError("openpty failed")))
-    handler = object.__new__(Handler)
-    handler.connection = FakeShareConnection()
-    handler.server = SimpleNamespace(
-        share_terminal_upstream=lambda token, session: upstream,
-        release_share_terminal_upstream=lambda token, session, viewer: calls.append(("release", token, session, viewer.client_id)),
-        app=SimpleNamespace(unregister_share_viewer=lambda token, viewer_id: calls.append(("unregister", token, viewer_id))),
-        broadcast_share_status=lambda token: calls.append(("broadcast", token)),
-    )
-
-    Handler.bridge_shared_tmux(handler, "share-token", "6", "viewer-1")
-
-    assert calls == [
-        ("release", "share-token", "6", "viewer-1"),
-        ("unregister", "share-token", "viewer-1"),
-        ("broadcast", "share-token"),
-    ]

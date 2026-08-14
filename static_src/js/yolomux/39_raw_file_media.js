@@ -4,7 +4,6 @@
 
 function rawFileUrl(path, params = {}) {
   const queryParts = [`path=${encodeURIComponent(path)}`];
-  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
   for (const [key, value] of Object.entries(params)) {
     if (value === null || value === undefined || value === '') continue;
     queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);

@@ -321,7 +321,10 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the indicator owns no request or timer of its own', () => {
-    const region = CORE_SOURCE.slice(0, CORE_SOURCE.indexOf('function applyShareTokenHeaders'));
+    const region = CORE_SOURCE.slice(
+      CORE_SOURCE.indexOf('function backendHealthStateSeverity'),
+      CORE_SOURCE.indexOf('function noteBackendHealthFailure'),
+    );
     assert.ok(region.includes('function syncBackendHealthIndicator'), 'the backend-health region is the one being scanned');
     for (const forbidden of ['apiFetch(', 'fetch(', 'setInterval(', 'setTimeout(']) {
       assert.ok(!region.includes(forbidden), `the indicator must not ${forbidden.slice(0, -1)}: health is pushed, never polled`);

@@ -1,27 +1,27 @@
 {
   "class_budgets": {
     "yolomux_lib/app.py:TmuxWebtermApp": {
-      "methods": 602,
-      "self_fields": 96
+      "methods": 551,
+      "self_fields": 94
     },
     "yolomux_lib/infra/background_owner.py:BackgroundOwnerRegistry": {
       "methods": 49,
       "self_fields": 37
     },
-    "yolomux_lib/infra/jobd.py:PersistentJobBroker": {
-      "methods": 50,
-      "self_fields": 31
-    },
     "yolomux_lib/infra/jobd.py:JobProductStore": {
-      "methods": 25,
+      "methods": 27,
       "self_fields": 2
+    },
+    "yolomux_lib/infra/jobd.py:PersistentJobBroker": {
+      "methods": 51,
+      "self_fields": 31
     },
     "yolomux_lib/local_services/registry.py:LocalServiceRegistry": {
       "methods": 76,
       "self_fields": 27
     },
     "yolomux_lib/server.py:Handler": {
-      "methods": 105,
+      "methods": 87,
       "self_fields": 13
     },
     "yolomux_lib/stats_current/service.py:StatsCurrentService": {
@@ -165,16 +165,16 @@
   },
   "file_lines": {
     "static_src/css/yolomux/30_preferences_changes.css": 3577,
-    "static_src/css/yolomux/50_terminal_file_tree.css": 4534,
+    "static_src/css/yolomux/50_terminal_file_tree.css": 4264,
     "static_src/css/yolomux/60_editor_file_panels.css": 3327,
-    "static_src/js/yolomux/10_core_utils.js": 6334,
-    "static_src/js/yolomux/20_layout_state.js": 6670,
-    "static_src/js/yolomux/40_file_explorer_files.js": 5466,
+    "static_src/js/yolomux/10_core_utils.js": 6348,
+    "static_src/js/yolomux/20_layout_state.js": 6952,
+    "static_src/js/yolomux/40_file_explorer_files.js": 5449,
     "static_src/js/yolomux/85_debug_panel.js": 10704,
-    "static_src/js/yolomux/99_terminal_boot.js": 8353,
-    "yolomux_lib/app.py": 17690,
+    "static_src/js/yolomux/99_terminal_boot.js": 8132,
+    "yolomux_lib/app.py": 16730,
     "yolomux_lib/search/file_index.py": 4468,
-    "yolomux_lib/server.py": 4528,
+    "yolomux_lib/server.py": 3077,
     "yolomux_lib/stats_current/service.py": 4154,
     "yolomux_lib/workspace/session_files.py": 4133
   },
@@ -1143,36 +1143,6 @@
     },
     {
       "count": 1,
-      "name": "shareDefaultMaxViewers",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "shareDefaultReadOnly",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "shareDefaultScheme",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "shareDefaultTtlSeconds",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
-      "name": "shareViewFit",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
-    },
-    {
-      "count": 1,
       "name": "startupHelpersEnabled",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
@@ -1216,6 +1186,12 @@
     {
       "count": 1,
       "name": "workflowTransitionGlowSeconds",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
+    },
+    {
+      "count": 1,
+      "name": "yolomuxFontsReadyPromise",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/50_editor_settings_runtime.js"
     },
@@ -1496,468 +1472,6 @@
       "writer": "static_src/js/yolomux/92_codemirror_editor.js"
     },
     {
-      "count": 2,
-      "name": "activeShare",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/93_share_state.js"
-    },
-    {
-      "count": 2,
-      "name": "activeShares",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/93_share_state.js"
-    },
-    {
-      "count": 2,
-      "name": "applyingShareRemoteUiState",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/93_share_state.js"
-    },
-    {
-      "count": 1,
-      "name": "clientSettings",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/93_share_state.js"
-    },
-    {
-      "count": 4,
-      "name": "applyingShareRemoteScroll",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 4,
-      "name": "clientSettings",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefFrom",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefTo",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "diffRefsByRepo",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "editorFontSize",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "editorPreviewFontSize",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "fileExplorerChangesSelectedSession",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerFinderSelectedSession",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerFontSize",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "fileExplorerRoot",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerRootMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionAnchor",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerSelectionLead",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "fileExplorerShowHidden",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "globalThemeMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "infoPanelSubTab",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesResetConfirmVisible",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "preferencesSearchText",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareAppearancePublishTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareDebugReports",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareGeometryRepairInFlight",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareGeometryResyncInFlight",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareGeometryResyncLastStartedAt",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareLastGeometryDigest",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareLastGeometryDigestResult",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareMirrorEpoch",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareMirrorSequence",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "sharePointerFramePending",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "sharePointerLastEvent",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "sharePointerLastPublishedAt",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "sharePopupLayerNode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "sharePopupLayerObserver",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "sharePopupLayerPublishTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "sharePopupLayerSequence",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "shareReplayDeltaFramePending",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "shareReplayHostKeyframePendingReason",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayHostKeyframeSuppressedCount",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "shareReplayHostKeyframeTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayHostLastKeyframeAt",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayHostLastKeyframeReason",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayHostMirroredNodes",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayHostNextNodeId",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastDeltaBatch",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastDeltaBytes",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastFrameReceivedAt",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastKeyframe",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastKeyframeBytes",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastLatencyMs",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastRedactionPolicyVersion",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayLastReplayError",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareReplayMirrorEpoch",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareReplayMirrorSequence",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareReplayMutationObserver",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "shareReplayMutationPublisherPaused",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayNodeMap",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareReplayTerminalPlaceholders",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 4,
-      "name": "shareReplayTopologyKeyframeQueuedAt",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 5,
-      "name": "shareReplayTopologyKeyframeTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 3,
-      "name": "shareReplayTopologyMutationPauseTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "shareResolvedGlobalThemeMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareUiStatePublishTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "shareViewportPublishTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "tabMetaVisible",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalFontSize",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 1,
-      "name": "terminalThemeMode",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 4,
-      "name": "terminals",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/94_share_replay.js"
-    },
-    {
-      "count": 2,
-      "name": "applyingShareRemoteScroll",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
-      "count": 3,
-      "name": "shareCreateErrorPayload",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
-      "count": 2,
-      "name": "shareStatusLastRefreshAt",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
-      "count": 1,
-      "name": "shareStatusPill",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
-      "count": 4,
-      "name": "shareStatusRefreshInFlight",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
-      "count": 1,
-      "name": "shareViewerBanner",
-      "owner": "static_src/js/yolomux/93_share_state.js",
-      "writer": "static_src/js/yolomux/95_share_admin.js"
-    },
-    {
       "count": 1,
       "name": "clipboardPasteBound",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
@@ -1996,12 +1510,6 @@
     {
       "count": 1,
       "name": "sessions",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
-      "name": "shareInfoBranchRowsOverride",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/99_terminal_boot.js"
     },
@@ -2052,8 +1560,6 @@
       "tests/test_app.py:test_session_http_guards_use_shared_decorator:1",
       "tests/test_app.py:test_session_http_guards_use_shared_decorator:2",
       "tests/test_app.py:test_session_http_guards_use_shared_decorator:3",
-      "tests/test_app.py:test_share_debug_profile_is_opt_in_and_redacted:1",
-      "tests/test_app.py:test_share_debug_profile_is_opt_in_and_redacted:2",
       "tests/test_app.py:test_stats_history_sampler_parallel_state_is_retired:1",
       "tests/test_app.py:test_stats_history_sampler_parallel_state_is_retired:2",
       "tests/test_app.py:test_stats_history_sampler_parallel_state_is_retired:3",
@@ -2195,10 +1701,6 @@
       "tests/test_server_query.py:test_activity_hours_routes_share_float_validation_owner:2",
       "tests/test_server_query.py:test_activity_hours_routes_share_float_validation_owner:3",
       "tests/test_server_query.py:test_activity_hours_routes_share_float_validation_owner:4",
-      "tests/test_server_query.py:test_both_attach_paths_route_through_shared_tmux_options:1",
-      "tests/test_server_query.py:test_both_attach_paths_route_through_shared_tmux_options:2",
-      "tests/test_server_query.py:test_both_attach_paths_route_through_shared_tmux_options:3",
-      "tests/test_server_query.py:test_both_attach_paths_route_through_shared_tmux_options:4",
       "tests/test_server_query.py:test_configure_session_tmux_options_uses_bounded_tmux_helper:1",
       "tests/test_server_query.py:test_configure_session_tmux_options_uses_bounded_tmux_helper:2",
       "tests/test_server_query.py:test_http_route_registry_groups_dispatch_and_keeps_verbs_thin:1",
@@ -2222,70 +1724,9 @@
       "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup:7",
       "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup:8",
       "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup:9",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:1",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:10",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:11",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:2",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:3",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:4",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:5",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:6",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:7",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:8",
-      "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side:9",
-      "tests/test_server_query.py:test_share_pointer_parallel_state_maps_are_retired:1",
-      "tests/test_server_query.py:test_share_pointer_parallel_state_maps_are_retired:2",
-      "tests/test_server_query.py:test_share_pointer_parallel_state_maps_are_retired:3",
-      "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired:1",
-      "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired:2",
-      "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired:3",
-      "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired:4",
-      "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired:5",
-      "tests/test_server_query.py:test_share_terminal_reader_uses_owned_fd_duplicate_before_reading:1",
-      "tests/test_server_query.py:test_share_terminal_reader_uses_owned_fd_duplicate_before_reading:2",
-      "tests/test_server_query.py:test_share_terminal_reader_uses_owned_fd_duplicate_before_reading:3",
-      "tests/test_server_query.py:test_share_terminal_reader_uses_owned_fd_duplicate_before_reading:4",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:1",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:10",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:11",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:12",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:13",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:14",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:15",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:16",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:17",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:18",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:19",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:2",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:20",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:21",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:22",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:23",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:24",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:25",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:26",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:27",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:28",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:29",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:3",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:30",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:4",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:5",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:6",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:7",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:8",
-      "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit:9",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:1",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:2",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:3",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:4",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:5",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:6",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:7",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:8",
-      "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions:9",
-      "tests/test_server_query.py:test_tmux_attach_paths_refresh_clients_after_attach:1",
-      "tests/test_server_query.py:test_tmux_attach_paths_refresh_clients_after_attach:2",
+      "tests/test_server_query.py:test_tmux_attach_refreshes_clients_after_attach:1",
+      "tests/test_server_query.py:test_tmux_attach_routes_through_shared_options:1",
+      "tests/test_server_query.py:test_tmux_attach_routes_through_shared_options:2",
       "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle:1",
       "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle:10",
       "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle:2",
@@ -2311,12 +1752,15 @@
       "tests/test_static_build.py:test_browser_fixture_wait_loops_have_one_injected_owner:3",
       "tests/test_static_build.py:test_compact_overflow_strips_have_one_shared_layout_owner:1",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:1",
+      "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:10",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:2",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:3",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:4",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:5",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:6",
       "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:7",
+      "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:8",
+      "tests/test_static_build.py:test_dialog_capacities_have_one_content_relative_token_owner:9",
       "tests/test_static_build.py:test_event_rows_use_one_container_responsive_layout_owner:1",
       "tests/test_static_build.py:test_markdown_source_change_invalidates_derived_preview_artifacts:1",
       "tests/test_static_build.py:test_markdown_source_change_invalidates_derived_preview_artifacts:2",
@@ -2419,30 +1863,29 @@
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:7",
       "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts:8"
     ],
-    "inventory_sha256": "14779cd85fdb63052dbeb9d1ffa111fbcfc722c77c88a3733103b049d6c12304",
+    "inventory_sha256": "42c128b4a20a7146b702a0febe685f779f385c88e51ea685e25bfae5408080a0",
     "unallowlisted": [],
     "validation_errors": []
   },
   "test_owner_lines": {
-    "tests/backend_health_indicator.test.js": 368,
-    "tests/browser_helpers/editor_preview_suite.js": 8806,
-    "tests/diagnostic_redaction.test.js": 133,
+    "tests/backend_health_indicator.test.js": 371,
+    "tests/browser_helpers/editor_preview_suite.js": 8708,
+    "tests/cross_surface_state.test.js": 6173,
+    "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 4,
     "tests/editor_preview_settings.test.js": 4,
     "tests/editor_preview_tmux.test.js": 4,
-    "tests/file_surface_menu.test.js": 150,
-    "tests/i18n_locale_registry.test.js": 271,
-    "tests/i18n_structured_message.test.js": 285,
-    "tests/layout_async.test.js": 7909,
-    "tests/layout_restore.test.js": 3857,
-    "tests/open_file_missing_guard.test.js": 368,
-    "tests/share_file_surface_replay.test.js": 45,
-    "tests/share_theme.test.js": 7433,
-    "tests/side_panes.test.js": 743,
-    "tests/stats_current_panel.test.js": 3105,
-    "tests/stats_current_ui.test.js": 2827,
+    "tests/file_surface_menu.test.js": 139,
     "tests/helpers/fixture_http_server.py": 161,
+    "tests/i18n_locale_registry.test.js": 267,
+    "tests/i18n_structured_message.test.js": 263,
+    "tests/layout_async.test.js": 7488,
+    "tests/layout_restore.test.js": 3813,
+    "tests/open_file_missing_guard.test.js": 368,
+    "tests/side_panes.test.js": 728,
+    "tests/stats_current_panel.test.js": 3098,
+    "tests/stats_current_ui.test.js": 2827,
     "tests/subsystems/app_darwin_memory.py": 68,
     "tests/subsystems/browser_harness_lifecycle.py": 95,
     "tests/subsystems/stats_24h_http.py": 510,
@@ -2453,10 +1896,10 @@
     "tests/test_activity_summary_disabled.py": 91,
     "tests/test_aged_state.py": 111,
     "tests/test_agent_tui.py": 613,
-    "tests/test_api_response_parent.py": 1051,
-    "tests/test_app.py": 17741,
+    "tests/test_api_response_parent.py": 1050,
+    "tests/test_app.py": 17283,
     "tests/test_approvald.py": 178,
-    "tests/test_architecture_budgets.py": 263,
+    "tests/test_architecture_budgets.py": 316,
     "tests/test_atomic_file.py": 16,
     "tests/test_attention_ack_sync.py": 541,
     "tests/test_auth_config.py": 538,
@@ -2473,30 +1916,29 @@
     "tests/test_backend_health_store.py": 874,
     "tests/test_background_owner.py": 2164,
     "tests/test_bfs_index.py": 1185,
-    "tests/test_boot_healthz_probe.py": 384,
+    "tests/test_boot_healthz_probe.py": 382,
     "tests/test_browser_boot.py": 424,
     "tests/test_browser_daemons_theme.py": 151,
     "tests/test_browser_dockview.py": 9100,
     "tests/test_browser_editor.py": 4773,
     "tests/test_browser_finder.py": 3508,
     "tests/test_browser_finder_fs_repro.py": 46,
-    "tests/test_browser_golden.py": 106,
-    "tests/test_browser_layout.py": 16765,
+    "tests/test_browser_golden.py": 78,
+    "tests/test_browser_layout.py": 16655,
     "tests/test_browser_ring_landing_verify.py": 783,
-    "tests/test_browser_share.py": 5432,
     "tests/test_browser_stats_coverage.py": 676,
     "tests/test_browser_stats_widen.py": 1261,
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 2429,
+    "tests/test_check_runner.py": 2424,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_events.py": 410,
     "tests/test_common.py": 229,
     "tests/test_control.py": 152,
     "tests/test_cross_layer_matrix.py": 146,
     "tests/test_dev_restart_script.py": 342,
-    "tests/test_diagnostic_redaction.py": 1006,
+    "tests/test_diagnostic_redaction.py": 1018,
     "tests/test_drop_actions.py": 160,
     "tests/test_e2e_api_errors.py": 490,
     "tests/test_e2e_auto_approve.py": 405,
@@ -2523,7 +1965,7 @@
     "tests/test_gate_chat.py": 70,
     "tests/test_gate_chat_host_local.py": 115,
     "tests/test_gate_coexistence.py": 2241,
-    "tests/test_gate_contract.py": 826,
+    "tests/test_gate_contract.py": 821,
     "tests/test_gate_contracts_q.py": 37,
     "tests/test_gate_corruption_ui.py": 112,
     "tests/test_gate_cross_host_views.py": 213,
@@ -2538,13 +1980,13 @@
     "tests/test_gate_i18n_raw_keys.py": 73,
     "tests/test_gate_interaction.py": 904,
     "tests/test_gate_isolated_dev_server.py": 153,
-    "tests/test_gate_isolation.py": 4274,
+    "tests/test_gate_isolation.py": 4272,
     "tests/test_gate_jobd_scheduler_pin.py": 83,
     "tests/test_gate_launch.py": 573,
     "tests/test_gate_orphans.py": 394,
     "tests/test_gate_owner_election.py": 347,
     "tests/test_gate_panels.py": 1528,
-    "tests/test_gate_route_sweep.py": 992,
+    "tests/test_gate_route_sweep.py": 967,
     "tests/test_gate_safety.py": 229,
     "tests/test_gate_scheduler.py": 80,
     "tests/test_gate_stats.py": 809,
@@ -2567,8 +2009,8 @@
     "tests/test_inotify_capacity.py": 181,
     "tests/test_install_metadata.py": 25,
     "tests/test_instance_isolation.py": 227,
-    "tests/test_jobd.py": 2865,
-    "tests/test_journey_phase_contracts.py": 67,
+    "tests/test_jobd.py": 2929,
+    "tests/test_journey_phase_contracts.py": 60,
     "tests/test_launcher_ephemeral_server.py": 78,
     "tests/test_launcher_probe.py": 61,
     "tests/test_launcher_row_wiring.py": 198,
@@ -2583,7 +2025,7 @@
     "tests/test_local_services_launch.py": 1993,
     "tests/test_local_services_rpc.py": 1306,
     "tests/test_local_services_watchdog.py": 339,
-    "tests/test_login_auth.py": 1514,
+    "tests/test_login_auth.py": 1031,
     "tests/test_login_escalation.py": 183,
     "tests/test_login_rate_limit.py": 420,
     "tests/test_login_throttle_integration.py": 251,
@@ -2610,25 +2052,25 @@
     "tests/test_search_progress_notifier_isolation.py": 127,
     "tests/test_server_lease.py": 64,
     "tests/test_server_logs.py": 125,
-    "tests/test_server_query.py": 4177,
+    "tests/test_server_query.py": 2530,
     "tests/test_server_static.py": 329,
     "tests/test_service_failure_matrix.py": 242,
     "tests/test_session_actions.py": 327,
     "tests/test_session_files.py": 4584,
     "tests/test_sessions.py": 1067,
-    "tests/test_settings.py": 902,
+    "tests/test_settings.py": 889,
     "tests/test_shared_config_lock.py": 121,
     "tests/test_source_inventory.py": 32,
     "tests/test_state_services.py": 141,
-    "tests/test_static_build.py": 1607,
+    "tests/test_static_build.py": 1584,
     "tests/test_stats_current_app.py": 965,
     "tests/test_stats_current_client.py": 565,
     "tests/test_stats_current_collectors.py": 267,
     "tests/test_stats_current_families.py": 136,
-    "tests/test_stats_current_http.py": 869,
+    "tests/test_stats_current_http.py": 865,
     "tests/test_stats_current_materializer.py": 1290,
     "tests/test_stats_current_migration.py": 1006,
-    "tests/test_stats_current_observations.py": 566,
+    "tests/test_stats_current_observations.py": 563,
     "tests/test_stats_current_pricing.py": 279,
     "tests/test_stats_current_protocol.py": 470,
     "tests/test_stats_current_prune_schedule.py": 432,
@@ -2646,7 +2088,7 @@
     "tests/test_system_status_latency_tool.py": 122,
     "tests/test_system_status_snapshot.py": 458,
     "tests/test_terminal_state_guard.py": 90,
-    "tests/test_test_isolation.py": 188,
+    "tests/test_test_isolation.py": 176,
     "tests/test_text_client_common_metadata.py": 811,
     "tests/test_textshape_guard.py": 158,
     "tests/test_tls_config.py": 586,
@@ -2660,7 +2102,7 @@
     "tests/test_uploads.py": 173,
     "tests/test_watch_diff_route_contract.py": 600,
     "tests/test_watchd.py": 3737,
-    "tests/test_web.py": 214,
+    "tests/test_web.py": 212,
     "tests/test_webdriver_lease.py": 254,
     "tests/test_websocket.py": 123,
     "tests/test_workdir.py": 294,
@@ -2669,7 +2111,7 @@
     "tests/test_yoagent_frontend.py": 18,
     "tests/test_yoagent_model_intents.py": 121,
     "tests/test_yoagent_orchestration.py": 432,
-    "tests/test_yoagent_preferences.py": 694,
+    "tests/test_yoagent_preferences.py": 692,
     "tests/test_yoagent_skills.py": 170,
     "tests/test_yoagent_stream_events.py": 185,
     "tests/test_yoagent_stream_state.py": 538,

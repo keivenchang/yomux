@@ -7,7 +7,6 @@ const vm = require('node:vm');
 const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./browser_helpers/layout_test_helper');
 
 const source = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
 const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
 const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
@@ -206,8 +205,6 @@ const context = {
   renderBrandWordmark() { brandWordmarkRenders += 1; },
   renderUpdateBadgeChrome() { updateBadgeChromeRenders += 1; },
   relocalizeModalChrome() { modalChromeRenders += 1; },
-  scheduleShareAppearancePublish() {},
-  scheduleSharePopupLayerPublish() {},
   console,
   Intl,
   Map,
@@ -258,7 +255,6 @@ async function runI18nLocaleRegistrySuite() {
   assert.equal(api.i18nActiveLocaleId(), 'en-XA');
   assert.ok(fetches.includes('/static/locales/en-XA.json'));
 
-  assert.match(shareSource, /const locale = String\(appearance\.locale[\s\S]*resolveLocalePref\(nextPref\)[\s\S]*applyLocale\(resolvedLocale\)/);
   assert.doesNotMatch(source, /navigator\.language|startsWith\('zh'\)|base === 'ar'/, 'the client has no parallel language-tag or RTL classifier');
   testChromeOwnerBehavior();
   });

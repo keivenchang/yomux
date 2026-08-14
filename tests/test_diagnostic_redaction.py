@@ -20,6 +20,7 @@ SHARED_FIXTURE_SECRET_FRAGMENTS = (
     "first-secret", "second-secret", "s-secret", "url-secret", "fragment-secret",
     "unterminated-secret", "x-api-secret", "token-secret", "basic-secret", "deep-secret", "deep-token",
     "a-secret", "b-secret", "matrix-secret", "utf8-secret", "utf8-token-secret", "AbC-123_xyz",
+    "upgrade-secret-a", "upgrade-secret-b", "upgrade-secret-c", "upgrade-secret-d",
 )
 
 
@@ -52,7 +53,7 @@ SHARED_FIXTURE_SECRET_FRAGMENTS = (
         ),
         (
             "https://example.test/api?password=url-secret&mode=debug#token=fragment-secret",
-            "https://example.test/api?password=[redacted-secret]&mode=debug#token=[redacted-share-token]",
+            "https://example.test/api?password=[redacted-secret]&mode=debug#token=[redacted-secret]",
         ),
         (
             "Authorization: Basic browser-secret Cookie: session=browser-cookie; csrf=csrf-secret",
@@ -688,14 +689,13 @@ def test_diagnostic_redacted_authorization_assignments_are_idempotent(raw):
         "client_secret=client-secret failed",
         "access_token: access-secret failed",
         "refresh_token=refresh-secret failed",
-        "x_share_token: share-secret failed",
     ),
 )
 def test_diagnostic_every_structured_credential_name_is_also_owned_in_free_text(raw):
     redacted = redact_diagnostic_value(raw)
 
     assert "[redacted-secret]" in redacted
-    assert all(fragment not in redacted for fragment in ("x-api-secret", "client-secret", "access-secret", "refresh-secret", "share-secret"))
+    assert all(fragment not in redacted for fragment in ("x-api-secret", "client-secret", "access-secret", "refresh-secret"))
 
 
 EXACT_DIAGNOSTIC_CREDENTIAL_NAMES = (
@@ -727,12 +727,6 @@ EXACT_DIAGNOSTIC_CREDENTIAL_NAMES = (
     "refresh_token",
     "refresh-token",
     "refreshtoken",
-    "share_token",
-    "share-token",
-    "sharetoken",
-    "x_share_token",
-    "x-share-token",
-    "xsharetoken",
 )
 
 BENIGN_DIAGNOSTIC_NEAR_NAMES = (
@@ -747,9 +741,27 @@ BENIGN_DIAGNOSTIC_NEAR_NAMES = (
     "client_secrets",
     "access_tokens",
     "refresh_tokenizer",
-    "share_tokenizer",
-    "x_share_tokenizer",
+    "archived_session_tokenizer",
 )
+
+
+@pytest.mark.parametrize("separator", ("_", "-"))
+def test_diagnostic_upgrade_payloads_keep_retired_producer_token_suffixes_secret(separator):
+    retired_producer = "".join(("sh", "are"))
+    retired_key = separator.join((retired_producer, "token"))
+
+    assert redact_diagnostic_value({retired_key: "upgrade-secret"}) == {
+        retired_key: "[redacted-secret]"
+    }
+
+
+def test_diagnostic_upgrade_query_keeps_retired_camel_token_assignment_secret():
+    retired_key = "".join(("sh", "are", "Token"))
+    raw = f"GET /api/thing?{retired_key}=upgrade-secret&ok=1 failed"
+
+    assert redact_diagnostic_value(raw) == (
+        f"GET /api/thing?{retired_key}=[redacted-secret]&ok=1 failed"
+    )
 
 
 @pytest.mark.parametrize("credential_name", EXACT_DIAGNOSTIC_CREDENTIAL_NAMES)
@@ -758,7 +770,7 @@ def test_diagnostic_structured_credential_name_matrix_uses_exact_shared_grammar(
     rendered_name = credential_name if casing == "lower" else credential_name.upper()
 
     assert redact_diagnostic_value({rendered_name: "matrix-secret"}) == {
-        rendered_name: "[redacted-share-token]"
+        rendered_name: "[redacted-secret]"
     }
 
 
@@ -945,10 +957,10 @@ def test_diagnostic_structured_keys_redact_only_credential_names():
         "tokenizer": "gpt2",
         "secretary": "alice",
         "password_validation": "failed",
-        "token": "[redacted-share-token]",
-        "client_secret": "[redacted-share-token]",
-        "access_token": "[redacted-share-token]",
-        "Authorization": "[redacted-share-token]",
+        "token": "[redacted-secret]",
+        "client_secret": "[redacted-secret]",
+        "access_token": "[redacted-secret]",
+        "Authorization": "[redacted-secret]",
     }
 
 

@@ -710,6 +710,70 @@ def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_hand
     assert worker.is_alive() is False
 
 
+def test_artifact_adoption_does_not_hold_the_broker_state_lock(tmp_path, monkeypatch):
+    """A completed large transfer must not strand unrelated zero-wait RPCs while it is verified."""
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = broker._queue_record("filesystem_operation", {}, "interactive", 1, "adopting-artifact")
+    record.status = "running"
+    record.future = Future()
+    record.future.set_result(jobd.JobdArtifactResult(
+        basename="transfer-controlled",
+        device=1,
+        inode=2,
+        product={
+            "format": "opaque_bytes",
+            "content_type": "image/png",
+            "length": 1_957_801,
+            "sha256": "0" * 64,
+            "disposition": "inline",
+            "filename": "",
+        },
+    ))
+    adoption_started = threading.Event()
+    release_adoption = threading.Event()
+
+    def blocked_adoption(_result):
+        adoption_started.set()
+        assert release_adoption.wait(timeout=2.0)
+        raise ValueError("controlled adoption stop")
+
+    monkeypatch.setattr(broker.product_store, "prepare_artifact", blocked_adoption)
+    pump = threading.Thread(target=broker._pump, name="jobd-controlled-artifact-adoption")
+    pump.start()
+    assert adoption_started.wait(timeout=1.0)
+
+    responses = []
+    requests = (
+        {"action": "produce", "task": "json_compact", "payload": {"value": 1}, "coalesce_key": "unrelated-produce"},
+        {"action": "result", "job_id": "unknown"},
+        {"action": "product", "coalesce_key": "unrelated-product"},
+    )
+    callers = [
+        threading.Thread(
+            target=lambda request=request: responses.append((request["action"], broker.handle(request))),
+            name=f"jobd-unrelated-{request['action']}",
+        )
+        for request in requests
+    ]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join(timeout=0.1)
+    served_while_adopting = all(not caller.is_alive() for caller in callers)
+    release_adoption.set()
+    for caller in callers:
+        caller.join(timeout=2.0)
+    pump.join(timeout=2.0)
+
+    assert served_while_adopting is True
+    by_action = dict(responses)
+    assert by_action["produce"][0]["ok"] is True
+    assert by_action["produce"][0]["state"] == "queued"
+    assert by_action["result"] == ({"ok": False, "error": "unknown job"}, b"")
+    assert by_action["product"] == ({"ok": True, "state": "none", "generation": 0, "inflight": False}, b"")
+    assert record.status == "failed"
+
+
 def test_zero_wait_produce_preserves_typed_filesystem_failure(tmp_path):
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     broker._start_scheduler()

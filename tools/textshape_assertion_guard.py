@@ -29,7 +29,6 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_chat_store.py:test_chat_store_paging_sql_reads_the_real_implementation_and_avoids_offset": "The OFFSET paging contract is only falsifiable if the scanned file really defines the store's SQL; the prior form read a six-line sys.modules alias with no SQL and could never fail.",
     "tests/test_app.py:test_session_http_guards_use_shared_decorator": "The decorator is the declared HTTP guard boundary, so its single shared attachment is a structural contract.",
     "tests/test_app.py:test_stats_history_sampler_parallel_state_is_retired": "The retired sampler maps must remain absent to prevent a second state owner.",
-    "tests/test_app.py:test_share_debug_profile_is_opt_in_and_redacted": "The debug profile source is audited for opt-in and redaction before any profile can be collected.",
     "tests/test_app.py:test_auto_approve_worker_parallel_maps_are_retired": "The retired worker maps must remain absent to preserve the one-worker ownership design.",
     "tests/test_app.py:test_transcripts_payload_parallel_cache_state_is_retired": "The retired transcript cache maps must remain absent to preserve one cache owner.",
     "tests/test_app.py:test_tabber_activity_parallel_cache_state_is_retired": "The retired tabber cache maps must remain absent to preserve one cache owner.",
@@ -61,19 +60,13 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_mock_agents.py:test_background_codex_working_animation_reuses_its_status_row": "The mock renderer's static markup reuse is its exact TUI parity contract.",
     "tests/test_mock_agents.py:test_all_mock_timer_paths_obey_the_no_repaint_contract": "The mock timer paths are intentionally enumerated static rendering contracts.",
     "tests/test_server_query.py:test_activity_hours_routes_share_float_validation_owner": "Both routes must call the same validation owner rather than duplicate parsing rules.",
-    "tests/test_server_query.py:test_both_attach_paths_route_through_shared_tmux_options": "Host and share attach paths must call one tmux-option helper to avoid divergent terminal behavior.",
-    "tests/test_server_query.py:test_tmux_attach_paths_refresh_clients_after_attach": "Both attach paths must call the shared client-refresh helper.",
+    "tests/test_server_query.py:test_tmux_attach_routes_through_shared_options": "The browser attach path must call the shared tmux-option helper rather than duplicate terminal setup.",
+    "tests/test_server_query.py:test_tmux_attach_refreshes_clients_after_attach": "The browser attach path must call the shared client-refresh helper.",
     "tests/test_server_query.py:test_configure_session_tmux_options_uses_bounded_tmux_helper": "The helper must use the bounded tmux wrapper and never bypass it with subprocess.run.",
     "tests/test_server_query.py:test_request_body_reader_owns_content_length_validation": "Content-length validation has one deliberate request-body owner.",
     "tests/test_server_query.py:test_http_route_registry_groups_dispatch_and_keeps_verbs_thin": "Route registration and verb dispatch are intentionally centralized architecture boundaries.",
     "tests/test_server_query.py:test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle": "The signal watcher lifecycle has one intentional client-event owner.",
     "tests/test_server_query.py:test_server_source_wires_routing_ws_readonly_and_pty_setup": "The server's route, readonly, and PTY wiring form an architecture contract.",
-    "tests/test_server_query.py:test_share_pointer_events_are_coalesced_server_side": "Pointer coalescing must remain server-owned to bound share traffic.",
-    "tests/test_server_query.py:test_share_pointer_parallel_state_maps_are_retired": "The retired pointer maps must remain absent to prevent duplicate ownership.",
-    "tests/test_server_query.py:test_share_ui_socket_source_wiring_remains_explicit": "The share UI socket protocol has explicit source-level producer and consumer wiring.",
-    "tests/test_server_query.py:test_share_replay_parallel_state_maps_are_retired": "The retired replay maps must remain absent to preserve one replay owner.",
-    "tests/test_server_query.py:test_share_viewers_receive_host_terminal_dimensions": "Viewer geometry must use host dimensions through the designated shared path.",
-    "tests/test_server_query.py:test_share_terminal_reader_uses_owned_fd_duplicate_before_reading": "The terminal reader's duplicate-FD ownership is a process-safety boundary.",
     "tests/test_session_files.py:test_transcript_scan_store_survives_cold_reload_and_resumes_append": "The persistent scan store's source contains the intentional recovery markers.",
     "tests/test_session_files.py:test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids": "The scan cache has one deliberately bounded state owner.",
     "tests/test_settings.py:test_preferences_source_paths_are_in_backend_catalog": "The backend preference catalog is a static source-of-truth mapping.",
@@ -117,7 +110,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "14779cd85fdb63052dbeb9d1ffa111fbcfc722c77c88a3733103b049d6c12304"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "42c128b4a20a7146b702a0febe685f779f385c88e51ea685e25bfae5408080a0"
 
 
 @dataclass(frozen=True, slots=True)

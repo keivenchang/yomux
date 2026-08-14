@@ -494,7 +494,6 @@ def test_warm_filesystem_response_writes_canonical_bytes_without_a_qualified_pro
     webapp.job_client = WarmFilesystemJob()
     monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
     handler.server = SimpleNamespace(app=webapp)
-    handler.share_token = MethodType(lambda _self: "", handler)
     handler.auth_identity = MethodType(
         lambda _self: SimpleNamespace(role="admin", username="fixture"),
         handler,

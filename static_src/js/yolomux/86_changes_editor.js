@@ -762,7 +762,6 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
   renderFileExplorerChangesPanels({force: true});
   fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
-  scheduleShareTopologySnapshot('differ-refs');
   return true;
 }
 
@@ -801,7 +800,6 @@ function fileExplorerSelectedSessionForView(view) {
 }
 
 function fileExplorerFinderTargetSession() {
-  if (shareViewMode && !shareWriteMode) return fileExplorerSelectedSessionForView('finder');
   const selected = fileExplorerSelectedSessionForView('finder');
   if (selected) {
     fileExplorerFinderSelectedSession = selected;
@@ -813,9 +811,6 @@ function fileExplorerFinderTargetSession() {
 }
 
 function fileExplorerSessionFilesTargetSession() {
-  if (shareViewMode && !shareWriteMode) {
-    return fileExplorerSelectedSessionForView('differ');
-  }
   const selected = fileExplorerSelectedSessionForView('differ');
   if (selected) {
     fileExplorerChangesSelectedSession = selected;
@@ -899,16 +894,12 @@ function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
-  // Session selection belongs to Differ now. Keep the old semantic shape only for older share
-  // viewers; it no longer drives any live panel mode.
-  sharePublish('finder-mode', {mode: 'diff', session});
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
   // Tabber is backed by transcript/activity data, so a pane-tab click changes only its current and
   // active row state. Preparing Differ payloads, rebuilding the tree, and forcing a session-files
   // request here made one tab activation perform the same Tabber state sync twice.
   if (itemInLayout(tabberItemId) && focusedPanelItem === tabberItemId) {
     scheduleTabberTreeLayoutStateSync();
-    scheduleShareTopologySnapshot('finder-session');
     return;
   }
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
@@ -927,18 +918,14 @@ function switchFileExplorerChangesSession(session) {
   // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
   // that parent and submit a full session-files job for every tab switch.
   fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
-  scheduleShareTopologySnapshot('finder-session');
 }
 
 function switchFileExplorerFinderSession(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
   if (fileExplorerFinderSelectedSession === session) return false;
   fileExplorerFinderSelectedSession = session;
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
-  sharePublish('finder-mode', {mode: 'files', session});
-  scheduleShareTopologySnapshot('finder-session');
   return true;
 }
 
@@ -949,7 +936,6 @@ function fileExplorerChangesSessionInteractionIsCurrent(session) {
 
 function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
   if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
   if (fileExplorerChangesSelectedSession === session) return false;
@@ -1476,7 +1462,6 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
   writeStoredChangesRepoCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
-  scheduleShareUiStatePublish();
 }
 
 function toggleAllFileExplorerChanges() {
@@ -1495,7 +1480,6 @@ function setAllFileExplorerChangesDirectoriesExpanded(expand) {
   writeStoredChangesFolderCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
-  scheduleShareUiStatePublish();
 }
 
 function sessionFileIsDifferVisible(item) {
@@ -2448,7 +2432,6 @@ const differTreeInteractionController = createSharedTreeInteractionController({
     else changesFolderCollapsed.add(key);
     writeStoredChangesFolderCollapsed();
     renderFileExplorerChangesPanels({force: true});
-    scheduleShareUiStatePublish();
   },
   activateRow(row, event) {
     if (row?.dataset?.openChangeFile) {
@@ -2770,7 +2753,6 @@ function setEditorPreviewFontSize(value) {
   applyCssSettings();
   updateEditorPreviewFontControls();
   refreshFilePreviewPopouts();
-  scheduleShareUiStatePublish();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
@@ -2952,9 +2934,6 @@ function renderFileExplorerChangesPanels(options = {}) {
   for (const panel of document.querySelectorAll('.file-explorer-panel')) {
     if (requestedView && fileExplorerViewForItem(panel.dataset.panelItem) !== requestedView) continue;
     renderFileExplorerChangesPanel(panel, options);
-  }
-  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
-    scheduleShareScrollRestoreByKey('finder:differ');
   }
 }
 
@@ -3674,7 +3653,6 @@ function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteScroll && !applyingShareRemoteUiState) return;
   if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {

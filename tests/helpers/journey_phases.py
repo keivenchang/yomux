@@ -99,13 +99,3 @@ YOCHAT_PHASES = phase_chain(
     "yoagent-and-media",
     "reload-paging-and-cleanup",
 )
-
-GENERATED_SHARE_PHASES = {
-    section: phase_chain(
-        "shared-host-viewer-setup",
-        "initial-replay-and-socket-sentinel",
-        f"{section}-surface-matrix",
-        "complete-manifest",
-    )
-    for section in ("chrome", "finder", "resilience", "popovers")
-}

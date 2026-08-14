@@ -231,18 +231,6 @@ function noteBackendHealthSuccess() {
   syncBackendHealthIndicator();
 }
 
-function applyShareTokenHeaders(requestOptions) {
-  if (!shareToken) return requestOptions;
-  if (typeof Headers === 'function') {
-    const headers = new Headers(requestOptions.headers || {});
-    if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
-    requestOptions.headers = headers;
-  } else {
-    requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
-  }
-  return requestOptions;
-}
-
 function applyApiRequestIdHeader(url, requestOptions) {
   const endpoint = jsDebugEndpointText(url);
   if (!endpoint.startsWith('/api/')) return '';
@@ -341,7 +329,6 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   delete requestOptions.deadlineMs;
   delete requestOptions.timeoutMs;
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
   const quietStatuses = Array.isArray(internalOptions.quietStatuses)
     ? new Set(internalOptions.quietStatuses.map(Number))
@@ -786,23 +773,7 @@ function waitForApiOperationResult(pending, expected = {}) {
   });
 }
 
-function openApiOperationEventStream(record) {
-  if (typeof EventSource !== 'function' || !record?.eventsUrl) return null;
-  const separator = record.eventsUrl.includes('?') ? '&' : '?';
-  const eventsUrl = shareToken
-    ? `${record.eventsUrl}${separator}token=${encodeURIComponent(shareToken)}`
-    : record.eventsUrl;
-  const source = new EventSource(eventsUrl);
-  record.source = source;
-  source.addEventListener('operation_terminal', event => {
-    const envelope = safeJsonParse(event?.data, {});
-    applyApiOperationTerminal(envelope?.payload || envelope);
-  });
-  return source;
-}
-
 function startApiOperationTransport(record) {
-  if (shareToken) return openApiOperationEventStream(record);
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -1445,6 +1416,69 @@ function diagnosticPacificWallTime(value) {
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
 }
 
+function redactDiagnosticSecretText(value) {
+  let text = String(value ?? '');
+  text = text
+    .replace(DIAGNOSTIC_TOKEN_QUERY_RE, '$1[redacted-secret]')
+    .replace(DIAGNOSTIC_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_SECRET_ASSIGNMENT_RE, diagnosticRedactSecretAssignment)
+    .replace(DIAGNOSTIC_BEARER_VALUE_RE, '$1$2[redacted-secret]');
+  return text.length > 4000 ? `${text.slice(0, 4000)}[truncated]` : text;
+}
+
+function redactDiagnosticValue(value, key = '', depth = 0) {
+  if (depth > 12) return '[truncated-depth]';
+  if (DIAGNOSTIC_SECRET_KEY_RE.test(String(key || ''))) return '[redacted-secret]';
+  if (Array.isArray(value)) return value.slice(0, 256).map(item => redactDiagnosticValue(item, key, depth + 1));
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [name, rawValue] of Object.entries(value)) {
+      result[String(name).slice(0, 120)] = redactDiagnosticValue(rawValue, String(name), depth + 1);
+    }
+    return result;
+  }
+  if (typeof value === 'string') return redactDiagnosticSecretText(value);
+  return value;
+}
+
+// Diagnostics can outlive the producer that named a credential. Keep upgrade data safe via a
+// bounded token-suffix grammar instead of retaining producer-specific identifiers here.
+const DIAGNOSTIC_TOKEN_PREFIX_SOURCE = '[A-Za-z](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?';
+const DIAGNOSTIC_SECRET_NAME_SOURCE = '(?:token|secret|password|passwd|(?:proxy[_-]?)?authorization|'
+  + '(?:set[_-]?)?cookie|bearer|(?:x[_-]?)?api[_-]?key|client[_-]?secret|(?:access|refresh)[_-]?token|'
+  + `${DIAGNOSTIC_TOKEN_PREFIX_SOURCE}[_-]token)`;
+const DIAGNOSTIC_SECRET_KEY_RE = new RegExp(`^${DIAGNOSTIC_SECRET_NAME_SOURCE}$`, 'i');
+const DIAGNOSTIC_TOKEN_QUERY_RE = /([?#&](?:[A-Za-z][A-Za-z0-9_-]{0,63})?token=)[^&#\s"']+/gi;
+const DIAGNOSTIC_AUTHORIZATION_HEADER_RE = /\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)(?:Basic|Bearer)[ \t]+[^\s,;"'<>}]+(?![^\r\n]*=)(?=[ \t]+(?:failed\b|after\b|at[ \t]+\/|Cookie[ \t]*:)|[;\r\n]|$)/gi;
+const DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE = /(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*\[redacted-secret\])(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*(?:\r?\n|$))(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*["'])\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_COOKIE_HEADER_RE = /\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$)(?:[ \t]*;[ \t]*[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$))*(?![ \t]*;)(?![^\r\n]*=)/gi;
+const DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE = /(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*\[redacted-secret\])(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*(?:\r?\n|$))\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_SECRET_ASSIGNMENT_RE = new RegExp(
+  '\\b(?<prefix>' + DIAGNOSTIC_SECRET_NAME_SOURCE + '\\b["\']?[ \\t]*(?:=|:)[ \\t]*)'
+  + '(?:(?<quote>["\'])(?<quoted_value>(?:\\\\[^\\r\\n]|(?!\\k<quote>)[^\\\\\\r\\n])*)\\k<quote>|'
+  + '(?<unterminated_quote>["\'])(?<unterminated_value>[^\\r\\n]*)|'
+  + '(?<value>[^&#\\s,;"\'<>}]+))',
+  'gi',
+);
+const DIAGNOSTIC_BEARER_VALUE_RE = /\b(Bearer)([ \t]+)([^\s,;:="'<>]+)/gi;
+
+function diagnosticRedactSecretHeader(...args) {
+  const groups = args[args.length - 1];
+  return `${groups.name}${groups.separator}[redacted-secret]`;
+}
+
+function diagnosticRedactSecretAssignment(...args) {
+  const groups = args[args.length - 1];
+  const quote = groups.quote || '';
+  if (groups.unterminated_quote) return `${groups.prefix}[redacted-secret]`;
+  const value = quote ? groups.quoted_value : groups.value;
+  if (typeof value === 'string' && value.startsWith('[redacted-')) return args[0];
+  return `${groups.prefix}${quote}[redacted-secret]${quote}`;
+}
+
 function recordJsDebugEvent(type, payload = {}) {
   const timestampMs = Date.now();
   // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
@@ -1453,7 +1487,7 @@ function recordJsDebugEvent(type, payload = {}) {
   // browser-lifecycle failure records the Pacific wall time it observed the failure at, and the
   // finalizer reports THAT time, not the later moment this event was retained -- so a caller
   // wallTime is preserved and the producer only stamps its own when the caller supplied none.
-  const redacted = shareRedactDiagnosticValue(payload);
+  const redacted = redactDiagnosticValue(payload);
   const event = {
     ...redacted,
     id: ++jsDebugEventSeq,
@@ -1903,7 +1937,7 @@ function viewportDiagnosticsText(snapshot = viewportDiagnosticsSnapshot()) {
 }
 
 function renderViewportDiagnostics() {
-  if (!debugModeExplicitUrlEnabled || shareViewMode) return false;
+  if (!debugModeExplicitUrlEnabled) return false;
   let node = viewportDiagnosticsState.node;
   if (!node?.isConnected) {
     node = document.createElement('output');
@@ -1980,9 +2014,6 @@ function appRootElement() {
 }
 
 function appOverlayRootElement() {
-  // A replay root is deliberately inert until the host publishes its first frame. Local overlays
-  // (for example an async file-browser popover) belong beside that root, never inside it.
-  if (shareReplayShellActive) return document.body;
   const root = appRootElement();
   if (!root || root === document.body) return document.body;
   let overlay = document.getElementById?.('appOverlayRoot');
@@ -1990,7 +2021,6 @@ function appOverlayRootElement() {
     overlay = document.createElement('div');
     overlay.id = 'appOverlayRoot';
     overlay.className = 'app-overlay-root';
-    overlay.dataset.shareReplayOverlayRoot = 'true';
   }
   if (overlay.parentElement !== root) root.appendChild(overlay);
   return overlay;
@@ -2238,7 +2268,7 @@ function normalizeSessionFileLookbackHours(value, fallback = sessionFileLookback
 
 function sessionFileLookbackLabel(hours) {
   const value = Number(hours);
-  if (value < 1) return t('share.duration.minute', {count: Math.round(value * 60)});
+  if (value < 1) return t('duration.minuteShort', {count: Math.round(value * 60)});
   if (value < 24) return tPlural('duration.hour', value);
   return tPlural('duration.day', value / 24);
 }
@@ -3038,12 +3068,11 @@ function setFileExplorerViewSetting(view, key, value, options = {}) {
   fileExplorerViewSettings = {...fileExplorerViewSettings, [surface]: next};
   writeStoredFileExplorerViewSettings();
   if (options.refresh !== false) refreshFileExplorerViewSettingsSurface(surface);
-  if (options.publish !== false) scheduleShareUiStatePublish();
   return true;
 }
 
-// URL state and YO!share use the same payload shape. Keep legacy-field migration here so a
-// restored URL and a replayed frame can never teach the three fixed surfaces different rules.
+// URL state uses one payload shape. Keep legacy-field migration here so restored URLs cannot
+// teach the three fixed surfaces different rules.
 function applyFileExplorerViewSettingsSeed(seed = {}) {
   if (!seed || typeof seed !== 'object') return;
   if (seed.viewSettings && typeof seed.viewSettings === 'object') {
@@ -3254,10 +3283,6 @@ function normalizeResolvedGlobalThemeMode(value = '') {
 
 function resolvedGlobalThemeMode(mode = globalThemeMode) {
   const normalized = normalizeGlobalThemeMode(mode);
-  if (shareViewMode && normalized === 'system') {
-    const shareResolved = normalizeResolvedGlobalThemeMode(shareResolvedGlobalThemeMode);
-    if (shareResolved) return shareResolved;
-  }
   if (normalized === 'system') return systemPrefersDarkTheme() ? 'dark' : 'light';
   return normalized;
 }
@@ -3461,7 +3486,6 @@ function toggleTabMetadata() {
   renderTabMetaToggle();
   renderSessionButtons();
   scheduleTopbarMetricsUpdate();
-  scheduleShareUiStatePublish();
 }
 
 function recordFocusNavTransition(previousItem, nextItem) {
@@ -3596,7 +3620,6 @@ function setFocusedTerminalMeasured(session, options = {}) {
   if (isTmuxSession(session)) lastFocusedTmuxSession = session;
   dismissAttentionAlertsForSession(session);
   updateFocusOnlyChrome();
-  sharePublish('focus', {item: session});
   if (options.userInitiated === true) {
     acknowledgeTerminalAttentionFromUserAction(session, null, options);
     rememberFileExplorerExplicitSyncSession(session);
@@ -3651,7 +3674,6 @@ function setFocusedPanelItem(item, options = {}) {
     lastFocusedTmuxSession = item;
   }
   updateFocusOnlyChrome();
-  sharePublish('focus', {item});
   if (options.userInitiated === true) {
     applyUserInitiatedPanelFocus(item, previousItem, options);
   }
@@ -3917,7 +3939,7 @@ function fuzzySearchScore(query, fields) {
   return total;
 }
 
-function sessionScopedId(key, create = randomShareViewerId) {
+function sessionScopedId(key, create = randomBrowserInstanceId) {
   try {
     const existing = sessionStorage.getItem(key);
     if (existing) return existing;
@@ -4026,11 +4048,7 @@ function keyedScrollAnchor(selector) {
 
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  if (shareViewMode) {
-    const params = new URLSearchParams({session, token: shareToken, viewer: shareViewerId});
-    return `${scheme}//${location.host}/ws/share-view?${params.toString()}`;
-  }
-  const params = new URLSearchParams({session, client: shareClientId});
+  const params = new URLSearchParams({session, client: browserClientId});
   return `${scheme}//${location.host}/ws?${params.toString()}`;
 }
 
@@ -5049,10 +5067,7 @@ function createDismissableOverlayController(options = {}) {
 }
 
 function createContextMenuController() {
-  const overlay = createDismissableOverlayController({
-    onOpen: () => scheduleSharePopupLayerPublish(),
-    onClose: () => scheduleSharePopupLayerPublish({immediate: true}),
-  });
+  const overlay = createDismissableOverlayController();
   return {
     close: overlay.close,
     isOpen: overlay.isOpen,
@@ -6128,7 +6143,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   }
   // Long-press starts this probe while Safari still grants user activation.  Do not offer a
   // dead Paste action when that probe found no text/image, and reuse the one paste transport.
-  if ((!readOnlyMode || shareWriteMode) && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
+  if (!readOnlyMode && typeof terminalClipboardPasteAvailable === 'function' && terminalClipboardPasteAvailable()) {
     appendContextMenuButton(menu, t('common.paste'), () => pasteTerminalMobileAccessoryClipboard(session), closeTerminalContextMenu);
   }
   terminalContextMenu.open(menu, x, y);
@@ -6172,7 +6187,6 @@ function openTabDescriptionPopover(item, anchor) {
   anchor.classList.add('popover-open');
   popover.classList.add('popover-open');
   if (typeof maybeLoadFileTabForPopover === 'function') maybeLoadFileTabForPopover(anchor, item);
-  if (typeof scheduleSharePopupLayerPublish === 'function') scheduleSharePopupLayerPublish();
   return true;
 }
 

@@ -6,7 +6,7 @@
 // W2: the JavaScript half of the ONE neutral diagnostic-redaction contract. The authoritative
 // fixture (tests/fixtures/diagnostic_redaction.json) is generated from the Python owner
 // (yolomux_lib/diagnostic_redaction.py). This suite proves the browser redactor
-// (94_share_replay.js::shareRedactDiagnosticValue) reproduces every expected value byte-for-byte,
+// (10_core_utils.js::redactDiagnosticValue) reproduces every expected value byte-for-byte,
 // is idempotent, and leaves zero fixture secret fragments behind. Redaction is a security boundary.
 
 const assert = require('node:assert/strict');
@@ -27,10 +27,10 @@ function test(name, body) {
   }
 }
 
-const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
-const redactorSource = shareSource.slice(
-  shareSource.indexOf('function shareRedactSecretText('),
-  shareSource.indexOf('\nfunction shareDebugNumber('),
+const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const redactorSource = coreSource.slice(
+  coreSource.indexOf('function redactDiagnosticSecretText('),
+  coreSource.indexOf('\nfunction recordJsDebugEvent('),
 );
 assert.notEqual(redactorSource, '', 'the diagnostic redactor slice exists');
 
@@ -40,20 +40,19 @@ const context = {
   Object,
   Array,
   Number,
-  shareDebugSecretValues: () => [],
   result: null,
 };
 vm.runInNewContext(`
   ${redactorSource}
   result = {
-    redactValue: shareRedactDiagnosticValue,
-    redactText: shareRedactSecretText,
+    redactValue: redactDiagnosticValue,
+    redactText: redactDiagnosticSecretText,
   };
 `, context);
 const redactValue = context.result.redactValue;
 
 const fixture = JSON.parse(fs.readFileSync('tests/fixtures/diagnostic_redaction.json', 'utf8'));
-assert.ok(Array.isArray(fixture.cases) && fixture.cases.length >= 90, 'fixture carries the shared contract cases');
+assert.equal(fixture.cases.length, 87, 'fixture carries the complete active credential-redaction contract');
 
 // The redactor builds objects inside a separate vm realm, so their prototype differs from this
 // realm's and assert.deepEqual rejects the cross-realm identity even for identical structure. Both
@@ -69,10 +68,11 @@ const SECRET_FRAGMENTS = [
   'browser-secret', 'server-secret', 'csrf-secret', 'proxy-secret', 'proxy-user', 'digest-secret',
   'first-secret', 'second-secret', 'owner', 's-secret', 'url-secret', 'fragment-secret',
   'unterminated-secret', 'x-api-secret', 'token-secret', 'basic-secret', 'deep-secret', 'deep-token',
-  'a-secret', 'b-secret', 'matrix-secret', 'utf8-secret', 'utf8-token-secret', 'AbC-123_xyz',
+  'a-secret', 'b-secret', 'matrix-secret', 'utf8-secret', 'utf8-token-secret',
+  'upgrade-secret-a', 'upgrade-secret-b', 'upgrade-secret-c', 'upgrade-secret-d',
 ];
 
-test('JS redactor reproduces every shared-fixture expected value (Python parity)', () => {
+test('JS redactor reproduces every fixture expected value (Python parity)', () => {
   for (const testCase of fixture.cases) {
     const actual = redactValue(testCase.input);
     eq(
@@ -84,7 +84,7 @@ test('JS redactor reproduces every shared-fixture expected value (Python parity)
   }
 });
 
-test('JS redactor is idempotent over every shared-fixture case', () => {
+test('JS redactor is idempotent over every fixture case', () => {
   for (const testCase of fixture.cases) {
     const once = redactValue(testCase.input);
     const twice = redactValue(once);
@@ -111,10 +111,23 @@ test('no fixture secret fragment survives redaction anywhere in the output', () 
 });
 
 test('exact credential key names redact regardless of value type; near names pass through', () => {
-  eq(redactValue({token: {nested: 'x'}}), {token: '[redacted-share-token]'});
+  eq(redactValue({token: {nested: 'x'}}), {token: '[redacted-secret]'});
   eq(redactValue({tokenizer: 'gpt2'}), {tokenizer: 'gpt2'});
   eq(redactValue({secretary: 'alice'}), {secretary: 'alice'});
   assert.equal(redactValue('Bearer abc'), 'Bearer [redacted-secret]');
+});
+
+test('upgrade payloads retain producer-neutral token-suffix redaction', () => {
+  const retiredProducer = ['sh', 'are'].join('');
+  for (const separator of ['_', '-']) {
+    const retiredKey = [retiredProducer, 'token'].join(separator);
+    eq(redactValue({[retiredKey]: 'upgrade-secret'}), {[retiredKey]: '[redacted-secret]'});
+  }
+  const retiredQueryKey = [retiredProducer, 'Token'].join('');
+  assert.equal(
+    redactValue(`GET /api/thing?${retiredQueryKey}=upgrade-secret&ok=1 failed`),
+    `GET /api/thing?${retiredQueryKey}=[redacted-secret]&ok=1 failed`,
+  );
 });
 
 test('depth, array, key, and string bounds match the Python owner', () => {

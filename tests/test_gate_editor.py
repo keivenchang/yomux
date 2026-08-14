@@ -22,10 +22,10 @@ from tests.browser_helpers.browser_console import assert_browser_journey_error_f
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
-from tests.browser_helpers.browser_layout import stop_browser_share_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import start_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.browser_helpers.browser_layout import stop_isolated_browser_app
 from tests.gate_harness import repeat
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import retire_expected_fixture_typed_api_failure
@@ -120,7 +120,7 @@ def _request(
 
 @contextmanager
 def _running_server(monkeypatch: pytest.MonkeyPatch, gate_runtime_paths):
-    runtime = start_isolated_browser_share_app(
+    runtime = start_isolated_browser_app(
         monkeypatch,
         gate_runtime_paths.root,
         dangerously_yolo=False,
@@ -128,7 +128,7 @@ def _running_server(monkeypatch: pytest.MonkeyPatch, gate_runtime_paths):
     server = None
     thread = None
     try:
-        server, thread = start_browser_share_server(
+        server, thread = start_browser_server(
             monkeypatch,
             runtime.paths.config_dir,
             runtime.app,
@@ -137,8 +137,8 @@ def _running_server(monkeypatch: pytest.MonkeyPatch, gate_runtime_paths):
         yield SimpleNamespace(port=server.server_address[1], server=server)
     finally:
         if server is not None and thread is not None:
-            stop_browser_share_server(server, thread)
-        stop_isolated_browser_share_app(runtime)
+            stop_browser_server(server, thread)
+        stop_isolated_browser_app(runtime)
 
 
 from tests.helpers.gate_editor import A8_FRAME_COUNTS

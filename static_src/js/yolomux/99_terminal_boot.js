@@ -147,9 +147,9 @@ function terminalMobileAccessoryData(session, action) {
 function terminalMobileAccessoryButtonHtml(session, definition, state, extraClass = '') {
   const active = definition.modifier ? state?.[definition.modifier] === true : false;
   const locked = definition.modifier ? state?.[terminalMobileAccessoryModifierLockedKey(definition.modifier)] === true : false;
-  // Copy reads local terminal selection only, so it stays available to read-only share viewers;
+  // Copy reads local terminal selection only, so it stays available in read-only mode;
   // every other palette key can change the terminal and keeps the existing write gate.
-  const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
+  const disabled = readOnlyMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
   const macPlatform = isMacPlatform();
   const label = definition.labelKey ? t(definition.labelKey) : (macPlatform ? definition.macLabel : definition.pcLabel) || definition.label;
@@ -1101,7 +1101,6 @@ function backgroundOwnerStatusResource() {
 }
 
 function refreshBackgroundOwnerStatus(options = {}) {
-  if (shareViewMode) return Promise.resolve(false);
   // Every consumer observes the same current snapshot. A reconnect may require a new request
   // after this settles, but must not discard and duplicate the request boot already owns.
   if (backgroundOwnerStatusState.request) return backgroundOwnerStatusState.request;
@@ -1386,7 +1385,6 @@ function renderYoagentPanel(options = {}) {
 }
 
 function infoBranchRows() {
-  if (shareViewMode && Array.isArray(shareInfoBranchRowsOverride)) return shareInfoBranchRowsOverride.slice();
   return rawInfoBranchRows();
 }
 
@@ -1620,7 +1618,6 @@ function setInfoGrouping(value) {
   const next = writeInfoGrouping(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
-  if (infoGrouping.join(',') !== previous) scheduleShareUiStatePublish();
   return next;
 }
 
@@ -1629,7 +1626,6 @@ function setInfoSort(value, options = {}) {
   writeInfoSort(value);
   refreshInfoGroupingControls();
   renderInfoPanel();
-  if (`${infoSort.key}:${infoSort.dir}` !== previous && options.publish !== false) scheduleShareUiStatePublish();
   return {...infoSort};
 }
 
@@ -1642,7 +1638,6 @@ function setInfoSearch(value, options = {}) {
   infoSearch = normalizeInfoSearch(value);
   if (options.refreshControls === true) refreshInfoGroupingControls();
   if (options.render !== false) renderInfoPanel();
-  if (infoSearch !== previous && options.publish !== false) scheduleShareUiStatePublish();
   return infoSearch;
 }
 
@@ -2662,10 +2657,7 @@ function infoTreeHtml(records = infoRelationshipRecords(), grouping = infoGroupi
   const tree = infoGroupTree(records, grouping, normalizedSort);
   const activeGroupKeys = new Set();
   const childrenHtml = infoTreeChildrenHtml(tree.children || [], 0, [], [], activeGroupKeys);
-  // Host-owned YO!share state can legitimately carry a collapsed group that is currently
-  // filtered out. Preserve it until the host changes the snapshot; pruning it during a readonly
-  // render loses that state before the user clears the host search.
-  if (!shareViewMode) pruneInfoTreeCollapsedGroups(activeGroupKeys);
+  pruneInfoTreeCollapsedGroups(activeGroupKeys);
   return `<div class="info-tree" data-info-grouping="${esc(normalizeInfoGrouping(grouping).join(','))}" data-info-sort="${esc(`${normalizedSort.key}:${normalizedSort.dir}`)}" data-info-search="${esc(infoSearch.trim())}">${childrenHtml}</div>`;
 }
 
@@ -3364,106 +3356,6 @@ function rawInfoBranchRows() {
   return branchesNewestCommitFirst([...rowsByKey.values()]);
 }
 
-function shareInfoString(value, limit = 500) {
-  return String(value || '').slice(0, limit);
-}
-
-function shareInfoTabAgentsSnapshot(items) {
-  return Array.isArray(items)
-    ? items.slice(0, 20).map(item => ({
-      session: shareInfoString(item?.session, 80),
-      label: shareInfoString(item?.label, 200),
-      title: shareInfoString(item?.title, 500),
-      tabLabel: shareInfoString(item?.tabLabel, 120),
-      aiLabel: shareInfoString(item?.aiLabel, 120),
-      kind: shareInfoString(item?.kind, 40),
-      window: shareInfoString(item?.window, 40),
-    })).filter(item => item.label)
-    : [];
-}
-
-function shareInfoRowSnapshot(row = {}) {
-  const tabAgents = shareInfoTabAgentsSnapshot(row.tabAgents);
-  const pathTabAgents = shareInfoTabAgentsSnapshot(row.pathTabAgents);
-  const tabAgentText = tabAgents.length ? infoTabAgentsText(tabAgents) : shareInfoString(row.session, 200);
-  return {
-    session: tabAgentText,
-    tabAgents,
-    tabAgentsTitle: tabAgents.map(item => item.title || item.label).filter(Boolean).join('\n'),
-    pathTabAgents,
-    pathTabAgentsTitle: pathTabAgents.map(item => item.title || item.label).filter(Boolean).join('\n'),
-    path: shareInfoString(row.path, 1000),
-    pathLabel: shareInfoString(row.pathLabel, 1000),
-    pathTitle: shareInfoString(row.pathTitle, 1000),
-    pathActivityTs: Number.isFinite(row.pathActivityTs) ? row.pathActivityTs : 0,
-    pathActivitySource: shareInfoString(row.pathActivitySource, 100),
-    branch: shareInfoString(row.branch, 500),
-    branchState: normalizeInfoBranchState(row.branchState),
-    desc: shareInfoString(row.desc, 1000),
-    updated: shareInfoString(row.updated, 200),
-    updatedText: shareInfoString(row.updatedText, 200),
-    updatedTitle: shareInfoString(row.updatedTitle, 500),
-    updatedTs: Number.isFinite(row.updatedTs) ? row.updatedTs : 0,
-    updatedSource: shareInfoString(row.updatedSource, 100),
-    prTitle: shareInfoString(row.prTitle, 1000),
-    prUrl: shareInfoString(row.prUrl, 1000),
-    prLabel: shareInfoString(row.prLabel, 100),
-    prNumber: Number.isFinite(infoRowPrNumber(row)) ? infoRowPrNumber(row) : null,
-    prClass: shareInfoString(row.prClass, 100),
-    prSort: shareInfoString(row.prSort, 1000),
-    linearTitle: shareInfoString(row.linearTitle, 1000),
-    linearItems: Array.isArray(row.linearItems)
-      ? row.linearItems.slice(0, 20).map(item => ({
-        identifier: shareInfoString(item?.identifier, 120),
-        state: shareInfoString(item?.state, 120),
-        title: shareInfoString(item?.title, 500),
-        url: shareInfoString(item?.url, 1000),
-      })).filter(item => item.identifier || item.url)
-      : [],
-    current: row.current === true,
-  };
-}
-
-function cleanShareInfoRows(value) {
-  if (!Array.isArray(value)) return [];
-  return value.slice(0, 1000).map(shareInfoRowSnapshot);
-}
-
-function shareInfoStateSnapshot(options = {}) {
-  const snapshot = {
-    grouping: currentInfoGrouping(),
-    sort: currentInfoSort(),
-    search: currentInfoSearch(),
-    collapsedGroupKeys: [...infoCollapsedGroupKeys].slice(0, 1000),
-  };
-  if (options.includeRows !== false) snapshot.branchRows = infoBranchRows().map(shareInfoRowSnapshot);
-  return snapshot;
-}
-
-function applyShareInfoState(info = {}) {
-  if (!info || typeof info !== 'object') return;
-  if ('grouping' in info || 'infoGrouping' in info || 'info2Grouping' in info) {
-    infoGrouping = normalizeInfoGrouping(info.grouping || info.infoGrouping || info.info2Grouping);
-  }
-  if ('sort' in info || 'infoSort' in info || 'info2Sort' in info) {
-    infoSort = normalizeInfoSort(info.sort || info.infoSort || info.info2Sort);
-  }
-  if ('search' in info || 'infoSearch' in info || 'info2Search' in info) {
-    setInfoSearch(info.search ?? info.infoSearch ?? info.info2Search, {publish: false, render: false});
-  }
-  if (Array.isArray(info.collapsedGroupKeys)) {
-    infoCollapsedGroupKeys.clear();
-    info.collapsedGroupKeys.slice(0, 1000).forEach(key => {
-      const value = String(key || '');
-      if (value) infoCollapsedGroupKeys.add(value);
-    });
-  }
-  if ('branchRows' in info) shareInfoBranchRowsOverride = cleanShareInfoRows(info.branchRows);
-  refreshInfoGroupingControls();
-  renderInfoPanel({force: true});
-  restoreShareScrollTargetByKey('info');
-}
-
 function bindPanelControls(panel, session) {
   delegate(panel, 'pointerdown', '[data-terminal-mobile-toggle]', (event, button) => {
     beginTerminalMobileAccessoryLauncherPress(button.dataset.terminalMobileToggle || session, event, button);
@@ -4053,7 +3945,7 @@ function syncPasteCounterFromPath(path) {
 }
 
 function insertIntoTerminal(session, text) {
-  if (readOnlyMode && !shareWriteMode) {
+  if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyTypeTerminals'));
     return false;
   }
@@ -4063,11 +3955,6 @@ function insertIntoTerminal(session, text) {
   if (!filtered) return false;
   noteFileExplorerChangesSessionInteraction(session);
   setFocusedTerminal(session, {userInitiated: true});
-  if (shareReplayShellActive && shareWriteMode) {
-    const sent = shareSendTerminalInputIntent(session, filtered);
-    if (sent && autoFocusEnabled) item.term?.focus?.();
-    return sent;
-  }
   if (item.socket?.readyState !== WebSocket.OPEN) return false;
   const sendPerf = clientPerfStart('wsSend');
   item.socket.send(JSON.stringify({type: 'input', data: filtered}));
@@ -4461,7 +4348,7 @@ function handleTerminalData(session, data, options = {}) {
 }
 
 function handleTerminalDataMeasured(session, data, options = {}) {
-  if (readOnlyMode && !shareWriteMode) return false;
+  if (readOnlyMode) return false;
   const filtered = options.bypassMobileAccessoryModifiers === true
     ? stripTerminalQueryResponses(data)
     : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
@@ -4478,12 +4365,6 @@ function handleTerminalDataMeasured(session, data, options = {}) {
   // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
   if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
     closeOtherSessionPopovers(null, {force: true});
-  }
-  if (shareReplayShellActive && shareWriteMode) {
-    acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
-    shareSendTerminalInputIntent(session, filtered);
-    if (explicitInput) commitTerminalExplicitInputOwnership(session);
-    return true;
   }
   const socket = current?.socket;
   if (socket?.readyState !== WebSocket.OPEN) {
@@ -4714,7 +4595,7 @@ function activateTab(session, name, options = {}) {
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function tmuxWindow(session, key, label) {
@@ -5040,7 +4921,7 @@ function connectTerminalSocket(session, item) {
     if (terminalIsVisible(session, item.container)) {
       scheduleFit(session);
       scheduleTerminalBlankScreenRefresh(session, {reason: 'socket-open'});
-      if (!shareViewMode) scheduleRemoteResize(session, shareRemoteResizeAfterSocketOpenMs);
+      scheduleRemoteResize(session);
     }
     void refreshTmuxStatusMode(session).catch(error => console.warn('tmux status read failed', error));
     updateTypingIndicator(session);
@@ -5076,7 +4957,7 @@ function connectTerminalSocket(session, item) {
 
 // One frame-processing owner for the terminal WebSocket. PTY output stays raw binary; small
 // structured text control frames (the switch refresh acknowledgement) are consumed here and never
-// written to xterm. YO!share keeps its separate message path.
+// written to xterm.
 function processTerminalSocketFrame(session, item, data) {
   const dataBytes = data instanceof ArrayBuffer ? data.byteLength : utf8ByteLength(data);
   const inputSentAt = Number(item.lastInputSentAt || 0);
@@ -5086,9 +4967,7 @@ function processTerminalSocketFrame(session, item, data) {
   }
   const writePerf = clientPerfStart('xtermWrite');
   let consumedControl = false;
-  if (shareViewMode) {
-    handleShareViewSocketMessage(session, item, data);
-  } else if (consumeTerminalControlMessage(session, data)) {
+  if (consumeTerminalControlMessage(session, data)) {
     consumedControl = true;
   } else if (data instanceof ArrayBuffer) {
     // The optional completion callback is the pinned xterm 6 write barrier: a pending confirmed
@@ -5105,47 +4984,6 @@ function processTerminalSocketFrame(session, item, data) {
   item.fileUnderlineController?.schedule?.({reason: 'output'});
   if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
   scheduleTerminalAttentionHighlight(session);
-}
-
-function shareSocketMessage(data) {
-  if (typeof data !== 'string') return null;
-  try {
-    return JSON.parse(data);
-  } catch (_) {
-    return null;
-  }
-}
-
-function shareTerminalBytesFromMessage(session, message) {
-  if (!message || message.ch !== 'term' || message.pane !== session || typeof message.data !== 'string') {
-    return null;
-  }
-  const raw = atob(message.data);
-  const bytes = new Uint8Array(raw.length);
-  for (let index = 0; index < raw.length; index += 1) {
-    bytes[index] = raw.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function handleShareViewSocketMessage(session, item, data) {
-  const message = shareSocketMessage(data);
-  if (!message) return;
-  if (message.ch === 'ui') {
-    applyShareUiMessage(message);
-    return;
-  }
-  if (message.ch === 'ptr') {
-    renderSharePointerGhost(message.payload && typeof message.payload === 'object' ? message.payload : message);
-    return;
-  }
-  const bytes = shareTerminalBytesFromMessage(session, message);
-  if (bytes) {
-    item.shareTerminalBytesReceived = true;
-    item.shareTerminalLastByteAt = Date.now();
-    item.shareTerminalByteCount = Math.max(0, Math.round(Number(item.shareTerminalByteCount) || 0)) + bytes.length;
-    item.term.write(bytes);
-  }
 }
 
 function bindTerminalContainerForSession(session, term, container) {
@@ -5217,7 +5055,7 @@ function startTerminal(session) {
     return;
   }
   container.innerHTML = '';
-  const size = shareHostTerminalSize(session) || estimateTerminalSize(container);
+  const size = estimateTerminalSize(container);
   const baseTheme = terminalThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
@@ -5229,7 +5067,7 @@ function startTerminal(session) {
     letterSpacing: 0,
     lineHeight: 1.0,
     scrollback: terminalScrollback,
-    disableStdin: readOnlyMode && !shareWriteMode,
+    disableStdin: readOnlyMode,
     theme: terminalThemeForSession(session, baseTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
@@ -5245,7 +5083,7 @@ function startTerminal(session) {
   applyTerminalContainerTheme(container, baseTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
-  const openedSize = shareHostTerminalSize(session) || estimateTerminalSize(container, term);
+  const openedSize = estimateTerminalSize(container, term);
   if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {
     term.resize(openedSize.cols, openedSize.rows);
   }
@@ -5259,11 +5097,6 @@ function startTerminal(session) {
     resizeTimer: null,
     scrollTimer: null,
     pendingScrollLines: 0,
-    shareTerminalBytesReceived: false,
-    shareTerminalLastByteAt: 0,
-    shareTerminalByteCount: 0,
-    shareTerminalLastResetAt: 0,
-    shareTerminalSkippedResetCount: 0,
     blankScreenRefreshTimer: 0,
     blankScreenRefreshAttempts: 0,
     attentionHighlightFrame: 0,
@@ -5340,7 +5173,6 @@ function applyAutoApproveCommandState(session, state) {
   renderInfoPanel();
   renderAutoApproveButton(session, state);
   scheduleTerminalAttentionHighlight(session);
-  scheduleShareUiStatePublish();
 }
 
 function beginAutoApproveCommand(session, enabled) {
@@ -5503,7 +5335,6 @@ function renderAutoApproveStatusSurfaces(result = {}) {
     refreshActivePanelHeaders();
     trackSessionStateChanges();
     syncTerminalAttentionHighlights();
-    scheduleShareUiStatePublish();
     if (result && typeof result === 'object') result.rendered = true;
   } finally {
     clientPerfEnd(perf, {sessions: sessions.length});
@@ -6094,8 +5925,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
-  if (!shareViewMode) scheduleShareUiStatePublish();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   trackSessionStateChanges();
   refreshOpenEventLogs();
   return true;
@@ -6594,7 +6424,6 @@ function renderContextTailPayload(session, payload = {}) {
   body.textContent = payload.text
     ? `${payload.path}\n\n${payload.text}`
     : JSON.stringify(payload, null, 2);
-  scheduleSharePopupLayerPublish();
   return true;
 }
 
@@ -6623,7 +6452,6 @@ function applyContextProductOperationResult(record, result = {}) {
     if (!modal || !body || modal.dataset.modalKind !== 'context' || modal.dataset.modalSession !== session) return false;
     delete body.dataset.localeTextKey;
     body.textContent = userMessageText(result, t('common.requestFailed'));
-    scheduleSharePopupLayerPublish();
     return true;
   }
   return false;
@@ -6837,11 +6665,6 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
-  // /api/event is host-only (share_access=none); the server returns 403 for a share token, and a real
-  // 403 during teardown fails the strict browser server-log-ring gate. Gate every event producer
-  // (terminal_disconnected, state_changed, notifications, watched-PR, yoagent) at this one owner rather
-  // than per call site, so no share-reachable caller can leak a forbidden host-only request.
-  if (!clientCanUseUnscopedHostRequests()) return Promise.resolve(false);
   const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
   if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   return apiFetch('/api/event', {
@@ -6967,13 +6790,6 @@ async function boot() {
   syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});
   installReconnectResyncHandlers();
-  if (shareViewMode) {
-    applyShareViewBodyClasses();
-    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
-    applyShareViewportState(bootstrapUiState.viewport || shareBootstrap?.viewport || {});
-    applyShareAppearanceState(bootstrapUiState.appearance || shareBootstrap?.appearance || {});
-    applyShareMirrorTransform();
-  }
   waitForYolomuxFontsReady({timeoutMs: 0}).catch(() => {});
   syncAppViewportBreakpointClasses();
   // i18n: AWAIT the active locale catalog (all-static-fetch) before the first render so menus,
@@ -6982,73 +6798,44 @@ async function boot() {
   // resolved client-side against navigator.language (the server can't see the browser locale).
   await applyLocale(resolveLocalePref(initialSetting('general.language', 'system')));
   installGlobalThemeMediaListener();
-  if (installShareReplayShell()) {
-    installDevAutoReload();
-    schedulePageLoadProfileCompletion();
-    return;
-  }
   applyFileExplorerStaticLabels();
   renderTransportWarning();
   renderTabMetaToggle();
   bindTopbarMetrics();
   syncInitialLayoutUrl();
   statusEl.textContent = t('status.yoloLoading');
-  let initialAutoStatusesPromise = Promise.resolve(false);
-  if (!shareViewMode) {
-    loadNotificationDelivery();
-    refreshBackgroundOwnerStatus({render: false}).catch(error => {
-      console.warn('initial background-owner status refresh failed', error);
-      return false;
-    });
-    initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
-      console.warn('initial auto-status refresh failed', error);
-      return false;
-    });
-  }
+  loadNotificationDelivery();
+  refreshBackgroundOwnerStatus({render: false}).catch(error => {
+    console.warn('initial background-owner status refresh failed', error);
+    return false;
+  });
+  const initialAutoStatusesPromise = loadAutoStatuses().catch(error => {
+    console.warn('initial auto-status refresh failed', error);
+    return false;
+  });
   bindClipboardPaste();
   paintInitialAppShell();
   scheduleDeferredSettingsMetadataRefresh();
-  if (!shareViewMode) {
-    await refreshTranscripts({refreshAuto: false});
-  } else {
-    setTranscriptMetadataPayload({session_order: sessions.slice(), sessions: Object.fromEntries(sessions.map(session => [session, {target: session}]))});
-    transcriptMetadataState.loaded = true;
-    await refreshTranscripts({refreshAuto: false, refreshActivity: false});
-  }
+  await refreshTranscripts({refreshAuto: false});
   installYolomuxFontMetricRefresh();
   updatePanelInactiveOverlays();
-  if (shareViewMode) {
-    const bootstrapUiState = shareBootstrap?.uiState && typeof shareBootstrap.uiState === 'object' ? shareBootstrap.uiState : {};
-    await applyShareUiState({
-      ...bootstrapUiState,
-      finder: bootstrapUiState.finder || shareBootstrap?.finder || {},
-    });
-  }
-  if (!shareViewMode && clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   await Promise.all(activeSessions.filter(isTmuxSession).map(session => ensureTerminalRunning(session)));
-  if (!shareViewMode && typeof initializeJsDebugStatsBeforeStreams === 'function') {
+  if (typeof initializeJsDebugStatsBeforeStreams === 'function') {
     await initializeJsDebugStatsBeforeStreams();
   }
-  if (!shareViewMode) installClientEventStream();
-  if (!shareViewMode) {
-    initialAutoStatusesPromise.then(() => {
-      renderAutoApproveButtons();
-      updateSessionButtonStates();
-      refreshActivePanelHeaders();
-      trackSessionStateChanges();
-    });
-  }
-  if (!shareViewMode) refreshWatchedPrs();
+  installClientEventStream();
+  initialAutoStatusesPromise.then(() => {
+    renderAutoApproveButtons();
+    updateSessionButtonStates();
+    refreshActivePanelHeaders();
+    trackSessionStateChanges();
+  });
+  refreshWatchedPrs();
   renderAutoApproveButtons();
   updateLatency();
   installRuntimeIntervals();
   scheduleStartupHelperTip();
-  installShareViewerBanner();
-  installSharePointerPublisher();
-  installShareScrollPublisher();
-  installSharePopupLayerPublisher();
-  installShareReplayMutationPublisher();
-  startShareStatusRefresh();
   installDevAutoReload();
   document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
   checkForUpdateOnce();
@@ -7301,7 +7088,6 @@ function applyUpdateAvailable(status) {
 }
 
 async function checkForUpdateOnce() {
-  if (shareViewMode) return false;
   try {
     const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
     if (status && status.available) applyUpdateAvailable(status);
@@ -7665,7 +7451,7 @@ function clientEventDemandDescriptor() {
   const visible = document.visibilityState !== 'hidden';
   const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
   const channels = new Set();
-  const operations = shareToken ? [] : Array.from(apiOperationState.pending.keys()).sort();
+  const operations = Array.from(apiOperationState.pending.keys()).sort();
   const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
   const notificationChat = typeof notificationDeliveryEnabled === 'function'
     && (notificationDeliveryEnabled('inApp') || notificationDeliveryEnabled('system'));
@@ -7827,7 +7613,7 @@ function openClientEventStream(descriptor, options = {}) {
   }
   const params = new URLSearchParams({
     channels: descriptor.channels.join(','),
-    client_id: String(shareClientId || ''),
+    client_id: String(browserClientId || ''),
   });
   if (descriptor.operations.length) params.set('operations', descriptor.operations.join(','));
   let source;
@@ -8046,7 +7832,7 @@ function installDevAutoReload() {
 async function showContext(session) {
   const modal = document.getElementById('modal');
   const body = document.getElementById('modalBody');
-  modal.classList.remove('about-open', 'share-open');
+  modal.classList.remove('about-open');
   body.innerHTML = '';
   modal.dataset.modalKind = 'context';
   modal.dataset.modalSession = session;
@@ -8060,7 +7846,6 @@ async function showContext(session) {
     if (isApiPendingResponse(error)) return;
     delete body.dataset.localeTextKey;
     body.textContent = userMessageText(error, t('common.requestFailed'));
-    scheduleSharePopupLayerPublish();
   }
 }
 
@@ -8079,7 +7864,6 @@ function relocalizeModalChrome(options = {}) {
     showAboutModal();
     return true;
   }
-  if (modal.classList.contains('share-open')) return relocalizeShareModal();
   if (modal.dataset.modalKind !== 'context') return true;
   if (title) title.textContent = t('transcript.tailTitle', {session: sessionLabel(modal.dataset.modalSession || '')});
   if (body?.dataset.localeTextKey) body.textContent = t(body.dataset.localeTextKey);
@@ -8193,8 +7977,7 @@ if (tabMetaToggle) {
 if (logoutButton) logoutButton.onclick = () => { window.location.href = '/logout'; };
 document.getElementById('closeModal').onclick = () => {
   const modal = document.getElementById('modal');
-  modal.classList.remove(CLS.open, 'about-open', 'share-open');
-  scheduleSharePopupLayerPublish({immediate: true});
+  modal.classList.remove(CLS.open, 'about-open');
 };
 function promptAttentionClearElement(target) {
   return target?.closest?.('[data-prompt-attention-clear]');
@@ -8299,11 +8082,10 @@ function handleGlobalShortcutKeydown(event) {
     return;
   }
   if (mod && platformActionAllowed) {
-    if (key === 'k' && (event.shiftKey || !shareFeatureQuarantined)) {
+    if (key === 'k' && event.shiftKey) {
       event.preventDefault();
       event.stopPropagation();
-      if (event.shiftKey) startPinTabShortcutChord();
-      else showShareModal();
+      startPinTabShortcutChord();
       return;
     }
     if ((key === 'backspace' || key === 'delete') && globalShortcutTargetAllowsAppAction(event.target)) {
@@ -8333,7 +8115,6 @@ function handleGlobalShortcutKeydown(event) {
     closeAppMenus();
   }
 }
-installShareReadonlyInteractionBlocker();
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
@@ -8344,8 +8125,6 @@ window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
   scheduleResponsiveLayoutPrune();
   scheduleAllTabStripOverflowChecks();
   if (typeof dockviewScheduleLayoutToHost === 'function') dockviewScheduleLayoutToHost();
-  applyShareMirrorTransform();
-  scheduleShareViewportPublish();
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 });
 

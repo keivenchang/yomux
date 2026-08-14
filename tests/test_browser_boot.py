@@ -57,9 +57,9 @@ def saved_layout_search(session):
 
 
 def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
     session = runtime.sessions[0]
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     base_url = f"http://127.0.0.1:{server.server_address[1]}/"
     install_live_runtime_boot_error_tracker(browser)
     cases = {
@@ -77,15 +77,15 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
                 assert "file_explorer" in metrics["collapsedPreferenceSectionIds"], metrics
     finally:
         try:
-            stop_browser_share_server(server, thread, browser=browser)
+            stop_browser_server(server, thread, browser=browser)
         finally:
-            stop_isolated_browser_share_app(runtime)
+            stop_isolated_browser_app(runtime)
 
     successor_path = tmp_path / "xterm-successor"
     successor_path.mkdir()
-    successor_runtime = start_isolated_browser_share_app(monkeypatch, successor_path)
+    successor_runtime = start_isolated_browser_app(monkeypatch, successor_path)
     successor_session = successor_runtime.sessions[0]
-    successor_server, successor_thread = start_browser_share_server(
+    successor_server, successor_thread = start_browser_server(
         monkeypatch,
         successor_path,
         successor_runtime.app,
@@ -113,24 +113,24 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
         assert_browser_journey_error_free(browser, observation_seconds=2.0)
     finally:
         try:
-            stop_browser_share_server(
+            stop_browser_server(
                 successor_server,
                 successor_thread,
                 browser=browser,
             )
         finally:
-            stop_isolated_browser_share_app(successor_runtime)
+            stop_isolated_browser_app(successor_runtime)
 
 
 def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
     monkeypatch.setattr(
         runtime.app.yoagent_controller,
         "run_yoagent_cli_backend",
         lambda *_args, **_kwargs: ("fixture prewarm", "", {"elapsed_ms": 1}),
     )
     session = runtime.sessions[0]
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     base_url = f"http://127.0.0.1:{server.server_address[1]}/"
     search = "?" + urlencode({
         "sessions": f"{session},yoagent",
@@ -173,15 +173,15 @@ def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or
         assert state["activityRequests"] == []
         assert_browser_journey_error_free(browser)
     finally:
-        stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
 
 
 def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(browser, monkeypatch, tmp_path):
     """CDP touch input must traverse the bridge, actual xterm selection, and copy menu."""
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
     session = runtime.sessions[0]
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     marker = "real-xterm-touch-copy-marker"
     original_user_agent = browser.execute_script("return navigator.userAgent;")
     try:
@@ -266,15 +266,15 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
-        stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
 
 
 def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkeypatch, tmp_path):
     """One isolated HTTP/WS smoke covers the real xterm path that fixture FakeTerminal cannot."""
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
     session = runtime.sessions[0]
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     marker = "real-xterm-browser-smoke"
     try:
         browser.get(f"http://127.0.0.1:{server.server_address[1]}/{xterm_only_search(session)}")
@@ -420,5 +420,5 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         assert after["connected"] is True and after["viewport"] > glyphs["viewport"], {"before": glyphs, "after": after}
         assert after["screenRect"] and after["screenRect"]["width"] > 0 and after["screenRect"]["height"] > 0, after
     finally:
-        stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)

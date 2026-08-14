@@ -11,12 +11,7 @@ function toggleFileExplorer() {
   }
 }
 
-function shareReadOnlyFinderStateIsHostOwned() {
-  return shareViewMode && !shareWriteMode && !applyingShareRemoteUiState;
-}
-
 async function openFileExplorerAt(path, options = {}) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
   const root = normalizeDirectoryPath(expandUserPath(path));
   if (options.manualSelection === true) {
@@ -65,7 +60,6 @@ async function openFileExplorerAt(path, options = {}) {
   }
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   updateFileExplorerCurrentFileHighlight();
-  scheduleShareTopologySnapshot('finder-root');
   return true;
 }
 
@@ -319,7 +313,7 @@ function fileExplorerFsBatchClientMetadata() {
   const watchToken = String(fileExplorerFilesystemWatchToken || '');
   return {
     client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
-    client_scope: shareViewMode ? 'share' : 'browser',
+    client_scope: 'browser',
     watch_token: watchToken.slice(0, 128),
   };
 }
@@ -1022,7 +1016,6 @@ function setFileExplorerRootMode(mode, options = {}) {
   if (fileExplorerRootMode === 'sync' && options.sync !== false) {
     scheduleFileExplorerActiveTabSync(fileExplorerExplicitSyncSessionTarget(), {explicit: true});
   }
-  scheduleShareTopologySnapshot('finder-root-mode');
 }
 
 function fileExplorerRootModeValue() {
@@ -1958,7 +1951,6 @@ function fileExplorerSessionFilesPaneIsVisible() {
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
   if (fileExplorerRootMode !== 'sync') return;
-  if (shareReadOnlyFinderStateIsHostOwned()) return;
   const explicit = options.explicit === true;
   if (fileExplorerManualSelectionActive && !explicit) return;
   if (explicit) setFileExplorerSelectionPin(false);
@@ -1995,7 +1987,6 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
 
 function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
   if (!plan?.root || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   if (options.guardExplicitTarget === true && isTmuxSession(plan.session)) {
     return fileExplorerExplicitSyncSessionTarget() === String(plan.session);
   }
@@ -2011,7 +2002,6 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
 
 async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, {
     ...options,
     guardExplicitTarget: options.force === true,
@@ -2020,7 +2010,6 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = 
 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   forgetFileExplorerSyncManualCollapse(dirnameOf(path));
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
@@ -2076,7 +2065,6 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   }
   updateFileExplorerCurrentFileHighlight();
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
-  scheduleShareTopologySnapshot('finder-root');
   return true;
 }
 
@@ -2120,7 +2108,6 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
 }
 
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
   if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
@@ -2172,7 +2159,6 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
 async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return false;
   if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncState.inFlightSignature === path) return false;
   const root = currentFileExplorerRoot();
@@ -3489,7 +3475,6 @@ function updateFileExplorerCurrentFileHighlight() {
 }
 
 function scheduleFileExplorerActiveFileReveal(path = activeFile) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return;
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -5196,7 +5181,6 @@ function setTabberPathExpanded(fullPath, expanded) {
     fileExplorerTabberCollapsed.add(fullPath);
   }
   persistTabberCollapsed();
-  scheduleShareUiStatePublish();
   return true;
 }
 
@@ -5239,7 +5223,6 @@ function setAllTabberCollapsed(collapsed) {
   }
   persistTabberCollapsed();
   refreshTabberPanels();
-  scheduleShareUiStatePublish();
 }
 
 async function openTabberActivityOverview() {

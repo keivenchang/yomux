@@ -35,8 +35,8 @@ from _git_helpers import git
 from _git_helpers import init_repo
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import stop_browser_share_server
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import stop_browser_server
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yolomux_lib.server_logs import SERVER_LOGS
@@ -187,7 +187,7 @@ def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(monk
         assert int(webapp.job_client.registry._read_record().get("pid") or 0) == first_pid
         assert webapp.job_client.socket_path.exists()
 
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
         connection.request("GET", "/api/session-files?force=1")
         response = connection.getresponse()
@@ -205,7 +205,7 @@ def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(monk
         assert webapp.job_client.registry.healthy()
     finally:
         if server is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_server(server, thread)
         process = webapp.job_client.registry.process
         if process is not None and process.poll() is None:
             process.terminate()
@@ -222,7 +222,7 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
     monkeypatch.setattr(webapp.job_client.registry, "_spawn", lambda: None)
     server = thread = None
     try:
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
         connection.request("GET", "/api/session-files?force=1")
         response = connection.getresponse()
@@ -247,7 +247,7 @@ def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeyp
         assert len(retired) in {2, 3}
     finally:
         if server is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_server(server, thread)
         webapp.control_server.stop()
 
 
@@ -327,7 +327,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
     webapp.stop_client_event_watcher_if_idle = lambda: True
     server = thread = None
     try:
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         refs = {"/repo/z": {"to": " current ", "from": " HEAD~2 "}}
         encoded_refs = quote(json.dumps(refs, separators=(",", ":")), safe="")
@@ -391,7 +391,7 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
     finally:
         release_result.set()
         if server is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_server(server, thread)
         webapp.control_server.stop()
 
 
@@ -465,7 +465,7 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
     webapp.publish_client_event = capture_publish
     server = thread = None
     try:
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
         connection.request("GET", "/api/session-files?session=5&force=1")
         response = connection.getresponse()
@@ -501,7 +501,7 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
         webapp.demote_background_owner()
     finally:
         if server is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_server(server, thread)
         webapp.control_server.stop()
 
 
@@ -758,7 +758,7 @@ def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch,
     server = thread = None
     try:
         assert webapp.job_client.start_for_scheduler()
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
         for hours in (1, 2, 3):
             connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=15)
             connection.request("GET", f"/api/session-files?session=5&force=1&hours={hours}")
@@ -790,7 +790,7 @@ def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch,
         assert webapp.job_client.runtime_status()["product_counters"]["session_files_view"]["completed"] >= 3
     finally:
         if server is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_server(server, thread)
         process = webapp.job_client.registry.process
         if process is not None and process.poll() is None:
             process.terminate()
