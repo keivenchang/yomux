@@ -356,6 +356,11 @@ class ApprovalClient(LocalServiceClient):
         statuses = response.get("statuses") if isinstance(response.get("statuses"), list) else []
         return [status for status in statuses if isinstance(status, dict)]
 
+    def status_session_if_running(self, session: str) -> list[dict[str, Any]]:
+        response = self.request_if_running({"action": "status_session", "session": session}, timeout=0.5)
+        statuses = response.get("statuses") if isinstance(response.get("statuses"), list) else []
+        return [status for status in statuses if isinstance(status, dict)]
+
     def stop_session(self, session: str) -> dict[str, Any]:
         return self.request({"action": "stop_session", "session": session}, timeout=2.5)
 

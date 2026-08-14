@@ -860,7 +860,8 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   const dispose = bindScopedOnce(doc, 'file-preview-popout-controls', scope => {
   const bind = (target, type, handler) => {
     if (!target?.addEventListener) return;
-    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, {passive: true});
+    const listenerOptions = ['scroll', 'wheel', 'touchstart'].includes(type) ? {passive: true} : undefined;
+    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, listenerOptions);
     scope.replace('event-index', Number(scope.value('event-index') || 0) + 1);
   };
   bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {

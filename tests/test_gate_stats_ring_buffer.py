@@ -778,6 +778,69 @@ def test_persisted_ring_snapshot_advances_at_warm_materializer_cadence_before_ri
     assert service._ring_publications == 1
 
 
+def test_public_delta_keeps_the_exact_served_base_across_same_cursor_ring_republication(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_009.9]
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        database,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    with storage.Store.open(database) as store:
+        service.writer = store
+        service._build_once(store, True, frozenset())
+        _metadata, warm_binary = service.handle_with_binary(_snapshot_request(
+            range_seconds=900,
+            requested_resolution=10,
+            client_id="same-cursor-served-base",
+        ))
+        warm = protocol.validate_snapshot(json.loads(warm_binary))
+
+        wall_now[0] += 0.2
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+        state = service._ring_views[(900, 10, None)]
+        assert state.snapshot is not None
+        retained = protocol.validate_snapshot(json.loads(state.snapshot.binary))
+        assert retained["cache_generation"] == warm["cache_generation"]
+        assert retained["buckets"] == warm["buckets"]
+        assert state.persisted is True
+
+        accepted, _binary = service.handle_with_binary(_cpu_append_request(wall_now[0]))
+        assert accepted["accepted"] == 1
+        work = service._take_work()
+        assert work is not None
+        service._build_once(store, *work)
+        delta_metadata, delta_binary = service.handle_with_binary(_delta_request(
+            range_seconds=900,
+            resolution_seconds=10,
+            client_id="same-cursor-served-base",
+            after_cache_generation=warm["cache_generation"],
+        ))
+        delta = protocol.validate_delta(json.loads(delta_binary))
+        current_state = service._ring_views[(900, 10, None)]
+        assert current_state.snapshot is not None
+        current = protocol.validate_snapshot(json.loads(current_state.snapshot.binary))
+
+    assert delta_metadata["base_cache_generation"] == warm["cache_generation"]
+    applied = _apply_delta(warm, delta)
+    assert [bucket["start"] for bucket in applied["buckets"] if bucket["open"]] == [
+        current["window_end"] - current["resolution_seconds"]
+    ]
+    assert applied == {
+        "source_generation": current["source_generation"],
+        "cache_generation": current["cache_generation"],
+        "buckets": current["buckets"],
+        "no_data": current["no_data"],
+        "cost_report": current["cost_report"],
+    }
+
+
 @pytest.mark.parametrize(
     ("range_seconds", "requested_resolution", "resolution_seconds"),
     (

@@ -14746,7 +14746,9 @@ class TmuxWebtermApp:
         if approval_client is None:
             self.set_persisted_auto_session(session, False)
             return
-        workers = approval_client.status_session(session)
+        # Session retirement must stop an existing approval worker, but asking whether one exists
+        # is not demand to launch approvald for a session that never enabled YOLO.
+        workers = approval_client.status_session_if_running(session)
         if workers:
             approval_client.stop_session(session)
         self.set_persisted_auto_session(session, False)

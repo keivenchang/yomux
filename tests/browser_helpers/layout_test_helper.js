@@ -2370,6 +2370,8 @@ globalThis.__layoutTestApi = {
   renderFileEditorPanel,
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
+  sourcePositionForPreviewScrollForTest: sourcePositionForPreviewScroll,
+  editorScrollTopForSourcePositionForTest: editorScrollTopForSourcePosition,
   fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
   reloadOpenFileFromDiskForTest: reloadOpenFileFromDisk,

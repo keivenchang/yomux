@@ -1503,6 +1503,10 @@ body.editor-theme-light {
   font: inherit;
 }
 
+.btn-base[hidden] {
+  display: none;
+}
+
 /* Compact status/count badges and interactive chips share their inline layout. Their local rules retain size, paint, and radius. */
 .badge-base,
 .chip-base {

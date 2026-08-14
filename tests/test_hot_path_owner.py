@@ -648,6 +648,7 @@ def test_current_worker_retirement_does_not_self_join(tmp_path, monkeypatch):
         assert id(ri) not in file_index._RETIRING
 
 
+@pytest.mark.gate_serial
 def test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation(tmp_path, monkeypatch):
     # Churn: start a worker, abandon it while blocked, start the next, repeat >3x, release in REVERSE
     # order. Every worker must eventually retire, none may be left observable, no descriptor may leak,

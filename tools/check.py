@@ -91,7 +91,7 @@ DEFAULT_TOOL_LOCK_PATH = Path(
 ).expanduser()
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
-EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e"})
+EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
 
 EXIT_LANE_FAILED = 1
 EXIT_USAGE = 2
@@ -148,6 +148,7 @@ class Lane:
     label: str
     steps: tuple[Step, ...]
     default: bool = False
+    run_last: bool = False
 
 
 @dataclass(frozen=True)
@@ -261,13 +262,14 @@ def step_catalog(*, serial: bool = False, cpu_percent: int | None = None) -> dic
         StepId.NODE_YOLOMUX_SYNTAX: Step("node --check static/yolomux.js", ["node", "--check", "static/yolomux.js"]),
         StepId.NODE_WALL_SYNTAX: Step("node --check static/tmux-wall.js", ["node", "--check", "static/tmux-wall.js"]),
         StepId.NODE_LAYOUT: Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),
-        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),
+        StepId.PYTEST_NONBROWSER: Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]),
+        StepId.PYTEST_GATE_SERIAL: Step("pytest timing-sensitive serial", ["python3", "-m", "pytest", *pytest_files("gate_serial"), "-m", "gate_serial", "-q"]),
         StepId.PYTEST_BOOT: Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
         StepId.PYTEST_BROWSER: Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
         StepId.PYTEST_BROWSER_GOLDEN: Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
         StepId.PYTEST_E2E: Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),
-        StepId.PYTEST_UNIT: Step("pytest unit", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "not socket and not browser and not node_bridge", "-q"]),
-        StepId.PYTEST_SOCKET: Step("pytest socket", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "socket and not browser", "-q"]),
+        StepId.PYTEST_UNIT: Step("pytest unit", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "not gate_serial and not socket and not browser and not node_bridge", "-q"]),
+        StepId.PYTEST_SOCKET: Step("pytest socket", ["python3", "-m", "pytest", *focused_phase_target_args("nonbrowser"), "-m", "socket and not gate_serial and not browser", "-q"]),
         StepId.WHITESPACE: Step("git diff --check", ["git", "diff", "--check"]),
     }
 
@@ -283,6 +285,7 @@ def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]
             spec.label,
             tuple(catalog[step_id] for step_id in resolved_lane_step_ids(spec)),
             spec.default,
+            spec.run_last,
         )
         for spec in LANE_SPECS
     ]
@@ -561,7 +564,7 @@ def instrument_lane_for_performance(lane: Lane) -> Lane:
         Step(step.label, [*step.args, "--durations=0", "--durations-min=0"] if step.args[:3] == ["python3", "-m", "pytest"] else step.args, step.env)
         for step in lane.steps
     )
-    return Lane(lane.name, lane.label, steps, lane.default)
+    return Lane(lane.name, lane.label, steps, lane.default, lane.run_last)
 
 
 def child_usage_delta(before: dict[str, float | int | str], after: dict[str, float | int | str]) -> dict[str, float | int | str]:
@@ -642,7 +645,6 @@ def print_result(result: LaneResult) -> None:
 # longest lane plus whatever queued ahead of it. Unknown lanes sort last.
 LANE_LAUNCH_ORDER = (
     "pytest-browser",
-    "pytest-browser-behavior",
     "pytest-e2e",
     "pytest",
     "pytest-unit",
@@ -653,6 +655,7 @@ LANE_LAUNCH_ORDER = (
     "node-syntax",
     "py-compile",
     "whitespace",
+    "pytest-gate-serial",
 )
 
 
@@ -679,6 +682,23 @@ def run_serial(selected: list[Lane]) -> list[LaneResult]:
         result = run_lane(lane)
         results.append(result)
         print_result(result)
+    return results
+
+
+def run_functional_lanes(selected: list[Lane], *, serial: bool) -> list[LaneResult]:
+    """Run declared final lanes serially after every parallel functional lane retires."""
+
+    if serial:
+        return run_serial(selected)
+    parallel_lanes = [lane for lane in selected if not lane.run_last]
+    final_lanes = [lane for lane in selected if lane.run_last]
+    results = run_parallel(parallel_lanes) if parallel_lanes else []
+    if final_lanes:
+        print(
+            "Running final serial lane(s): " + ", ".join(lane.name for lane in final_lanes),
+            flush=True,
+        )
+        results.extend(run_serial(final_lanes))
     return results
 
 
@@ -1265,10 +1285,12 @@ def main(argv: list[str] | None = None) -> int:
                     if lower_current_process_priority(active_records):
                         ports = sorted({str(record.get("port") or "?") for record in active_records})
                         print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-                mode = "serial" if args.serial else "parallel"
+                mode = "serial"
+                if not args.serial:
+                    mode = "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
                 if selected:
                     print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-                    results = run_serial(selected) if args.serial else run_parallel(selected)
+                    results = run_functional_lanes(selected, serial=args.serial)
                 # Always, even when a lane already failed. A phase that only runs on an otherwise
                 # green gate cannot be trusted on a box where some lane is usually red: its own
                 # regressions would never be observed.

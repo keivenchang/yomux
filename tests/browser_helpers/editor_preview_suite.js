@@ -477,6 +477,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(popoutSource, /function syncFilePreviewPopoutScroll[\s\S]*filePreviewPopoutReflectedScrollMatches[\s\S]*beginFilePreviewPopoutScrollOwner\(record, \{kind: 'popout'/, 'reflected writes cannot steal ownership while a genuine popup scroll can');
     assert.match(popoutSource, /function writeFilePreviewPopoutAfterNavigation\(path, previewWindow, snapshot, previewGeneration\)[\s\S]*record\.navigationWrite !== job[\s\S]*filePreviewPopoutGenerationMatches\(path, previewWindow, previewGeneration\)[\s\S]*settleFilePreviewPopoutNavigationWrite/, 'deferred navigation writes validate the current record, window, and generation at the actual write boundary');
     assert.match(popoutSource, /function applyFilePreviewPopoutAsync[\s\S]*return apply\(snapshot\)[\s\S]*completion\.then\(finish, finish\)/, 'async readiness follows the apply result through a deferred navigation write instead of retiring when it is merely scheduled');
+    assert.match(popoutSource, /const listenerOptions = \['scroll', 'wheel', 'touchstart'\]\.includes\(type\) \? \{passive: true\} : undefined;[\s\S]*scope\.ownEvent\([^\n]+listenerOptions\)/, 'only scroll, wheel, and touch listeners are passive; click, pointer, and keyboard controls can prevent defaults');
     const frames = [];
     const measures = [];
     let now = 0;
@@ -546,6 +547,49 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(panel._splitScrollBottomConvergence, null, 'bottom convergence retires only after stable measured snapshots');
     api.scheduleFileEditorPreviewLayoutSyncForTest(panel);
     assert.equal(panel._splitScrollPendingSource, 'editor', 'an explicit preview-layout refresh can still elect the editor source');
+  });
+
+  test('integer preview source positions land inside the target CodeMirror block', () => {
+    const api = loadYolomux('', ['1']);
+    const targetLine = 50;
+    for (const lineHeight of [8, 16, 20, 37]) {
+      for (const clientHeight of [75, 200, 401]) {
+        const doc = {
+          lines: 120,
+          line: number => ({from: number}),
+          lineAt: from => ({number: from}),
+        };
+        const cmView = {
+          scrollDOM: {clientHeight, scrollHeight: 120 * lineHeight},
+          state: {doc},
+          lineBlockAt: position => ({top: (position - 1) * lineHeight, height: lineHeight}),
+          // CodeMirror can assign an exact shared boundary to the preceding visual block.
+          lineBlockAtHeight: height => ({from: Math.max(1, Math.ceil(height / lineHeight))}),
+        };
+        const scrollTop = api.editorScrollTopForSourcePositionForTest(cmView, {line: targetLine});
+        const center = scrollTop + (clientHeight * 0.5);
+        const targetTop = (targetLine - 1) * lineHeight;
+        const centerLine = doc.lineAt(cmView.lineBlockAtHeight(center).from).number;
+        assert.ok(center > targetTop && center < targetTop + lineHeight, `line ${targetLine} owns the center for ${lineHeight}px lines in a ${clientHeight}px viewport`);
+        assert.equal(centerLine, targetLine, `boundary classification stays on line ${targetLine} for ${lineHeight}px lines in a ${clientHeight}px viewport`);
+      }
+    }
+    for (const anchorGap of [0, 0.125, 0.5, 1]) {
+      const preview = {
+        scrollTop: 299,
+        clientHeight: 476,
+        getBoundingClientRect: () => ({top: 0}),
+      };
+      const anchorRows = [[37, 100], [targetLine, 537 + anchorGap]].map(([line, top]) => ({
+        dataset: {sourceLine: String(line)},
+        closest: () => null,
+        getClientRects: () => [{}],
+        getBoundingClientRect: () => ({top: top - preview.scrollTop, width: 1, height: 1}),
+      }));
+      preview.querySelectorAll = () => anchorRows;
+      const position = api.sourcePositionForPreviewScrollForTest(preview);
+      assert.equal(position.line, targetLine, `a ${anchorGap}px scroll-quantization gap snaps to the focused source anchor`);
+    }
   });
 
   test('coarse-pointer tablets retain menus while phones compact the topbar', () => {
@@ -1365,26 +1409,72 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const blob = new Blob(['image'], {type: 'image/png'});
       api.setFetchForTest(async () => response({}, 200, blob));
       const media = new TestElement('raw-media', 'img');
-      const installed = await api.installRawFileMediaSourceForTest(media, '/repo/image.png');
+      media.naturalWidth = 640;
+      media.naturalHeight = 480;
+      let assignedSource = '';
+      let loadListenerInstalledBeforeSource = false;
+      Object.defineProperty(media, 'src', {
+        get: () => assignedSource,
+        set(value) {
+          loadListenerInstalledBeforeSource = typeof media.listeners.get('load')?.[0] === 'function';
+          assignedSource = value;
+        },
+      });
+      let installedSettled = false;
+      let postLoadFailures = 0;
+      const installedPending = api.installRawFileMediaSourceForTest(media, '/repo/image.png', {
+        onDecodeFailure: (_error, failure) => {
+          postLoadFailures += 1;
+          assert.equal(failure.decodeFailed, true, 'post-load failure retains the typed decode result');
+        },
+      });
+      installedPending.then(() => { installedSettled = true; });
+      await flushAsyncWork();
+      assert.equal(loadListenerInstalledBeforeSource, true, 'image readiness listener is installed before assigning the blob URL');
+      assert.equal(installedSettled, false, 'raw image installation stays pending until authoritative load readiness');
+      media.listeners.get('load')[0]();
+      const installed = await installedPending;
       assert.equal(installed.ok, true);
       assert.equal(media.src, 'blob:test-1');
+      assert.equal(installedSettled, true, 'raw image installation settles with usable decoded dimensions');
       assert.equal(created.length, 1, 'only a successful response creates a blob URL');
+      const postLoadErrorHandler = media.listeners.get('error')?.[0];
+      assert.equal((media.listeners.get('error') || []).length, 1, 'one readiness owner retains the post-load error lifecycle');
+      postLoadErrorHandler();
+      postLoadErrorHandler();
+      assert.equal(postLoadFailures, 1, 'the readiness owner reports a post-load decode failure exactly once');
       api.releaseRawFileMediaSourceForTest(media);
       api.releaseRawFileMediaSourceForTest(media);
       assert.deepStrictEqual(revoked, ['blob:test-1'], 'the installed object URL is revoked exactly once');
 
       let decodeFailures = 0;
       const decodeMedia = new TestElement('decode-media', 'img');
-      await api.installRawFileMediaSourceForTest(decodeMedia, '/repo/broken.png', {
-        onDecodeFailure: () => { decodeFailures += 1; },
+      const brokenPending = api.installRawFileMediaSourceForTest(decodeMedia, '/repo/broken.png', {
+        onDecodeFailure: (_error, failure) => {
+          decodeFailures += 1;
+          assert.equal(failure.decodeFailed, true, 'decode failure is typed');
+        },
       });
+      await flushAsyncWork();
       const decodeHandler = decodeMedia.listeners.get('error')?.[0];
-      assert.equal(typeof decodeHandler, 'function', 'a fetched media source installs a decode-failure handler');
+      assert.equal(typeof decodeHandler, 'function', 'a fetched image installs a readiness error handler');
       decodeHandler();
       decodeHandler();
+      const broken = await brokenPending;
+      assert.equal(broken.ok, false);
+      assert.equal(broken.decodeFailed, true, 'the installation promise resolves with a typed decode failure');
       api.releaseRawFileMediaSourceForTest(decodeMedia);
       assert.equal(decodeFailures, 1, 'decode failure is reported exactly once');
       assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2'], 'decode failure revokes its object URL exactly once');
+
+      const zeroDimensionMedia = new TestElement('zero-dimension-media', 'img');
+      const zeroDimensionPending = api.installRawFileMediaSourceForTest(zeroDimensionMedia, '/repo/zero.png');
+      await flushAsyncWork();
+      zeroDimensionMedia.listeners.get('load')[0]();
+      const zeroDimension = await zeroDimensionPending;
+      assert.equal(zeroDimension.ok, false);
+      assert.equal(zeroDimension.decodeFailed, true, 'a load event without usable decoded dimensions is a typed failure');
+      assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2', 'blob:test-3'], 'zero-dimension load revokes its unusable object URL');
 
       let settleFetch;
       api.setFetchForTest(() => new Promise(resolve => { settleFetch = resolve; }));
@@ -1396,7 +1486,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       const stale = await pending;
       assert.equal(stale.ok, true);
       assert.equal(staleMedia.src, undefined, 'an aborted/stale owner cannot install late bytes');
-      assert.equal(created.length, 2, 'an aborted/stale owner creates no object URL');
+      assert.equal(created.length, 3, 'an aborted/stale owner creates no object URL');
     } finally {
       URL.createObjectURL = originalCreateObjectURL;
       URL.revokeObjectURL = originalRevokeObjectURL;
@@ -7771,6 +7861,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const dispatch = source.slice(source.indexOf('function renderEditorPreviewPane'), source.indexOf('\n}', source.indexOf('function renderEditorPreviewPane')) + 2);
     assert.ok(dispatch.includes('renderPreviewDescriptor(renderer'), 'editor preview routes through the registry descriptor');
     assert.equal(/previewKind\s*===|render(?:Html|RawImage|Pdf|Structured|Table|NativeMedia|Unsupported|EditorCode)PreviewInto/.test(dispatch), false, 'editor preview has no parallel kind switch');
+    const markdown = new TestElement('unchanged-markdown-preview');
+    api.renderEditorPreviewPane(markdown, '/repo/README.md', '# Ready', {context: 'preview'});
+    const readiness = markdown._previewAsync;
+    assert.ok(readiness && typeof readiness.then === 'function', 'the initial Markdown render exposes its asynchronous readiness');
+    api.renderEditorPreviewPane(markdown, '/repo/README.md', '# Ready', {context: 'preview'});
+    assert.strictEqual(markdown._previewAsync, readiness, 'an unchanged Markdown refresh preserves the current media-readiness promise');
   });
 
   test('i18n catalogs interpolate fallback and relocalize UI', () => {

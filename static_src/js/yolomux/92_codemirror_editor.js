@@ -1862,6 +1862,7 @@ function clampScrollTop(element, value) {
 }
 
 const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
   const maxFrom = Math.max(0, Number(from?.scrollHeight || 0) - Number(from?.clientHeight || 0));
@@ -1901,6 +1902,7 @@ function sourcePositionForPreviewScroll(previewPane) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (next.top > y) {
+      if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -1938,7 +1940,12 @@ function editorScrollTopForSourcePosition(cmView, position) {
     const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
     const beforeBlock = cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from);
     const beforeTop = Number(beforeBlock?.top || 0);
-    if (afterLine === beforeLine) return clampScrollTop(cmView.scrollDOM, beforeTop - targetOffset);
+    if (afterLine === beforeLine) {
+      // CodeMirror may classify the exact top boundary as the preceding visual block. Keep an integer
+      // source position just inside its target block so preview -> editor sync cannot land one line early.
+      const interiorInset = Math.min(1, Math.max(0, Number(beforeBlock?.height || 0)) / 2);
+      return clampScrollTop(cmView.scrollDOM, beforeTop + interiorInset - targetOffset);
+    }
     const afterBlock = cmView.lineBlockAt(cmView.state.doc.line(afterLine).from);
     const afterTop = Number(afterBlock?.top || beforeTop);
     return clampScrollTop(cmView.scrollDOM, beforeTop + ((afterTop - beforeTop) * (line - beforeLine)) - targetOffset);

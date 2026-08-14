@@ -13,9 +13,17 @@ from tests.tmux_runtime import stop_isolated_tmux_runtime
 
 
 def test_probe_fails_zero_or_multiple_listeners(monkeypatch, tmp_path):
+    # Zero or unrelated multiple owners remain hard setup failures.
     for pids in ([], [1, 2]):
         monkeypatch.setattr(probe, "listener_pids", lambda _port, pids=pids: pids)
         assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(tmp_path / "out.json")]) == 2
+    # A fork-before-exec child momentarily retains the parent's close-on-exec socket and command.
+    # Only that exact ancestor/command relationship collapses; an unrelated listener stays visible.
+    # This exercises the canonical owner without retrying the listener observation.
+    parents = {101: 1, 202: 101, 303: 1}
+    commands = {101: "python yolomux.py --port 49152", 202: "python yolomux.py --port 49152", 303: "foreign"}
+    assert probe.canonical_listener_pids([101, 202], parent_reader=parents.get, command_reader=commands.get) == [101]
+    assert probe.canonical_listener_pids([101, 303], parent_reader=parents.get, command_reader=commands.get) == [101, 303]
 
 
 def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
@@ -91,17 +99,9 @@ def test_standalone_probe_drives_an_ephemeral_authenticated_daemon(monkeypatch, 
             if probe.time.monotonic() >= deadline:
                 raise AssertionError(f"ephemeral server snapshot did not publish: {status} {body}")
         output = tmp_path / "latency.json"
+        arguments = [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"), "--port", str(server.port), "--scheme", "http", "--output", str(output)]
         completed = subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"),
-                "--port",
-                str(server.port),
-                "--scheme",
-                "http",
-                "--output",
-                str(output),
-            ],
+            arguments,
             capture_output=True,
             text=True,
             timeout=60,

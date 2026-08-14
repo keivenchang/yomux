@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from numbers import Real
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -842,7 +843,7 @@ def classify_browser_retirement_delta(
     evicted_failures = [dict(event) for event in atomic_failures if event.get("id") not in retained_by_id]
     mutated_events = [
         dict(event) for event in atomic_events
-        if event.get("id") in retained_by_id and _comparable_event(retained_by_id[event["id"]]) != _comparable_event(event)
+        if event.get("id") in retained_by_id and _event_content_changed(event, retained_by_id[event["id"]])
     ]
     observed_keys = {receipt["key"] for receipt in (atomic_projection or {}).get("receipts", [])}
     added_receipts = [dict(receipt) for receipt in retired_projection["receipts"] if receipt["key"] not in observed_keys]
@@ -893,6 +894,87 @@ def _comparable_event(event: Mapping[str, Any]) -> dict[str, Any]:
     null-valued keys is what makes a real content change detectable at all.
     """
     return {key: value for key, value in event.items() if value is not None}
+
+
+_JS_DEBUG_MAX_SAFE_INTEGER = 2**53 - 1
+_JS_DEBUG_PROTOCOL_TOKEN_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-"
+)
+_JS_DEBUG_ASYNC_ENRICHMENT_FIELDS = frozenset({"responseBytes", "connectionProtocol", "phaseTimings"})
+_JS_DEBUG_ASYNC_PHASE_FIELDS = frozenset({
+    "queueMs", "connectMs", "tlsMs", "ttfbMs", "downloadMs", "applyRenderMs",
+})
+_JS_DEBUG_MAX_ASYNC_PHASE_MS = 86_400_000.0
+
+
+def _js_debug_async_phase_timing(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, Real)
+        and math.isfinite(float(value))
+        and 0 <= float(value) <= _JS_DEBUG_MAX_ASYNC_PHASE_MS
+    )
+
+
+def js_debug_event_enrichment_matches(expected: Mapping[str, Any], retired: Mapping[str, Any]) -> bool:
+    """Accept only the fields the API producer adds after publishing event identity."""
+    added_fields = set(retired) - set(expected)
+    if not added_fields <= _JS_DEBUG_ASYNC_ENRICHMENT_FIELDS:
+        return False
+    if added_fields and expected.get("type") != "api":
+        return False
+    if any(
+        field not in retired or retired[field] != value
+        for field, value in expected.items()
+        if field != "phaseTimings"
+    ):
+        return False
+    if "responseBytes" in added_fields:
+        response_bytes = retired["responseBytes"]
+        if isinstance(response_bytes, bool) or not isinstance(response_bytes, int) or not 0 <= response_bytes <= _JS_DEBUG_MAX_SAFE_INTEGER:
+            return False
+    if "connectionProtocol" in added_fields:
+        protocol = retired["connectionProtocol"]
+        if (
+            not isinstance(protocol, str)
+            or len(protocol) > 24
+            or protocol != protocol.lower()
+            or any(character not in _JS_DEBUG_PROTOCOL_TOKEN_CHARACTERS for character in protocol)
+        ):
+            return False
+    expected_phases = expected.get("phaseTimings")
+    retired_phases = retired.get("phaseTimings")
+    if "phaseTimings" in expected:
+        if not isinstance(expected_phases, Mapping) or not isinstance(retired_phases, Mapping):
+            return retired_phases == expected_phases
+        if any(key not in retired_phases or retired_phases[key] != value for key, value in expected_phases.items()):
+            return False
+        added_phases = set(retired_phases) - set(expected_phases)
+    elif "phaseTimings" in retired:
+        if not isinstance(retired_phases, Mapping):
+            return False
+        added_phases = set(retired_phases)
+    else:
+        added_phases = set()
+    return (
+        (not added_phases or expected.get("type") == "api")
+        and added_phases <= _JS_DEBUG_ASYNC_PHASE_FIELDS
+        and all(_js_debug_async_phase_timing(retired_phases[key]) for key in added_phases)
+    )
+
+
+def _event_content_changed(observed: Mapping[str, Any], retired: Mapping[str, Any]) -> bool:
+    """Compare immutable event content while accepting producer-owned API measurements.
+
+    ``recordApiDebugEvent`` publishes the request/result identity first. Resource timing,
+    response-body bytes, and the post-paint duration arrive later through the same live event
+    reference. They may therefore be absent from the WebDriver snapshot and present in the
+    unload journal without rewriting the diagnostic. Existing measurements remain immutable:
+    only valid missing fields or phase keys may be added.
+    """
+    before = _comparable_event(observed)
+    after = _comparable_event(retired)
+    return not js_debug_event_enrichment_matches(before, after)
 
 
 def _event_cursor(event: Mapping[str, Any]) -> int:

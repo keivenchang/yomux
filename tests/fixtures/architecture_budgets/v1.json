@@ -172,10 +172,10 @@
     "static_src/js/yolomux/40_file_explorer_files.js": 5455,
     "static_src/js/yolomux/85_debug_panel.js": 7819,
     "static_src/js/yolomux/99_terminal_boot.js": 6844,
-    "yolomux_lib/app.py": 16731,
+    "yolomux_lib/app.py": 16733,
     "yolomux_lib/search/file_index.py": 4468,
     "yolomux_lib/server.py": 3078,
-    "yolomux_lib/stats_current/service.py": 4154,
+    "yolomux_lib/stats_current/service.py": 4156,
     "yolomux_lib/workspace/session_files.py": 4133
   },
   "lane_ownership": [
@@ -224,17 +224,17 @@
       ]
     },
     {
-      "focused_alias_of": "pytest-browser",
-      "name": "pytest-browser-behavior",
-      "step_ids": [
-        "pytest-browser"
-      ]
-    },
-    {
       "focused_alias_of": null,
       "name": "pytest-e2e",
       "step_ids": [
         "pytest-e2e"
+      ]
+    },
+    {
+      "focused_alias_of": null,
+      "name": "pytest-gate-serial",
+      "step_ids": [
+        "pytest-gate-serial"
       ]
     },
     {
@@ -1956,8 +1956,8 @@
     "tests/backend_health_indicator.test.js": 374,
     "tests/browser_helpers/cross_surface_quick_open_suite.js": 70,
     "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
-    "tests/browser_helpers/editor_preview_suite.js": 8648,
-    "tests/cross_surface_state.test.js": 6115,
+    "tests/browser_helpers/editor_preview_suite.js": 8744,
+    "tests/cross_surface_state.test.js": 6116,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 4,
@@ -2007,7 +2007,7 @@
     "tests/test_boot_healthz_probe.py": 382,
     "tests/test_browser_boot.py": 424,
     "tests/test_browser_daemons_theme.py": 151,
-    "tests/test_browser_dockview.py": 9100,
+    "tests/test_browser_dockview.py": 9098,
     "tests/test_browser_editor.py": 4773,
     "tests/test_browser_finder.py": 3508,
     "tests/test_browser_finder_fs_repro.py": 46,
@@ -2019,7 +2019,7 @@
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 2424,
+    "tests/test_check_runner.py": 2434,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_events.py": 410,
     "tests/test_common.py": 229,
@@ -2080,11 +2080,11 @@
     "tests/test_gate_stats.py": 809,
     "tests/test_gate_stats_nonbrowser.py": 309,
     "tests/test_gate_stats_range.py": 550,
-    "tests/test_gate_stats_ring_buffer.py": 1880,
+    "tests/test_gate_stats_ring_buffer.py": 1943,
     "tests/test_gate_stats_socket_runtime.py": 131,
     "tests/test_gate_sweep_p.py": 33,
     "tests/test_gate_terminal_files.py": 92,
-    "tests/test_gate_tmux.py": 785,
+    "tests/test_gate_tmux.py": 786,
     "tests/test_gate_tmux_identity.py": 261,
     "tests/test_gate_tmux_recovery.py": 41,
     "tests/test_gate_transcript_roots.py": 339,
@@ -2093,16 +2093,16 @@
     "tests/test_host_identity.py": 307,
     "tests/test_host_partitioned_remaining_families.py": 118,
     "tests/test_host_partitioned_stores.py": 84,
-    "tests/test_hot_path_owner.py": 1352,
+    "tests/test_hot_path_owner.py": 1353,
     "tests/test_inotify_capacity.py": 181,
     "tests/test_install_metadata.py": 25,
     "tests/test_instance_isolation.py": 227,
-    "tests/test_jobd.py": 2929,
+    "tests/test_jobd.py": 2931,
     "tests/test_journey_phase_contracts.py": 60,
     "tests/test_launcher_ephemeral_server.py": 78,
     "tests/test_launcher_probe.py": 61,
     "tests/test_launcher_row_wiring.py": 198,
-    "tests/test_live_browser_soak.py": 3910,
+    "tests/test_live_browser_soak.py": 3989,
     "tests/test_local_service_command_router.py": 104,
     "tests/test_local_service_health_visibility.py": 201,
     "tests/test_local_service_projection.py": 979,
@@ -2110,7 +2110,7 @@
     "tests/test_local_service_registry_state.py": 95,
     "tests/test_local_service_runtime_row_projection.py": 158,
     "tests/test_local_services_host_identity.py": 134,
-    "tests/test_local_services_launch.py": 1993,
+    "tests/test_local_services_launch.py": 2015,
     "tests/test_local_services_rpc.py": 1306,
     "tests/test_local_services_watchdog.py": 339,
     "tests/test_login_auth.py": 1031,
@@ -2143,7 +2143,7 @@
     "tests/test_server_query.py": 2539,
     "tests/test_server_static.py": 329,
     "tests/test_service_failure_matrix.py": 242,
-    "tests/test_session_actions.py": 327,
+    "tests/test_session_actions.py": 331,
     "tests/test_session_files.py": 4584,
     "tests/test_sessions.py": 1067,
     "tests/test_settings.py": 889,

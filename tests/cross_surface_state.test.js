@@ -1098,6 +1098,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-cycle"'), 'CSS-2: repo arrow buttons use the shared button reset');
     assert.ok(multiMetaHtml.includes('class="btn-base chip-base meta-repo-chip"'), 'CSS-2: repo count button uses shared button reset and chip geometry');
     assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
+    assert.ok(/\.btn-base\[hidden\]\s*\{[\s\S]*display:\s*none;/.test(c9Css), 'CSS-2: the shared button reset preserves the native hidden contract');
     assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
     assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');

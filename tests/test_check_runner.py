@@ -131,7 +131,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     nonbrowser_workers, browser_workers, e2e_workers = check.pytest_worker_counts()
     lanes = check.lanes()
     default_names = [lane.name for lane in lanes if lane.default]
-    assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
+    assert default_names == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "pytest-gate-serial", "whitespace"]
     static_lane = next(lane for lane in lanes if lane.name == "static")
     assert static_lane.steps == (
         check.Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
@@ -145,7 +145,7 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not gate_serial and not e2e and not browser", "-q"]
     assert check.MOCK_TRANSCRIPT_FILES == ("tests/test_mock_transcripts.py",)
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
     node_lane = next(lane for lane in lanes if lane.name == "node-layout")
@@ -194,7 +194,6 @@ def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
 
 def test_focused_pytest_lanes_keep_expected_filters():
     check = load_check_module()
-    _nonbrowser_workers, browser_workers, _e2e_workers = check.pytest_worker_counts()
     lanes = {lane.name: lane for lane in check.lanes()}
     assert lanes["pytest-unit"].steps[0].args == [
         "python3",
@@ -203,7 +202,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "tests",
         "--ignore=tests/test_browser_layout.py",
         "-m",
-        "not socket and not browser and not node_bridge",
+        "not gate_serial and not socket and not browser and not node_bridge",
         "-q",
     ]
     assert lanes["pytest-socket"].steps[0].args == [
@@ -213,42 +212,10 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "tests",
         "--ignore=tests/test_browser_layout.py",
         "-m",
-        "socket and not browser",
+        "socket and not gate_serial and not browser",
         "-q",
     ]
-    assert lanes["pytest-browser"].steps[0].args == [
-        "python3",
-        "-m",
-        "pytest",
-        *check.pytest_files("boot"),
-        "-m",
-        "boot",
-        "-q",
-    ]
-    assert lanes["pytest-browser"].steps[1].args == [
-        "python3",
-        "-m",
-        "pytest",
-        *check.pytest_files("browser"),
-        "-n",
-        browser_workers,
-        "--dist",
-        "worksteal",
-        "-m",
-        "browser and not e2e and not boot and not visual_golden",
-        "-q",
-    ]
-    assert lanes["pytest-browser"].steps[2].args == [
-        "python3",
-        "-m",
-        "pytest",
-        *check.pytest_files("golden"),
-        "-m",
-        "visual_golden",
-        "-q",
-    ]
-    assert lanes["pytest-browser-behavior"].default is False
-    assert lanes["pytest-browser-behavior"].steps == (lanes["pytest-browser"].steps[1],)
+    assert "pytest-browser-behavior" not in lanes
     assert lanes["pytest-boot"].steps[0].args == [
         "python3",
         "-m",
@@ -258,6 +225,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
+    assert lanes["pytest-boot"].steps[0] is lanes["pytest-browser"].steps[0]
 
     assert test_catalog.focused_phase_target_args("nonbrowser") == [
         "tests",
@@ -275,7 +243,6 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
     assert browser_spec.prerequisites == ("pytest-boot",)
     assert browser_spec.phases == ("boot", "browser", "golden")
     assert browser_spec.worker_class == "pytest-mixed"
-    assert test_plan.lane_spec("pytest-browser-behavior").focused_alias_of == "pytest-browser"
     assert test_plan.resolved_lane_step_ids(browser_spec) == (
         "pytest-boot",
         "pytest-browser",
@@ -283,9 +250,30 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
     )
     browser = next(lane for lane in built if lane.name == "pytest-browser")
     boot = next(lane for lane in built if lane.name == "pytest-boot")
-    behavior = next(lane for lane in built if lane.name == "pytest-browser-behavior")
+    timing = next(lane for lane in built if lane.name == "pytest-gate-serial")
     assert browser.steps[0] is boot.steps[0]
-    assert behavior.steps[0] is browser.steps[1]
+    assert timing.run_last is True
+    assert timing.steps[0].args == [
+        "python3",
+        "-m",
+        "pytest",
+        *test_catalog.PYTEST_PHASE_FILES["gate_serial"],
+        "-m",
+        "gate_serial",
+        "-q",
+    ]
+    gate_serial_nodes = {
+        nodeid
+        for relative in test_catalog.PYTEST_PHASE_FILES["gate_serial"]
+        for nodeid, phase in test_catalog.test_definitions(REPO_ROOT / relative)
+        if phase == "gate_serial"
+    }
+    assert gate_serial_nodes == {
+        "tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
+        "tests/test_hot_path_owner.py::test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation",
+        "tests/test_jobd.py::test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window",
+        "tests/test_jobd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
+    }
 
     default_step_owners = {}
     for spec in test_plan.LANE_SPECS:
@@ -349,10 +337,10 @@ def test_lane_registry_references_are_typed_total_and_fail_closed(monkeypatch):
 
 @pytest.mark.parametrize(
     "name, marker_expression",
-    (
-        ("unit", "not socket and not browser and not node_bridge"),
-        ("socket", "socket and not browser"),
-    ),
+        (
+            ("unit", "not gate_serial and not socket and not browser and not node_bridge"),
+            ("socket", "socket and not gate_serial and not browser"),
+        ),
 )
 def test_focused_alias_collection_matches_phase_catalog_in_exact_order_and_markers(tmp_path, name, marker_expression):
     check = load_check_module()
@@ -581,9 +569,25 @@ def test_check_runner_launches_slowest_lanes_first(monkeypatch):
     assert ordered[0] == "pytest-browser"
     assert ordered[1] == "pytest-e2e"
     assert ordered[2] == "pytest"
-    assert ordered[-1] == "whitespace"
+    assert ordered[-2] == "whitespace"
+    assert ordered[-1] == "pytest-gate-serial"
     # Every default lane survives the reordering exactly once.
     assert sorted(ordered) == sorted(lane.name for lane in default_lanes)
+    events = []
+    parallel_lane = check.Lane("parallel", "parallel", ())
+    final_lane = check.Lane("timing", "timing", (), run_last=True)
+
+    def run(mode):
+        def record(selected):
+            events.append((mode, [lane.name for lane in selected]))
+            return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
+        return record
+
+    monkeypatch.setattr(check, "run_parallel", run("parallel"))
+    monkeypatch.setattr(check, "run_serial", run("serial"))
+    results = check.run_functional_lanes([parallel_lane, final_lane], serial=False)
+    assert events == [("parallel", ["parallel"]), ("serial", ["timing"])]
+    assert [result.name for result in results] == ["parallel", "timing"]
 
 
 def test_serial_check_gate_forces_every_pytest_pool_to_one_worker(monkeypatch):
@@ -782,6 +786,10 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         events.append(("run", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
+    def fake_run_serial(selected):
+        events.append(("serial", [lane.name for lane in selected]))
+        return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
+
     def fake_certification_phase(*, evidence_dir, expected_containers=False):
         events.append(("certify", str(evidence_dir)))
         return {
@@ -796,6 +804,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [{"port": 7772}, {"port": 7770}])
     monkeypatch.setattr(check, "lower_current_process_priority", lambda records: events.append(("nice", records)) or True)
     monkeypatch.setattr(check, "run_parallel", fake_run_parallel)
+    monkeypatch.setattr(check, "run_serial", fake_run_serial)
     monkeypatch.setattr(check, "run_certification_phase", fake_certification_phase)
 
     assert check.main([]) == 0
@@ -804,8 +813,9 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
     assert events[1] == ("nice", [{"port": 7772}, {"port": 7770}])
     assert events[2][0] == "run"
     assert events[2][1] == ["pytest-browser", "pytest-e2e", "pytest", "node-layout", "static", "node-syntax", "py-compile", "whitespace"]
+    assert events[3] == ("serial", ["pytest-gate-serial"])
     # The exclusive phase belongs to the canonical command, and it runs after the parallel lanes.
-    assert events[3][0] == "certify", events
+    assert events[4][0] == "certify", events
     output = capsys.readouterr().out
     assert "Acquiring YOLOmux expensive-tool lock" in output
     assert "lowered check priority by nice +5" in output

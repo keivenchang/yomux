@@ -25,7 +25,11 @@ class FakeTmuxResult:
 def make_app(make_tmux_webterm_app):
     def factory(sessions: list[str]):
         app = make_tmux_webterm_app(sessions)
-        app.approval_client = SimpleNamespace(status_session=lambda _session: [], stop_session=lambda _session: {"ok": True})
+        app.approval_client = SimpleNamespace(
+            status_session=lambda _session: [],
+            status_session_if_running=lambda _session: [],
+            stop_session=lambda _session: {"ok": True},
+        )
         app.refresh_sessions = lambda *args, **kwargs: []
         app.set_persisted_auto_session = lambda _session, _enabled: None
         app.log_event = lambda session, event_type, message, details=None, *, message_key="", message_params=None: {

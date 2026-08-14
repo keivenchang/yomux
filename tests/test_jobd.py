@@ -324,6 +324,7 @@ def test_jobd_broker_past_its_idle_window_stays_up_while_a_client_lease_is_held(
     assert broker.stop_event.is_set() is False
 
 
+@pytest.mark.gate_serial
 def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
     """The fs-batch/differ completion worker pins the broker with a client lease while it polls.
 
@@ -514,6 +515,7 @@ def _poll_broker_product(broker, coalesce_key, *, wait_seconds=5.0):
     raise AssertionError("broker product never became ready")
 
 
+@pytest.mark.gate_serial
 def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay(tmp_path, monkeypatch):
     """The retired `relay` action's job -- a browser byte download -- is served by zero-wait produce.
 

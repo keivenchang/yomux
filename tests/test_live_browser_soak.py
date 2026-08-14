@@ -2326,6 +2326,85 @@ def test_atomic_finalizer_rejects_content_change_of_an_observed_event(monkeypatc
     assert soak.evidence_failed(boundary["evidence"])
 
 
+def test_atomic_finalizer_accepts_producer_owned_api_enrichment_after_observation(monkeypatch):
+    """Late API measurements enrich one event identity without rewriting its result."""
+    driver = RewrittenEventFinalizerDriver(
+        limit=200,
+        appended=1,
+        events=[
+            {
+                "id": index,
+                "type": "api",
+                "method": "GET",
+                "url": "/api/ping",
+                "endpoint": "/api/ping",
+                "durationMs": 1,
+                "status": 200,
+                "ok": True,
+                "phaseTimings": {"queueMs": 0.1},
+            }
+            for index in range(1, 201)
+        ],
+        rewrite=lambda event: {
+            **event,
+            "responseBytes": 123,
+            "connectionProtocol": "h2",
+            "phaseTimings": {**event["phaseTimings"], "downloadMs": 0.2, "applyRenderMs": 0.3},
+        },
+    )
+
+    boundary = retirement_boundary(monkeypatch, driver)
+
+    delta = soak.validate_browser_retirement_delta(boundary["eventRing"]["delta"])
+    assert delta["reason"] == soak.RETIREMENT_DELTA_BENIGN, delta
+    assert delta["mutatedEvents"] == 0, delta
+    assert boundary["evidence"]["integrityFailures"] == []
+    assert not soak.evidence_failed(boundary["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("initial", "rewrite"),
+    (
+        ({}, lambda event: {**event, "status": 503}),
+        ({}, lambda event: {**event, "ok": False}),
+        ({}, lambda event: {**event, "url": "/api/changed"}),
+        ({"responseBytes": 100}, lambda event: {**event, "responseBytes": 101}),
+        ({}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "queueMs": 0.2}}),
+        ({}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "unknownMs": 0.2}}),
+        ({"type": "render"}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "downloadMs": 0.2}}),
+    ),
+    ids=("status", "ok", "url", "response_bytes_rewrite", "phase_rewrite", "unknown_phase", "non_api_phase"),
+)
+def test_api_enrichment_normalization_still_rejects_identity_and_measurement_rewrites(monkeypatch, initial, rewrite):
+    driver = RewrittenEventFinalizerDriver(
+        limit=200,
+        appended=1,
+        events=[
+            {
+                "id": index,
+                "type": "api",
+                "method": "GET",
+                "url": "/api/ping",
+                "endpoint": "/api/ping",
+                "durationMs": 1,
+                "status": 200,
+                "ok": True,
+                "phaseTimings": {"queueMs": 0.1},
+                **initial,
+            }
+            for index in range(1, 201)
+        ],
+        rewrite=rewrite,
+    )
+
+    boundary = retirement_boundary(monkeypatch, driver)
+
+    delta = soak.validate_browser_retirement_delta(boundary["eventRing"]["delta"])
+    assert delta["reason"] == soak.RETIREMENT_DELTA_MUTATED_EVENTS, delta
+    assert delta["mutatedEvents"] == 1, delta
+    assert soak.evidence_failed(boundary["evidence"])
+
+
 @pytest.mark.parametrize("rewrite", (
     lambda event: {key: value for key, value in event.items() if value is not None},
     lambda event: {**event, "route": None, "computeMs": None},

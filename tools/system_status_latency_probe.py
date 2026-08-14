@@ -37,6 +37,74 @@ HEADER = "X-YOLOmux-Measurement"
 METRIC = "route_to_representation_ready_ms"
 
 
+def process_parent_pid(pid: int) -> int:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        value = completed.stdout.strip()
+        return int(value) if completed.returncode == 0 and value.isdigit() else 0
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    fields = stat.rpartition(")")[2].split()
+    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
+
+
+def process_command(pid: int) -> str:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def canonical_listener_pids(
+    pids: list[int],
+    *,
+    parent_reader=process_parent_pid,
+    command_reader=process_command,
+) -> list[int]:
+    """Collapse only a fork-before-exec clone of an already identified listener owner.
+
+    A loaded server can be observed after fork and before close-on-exec closes its listener in the
+    child. Both PIDs then name the same socket and command for that instant. Unrelated listeners,
+    an exec'd child, or an unobservable process stay distinct and fail the exact-one-owner gate.
+    """
+
+    candidates = sorted(set(pids))
+    candidate_set = set(candidates)
+    commands = {pid: command_reader(pid) for pid in candidates}
+    canonical = []
+    for pid in candidates:
+        command = commands[pid]
+        ancestor = parent_reader(pid)
+        seen = {pid}
+        inherited = False
+        while ancestor > 1 and ancestor not in seen:
+            if ancestor in candidate_set:
+                inherited = bool(command and command == commands[ancestor])
+                break
+            seen.add(ancestor)
+            ancestor = parent_reader(ancestor)
+        if not inherited:
+            canonical.append(pid)
+    return canonical
+
+
 def listener_pids(port: int) -> list[int]:
     if platform.system() == "Darwin":
         completed = subprocess.run(
@@ -46,7 +114,8 @@ def listener_pids(port: int) -> list[int]:
             timeout=3,
             check=False,
         )
-        return sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
+        pids = sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
+        return canonical_listener_pids(pids)
     inodes = set()
     for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
@@ -67,7 +136,7 @@ def listener_pids(port: int) -> list[int]:
                 pids.add(int(process_dir.name))
         except (OSError, PermissionError):
             continue
-    return sorted(pids)
+    return canonical_listener_pids(sorted(pids))
 
 
 def process_environment(pid: int) -> dict[str, str]:

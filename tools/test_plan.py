@@ -26,6 +26,7 @@ class TestPhaseSpec:
 # to the first matching phase, exactly as the gate did before this registry.
 TEST_PHASE_SPECS: Final[tuple[TestPhaseSpec, ...]] = (
     TestPhaseSpec("node_bridge", "node_bridge"),
+    TestPhaseSpec("gate_serial", "gate_serial"),
     TestPhaseSpec("e2e", "e2e"),
     TestPhaseSpec("golden", "visual_golden"),
     TestPhaseSpec("boot", "boot"),
@@ -85,6 +86,7 @@ class LaneSpec:
     phases: tuple[str, ...] = ()
     worker_class: str = "serial"
     focused_alias_of: str | None = None
+    run_last: bool = False
 
 
 @unique
@@ -100,6 +102,7 @@ class StepId(StrEnum):
     NODE_WALL_SYNTAX = "node-wall-syntax"
     NODE_LAYOUT = "node-layout"
     PYTEST_NONBROWSER = "pytest-nonbrowser"
+    PYTEST_GATE_SERIAL = "pytest-gate-serial"
     PYTEST_BOOT = "pytest-boot"
     PYTEST_BROWSER = "pytest-browser"
     PYTEST_BROWSER_GOLDEN = "pytest-browser-golden"
@@ -119,6 +122,7 @@ STEP_PHASES: Final[dict[StepId, tuple[str, ...]]] = {
     StepId.NODE_WALL_SYNTAX: (),
     StepId.NODE_LAYOUT: (),
     StepId.PYTEST_NONBROWSER: ("nonbrowser",),
+    StepId.PYTEST_GATE_SERIAL: ("gate_serial",),
     StepId.PYTEST_BOOT: ("boot",),
     StepId.PYTEST_BROWSER: ("browser",),
     StepId.PYTEST_BROWSER_GOLDEN: ("golden",),
@@ -145,8 +149,8 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
         phases=("boot", "browser", "golden"),
         worker_class="pytest-mixed",
     ),
-    LaneSpec("pytest-browser-behavior", "pytest browser behavior", (StepId.PYTEST_BROWSER,), phases=("browser",), worker_class="pytest-xdist", focused_alias_of="pytest-browser"),
     LaneSpec("pytest-e2e", "pytest e2e", (StepId.PYTEST_E2E,), True, phases=("e2e",), worker_class="pytest-xdist"),
+    LaneSpec("pytest-gate-serial", "pytest timing-sensitive serial", (StepId.PYTEST_GATE_SERIAL,), True, phases=("gate_serial",), worker_class="pytest-serial", run_last=True),
     LaneSpec("pytest-unit", "pytest unit", (StepId.PYTEST_UNIT,), phases=("nonbrowser",), worker_class="pytest-serial"),
     LaneSpec("pytest-socket", "pytest socket", (StepId.PYTEST_SOCKET,), phases=("nonbrowser",), worker_class="pytest-serial"),
     LaneSpec("whitespace", "git diff --check", (StepId.WHITESPACE,), True),

@@ -35,6 +35,28 @@ from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_query_if_running_does_not_launch_an_absent_local_service(tmp_path, monkeypatch):
+    client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
+    absent_error = FileNotFoundError(2, "socket is absent")
+    launch_calls = []
+
+    monkeypatch.setattr(
+        client,
+        "_request_once",
+        lambda *_args, **_kwargs: (
+            {"ok": False, "error": "socket is absent", "_transport_error": "absent"},
+            b"",
+            TransportFailure(absent_error, "traceback", "status", "r-status", 1.0),
+        ),
+    )
+    monkeypatch.setattr(client.registry, "ensure_started", lambda: launch_calls.append(True) or True)
+
+    response = client.request_if_running({"action": "status"})
+
+    assert response["_transport_error"] == "absent"
+    assert launch_calls == []
+
+
 def test_sealed_local_service_client_rejects_late_demand_without_rpc_or_respawn(tmp_path, monkeypatch):
     client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
     rpc_calls = []

@@ -50,11 +50,67 @@ async function fetchRawFileBlob(path, options = {}) {
 function releaseRawFileMediaSource(media) {
   media?._rawFileAbortController?.abort?.();
   if (media) media._rawFileAbortController = null;
+  media?._rawFileReadyCleanup?.();
+  if (media) media._rawFileReadyCleanup = null;
   if (media?._rawFileErrorHandler) media.removeEventListener?.('error', media._rawFileErrorHandler);
   if (media) media._rawFileErrorHandler = null;
   const objectUrl = String(media?._rawFileObjectUrl || '');
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   if (media) media._rawFileObjectUrl = '';
+}
+
+function rawFileImageFailureResult(path, installed) {
+  return {
+    ...installed,
+    ok: false,
+    status: 0,
+    decodeFailed: true,
+    error: userMessageSnapshot({}, {key: 'preview.image.loadFailed', params: {}, fallback: `Image could not be loaded: ${path}`}),
+  };
+}
+
+function rawFileImageReadiness(media, path, installed, options = {}) {
+  let settle = null;
+  const promise = new Promise(resolve => {
+    let promiseSettled = false;
+    let failureReported = false;
+    const cleanup = () => {
+      media.removeEventListener?.('load', handleLoad);
+      media.removeEventListener?.('error', handleError);
+      if (media._rawFileReadyCleanup === cancel) media._rawFileReadyCleanup = null;
+    };
+    const resolveOnce = value => {
+      if (promiseSettled) return;
+      promiseSettled = true;
+      resolve(value);
+    };
+    const handleError = () => {
+      if (failureReported) return;
+      failureReported = true;
+      cleanup();
+      const failure = rawFileImageFailureResult(path, installed);
+      resolveOnce(failure);
+      releaseRawFileMediaSource(media);
+      options.onDecodeFailure?.(failure.error, failure);
+    };
+    const handleLoad = () => {
+      if (Number(media.naturalWidth || 0) <= 0 || Number(media.naturalHeight || 0) <= 0) {
+        handleError();
+        return;
+      }
+      media.removeEventListener?.('load', handleLoad);
+      resolveOnce(installed);
+    };
+    const cancel = () => {
+      cleanup();
+      resolveOnce({...installed, ok: false, status: 0, aborted: true, error: null});
+    };
+    settle = handleLoad;
+    media._rawFileReadyCleanup = cancel;
+    media.addEventListener('load', handleLoad, {once: true});
+    media.addEventListener('error', handleError, {once: true});
+  });
+  return {promise, settle};
 }
 
 async function installRawFileMediaSource(media, path, options = {}) {
@@ -75,6 +131,13 @@ async function installRawFileMediaSource(media, path, options = {}) {
     return {...result, stale: true};
   }
   media._rawFileObjectUrl = objectUrl;
+  const installed = {...result, objectUrl};
+  if (media.tagName === 'IMG' && typeof media.addEventListener === 'function') {
+    const readiness = rawFileImageReadiness(media, path, installed, options);
+    media.src = objectUrl;
+    if (media.complete && Number(media.naturalWidth || 0) > 0 && Number(media.naturalHeight || 0) > 0) readiness.settle();
+    return readiness.promise;
+  }
   if (typeof options.onDecodeFailure === 'function') {
     const handleDecodeFailure = () => {
       if (media._rawFileErrorHandler !== handleDecodeFailure) return;
@@ -92,7 +155,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
       media._rawFileErrorHandler?.();
     }
   }
-  return {...result, objectUrl};
+  return installed;
 }
 
 function releaseRawFileMediaSources(root) {

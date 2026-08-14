@@ -19325,11 +19325,67 @@ async function fetchRawFileBlob(path, options = {}) {
 function releaseRawFileMediaSource(media) {
   media?._rawFileAbortController?.abort?.();
   if (media) media._rawFileAbortController = null;
+  media?._rawFileReadyCleanup?.();
+  if (media) media._rawFileReadyCleanup = null;
   if (media?._rawFileErrorHandler) media.removeEventListener?.('error', media._rawFileErrorHandler);
   if (media) media._rawFileErrorHandler = null;
   const objectUrl = String(media?._rawFileObjectUrl || '');
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   if (media) media._rawFileObjectUrl = '';
+}
+
+function rawFileImageFailureResult(path, installed) {
+  return {
+    ...installed,
+    ok: false,
+    status: 0,
+    decodeFailed: true,
+    error: userMessageSnapshot({}, {key: 'preview.image.loadFailed', params: {}, fallback: `Image could not be loaded: ${path}`}),
+  };
+}
+
+function rawFileImageReadiness(media, path, installed, options = {}) {
+  let settle = null;
+  const promise = new Promise(resolve => {
+    let promiseSettled = false;
+    let failureReported = false;
+    const cleanup = () => {
+      media.removeEventListener?.('load', handleLoad);
+      media.removeEventListener?.('error', handleError);
+      if (media._rawFileReadyCleanup === cancel) media._rawFileReadyCleanup = null;
+    };
+    const resolveOnce = value => {
+      if (promiseSettled) return;
+      promiseSettled = true;
+      resolve(value);
+    };
+    const handleError = () => {
+      if (failureReported) return;
+      failureReported = true;
+      cleanup();
+      const failure = rawFileImageFailureResult(path, installed);
+      resolveOnce(failure);
+      releaseRawFileMediaSource(media);
+      options.onDecodeFailure?.(failure.error, failure);
+    };
+    const handleLoad = () => {
+      if (Number(media.naturalWidth || 0) <= 0 || Number(media.naturalHeight || 0) <= 0) {
+        handleError();
+        return;
+      }
+      media.removeEventListener?.('load', handleLoad);
+      resolveOnce(installed);
+    };
+    const cancel = () => {
+      cleanup();
+      resolveOnce({...installed, ok: false, status: 0, aborted: true, error: null});
+    };
+    settle = handleLoad;
+    media._rawFileReadyCleanup = cancel;
+    media.addEventListener('load', handleLoad, {once: true});
+    media.addEventListener('error', handleError, {once: true});
+  });
+  return {promise, settle};
 }
 
 async function installRawFileMediaSource(media, path, options = {}) {
@@ -19350,6 +19406,13 @@ async function installRawFileMediaSource(media, path, options = {}) {
     return {...result, stale: true};
   }
   media._rawFileObjectUrl = objectUrl;
+  const installed = {...result, objectUrl};
+  if (media.tagName === 'IMG' && typeof media.addEventListener === 'function') {
+    const readiness = rawFileImageReadiness(media, path, installed, options);
+    media.src = objectUrl;
+    if (media.complete && Number(media.naturalWidth || 0) > 0 && Number(media.naturalHeight || 0) > 0) readiness.settle();
+    return readiness.promise;
+  }
   if (typeof options.onDecodeFailure === 'function') {
     const handleDecodeFailure = () => {
       if (media._rawFileErrorHandler !== handleDecodeFailure) return;
@@ -19367,7 +19430,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
       media._rawFileErrorHandler?.();
     }
   }
-  return {...result, objectUrl};
+  return installed;
 }
 
 function releaseRawFileMediaSources(root) {
@@ -66398,18 +66461,20 @@ function mermaidPreviewStrategySignature({path, text, context}) {
 
 function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
-  if (currentSignature === signature) return;
+  if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
   renderMarkdownPreviewInto(container, text, path, {context});
+  return true;
 }
 
 function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
-  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return false;
   container._mermaidSig = signature;
   container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+  return true;
 }
 
 function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
@@ -66430,6 +66495,7 @@ function renderPreviewDescriptor(renderer, context) {
 
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  const previousAsync = container._previewAsync;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
@@ -66438,7 +66504,8 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -67669,7 +67736,8 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   const dispose = bindScopedOnce(doc, 'file-preview-popout-controls', scope => {
   const bind = (target, type, handler) => {
     if (!target?.addEventListener) return;
-    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, {passive: true});
+    const listenerOptions = ['scroll', 'wheel', 'touchstart'].includes(type) ? {passive: true} : undefined;
+    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, listenerOptions);
     scope.replace('event-index', Number(scope.value('event-index') || 0) + 1);
   };
   bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {
@@ -69708,6 +69776,7 @@ function clampScrollTop(element, value) {
 }
 
 const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
   const maxFrom = Math.max(0, Number(from?.scrollHeight || 0) - Number(from?.clientHeight || 0));
@@ -69747,6 +69816,7 @@ function sourcePositionForPreviewScroll(previewPane) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (next.top > y) {
+      if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -69784,7 +69854,12 @@ function editorScrollTopForSourcePosition(cmView, position) {
     const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
     const beforeBlock = cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from);
     const beforeTop = Number(beforeBlock?.top || 0);
-    if (afterLine === beforeLine) return clampScrollTop(cmView.scrollDOM, beforeTop - targetOffset);
+    if (afterLine === beforeLine) {
+      // CodeMirror may classify the exact top boundary as the preceding visual block. Keep an integer
+      // source position just inside its target block so preview -> editor sync cannot land one line early.
+      const interiorInset = Math.min(1, Math.max(0, Number(beforeBlock?.height || 0)) / 2);
+      return clampScrollTop(cmView.scrollDOM, beforeTop + interiorInset - targetOffset);
+    }
     const afterBlock = cmView.lineBlockAt(cmView.state.doc.line(afterLine).from);
     const afterTop = Number(afterBlock?.top || beforeTop);
     return clampScrollTop(cmView.scrollDOM, beforeTop + ((afterTop - beforeTop) * (line - beforeLine)) - targetOffset);

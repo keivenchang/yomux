@@ -1154,18 +1154,20 @@ function mermaidPreviewStrategySignature({path, text, context}) {
 
 function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
-  if (currentSignature === signature) return;
+  if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
   renderMarkdownPreviewInto(container, text, path, {context});
+  return true;
 }
 
 function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
-  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return false;
   container._mermaidSig = signature;
   container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+  return true;
 }
 
 function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
@@ -1186,6 +1188,7 @@ function renderPreviewDescriptor(renderer, context) {
 
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  const previousAsync = container._previewAsync;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
@@ -1194,6 +1197,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }

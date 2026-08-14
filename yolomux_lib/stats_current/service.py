@@ -2654,25 +2654,27 @@ class StatsCurrentService:
                     continue
                 previous_state = previous_states[key]
                 previous = bases.get(key)
-                delta = None
-                deltas = previous_state.deltas
-                revision_number = previous_state.revision
                 if (
                     previous is not None
                     and self._entry_cursor(previous) == self._entry_cursor(entry)
-                    and previous_state.deltas
-                    and previous_state.base is not None
                 ):
-                    # Ring persistence can replace a warm wire at the same
-                    # cursor. Rebuild the retained revision from the cursor
-                    # that may still be active, rather than losing its bridge.
-                    previous = previous_state.base
-                    deltas = tuple(
-                        item
-                        for item in deltas
-                        if int(item.metadata["cache_generation"])
-                        != int(entry.metadata["cache_generation"])
+                    # A cursor names one exact wire. Reading the persisted ring after
+                    # the wall clock crosses a bucket boundary can shift its window
+                    # without advancing the materializer cursor. Keep the already
+                    # published wire until a later cursor can carry an exact delta;
+                    # otherwise two clients at the same cursor can retain different
+                    # open buckets and no delta can safely update both.
+                    self._ring_views[key] = RingViewState(
+                        snapshot=previous,
+                        base=previous_state.base or previous,
+                        deltas=previous_state.deltas,
+                        revision=previous_state.revision,
+                        persisted=True,
                     )
+                    continue
+                delta = None
+                deltas = previous_state.deltas
+                revision_number = previous_state.revision
                 if (
                     previous is not None
                     and int(previous.metadata["cache_generation"])

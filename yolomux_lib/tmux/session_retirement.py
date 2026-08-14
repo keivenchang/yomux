@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import threading
 import time
 
+from ..host_identity import process_identity_snapshot
 from ..local_services.registry import ProcessTableEntry
 from ..local_services.registry import ProcessTableUnavailable
 from ..local_services.registry import bounded_process_table
@@ -76,22 +78,48 @@ def retained_tmux_session_births(
     *,
     table: dict[int, ProcessTableEntry] | None = None,
 ) -> tuple[dict[str, object], ...]:
-    """Describe only captured births that remain live in one complete snapshot."""
+    """Describe only captured births that remain live.
 
-    if table is None:
-        table = bounded_process_table(require_complete=True)
+    Capture needs one complete process table to discover every member of each pane's process
+    group. Joining does not: the captured PID and start identity are already the complete set of
+    births to fence. Probe those exact births directly so request latency cannot grow with every
+    unrelated process on the host.
+    """
+
     retained = []
     for member in identity.members:
-        current = table.get(member.pid)
-        if current is None or current.start_identity != member.start_identity:
-            continue
+        if table is None:
+            snapshot = process_identity_snapshot(member.pid)
+            if snapshot is None or snapshot.state == "Z" or snapshot.start_identity != member.start_identity:
+                continue
+            try:
+                pgid = os.getpgid(member.pid)
+            except OSError:
+                continue
+            # Fence the getpgid read against exit and PID reuse before publishing a survivor.
+            current_snapshot = process_identity_snapshot(member.pid)
+            if (
+                current_snapshot is None
+                or current_snapshot.state == "Z"
+                or current_snapshot.start_identity != member.start_identity
+            ):
+                continue
+            state = current_snapshot.state
+            command = member.command
+        else:
+            current = table.get(member.pid)
+            if current is None or current.start_identity != member.start_identity:
+                continue
+            pgid = current.pgid
+            state = process_state(member.pid)
+            command = current.command
         retained.append(
             {
                 "pid": member.pid,
-                "pgid": current.pgid,
-                "state": process_state(member.pid),
-                "start_identity": current.start_identity,
-                "command": current.command,
+                "pgid": pgid,
+                "state": state,
+                "start_identity": member.start_identity,
+                "command": command,
             }
         )
     return tuple(retained)
@@ -106,11 +134,7 @@ def join_tmux_session_retirement(
 
     deadline = time.monotonic() + max(0.0, float(timeout))
     while True:
-        try:
-            table = bounded_process_table(require_complete=True)
-        except ProcessTableUnavailable as error:
-            raise SessionRetirementError("process table unavailable while joining tmux session kill") from error
-        retained = retained_tmux_session_births(identity, table=table)
+        retained = retained_tmux_session_births(identity)
         if not retained:
             return
         remaining = deadline - time.monotonic()
