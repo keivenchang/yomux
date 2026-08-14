@@ -27,7 +27,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Current Priorities
 
-**Current scope is 0.7.5, planned 2026-08-12: merge macOS support, delete YO!share, close the 0.7.4 refactor followups, fix first-launch agent auth. No new product surface.** The plan and its execution order are in [`../PLAN.0.7.5.md`](../PLAN.0.7.5.md); the four queues are `DOIT.075.1` through `DOIT.075.4` at the repo root. Everything below this paragraph is roadmap, not 0.7.5 scope — do not start an item here without moving it into the release plan first. Out-of-scope queues live in `../queues/backlog/`.
+[`../STATUS-REPORT.md`](../STATUS-REPORT.md) is the sole source for the current release scope, execution order, and progress. Everything below this paragraph is roadmap; do not start an item here without explicitly promoting it into the status report. Out-of-scope queues live in `../queues/backlog/`.
 
 The 0.7.1 performance freeze that used to sit here (set 2026-08-03, "nothing else") is over: 0.7.1, 0.7.2, and 0.7.3 all shipped and 0.7.4 is in acceptance. Its queue `DOIT.071-performance.md` no longer exists.
 
