@@ -274,7 +274,7 @@ def test_watchd_client_runtime_status_still_has_zero_production_callers():
     ]
 
     assert callers == [], callers
-    assert "without making a status route call watchd" in app_module.WatchBridge.watchd_runtime_status.__doc__
+    assert "without making a status route call watchd" in app_module.TmuxWebtermApp.watchd_runtime_status.__doc__
 
 
 def test_watchd_now_has_a_display_label_and_is_essential():
@@ -486,7 +486,7 @@ def test_statsd_is_a_named_row_producer_and_no_longer_an_inline_literal():
     all, and every service -- statsd included -- is one attribute reference to a whole-row
     owner rather than an expression that assembles a row at the call site.
     """
-    projection = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
+    projection = _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "runtime_local_services"))
     inline_literals = [
         node for node in ast.walk(ast.parse(textwrap.dedent(projection))) if isinstance(node, ast.Dict)
     ]
@@ -495,24 +495,20 @@ def test_statsd_is_a_named_row_producer_and_no_longer_an_inline_literal():
     assert "statsd" not in projection
     producers = _producer_expressions()
     assert tuple(producers) == local_service_projection.LOCAL_SERVICE_INVENTORY
-    assert producers["statsd"] == "app.statsd_runtime_status"
+    assert producers["statsd"] == "self.statsd_runtime_status"
     for service, expression in producers.items():
-        assert expression.startswith("app."), (service, expression)
+        assert expression.startswith("self."), (service, expression)
         assert "(" not in expression, (service, expression)
     # The whole row really does come back from that owner, not from the projection.
-    statsd_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "statsd_runtime_status"))
-    statsd_calls = [
-        node for node in ast.walk(ast.parse(textwrap.dedent(statsd_source)))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "local_service_runtime_row"
-    ]
-    assert len(statsd_calls) == 1
-    assert ast.literal_eval(statsd_calls[0].args[0]) == "statsd"
+    assert '"service": "statsd",' in _definition_source(
+        "yolomux_lib/app.py", ("TmuxWebtermApp", "statsd_runtime_status")
+    )
 
 
 def _producer_expressions() -> dict[str, str]:
     """The literal `{service: producer}` mapping local_services_row_producers returns."""
     source = textwrap.dedent(
-        _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "local_services_row_producers"))
+        _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "local_services_row_producers"))
     )
     mapping = next(
         node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Dict)
@@ -530,15 +526,15 @@ def test_the_collector_is_the_only_path_into_the_projection():
     codebase fails on most, and the DOIT names it explicitly. Both callers must reach
     `local_services_snapshot()`, and neither may build rows of its own.
     """
-    snapshot_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "local_services_snapshot"))
-    projection_source = _definition_source("yolomux_lib/app.py", ("SystemStatusProjector", "runtime_local_services"))
+    snapshot_source = _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "local_services_snapshot"))
+    projection_source = _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "runtime_local_services"))
     sampler_source = _definition_source("yolomux_lib/app.py", ("TmuxWebtermApp", "collect_current_stats_service_load"))
     app_text = (Path(__file__).resolve().parent.parent / "yolomux_lib" / "app.py").read_text(encoding="utf-8")
 
     assert "LocalServicesCollector(" in snapshot_source
     # Exactly one construction site for the collector in the whole app.
     assert app_text.count("local_service_projection.LocalServicesCollector(") == 1
-    assert "app.local_services_snapshot()" in projection_source
+    assert "self.local_services_snapshot()" in projection_source
     assert "self.local_services_snapshot()" in sampler_source
     # The sampler must no longer re-parse the rendered HTTP payload. Read the executable
     # source, not the text: the comment recording why it stopped doing that names the old

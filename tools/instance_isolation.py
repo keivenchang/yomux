@@ -61,7 +61,7 @@ class InstanceResolution:
 
 
 def default_port(platform: str) -> int:
-    return 8880 if platform == "Darwin" else 7770
+    return 8880 if platform.casefold() == "darwin" else 7770
 
 
 def scan_port(argv: list[str]) -> int | None:
@@ -93,7 +93,11 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
         return InstanceResolution(port, {})
     # Runtime sockets must stay on a local, deliberately short path. F0 turns
     # this managed launch into one root instead of four independent families.
-    runtime_base = Path(tempdir or tempfile.gettempdir()) / f"y{os.getuid()}"
+    # macOS tempfile.gettempdir() expands below /private/var/folders and can make the
+    # longest product socket exceed the portable Unix-socket pathname budget.
+    default_tempdir = Path("/tmp") if platform.casefold() == "darwin" else Path(tempfile.gettempdir())
+    runtime_base = Path(tempdir) if tempdir is not None else default_tempdir
+    runtime_base = runtime_base / f"y{os.getuid()}"
     instance = f"p{port}"
     return InstanceResolution(port, {
         YOLOMUX_ROOT_ENV: str(runtime_base / instance),

@@ -1,7 +1,5 @@
 # Mutable path inventory
 
-> **STATUS 2026-08-12: HISTORICAL.** This inventory was taken against the `phase2-infrastructure` baseline, which landed on 2026-08-01. Path ownership has since moved through the 0.7.3 root-isolation work and the 0.7.4 package split; `yolomux_lib/infra/root_paths.py` is the current resolver and this table has not been re-derived from it. Use it for migration history, not to look up where a path lives today.
-
 This is a source-only inventory for the `phase2-infrastructure` baseline. `STATE_DIR` currently conflates runtime, durable state, and cache data; matrix classifications below are migration targets, not claims that the current layout already meets them.
 
 | Matrix row | Current path | Owner and writer | Evidence |

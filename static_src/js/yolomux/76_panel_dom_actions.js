@@ -128,16 +128,6 @@ function toolbarButtonHtml(options = {}) {
   return domBuilderElementHtml(createToolbarButton(options));
 }
 
-function panelDetailCloseButtonHtml(item) {
-  const label = t('pane.details.hide');
-  return toolbarButtonHtml({
-    className: 'panel-detail-close',
-    dataset: {detailToggle: item},
-    title: label,
-    ariaLabel: label,
-  });
-}
-
 function actionRowHtml(options = {}) {
   return domBuilderElementHtml(createActionRow(options));
 }
@@ -147,9 +137,7 @@ function segmentedControlHtml(options = {}) {
 }
 
 function bindActionDispatcher(parent, handlers = {}, options = {}) {
-  const type = options.type || 'click';
-  const listenerOptions = options.listenerOptions || {};
-  const listener = delegate(parent, type, options.selector || '[data-action]', async (event, target) => {
+  return delegate(parent, options.type || 'click', options.selector || '[data-action]', async (event, target) => {
     const action = target?.dataset?.action || '';
     const handler = handlers[action];
     if (!handler || options.ignore?.(event, target) === true) return;
@@ -157,6 +145,5 @@ function bindActionDispatcher(parent, handlers = {}, options = {}) {
     if (options.stopPropagation !== false) event.stopPropagation();
     if (options.skipDisabled !== false && (target.disabled || target.hidden)) return;
     await handler(event, target, action);
-  }, listenerOptions);
-  return listener ? () => parent.removeEventListener(type, listener, listenerOptions) : null;
+  }, options.listenerOptions || {});
 }

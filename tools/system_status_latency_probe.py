@@ -11,6 +11,7 @@ import hmac
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import secrets
 import ssl
@@ -20,6 +21,15 @@ import time
 import urllib.request
 import urllib.error
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.infra.host_identity import process_start_identity
+from yolomux_lib.local_services.registry import darwin_process_environment
+from yolomux_lib.tmux.sessions import process_cwd
+from tools.instance_isolation import resolve_instance_environment
+
 WARMUPS = 20
 SAMPLES = 200
 BUDGET_MS = 20.0
@@ -28,6 +38,15 @@ METRIC = "route_to_representation_ready_ms"
 
 
 def listener_pids(port: int) -> list[int]:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
     inodes = set()
     for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
@@ -52,23 +71,25 @@ def listener_pids(port: int) -> list[int]:
 
 
 def process_environment(pid: int) -> dict[str, str]:
-    raw = Path(f"/proc/{pid}/environ").read_bytes()
-    return {key.decode(): value.decode() for item in raw.split(b"\0") if b"=" in item for key, value in [item.split(b"=", 1)]}
+    try:
+        items = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        items = darwin_process_environment(pid)
+    return {key.decode(): value.decode() for item in items if b"=" in item for key, value in [item.split(b"=", 1)]}
 
 
 def process_identity(pid: int) -> dict[str, object]:
-    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    fields = stat[stat.rfind(")") + 1 :].split()
-    cwd = str(Path(f"/proc/{pid}/cwd").resolve(strict=True))
+    start_identity = process_start_identity(pid)
+    cwd = process_cwd(pid)
     sha_result = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False)
     sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
-    identity = {"pid": pid, "start_ticks": int(fields[19]), "cwd": cwd, "sha": sha}
+    identity = {"pid": pid, "start_identity": start_identity, "cwd": cwd, "sha": sha}
     if any(value in (None, "") for value in identity.values()):
         raise RuntimeError(f"listener identity is incomplete: {identity}")
     return identity
 
 
-def config_dir_from_process(environ: dict[str, str]) -> Path:
+def config_dir_from_process(environ: dict[str, str], port: int | None = None) -> Path:
     root = environ.get("YOLOMUX_ROOT", "").strip()
     configured = environ.get("YOLOMUX_CONFIG_DIR", "").strip()
     if root:
@@ -78,7 +99,11 @@ def config_dir_from_process(environ: dict[str, str]) -> Path:
             raise RuntimeError("listener config root escapes YOLOMUX_ROOT")
         return config
     if not configured:
-        raise RuntimeError("listener process exposes no authoritative config root")
+        resolution = resolve_instance_environment(port, environ, platform=platform.system())
+        root = resolution.environment.get("YOLOMUX_ROOT", "")
+        if not root:
+            raise RuntimeError("listener process exposes no authoritative config root")
+        return Path(root).resolve(strict=True) / "config"
     return Path(configured).resolve(strict=True)
 
 
@@ -129,7 +154,7 @@ def run(port: int, scheme: str, output: Path) -> bool:
         raise RuntimeError(f"port {port} must have exactly one listener; found {pids or 'none'}")
     pid = pids[0]
     before = process_identity(pid)
-    cookie = auth_cookie(config_dir_from_process(process_environment(pid)), port)
+    cookie = auth_cookie(config_dir_from_process(process_environment(pid), port), port)
     base = f"{scheme}://127.0.0.1:{port}"
     for _ in range(WARMUPS):
         status, body = get_json(base + "/api/system-status", cookie)

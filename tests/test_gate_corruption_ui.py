@@ -6,9 +6,9 @@ import pytest
 
 from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_static_html_fixture
-from tests.helpers.browser_stats_coverage import _current_stats_fixture_html
-from tests.helpers.gate_stats import corrupt_in_place as _corrupt_in_place
-from tests.helpers.gate_stats import valid_current_database as _valid_current_database
+from tests.test_browser_stats_coverage import _current_stats_fixture_html
+from tests.test_gate_stats_nonbrowser import _corrupt_in_place
+from tests.test_gate_stats_nonbrowser import _valid_current_database
 from yolomux_lib.stats_current import http as stats_http
 from yolomux_lib.stats_current import service as stats_service
 from yolomux_lib.stats_current import storage

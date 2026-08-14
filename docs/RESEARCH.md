@@ -170,7 +170,7 @@ RMUX Web Share keeps the PTY local, supports separate operator and spectator rol
 
 ## Transparent model pricing and estimated cost — 2026-07-11
 
-Implemented 2026-07-19. This section records the durable pricing, attribution, and uncertainty constraints behind the current displayed-range Cost summary; delivery sequencing is archived in `docs/DONE/` rather than remaining as a proposal.
+Implemented 2026-07-19. This section records the durable pricing, attribution, and uncertainty constraints behind the current displayed-range Cost summary; delivery sequencing is archived in `docs/DONE.md` rather than remaining as a proposal.
 
 ### What current telemetry can and cannot prove
 

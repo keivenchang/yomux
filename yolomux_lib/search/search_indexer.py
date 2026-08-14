@@ -18,17 +18,15 @@ from typing import Any
 from . import bfs_index
 from . import file_index
 from ..filesystem import search
-from ..local_service_projection import registry_runtime_row
 from ..infra.common import RUNTIME_DIR
 from ..local_services.rpc import LocalRpcError
-from ..local_services.command_router import CommonDaemonActions
-from ..local_services.command_router import LocalServiceCommandRouter
 from ..local_services.rpc import new_envelope
 from ..local_services.rpc import request as local_service_request
 from ..local_services.rpc import safe_socket_path
 from ..local_services.registry import LocalServiceRegistry
 from ..local_services.registry import LocalServiceSpec
 from ..local_services.runtime import acquire_client_lease
+from ..local_services.runtime import local_service_failure_text
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -57,12 +55,6 @@ INDEXER_DEFAULT_IDLE_SECONDS = 60.0
 INDEXER_SEARCH_RPC_TIMEOUT_SECONDS = 0.5
 INDEXER_SOCKET_NAME = "indexer.sock"
 INDEXER_LOCK_NAME = "indexer.lock"
-INDEXER_COMMAND_ROUTER = LocalServiceCommandRouter({
-    action: f"_handle_{action}" for action in (
-        "ping", "status", "profile", "drain", "lease", "release", "shutdown_if_idle",
-        "enqueue", "search", "drain_search_progress", "unindex", "promote", "shutdown",
-    )
-})
 
 
 def default_socket_path() -> Path:
@@ -218,55 +210,61 @@ class PersistentSearchIndexer:
 
     def handle(self, request: dict[str, Any]) -> dict[str, Any]:
         action = str(request.get("action") or "")
-        response = INDEXER_COMMAND_ROUTER.dispatch(self, action, request, b"")
-        return response[0] if response is not None else {"ok": False, "error": f"unknown indexer action: {action}"}
-
-    def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return {"ok": True, "version": INDEXER_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at, "capabilities": sorted(INDEXER_CAPABILITIES)}, b""
-
-    def _handle_status(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self.common_status(), b""
-
-    def _handle_profile(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return CommonDaemonActions.status(self.common_status, profile=True)
-
-    def _handle_drain(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        processed = self.process_due()
-        return {"ok": True, "processed": processed, "status": self.common_status()}, b""
-
-    def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"))
-        return {**response, "version": INDEXER_PROTOCOL_VERSION}, b""
-
-    def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return release_client_lease(self.leases, request.get("lease_id")), b""
-
-    def _handle_shutdown_if_idle(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        if self.leases:
-            return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
-        self.stop_event.set()
-        return {"ok": True, "shutdown": True}, b""
-
-    def _handle_enqueue(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        raw_paths = request.get("paths", [])
-        return self.enqueue(str(request.get("root") or ""), raw_paths if isinstance(raw_paths, list) else [], str(request.get("reason") or "")), b""
-
-    def _handle_search(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        cursor = str(request.get("cursor") or "") or None
-        return {"ok": True, "payload": search.search_files(str(request.get("root") or ""), str(request.get("query") or ""), request.get("limit"), recursive=True, cursor=cursor)}, b""
-
-    def _handle_drain_search_progress(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self.drain_search_progress(), b""
-
-    def _handle_unindex(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self.unindex(str(request.get("root") or "")), b""
-
-    def _handle_promote(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self.promote(str(request.get("root") or "")), b""
-
-    def _handle_shutdown(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        self.stop_event.set()
-        return {"ok": True}, b""
+        if action == "ping":
+            return {
+                "ok": True,
+                "version": INDEXER_PROTOCOL_VERSION,
+                "pid": os.getpid(),
+                "started_at": self.started_at,
+                "capabilities": sorted(INDEXER_CAPABILITIES),
+            }
+        if action == "status":
+            return self.common_status()
+        if action == "profile":
+            return {"ok": True, "profile": self.common_status()}
+        if action == "drain":
+            processed = self.process_due()
+            return {"ok": True, "processed": processed, "status": self.common_status()}
+        if action == "lease":
+            # `existing_lease_id` makes the shared owner idempotent: a still-valid lease returns the
+            # SAME id (unchanged-settings reuse) while a missing/stale id yields a fresh one (daemon
+            # restart recovery), so a scheduler that refreshes on every settings change never leaks
+            # or strands leases.
+            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"))
+            return {**response, "version": INDEXER_PROTOCOL_VERSION}
+        if action == "release":
+            return release_client_lease(self.leases, request.get("lease_id"))
+        if action == "shutdown_if_idle":
+            if self.leases:
+                return {"ok": True, "shutdown": False, "leases": len(self.leases)}
+            self.stop_event.set()
+            return {"ok": True, "shutdown": True}
+        if action == "enqueue":
+            raw_paths = request.get("paths", [])
+            paths = raw_paths if isinstance(raw_paths, list) else []
+            return self.enqueue(str(request.get("root") or ""), paths, str(request.get("reason") or ""))
+        if action == "search":
+            # Step 4: carry the opaque delta cursor through the indexer read path too, so a follower
+            # that reaches indexd for a committed-delta read gets the same fenced journal deltas the
+            # in-process reader serves. An absent/empty cursor is a snapshot read (recursive full-tree).
+            cursor = str(request.get("cursor") or "") or None
+            return {"ok": True, "payload": search.search_files(
+                str(request.get("root") or ""),
+                str(request.get("query") or ""),
+                request.get("limit"),
+                recursive=True,
+                cursor=cursor,
+            )}
+        if action == "drain_search_progress":
+            return self.drain_search_progress()
+        if action == "unindex":
+            return self.unindex(str(request.get("root") or ""))
+        if action == "promote":
+            return self.promote(str(request.get("root") or ""))
+        if action == "shutdown":
+            self.stop_event.set()
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown indexer action: {action}"}
 
     def run(self) -> int:
         def handle(request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
@@ -532,18 +530,23 @@ class SearchIndexerClient:
         scheduled_roots = list(self.scheduled_roots)
         has_obligation = bool(scheduled_roots) or self.scheduler_lease_id is not None
         root_coverage = self.scheduled_root_coverage()
-        row = registry_runtime_row("indexd", self.registry, status, payload, fields_before_failure={
+        row = {
+            "service": "indexd",
+            "pid": int(payload.get("pid") or 0),
+            "started_at": float(payload.get("started_at") or 0.0),
+            "version": int(payload.get("version") or 0),
             "socket": str(payload.get("socket") or self.socket_path),
+            "healthy": bool(status.get("healthy")),
             "clients": int(payload.get("clients") or 0),
             "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
             "active_task": str(payload.get("active_task") or ""),
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "last_success": float(payload.get("last_success") or 0.0),
-        }, fields_after_failure={
+            "last_failure": local_service_failure_text(status, payload),
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - time.monotonic()),
             "generation": int(payload.get("generation") or 0),
             "record": status.get("record") if isinstance(status.get("record"), dict) else {},
-        }, fields_after_resources={
+            "resources": self.registry.resources(int(payload.get("pid") or 0)),
             # Item 8 projection: the measured configured-root obligations this owner is scheduling.
             "scheduled_roots": scheduled_roots,
             "scheduled_root_count": len(scheduled_roots),
@@ -556,7 +559,7 @@ class SearchIndexerClient:
             # once a start was attempted and refused -- which is what last_failure says. A configured
             # or scheduled obligation overrides this in `_apply_scheduled_absence` below.
             "demand_started": True,
-        })
+        }
         # TWO ABSENCE VOCABULARIES, EXACTLY ONE SET (see backend_health/observer.py). Only the
         # `demand_started` default is declared in this scanned body; the scheduled-absence swap
         # lives in `_apply_scheduled_absence` so both literals never coexist here.

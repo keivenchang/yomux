@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -99,6 +100,64 @@ def test_machine_id_is_the_default_stable_owner(tmp_path: Path) -> None:
     assert identity.stable_host_id == "abcdef012345"
     assert identity.stable_host_id_source == str(machine_path)
     assert identity.display_hostname == "renamable-display-host"
+
+
+def test_macos_uses_platform_uuid_and_boot_time_when_linux_identity_files_are_absent(tmp_path: Path) -> None:
+    def run(command, **_kwargs):
+        if command[0] == "ioreg":
+            return subprocess.CompletedProcess(command, 0, '    "IOPlatformUUID" = "ABCDEF01-2345-6789-ABCD-EF0123456789"\n', "")
+        if command[:3] == ("sysctl", "-n", "kern.boottime"):
+            return subprocess.CompletedProcess(command, 0, "{ sec = 1786500000, usec = 123456 } Tue Aug 11 10:00:00 2026\n", "")
+        raise AssertionError(command)
+
+    identity = HostIdentity.from_system(
+        environ={},
+        machine_id_path=infra_host_identity_module.MACHINE_ID_PATH,
+        boot_id_path=infra_host_identity_module.BOOT_ID_PATH,
+        hostname_reader=lambda: "mac-display-host",
+        pid_reader=lambda: 4242,
+        start_identity_reader=lambda _pid: "ps:Tue Aug 11 10:00:00 2026",
+        nonce_factory=lambda: "instance-a",
+        platform_name="darwin",
+        command_runner=run,
+    )
+
+    assert identity.stable_host_id == "abcdef01-2345-6789-abcd-ef0123456789"
+    assert identity.stable_host_id_source == "ioreg IOPlatformUUID"
+    assert identity.boot_id == "darwin-1786500000"
+
+
+def test_macos_process_snapshot_preserves_native_birth_identity_and_zombie_state(tmp_path: Path) -> None:
+    snapshot = infra_host_identity_module.process_identity_snapshot(
+        4242,
+        proc_root=tmp_path / "missing-proc",
+        platform_name="darwin",
+        darwin_reader=lambda _pid: infra_host_identity_module.ProcessIdentitySnapshot(
+            state="Z",
+            start_identity="darwin:1786500000123456",
+        ),
+    )
+
+    assert snapshot == infra_host_identity_module.ProcessIdentitySnapshot(
+        state="Z",
+        start_identity="darwin:1786500000123456",
+    )
+    assert infra_host_identity_module.process_start_ticks(snapshot.start_identity) == 1786500000123456
+
+
+def test_macos_process_snapshot_does_not_spawn_ps_when_libproc_cannot_read_pid(tmp_path: Path) -> None:
+    commands = []
+
+    snapshot = infra_host_identity_module.process_identity_snapshot(
+        4242,
+        proc_root=tmp_path / "missing-proc",
+        platform_name="darwin",
+        darwin_reader=lambda _pid: None,
+        runner=lambda command, **_kwargs: commands.append(command),
+    )
+
+    assert snapshot is None
+    assert commands == []
 
 
 def test_identity_that_cannot_be_established_is_not_a_late_override(tmp_path: Path) -> None:

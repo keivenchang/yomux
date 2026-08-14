@@ -339,108 +339,38 @@ class LocalServiceTrafficLedger:
             return result
 
 
-class LocalServiceTrafficRegistry:
-    """Own the bounded set of traffic ledgers for one caller lifecycle.
-
-    Production keeps one instance for the web-process lifetime. Tests can inject
-    a separate instance or temporarily install one through
-    :func:`local_service_traffic_scope`; no caller needs access to the registry's
-    lock or ledger dictionary.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._ledgers: dict[str, LocalServiceTrafficLedger] = {}
-
-    def ledger(self, service: str) -> LocalServiceTrafficLedger:
-        name = str(service or "")[:64] or LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
-        with self._lock:
-            ledger = self._ledgers.get(name)
-            if ledger is None and len(self._ledgers) >= LOCAL_SERVICE_TRAFFIC_MAX_SERVICES:
-                name = LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
-                ledger = self._ledgers.get(name)
-            if ledger is None:
-                ledger = LocalServiceTrafficLedger(name)
-                self._ledgers[name] = ledger
-            return ledger
-
-    def snapshot(self) -> dict[str, dict[str, Any]]:
-        with self._lock:
-            ledgers = sorted(self._ledgers.items())
-        return {name: ledger.snapshot() for name, ledger in ledgers}
-
-    def reset(self) -> None:
-        with self._lock:
-            self._ledgers.clear()
+_TRAFFIC_LOCK = threading.Lock()
+_TRAFFIC_LEDGERS: dict[str, LocalServiceTrafficLedger] = {}
 
 
-_PRODUCTION_TRAFFIC_REGISTRY = LocalServiceTrafficRegistry()
-_TRAFFIC_FACADE_LOCK = threading.Lock()
-_TRAFFIC_SCOPE_REGISTRY: LocalServiceTrafficRegistry | None = None
-_TRAFFIC_SCOPE_TOKEN: object | None = None
-
-
-def _active_traffic_registry() -> LocalServiceTrafficRegistry:
-    with _TRAFFIC_FACADE_LOCK:
-        return _TRAFFIC_SCOPE_REGISTRY or _PRODUCTION_TRAFFIC_REGISTRY
-
-
-@contextmanager
-def local_service_traffic_scope(
-    registry: LocalServiceTrafficRegistry | None = None,
-) -> Iterator[LocalServiceTrafficRegistry]:
-    """Install one fixture-owned registry across every thread in the scope.
-
-    A global facade is intentional: local RPC tests fan requests out to worker
-    threads, and thread-local/context-local injection would silently split their
-    accounting. Only the owner token may remove the scope, so an unrelated reset
-    or teardown cannot clear a test whose requests are still active.
-    """
-
-    global _TRAFFIC_SCOPE_REGISTRY, _TRAFFIC_SCOPE_TOKEN
-    owned = registry or LocalServiceTrafficRegistry()
-    token = object()
-    with _TRAFFIC_FACADE_LOCK:
-        if _TRAFFIC_SCOPE_TOKEN is not None:
-            raise RuntimeError("a local-service traffic scope is already active")
-        _TRAFFIC_SCOPE_REGISTRY = owned
-        _TRAFFIC_SCOPE_TOKEN = token
-    try:
-        yield owned
-    finally:
-        with _TRAFFIC_FACADE_LOCK:
-            if _TRAFFIC_SCOPE_TOKEN is not token:
-                raise RuntimeError("local-service traffic scope ownership changed before teardown")
-            _TRAFFIC_SCOPE_REGISTRY = None
-            _TRAFFIC_SCOPE_TOKEN = None
-
-
-def local_service_traffic_ledger(
-    service: str,
-    *,
-    registry: LocalServiceTrafficRegistry | None = None,
-) -> LocalServiceTrafficLedger:
+def local_service_traffic_ledger(service: str) -> LocalServiceTrafficLedger:
     """Return the process-wide ledger for one service, bounded by service count."""
 
-    return (registry or _active_traffic_registry()).ledger(service)
+    name = str(service or "")[:64] or LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
+    with _TRAFFIC_LOCK:
+        ledger = _TRAFFIC_LEDGERS.get(name)
+        if ledger is None and len(_TRAFFIC_LEDGERS) >= LOCAL_SERVICE_TRAFFIC_MAX_SERVICES:
+            name = LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
+            ledger = _TRAFFIC_LEDGERS.get(name)
+        if ledger is None:
+            ledger = LocalServiceTrafficLedger(name)
+            _TRAFFIC_LEDGERS[name] = ledger
+        return ledger
 
 
-def local_service_traffic_snapshot(
-    *,
-    registry: LocalServiceTrafficRegistry | None = None,
-) -> dict[str, dict[str, Any]]:
+def local_service_traffic_snapshot() -> dict[str, dict[str, Any]]:
     """Return every retained per-service aggregate for the status projection."""
 
-    return (registry or _active_traffic_registry()).snapshot()
+    with _TRAFFIC_LOCK:
+        ledgers = sorted(_TRAFFIC_LEDGERS.items())
+    return {name: ledger.snapshot() for name, ledger in ledgers}
 
 
 def reset_local_service_traffic() -> None:
     """Drop every retained aggregate. Test and process-teardown seam only."""
 
-    with _TRAFFIC_FACADE_LOCK:
-        if _TRAFFIC_SCOPE_TOKEN is not None:
-            raise RuntimeError("cannot reset local-service traffic owned by an active scope")
-    _PRODUCTION_TRAFFIC_REGISTRY.reset()
+    with _TRAFFIC_LOCK:
+        _TRAFFIC_LEDGERS.clear()
 
 
 @dataclass(frozen=True)
@@ -816,6 +746,7 @@ def request_with_envelope(
     level higher would miss a caller and produce a second, divergent count of the same
     requests.  Every exit records exactly once.
     """
+    socket_path = safe_socket_path(Path(socket_path), prefix=f"yolomux-{envelope.service}")
     ledger = local_service_traffic_ledger(envelope.service)
     traffic_class = local_service_traffic_class(envelope.method, probe)
     started = monotonic_clock()

@@ -30,7 +30,7 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import wait_for_fixture_api_quiescence
-from tests.helpers.browser_contracts import clean_browser_receipt_barrier
+from tests.test_gate_isolation import clean_browser_receipt_barrier
 from tools.tool_guard import hold_host_tool_flock
 from tools.tool_guard import run_reaped_container_command
 from tools.tool_guard import TOOL_LOCK_OWNER_ENV

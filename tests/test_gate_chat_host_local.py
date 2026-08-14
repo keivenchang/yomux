@@ -14,19 +14,19 @@ from yolomux_lib.chat.chat_store import ChatStore
 from yolomux_lib.chat.chat_store import default_chat_database_path
 from yolomux_lib.infra import host_partition as host_partition_module
 from yolomux_lib.infra.host_identity import HostIdentity
-from tests.helpers.local_service_records import FixtureHostIdentityBuilder
 
 
 def _host_identity(stable_host_id: str, display_hostname: str) -> HostIdentity:
-    return FixtureHostIdentityBuilder(
+    return HostIdentity(
         stable_host_id=stable_host_id,
         display_hostname=display_hostname,
         boot_id="fixture-boot",
         pid=4242,
+        process_start_identity="proc:6262",
         process_start_ticks=6262,
         instance_nonce=f"{stable_host_id}-instance",
         stable_host_id_source="chat gate fixture",
-    ).build()
+    )
 
 
 def _chat_artifact_paths(state_dir: Path) -> tuple[Path, Path, Path, Path]:

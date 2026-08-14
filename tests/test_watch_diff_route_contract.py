@@ -9,16 +9,16 @@ reaches `write_api_response()`.  A direct call to the app function never sees it
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import threading
 import time
 from http import HTTPStatus
+from types import MethodType
 from types import SimpleNamespace
 
 import pytest
-
-from tests.helpers.http_routes import capturing_route_request as _capturing_route_request
 
 from yolomux_lib import app as app_module
 from yolomux_lib import common
@@ -57,6 +57,41 @@ class _StoppedCompletionService:
 
     def stop(self) -> None:
         self.stop_event.set()
+
+
+def _capturing_route_request(app, path: str, method: str = "GET", body: bytes = b""):
+    """Return one Handler wired to the real route registry, dispatcher, and response parent."""
+
+    handler = server.Handler.__new__(server.Handler)
+    handler.path = path
+    handler._route_response = None
+    handler._route_response_written = False
+    handler._api_request_id = ""
+    handler.headers = {"Content-Length": str(len(body))} if body else {}
+    handler.rfile = io.BytesIO(body)
+    handler.server = SimpleNamespace(app=app, dev=False)
+    handler.close_connection = False
+    handler.require_auth = lambda role="readonly": True
+    handler.auth_readonly = lambda: False
+    # `submit_filesystem_operation` scopes a request as `user:<role>:<username>`, so the identity
+    # this helper hands back needs both fields, not just the one the auth gate reads.
+    handler.auth_identity = lambda: SimpleNamespace(role="admin", username="tester")
+    handler.share_readonly_api_allowed = lambda parsed: False
+    handler.share_token_text = lambda: ""
+    handler.share_token = lambda: ""
+    handler.redirect_plaintext_to_https_if_needed = lambda parsed: False
+    writes: list[tuple[dict, HTTPStatus]] = []
+
+    def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):
+        del json_encode_ms, product_metadata
+        writes.append((json.loads(data), HTTPStatus(int(status))))
+
+    handler._write_json_representation = MethodType(capture, handler)
+
+    def dispatch() -> None:
+        http_routes.dispatch_http_route(handler, method)
+
+    return dispatch, writes
 
 
 def _watch_diff_app(monkeypatch, tmp_path, roots: list[str]):

@@ -34,8 +34,8 @@ from typing import Any
 
 import pytest
 
-from tests.helpers.backend_health_scenarios import FakeService
-from tests.helpers.backend_health_scenarios import RecoveryHarness
+from test_backend_health_observer import FakeService
+from test_backend_health_recovery import RecoveryHarness
 
 from yolomux_lib import cli as cli_module
 from yolomux_lib.app import STATSD_ABSENT_WHILE_PIN_PENDING

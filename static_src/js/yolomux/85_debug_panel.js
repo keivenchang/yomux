@@ -57,6 +57,7 @@ const jsDebugHistoryReadiness = {
   overlayVisible: false,
   overlayTimer: null,
 };
+let jsDebugSubTab = 'graph';
 const jsDebugSystemPollMs = 5000;
 // The retry cadence used while `/api/system-status` answers with a TYPED REFUSAL (no snapshot has
 // been published yet, or the newest one is past its freshness deadline and its aged body is
@@ -116,11 +117,14 @@ const jsDebugLogsState = {
   clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
+let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
+let jsDebugGraphResolutionOverrideSeconds = 0;
 // When a Resolution change needs a history fetch, this holds the value to restore and the
 // history generation to match so a stale response cannot revert a newer request. Cleared
 // on the matching ready (success) or error (revert + toast). Null when the last change was
 // served from cache (instant, no overlay).
 let jsDebugGraphPendingResolutionChange = null;
+let jsDebugGraphChartLayout = 0;
 const jsDebugStatsPollState = {
   inFlight: false,
   pending: false,
@@ -171,11 +175,6 @@ const jsDebugCurrentObservationState = {
   instrumentationCostMs: 0,
   receipts: new Map(),
 };
-let jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
-function currentObservationLifecycleScope() {
-  if (jsDebugCurrentObservationLifecycleScope.disposed()) jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
-  return jsDebugCurrentObservationLifecycleScope;
-}
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
@@ -200,19 +199,12 @@ const jsDebugGraphZoomMinBuckets = 3;
 let jsDebugGraphLastPointerType = 'mouse';
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveTimer = 0;
-let jsDebugGraphLifecycleScope = createLifecycleScope();
-function debugGraphLifecycleScope() {
-  if (jsDebugGraphLifecycleScope.disposed()) jsDebugGraphLifecycleScope = createLifecycleScope();
-  return jsDebugGraphLifecycleScope;
-}
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
+let jsDebugGraphHiddenCharts = null;
+let jsDebugGraphVisibleCharts = null;
+let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
-let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
-function debugPricingRefreshLifecycleScope() {
-  if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
-  return jsDebugPricingRefreshLifecycleScope;
-}
 const jsDebugUsageAtomBackfill = {state: 'unknown', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -492,6 +484,130 @@ const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flat
   ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
 
+function debugGraphLocalizedLabel(item = {}) {
+  if (!item.labelKey) return String(item.label || '');
+  const params = {...(item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(item.labelKey, params);
+}
+
+function debugGraphLocalizedDescription(item = {}) {
+  const descKey = item.descKey || jsDebugGraphDescriptionKeyByLabelKey[item.labelKey];
+  if (!descKey) return '';
+  const params = {...(item.descParams || item.labelParams || {})};
+  if (item.metricLabelKey) params.metric = t(item.metricLabelKey);
+  return t(descKey, params);
+}
+
+function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-explain', desc = '', params = {}} = {}) {
+  if (!descKey) return '';
+  const text = desc || t(descKey, params);
+  if (!text || text === descKey) return '';
+  return ` title="${esc(text)}" aria-label="${esc(`${label}: ${text}`)}" ${attribute}="${esc(descKey)}"`;
+}
+
+function normalizedJsDebugSubTab(value) {
+  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
+}
+
+function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
+  const seconds = Number(value);
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  if (options.some(option => option.seconds === seconds)) return seconds;
+  if (seconds === 60) return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+  if (options.some(option => option.seconds === jsDebugGraphDefaultRangeSeconds)) return jsDebugGraphDefaultRangeSeconds;
+  return options[0]?.seconds || jsDebugGraphDefaultRangeSeconds;
+}
+
+function activeJsDebugGraphRangeSeconds(nowMs = Date.now()) {
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds, nowMs);
+  syncDebugGraphResolutionOverride(nowMs, {persist: true});
+  return jsDebugGraphRangeSeconds;
+}
+
+function loadJsDebugStatsUiPreferences() {
+  if (jsDebugStatsUiPreferencesLoaded) return;
+  jsDebugStatsUiPreferencesLoaded = true;
+  let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+  jsDebugSubTab = normalizedJsDebugSubTab(saved.subTab);
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
+  jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
+  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
+  const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
+  const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
+  for (const key of visible) hidden.delete(key);
+  for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
+  jsDebugGraphHiddenCharts = hidden;
+  jsDebugGraphVisibleCharts = visible;
+  // Respect a previously-persisted level selection (including an intentionally
+  // empty one); only fresh state falls back to the warning+error default.
+  const storedLogLevels = Array.isArray(saved.logLevels)
+    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
+    : null;
+  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
+  syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+}
+
+function saveJsDebugStatsUiPreferences() {
+  if (!jsDebugStatsUiPreferencesLoaded) return;
+  try {
+    window.localStorage?.setItem(jsDebugStatsUiPreferencesStorageKey, JSON.stringify({
+      subTab: jsDebugSubTab,
+      rangeSeconds: jsDebugGraphRangeSeconds,
+      resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
+      chartLayout: jsDebugGraphChartLayout,
+      hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
+      visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
+      logLevels: [...jsDebugLogsState.levels].sort(),
+    }));
+  } catch (_) {
+  }
+}
+
+function debugGraphHiddenChartKeys() {
+  loadJsDebugStatsUiPreferences();
+  if (!(jsDebugGraphHiddenCharts instanceof Set)) jsDebugGraphHiddenCharts = new Set();
+  if (!(jsDebugGraphVisibleCharts instanceof Set)) jsDebugGraphVisibleCharts = new Set();
+  return jsDebugGraphHiddenCharts;
+}
+
+function debugGraphChartVisible(key) {
+  const chartKey = String(key || '');
+  if (chartKey === 'modelTokens' && !jsDebugGraphVisibleCharts.has(chartKey)) return false;
+  return !debugGraphHiddenChartKeys().has(chartKey);
+}
+
+function setDebugGraphChartVisible(key, visible) {
+  const chartKey = String(key || '');
+  if (!chartKey) return;
+  const hidden = debugGraphHiddenChartKeys();
+  if (visible) {
+    hidden.delete(chartKey);
+    jsDebugGraphVisibleCharts.add(chartKey);
+  } else {
+    hidden.add(chartKey);
+    jsDebugGraphVisibleCharts.delete(chartKey);
+  }
+  saveJsDebugStatsUiPreferences();
+  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
+  // while a graph control is focused, but deferring the user's own activation
+  // leaves aria-pressed and the chart body visibly stale until focus moves.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
+}
+
+function jsDebugGraphRangeOptionIndex(rangeSeconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(rangeSeconds, nowMs);
+  return Math.max(0, options.findIndex(option => option.seconds === normalized));
+}
+
+function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date.now()) {
+  const options = debugGraphAvailableRangeOptions(nowMs);
+  const normalized = normalizedJsDebugGraphRange(seconds, nowMs);
+  return options.find(option => option.seconds === normalized)?.label || `${normalized}s`;
+}
+
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
   return String(state?.phase || '') === 'loading';
 }
@@ -623,13 +739,13 @@ function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSecond
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
   const previousRangeSeconds = Number(state.requestedRangeSeconds) || 0;
-  const nextRangeSeconds = Number(debugRuntimeState.graphRangeSeconds) || 0;
+  const nextRangeSeconds = Number(jsDebugGraphRangeSeconds) || 0;
   const loadingOlder = Number(state.loadedStartSeconds) > 0
     && previousRangeSeconds > 0
     && nextRangeSeconds > previousRangeSeconds;
   const snapshot = setJsDebugHistoryReadiness('loading', {
     reason: retry ? 'retry' : (loadingOlder ? 'older' : 'initial'),
-    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
     requestedStartSeconds: Math.max(0, Math.floor(Number(requestedStartSeconds) || 0)),
@@ -940,7 +1056,7 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
   // (finest supported exact cell) when the picker is on AUTO.
-  const override = Math.max(0, Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0);
+  const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
   const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
   return choices.length ? Number(choices[0]) : 1;
@@ -980,7 +1096,7 @@ function jsDebugHistoryRequestWindow(targetStartSeconds, targetEndSeconds, resol
 
 function resetJsDebugHistoryReadiness() {
   return setJsDebugHistoryReadiness('idle', {
-    requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
+    requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: 0,
     targetEndSeconds: 0,
     requestedStartSeconds: 0,
@@ -1036,35 +1152,8 @@ function debugStatHtml(label, value, key = '') {
 }
 
 function debugSubTabButtonHtml(tab, label) {
-  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
-  return toolbarButtonHtml({
-    className: `js-debug-subtab${active ? ' active' : ''}`,
-    role: 'tab',
-    action: 'debug-subtab',
-    dataset: {jsDebugSubtab: tab},
-    attributes: {'aria-selected': active ? 'true' : 'false'},
-    html: `<span class="session-button-dir">${esc(label)}</span>`,
-  });
-}
-
-function debugEventsSubviewHtml() {
-  const counts = debugEventCounts();
-  const apiCopyLabel = debugApiCopyButtonLabel();
-  return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
-      <div class="js-debug-toolbar">
-        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
-          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
-          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
-          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
-          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
-        </div>
-        <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
-          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
-        </div>
-      </div>
-      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
-    </div>`;
+  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
+  return `<button type="button" class="js-debug-subtab${active ? ' active' : ''}" role="tab" data-js-debug-subtab="${esc(tab)}" aria-selected="${active ? 'true' : 'false'}"><span class="session-button-dir">${esc(label)}</span></button>`;
 }
 
 function debugSubTabsHtml() {
@@ -1078,7 +1167,7 @@ function debugSubTabsHtml() {
 }
 
 function debugSubViewAttrs(tab) {
-  const active = normalizedJsDebugSubTab(tab) === debugRuntimeState.subTab;
+  const active = normalizedJsDebugSubTab(tab) === jsDebugSubTab;
   return `data-js-debug-subview="${esc(tab)}"${active ? '' : ' hidden'}`;
 }
 
@@ -2465,14 +2554,6 @@ function installJsDebugCurrentObservationLiveness() {
   state.livenessTimer = setInterval(() => {
     recordJsDebugClientHealthObservation(0, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
-  currentObservationLifecycleScope().ownTimer('liveness', state.livenessTimer, clearInterval);
-}
-
-function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
-  const state = jsDebugCurrentObservationState;
-  jsDebugCurrentObservationLifecycleScope.dispose(reason);
-  state.timer = null;
-  state.livenessTimer = null;
 }
 
 installJsDebugCurrentObservationLiveness();
@@ -2665,15 +2746,12 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
   if (state.timer !== null) {
     if (delay !== 0) return;
     clearTimeout(state.timer);
-    currentObservationLifecycleScope().release('flush', state.timer);
     state.timer = null;
   }
   state.timer = setTimeout(() => {
-    currentObservationLifecycleScope().relinquish('flush', state.timer);
     state.timer = null;
     void flushJsDebugCurrentObservations();
   }, delay);
-  currentObservationLifecycleScope().ownTimer('flush', state.timer);
 }
 
 async function flushJsDebugCurrentObservations() {
@@ -3347,9 +3425,9 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
-  const normalized = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs);
-  if (normalized === debugRuntimeState.graphResolutionOverrideSeconds) return false;
-  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
+  const normalized = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs);
+  if (normalized === jsDebugGraphResolutionOverrideSeconds) return false;
+  jsDebugGraphResolutionOverrideSeconds = normalized;
   if (persist) saveJsDebugStatsUiPreferences();
   return true;
 }
@@ -3382,7 +3460,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
-  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds, domain, nowMs) * 1000;
+  const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
   if (overrideMs > 0) {
     let effectiveMs = Math.max(jsDebugGraphRawBucketMs, retainedMs, minimumMs, overrideMs);
     // Point-cap: an explicit override that would render more than the budget of buckets
@@ -3470,7 +3548,7 @@ function debugGraphContributingSourceSlices(domain) {
   return slices;
 }
 
-function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = debugRuntimeState.graphRangeSeconds} = {}) {
+function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds = 0, rangeSeconds = jsDebugGraphRangeSeconds} = {}) {
   compactJsDebugGraphBuckets(nowMs);
   const domain = debugGraphDomain(nowMs, rangeSeconds);
   const scaleMs = debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds, nowMs);
@@ -3490,10 +3568,10 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
 // debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
   const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
-  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
 }
 
-function debugGraphDomain(nowMs = Date.now(), rangeSeconds = debugRuntimeState.graphRangeSeconds) {
+function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
   const fallbackEndMs = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
   if (debugGraphZoomDomainValid()) {
     const startMs = Math.max(fallbackEndMs - jsDebugGraphRetentionMs, Number(jsDebugGraphZoomDomain.startMs));
@@ -4303,7 +4381,7 @@ function debugGraphResolutionLabelHtml(nowMs = Date.now()) {
   syncDebugGraphResolutionOverride(nowMs, {persist: true, domain});
   const resolutionSeconds = debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000;
   const availableChoices = debugGraphAvailableResolutionChoices(domain, nowMs);
-  const overrideSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
+  const overrideSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   return `<label class="js-debug-resolution-label" data-js-debug-resolution data-js-debug-resolution-seconds="${esc(resolutionSeconds)}">${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}<select data-js-debug-resolution-override aria-label="${esc(t('debug.graph.control.resolution', {resolution: `${resolutionSeconds}s`}))}"><option value="0"${overrideSeconds === 0 ? ' selected' : ''}>AUTO</option>${availableChoices.map(value => `<option value="${value}"${overrideSeconds === value ? ' selected' : ''}>${value}s</option>`).join('')}</select></label>`;
 }
 
@@ -4353,7 +4431,7 @@ function debugGraphChartToggleControlsHtml() {
 }
 
 function debugGraphLayoutControlsHtml() {
-  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${debugRuntimeState.graphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
+  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
 }
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
@@ -5302,7 +5380,7 @@ function debugGraphBucketsForChartGroup(group, defaultBuckets, nowMs = Date.now(
   if (group?.key === 'agentTokens' || group?.key === 'modelTokens') return debugGraphAgentTokenDisplayBuckets(nowMs);
   const bucketSeconds = Number(group?.bucketSeconds);
   if (Number.isFinite(bucketSeconds) && bucketSeconds > 0) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: debugRuntimeState.graphRangeSeconds});
+    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: bucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
   }
   return defaultBuckets;
 }
@@ -5630,7 +5708,7 @@ function debugGraphChartLabel(group, buckets = []) {
 
 function debugGraphChartShellHtml(gridHtml = '', domain = debugGraphDomain()) {
   return `<div class="js-debug-chart-shell">
-    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(debugRuntimeState.graphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
+    <div class="js-debug-chart-grid" data-js-debug-chart-grid data-js-debug-chart-layout="${esc(jsDebugGraphChartLayout)}" data-js-debug-domain-start="${esc(Math.floor(domain.startMs))}" data-js-debug-domain-end="${esc(Math.floor(domain.endMs))}"${domain.zoomed ? ' data-js-debug-zoomed="true"' : ''}>${gridHtml}</div>
     ${debugGraphHistoryOverlayHtml()}
   </div>`;
 }
@@ -6576,18 +6654,11 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
-  if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
+  if (jsDebugPricingRefreshState.timer !== null) clearTimeout(jsDebugPricingRefreshState.timer);
   jsDebugPricingRefreshState.timer = setTimeout(() => {
-    debugPricingRefreshLifecycleScope().relinquish('status', jsDebugPricingRefreshState.timer);
     jsDebugPricingRefreshState.timer = null;
     void refreshDebugCostPricingStatus();
   }, 750);
-  debugPricingRefreshLifecycleScope().ownTimer('status', jsDebugPricingRefreshState.timer);
-}
-
-function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
-  jsDebugPricingRefreshLifecycleScope.dispose(reason);
-  jsDebugPricingRefreshState.timer = null;
 }
 
 async function refreshDebugCostPricingStatus() {
@@ -6663,8 +6734,8 @@ function debugGraphHtml() {
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
   activeJsDebugGraphRangeSeconds(nowMs);
-  const domain = debugGraphDomain(nowMs, debugRuntimeState.graphRangeSeconds);
-  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: debugRuntimeState.graphRangeSeconds});
+  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
+  const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
   // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
   // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
@@ -6679,7 +6750,7 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
-    rangeSeconds: debugRuntimeState.graphRangeSeconds,
+    rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
     zoomRangeSeconds: debugGraphZoomDomainValid() ? (Number(jsDebugGraphZoomDomain.endMs) - Number(jsDebugGraphZoomDomain.startMs)) / 1000 : 0,
     availableRangeSeconds,
@@ -6754,8 +6825,8 @@ function jsDebugStatsLayoutItemsVisible(items) {
 
 function jsDebugCurrentStatsSelection() {
   return {
-    rangeSeconds: normalizedJsDebugGraphRange(debugRuntimeState.graphRangeSeconds),
-    resolution: normalizedDebugGraphResolutionOverrideSeconds(debugRuntimeState.graphResolutionOverrideSeconds) || 'AUTO',
+    rangeSeconds: normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds),
+    resolution: normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO',
   };
 }
 
@@ -6894,7 +6965,7 @@ function jsDebugStatsLivePushEnabled() {
   // A drag zoom is a fixed historical domain. The shared range slider is the
   // live-tail owner for both YO!stats and YO!cost; only its 5m/15m views need
   // every durable one-second push.
-  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds < jsDebugStatsLivePushRangeSeconds;
 }
 
 function jsDebugStatsPollIntervalMs() {
@@ -7492,25 +7563,10 @@ if (typeof document !== 'undefined' && document?.addEventListener) {
     const visible = document.visibilityState === 'visible';
     if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
-    syncDebugSubviewActivation({pollNow: visible});
+    syncDebugSystemPolling({pollNow: visible});
+    syncDebugLogsPolling({pollNow: visible});
     if (visible) syncDebugGraphLiveTicker();
     else stopDebugGraphLiveTicker();
-  });
-}
-
-if (typeof window !== 'undefined' && window?.addEventListener) {
-  window.addEventListener('pagehide', event => {
-    void event;
-    stopDebugGraphLiveTicker();
-    disposeDebugPricingRefreshLifecycle('pagehide');
-    disposeJsDebugCurrentObservationLifecycle('pagehide');
-  });
-  window.addEventListener('pageshow', event => {
-    if (event?.persisted !== true) return;
-    installJsDebugCurrentObservationLiveness();
-    scheduleJsDebugCurrentObservationFlush();
-    if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
-    syncDebugGraphLiveTicker();
   });
 }
 
@@ -9136,7 +9192,7 @@ function debugSystemPollDelayMs() {
 
 async function pollDebugSystemStatus({force = false} = {}) {
   if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
   jsDebugSystemState.inFlight = true;
   jsDebugSystemState.error = '';
   refreshDebugSystemViews();
@@ -9161,12 +9217,12 @@ async function pollDebugSystemStatus({force = false} = {}) {
 // keeps the existing timer when the delay is unchanged, so calling this after every poll costs
 // nothing on the steady path.
 function retimeDebugSystemPolling() {
-  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) return;
+  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) return;
   resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, debugSystemPollDelayMs());
 }
 
 function syncDebugSystemPolling({pollNow = false} = {}) {
-  if (debugRuntimeState.subTab !== 'system' || !jsDebugStatsPanelVisible()) {
+  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-system');
     return;
   }
@@ -9203,7 +9259,7 @@ function refreshDebugLogsViews() {
 
 async function pollDebugLogs({force = false} = {}) {
   if (jsDebugLogsState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
-  if (!force && (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
+  if (!force && (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible())) return false;
   jsDebugLogsState.inFlight = true;
   jsDebugLogsState.error = '';
   refreshDebugLogsViews();
@@ -9232,7 +9288,7 @@ async function pollDebugLogs({force = false} = {}) {
 }
 
 function syncDebugLogsPolling({pollNow = false} = {}) {
-  if (debugRuntimeState.subTab !== 'logs' || !jsDebugStatsPanelVisible()) {
+  if (jsDebugSubTab !== 'logs' || !jsDebugStatsPanelVisible()) {
     clearRuntimeInterval('debug-logs');
     return;
   }
@@ -9240,101 +9296,33 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
   if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
 }
 
-function debugSubviewNoop() {}
-
-function renderDebugEventsSubview(panel, options = {}) {
-  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
-  if (meta) meta.textContent = debugMetaText();
-  const counts = debugEventCounts();
-  const values = {
-    events: jsDebugEvents.length,
-    api: counts.apiCalls,
-    sse: counts.sseEvents,
-    errors: counts.errors,
-  };
-  for (const [key, value] of Object.entries(values)) {
-    const stat = panel.querySelector(`[data-js-debug-stat="${key}"]`);
-    if (stat) stat.textContent = String(value);
-  }
-  const log = panel.querySelector('[data-js-debug-log]');
-  if (!log) return;
-  const text = jsDebugTextForClipboard();
-  if (log.value === text) return;
-  const anchor = debugLogScrollAnchor(log);
-  log.value = text;
-  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
-}
-
-function debugSubviewDescriptor({id, html, render = debugSubviewNoop, bind = debugSubviewNoop, activate = debugSubviewNoop, deactivate = debugSubviewNoop, relocalize = debugSubviewNoop}) {
-  return Object.freeze({id, html, render, bind, activate, deactivate, relocalize});
-}
-
-const DEBUG_SUBVIEWS = Object.freeze([
-  debugSubviewDescriptor({
-    id: 'logs',
-    html: () => `<div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`,
-    render: () => refreshDebugLogsViews(),
-    activate: ({pollNow = false} = {}) => syncDebugLogsPolling({pollNow}),
-    deactivate: () => clearRuntimeInterval('debug-logs'),
-  }),
-  debugSubviewDescriptor({
-    id: 'system',
-    html: () => `<div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>`,
-    activate: ({pollNow = false} = {}) => syncDebugSystemPolling({pollNow}),
-    deactivate: () => clearRuntimeInterval('debug-system'),
-  }),
-  debugSubviewDescriptor({
-    id: 'events',
-    html: debugEventsSubviewHtml,
-    render: renderDebugEventsSubview,
-  }),
-  debugSubviewDescriptor({
-    id: 'graph',
-    html: () => `<div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>`,
-    render: (panel, options = {}) => refreshDebugGraphElement(panel.querySelector('[data-js-debug-graph]'), options),
-    bind: panel => {
-      bindDebugGraphTouchSelection(panel);
-      bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
-    },
-    activate: () => syncDebugGraphLiveTicker(),
-    deactivate: () => syncDebugGraphLiveTicker(),
-  }),
-  debugSubviewDescriptor({
-    id: 'cost',
-    html: yoCostPanelHtml,
-    render: (panel, options = {}) => renderYoCostPanels(options),
-    bind: bindYoCostPanel,
-    activate: () => syncDebugGraphLiveTicker(),
-    deactivate: () => syncDebugGraphLiveTicker(),
-    relocalize: relocalizeYoCostPanelChrome,
-  }),
-]);
-
-function debugSubview(id) {
-  return DEBUG_SUBVIEWS.find(view => view.id === id);
-}
-
-function debugPanelSubviewDescriptors() {
-  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
-}
-
-function syncDebugSubviewActivation({pollNow = false} = {}) {
-  for (const view of debugPanelSubviewDescriptors()) {
-    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
-    else view.deactivate();
-  }
-}
-
 function debugPanelHtml() {
+  const counts = debugEventCounts();
+  const apiCopyLabel = debugApiCopyButtonLabel();
   return `
     ${debugSubTabsHtml()}
-    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
+    <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
+      <div class="js-debug-toolbar">
+        <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
+          ${debugStatHtml(t('debug.events'), jsDebugEvents.length, 'events')}
+          ${debugStatHtml(t('debug.apiCalls'), counts.apiCalls, 'api')}
+          ${debugStatHtml('SSE', counts.sseEvents, 'sse')}
+          ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
+        </div>
+        <div class="js-debug-actions">
+          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
+        </div>
+      </div>
+      <textarea class="js-debug-log" data-js-debug-log readonly spellcheck="false" aria-label="${esc(t('debug.recent'))}">${esc(jsDebugTextForClipboard())}</textarea>
+    </div>
+    <div class="js-debug-subview js-debug-graph-view" ${debugSubViewAttrs('graph')}>${debugGraphHtml()}</div>
+    <div class="js-debug-subview js-debug-system-view" data-js-debug-system ${debugSubViewAttrs('system')}>${debugSystemInnerHtml()}</div>
+    <div class="js-debug-subview js-debug-logs-view" ${debugSubViewAttrs('logs')}>${debugLogsInnerHtml()}</div>`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
-  const result = relocalizeVirtualPanelChrome(panel, t('tab.debug'));
-  for (const view of debugPanelSubviewDescriptors()) view.relocalize(panel);
-  return result;
+  return relocalizeVirtualPanelChrome(panel, t('tab.debug'));
 }
 
 function yoCostPanelHtml() {
@@ -9372,54 +9360,52 @@ function openYoCostTranscriptPreview(event) {
 }
 
 function bindYoCostPanel(panel) {
-  if (!panel) return null;
-  return bindOnce(panel, 'yo-cost-panel', () => {
-    const scope = createLifecycleScope();
-    const disposeTouchSelection = bindDebugGraphTouchSelection(panel);
-    scope.replace('touch-selection', disposeTouchSelection, dispose => dispose?.());
-    scope.ownEvent('scroll', panel, 'scroll', event => {
+  if (!panel || panel.dataset.jsYoCostBound === 'true') return;
+  panel.dataset.jsYoCostBound = 'true';
+  bindDebugGraphTouchSelection(panel);
+  panel.addEventListener('scroll', event => {
     if (!event.target?.matches?.('.js-debug-cost-table-wrap')) return;
     panel.dataset.jsDebugCostLastScrollMs = String(Date.now());
   }, {capture: true, passive: true});
-    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
+  panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-    scope.ownEvent('pointermove', panel, 'pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-    scope.ownEvent('pointerleave', panel, 'pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
-    scope.ownEvent('pointerup', panel, 'pointerup', event => {
+  panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
+  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
+  panel.addEventListener('pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
+  panel.addEventListener('pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-    scope.ownEvent('input', panel, 'input', event => { handleDebugGraphControlEvent(event, panel); });
-    scope.ownEvent('change', panel, 'change', event => { handleDebugGraphControlEvent(event, panel); });
-    scope.ownEvent('click', panel, 'click', event => {
+  panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
+  panel.addEventListener('click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
     openYoCostTranscriptPreview(event);
-    });
-    return () => scope.dispose('yo-cost-panel-unbound');
   });
 }
 
 function createYoCostPanel() {
   enableDebugMode();
-  return createFramedPanel({
+  const panel = document.createElement('article');
+  panel.className = 'panel js-yocost-panel';
+  panel.id = panelDomId(yocostItemId);
+  panel.innerHTML = panelFrameHtml({
     item: yocostItemId,
-    className: 'panel js-yocost-panel',
-    frame: {
-      headClass: 'preferences-panel-head',
-      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
-      bodyClass: 'preferences-body js-yocost-body',
-      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-    },
-    bind: panel => debugSubview('cost').bind(panel),
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div><button type="button" class="panel-detail-close" data-detail-toggle="${esc(yocostItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button></div>`,
+    bodyClass: 'preferences-body js-yocost-body',
+    bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
   });
+  bindPanelShell(panel, yocostItemId);
+  bindYoCostPanel(panel);
+  return panel;
 }
 
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
@@ -9445,14 +9431,15 @@ function renderYoCostPanels({force = false} = {}) {
       continue;
     }
     const body = panel.querySelector('.js-yocost-body');
-    reconcilePanelBody({
-      body,
-      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-      anchors: [
-        elementScrollAnchor('.js-yocost-scroll'),
-        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
-      ],
-    });
+    const scroll = body?.querySelector('.js-yocost-scroll');
+    const scrollTop = scroll?.scrollTop || 0;
+    const scrollLeft = scroll?.scrollLeft || 0;
+    const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
+    if (body) {
+      body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
+      restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
+      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
+    }
     delete panel.dataset.jsDebugGraphRefreshPending;
     bindYoCostPanel(panel);
     rendered = true;
@@ -9478,24 +9465,25 @@ function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(
 
 function createDebugPanel() {
   enableDebugMode();
-  const panel = createFramedPanel({
+  const panel = document.createElement('article');
+  panel.className = 'panel js-debug-panel';
+  panel.id = panelDomId(debugPaneItemId);
+  panel.innerHTML = panelFrameHtml({
     item: debugPaneItemId,
-    className: 'panel js-debug-panel',
-    frame: {
-      headClass: 'preferences-panel-head',
-      controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
-      afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
+    headClass: 'preferences-panel-head',
+    controlsHtml: virtualPanelInnerControlsHtml(debugPaneItemId),
+    afterHeadHtml: `<div class="pane-info-bar panel-detail-row">
         <div class="pane-info-bar-copy panel-copy">
           <div id="panel-tab-${debugPaneItemId}" class="panel-session-label"><span class="session-button-dir">${esc(t('tab.debug'))}</span></div>
           <div id="meta-${debugPaneItemId}" class="pane-info-bar-meta meta">${esc(debugMetaText())}</div>
         </div>
-        ${panelDetailCloseButtonHtml(debugPaneItemId)}
+        <button type="button" class="panel-detail-close" data-detail-toggle="${esc(debugPaneItemId)}" title="${esc(t('pane.details.hide'))}" aria-label="${esc(t('pane.details.hide'))}"></button>
       </div>`,
-      bodyClass: 'preferences-body js-debug-body',
-      bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
-    },
-    bind: bindDebugPanel,
+    bodyClass: 'preferences-body js-debug-body',
+    bodyHtml: `<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
   });
+  bindPanelShell(panel, debugPaneItemId);
+  bindDebugPanel(panel);
   // `debugPanelHtml` above just wrote the five Daemons regions. Record what it wrote, or the first
   // poll after this panel appears replaces every one of them for no change at all.
   seedDebugSystemRenderedRegions(panel);
@@ -9531,25 +9519,23 @@ function renderDebugPanels(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
-      reconcilePanelBody({
-        body,
-        html: `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`,
-        anchors: [
-          elementScrollAnchor('.js-debug-scroll'),
-          keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
-          {
-            capture: root => debugLogScrollAnchor(root.querySelector('[data-js-debug-log]')),
-            restore: (root, value) => restoreDebugLogScrollAnchor(root.querySelector('[data-js-debug-log]'), value, {scrollToBottom: options.scrollLogToBottom === true}),
-          },
-        ],
-        // Same contract as `createDebugPanel`: record the five Daemons regions just written.
-        afterReplace: seedDebugSystemRenderedRegions,
-      });
+      const outerScroll = body.querySelector('.js-debug-scroll');
+      const outerScrollTop = outerScroll?.scrollTop || 0;
+      const outerScrollLeft = outerScroll?.scrollLeft || 0;
+      const tableScrolls = captureKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]');
+      const logAnchor = debugLogScrollAnchor(body.querySelector('[data-js-debug-log]'));
+      body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
+      // Same contract as `createDebugPanel`: this rebuild owns the five Daemons regions it just
+      // wrote, so it records them. Without this the next poll replaced all five again.
+      seedDebugSystemRenderedRegions(body);
+      restoreElementScrollPosition(body.querySelector('.js-debug-scroll'), outerScrollTop, outerScrollLeft);
+      restoreKeyedScrollPositions(body, '.js-debug-cost-table-wrap [data-js-debug-cost-table]', tableScrolls);
+      restoreDebugLogScrollAnchor(body.querySelector('[data-js-debug-log]'), logAnchor, {scrollToBottom: options.scrollLogToBottom === true});
     }
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  debugSubview('cost').render(null, options);
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -9562,14 +9548,34 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  debugSubview('cost').render(null, options);
+  renderYoCostPanels(options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
 function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
+  const meta = panel.querySelector(`#meta-${cssEscape(debugPaneItemId)}`);
+  if (meta) meta.textContent = debugMetaText();
+  const counts = debugEventCounts();
+  const statEvents = panel.querySelector('[data-js-debug-stat="events"]');
+  const statApi = panel.querySelector('[data-js-debug-stat="api"]');
+  const statSse = panel.querySelector('[data-js-debug-stat="sse"]');
+  const statErrors = panel.querySelector('[data-js-debug-stat="errors"]');
+  if (statEvents) statEvents.textContent = String(jsDebugEvents.length);
+  if (statApi) statApi.textContent = String(counts.apiCalls);
+  if (statSse) statSse.textContent = String(counts.sseEvents);
+  if (statErrors) statErrors.textContent = String(counts.errors);
   applyDebugSubTab(panel);
-  for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
+  if (panel.querySelector('[data-js-debug-subview="logs"]')) refreshDebugLogsViews();
+  const graph = panel.querySelector('[data-js-debug-graph]');
+  refreshDebugGraphElement(graph, options);
+  const log = panel.querySelector('[data-js-debug-log]');
+  if (!log) return;
+  const text = jsDebugTextForClipboard();
+  if (log.value === text) return;
+  const anchor = debugLogScrollAnchor(log);
+  log.value = text;
+  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
 }
 
 function debugGraphFocusedControl(graph) {
@@ -9595,7 +9601,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
   }
   const rangeLabel = graph.querySelector('[data-js-debug-range-label]');
   if (rangeLabel) {
-    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(debugRuntimeState.graphRangeSeconds, nowMs);
+    rangeLabel.textContent = zoomed ? debugGraphCompactRangeText(domain) : jsDebugGraphRangeLabel(jsDebugGraphRangeSeconds, nowMs);
     rangeLabel.classList.toggle('js-debug-range-label--zoomed', zoomed);
     rangeLabel.title = zoomed ? debugGraphCostRangeText(domain) : '';
   }
@@ -9622,7 +9628,7 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     rangeControl.insertBefore(prefix, slider || rangeControl.firstChild);
   }
   graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
-    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === debugRuntimeState.graphChartLayout ? 'true' : 'false');
+    button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
   });
   graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(toggle => {
     toggle.checked = debugGraphChartVisible(toggle.dataset.jsDebugChartToggle);
@@ -9694,7 +9700,7 @@ function debugGraphSlidingAxisActive() {
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
   // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
   // hidden panel is not static but simply does not repaint until it is shown again.
-  return !debugGraphZoomDomainValid() && debugRuntimeState.graphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
 function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
@@ -9724,12 +9730,11 @@ function debugGraphSlideLiveViews(nowMs = Date.now()) {
 }
 
 function stopDebugGraphLiveTicker() {
-  if (jsDebugGraphLiveTimer) debugGraphLifecycleScope().release('live-ticker', jsDebugGraphLiveTimer);
+  if (jsDebugGraphLiveTimer) clearTimeout(jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
 }
 
 function debugGraphLiveTimerTick() {
-  debugGraphLifecycleScope().relinquish('live-ticker', jsDebugGraphLiveTimer);
   jsDebugGraphLiveTimer = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const nowMs = Date.now();
@@ -9745,7 +9750,6 @@ function syncDebugGraphLiveTicker() {
   }
   if (jsDebugGraphLiveTimer) return;
   jsDebugGraphLiveTimer = setTimeout(debugGraphLiveTimerTick, Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
-  debugGraphLifecycleScope().ownTimer('live-ticker', jsDebugGraphLiveTimer);
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
@@ -9802,13 +9806,11 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
 function bindDebugCostSummaryTabButtons(graph) {
   if (!graph) return;
   graph.querySelectorAll('[data-js-debug-cost-details]').forEach(anchor => {
-    bindOnce(anchor, 'debug-cost-details', () => {
-      const handleClick = event => {
+    if (anchor.dataset.jsDebugCostDetailsBound === 'true') return;
+    anchor.dataset.jsDebugCostDetailsBound = 'true';
+    anchor.addEventListener('click', event => {
       event.preventDefault();
       selectSession(yocostItemId, {userInitiated: true});
-      };
-      anchor.addEventListener('click', handleClick);
-      return () => anchor.removeEventListener('click', handleClick);
     });
   });
 }
@@ -9816,22 +9818,23 @@ function bindDebugCostSummaryTabButtons(graph) {
 function applyDebugSubTab(panel) {
   if (!panel) return;
   panel.querySelectorAll('[data-js-debug-subtab]').forEach(button => {
-    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === debugRuntimeState.subTab;
+    const active = normalizedJsDebugSubTab(button.dataset.jsDebugSubtab) === jsDebugSubTab;
     button.classList.toggle(CLS.active, active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
   panel.querySelectorAll('[data-js-debug-subview]').forEach(view => {
-    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === debugRuntimeState.subTab;
+    const active = normalizedJsDebugSubTab(view.dataset.jsDebugSubview) === jsDebugSubTab;
     view.hidden = !active;
   });
 }
 
 function setDebugSubTab(tab) {
   loadJsDebugStatsUiPreferences();
-  debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
+  jsDebugSubTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSubviewActivation({pollNow: true});
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system'});
+  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs'});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -9866,7 +9869,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const state = jsDebugHistoryReadiness;
   if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-    && Number(state.requestedRangeSeconds) === Number(debugRuntimeState.graphRangeSeconds)
+    && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
     && Number(state.targetEndSeconds) === Number(requestedDomainEndSeconds)
     && Number(state.requestedResolutionSeconds) === Number(coverageResolutionSeconds);
@@ -9887,7 +9890,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
 function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
-  debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
+  jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;
@@ -9899,7 +9902,7 @@ function setDebugGraphRange(value, {render = true} = {}) {
   const requestedHistory = requestJsDebugHistoryForCurrentDomain({retry: jsDebugHistoryReadiness.phase === 'error'});
   if (!requestedHistory && (jsDebugHistoryReadinessBusy() || jsDebugHistoryReadiness.phase === 'error')) {
     setJsDebugHistoryReadiness('ready', {
-      requestedRangeSeconds: debugRuntimeState.graphRangeSeconds,
+      requestedRangeSeconds: jsDebugGraphRangeSeconds,
       requestedStartSeconds,
       attemptCount: 0,
       error: '',
@@ -9911,10 +9914,10 @@ function setDebugGraphRange(value, {render = true} = {}) {
 
 function setDebugGraphResolutionOverride(value) {
   loadJsDebugStatsUiPreferences();
-  const previousSeconds = Number(debugRuntimeState.graphResolutionOverrideSeconds) || 0;
+  const previousSeconds = Number(jsDebugGraphResolutionOverrideSeconds) || 0;
   const seconds = Math.max(0, Number(value) || 0);
   const normalized = normalizedDebugGraphResolutionOverrideSeconds(seconds, debugGraphDomain(), Date.now());
-  debugRuntimeState.graphResolutionOverrideSeconds = normalized;
+  jsDebugGraphResolutionOverrideSeconds = normalized;
   saveJsDebugStatsUiPreferences();
   // Immediate ≤1-frame acknowledgement: the control + Resolution label reflect the target
   // value now, before any fetch resolves.
@@ -9938,7 +9941,7 @@ function setDebugGraphResolutionOverride(value) {
   const pending = {
     previousSeconds,
     targetSeconds: normalized,
-    rangeSeconds: Number(debugRuntimeState.graphRangeSeconds),
+    rangeSeconds: Number(jsDebugGraphRangeSeconds),
     requestedResolutionSeconds: Number(jsDebugHistoryReadiness.requestedResolutionSeconds),
     targetStartSeconds: Number(jsDebugHistoryReadiness.targetStartSeconds),
     targetEndSeconds: Number(jsDebugHistoryReadiness.targetEndSeconds),
@@ -9971,8 +9974,8 @@ function clearDebugGraphPendingResolutionChange({hideOverlay = false} = {}) {
 function debugGraphResolutionChangeDataSatisfied(pending, state) {
   if (!pending || state?.phase !== 'ready') return false;
   if (Number(state.generation) < Number(pending.armedGeneration)) return false;
-  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
-  if (Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
+  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
+  if (Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
   if (Number(state.resolutionSeconds) !== Number(pending.requestedResolutionSeconds)) return false;
   const intervals = [...(state.requestCoverageIntervals || [])]
     .filter(interval => Number(interval.resolutionSeconds) === Number(pending.requestedResolutionSeconds))
@@ -10025,10 +10028,10 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
     return;
   }
   if (state.phase !== 'error') return;
-  if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(debugRuntimeState.graphRangeSeconds) !== Number(pending.rangeSeconds)) return;
+  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return;
   clearDebugGraphPendingResolutionChange();
   const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
-  debugRuntimeState.graphResolutionOverrideSeconds = revertedSeconds;
+  jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
   const label = revertedSeconds > 0 ? `${revertedSeconds}s` : 'AUTO';
@@ -10045,7 +10048,7 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
 
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
-  debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
+  jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
   saveJsDebugStatsUiPreferences();
   refreshDebugGraphSurfaces();
 }
@@ -10319,12 +10322,11 @@ function handleDebugGraphTouchMove(event, panel) {
 }
 
 function bindDebugGraphTouchSelection(panel) {
-  if (!panel) return null;
-  return bindOnce(panel, 'debug-graph-touch-selection', () => {
-    const handleTouchMove = event => { handleDebugGraphTouchMove(event, panel); };
-    panel.addEventListener('touchmove', handleTouchMove, {passive: false});
-    return () => panel.removeEventListener('touchmove', handleTouchMove, {passive: false});
-  });
+  if (!panel || panel.dataset.jsDebugTouchSelectionBound === 'true') return;
+  panel.dataset.jsDebugTouchSelectionBound = 'true';
+  panel.addEventListener('touchmove', event => {
+    handleDebugGraphTouchMove(event, panel);
+  }, {passive: false});
 }
 
 function startDebugGraphSelection(candidate, event = null) {
@@ -10588,46 +10590,49 @@ function handleDebugGraphControlEvent(event, panel) {
 }
 
 function bindDebugPanel(panel) {
-  if (!panel) return null;
-  return bindOnce(panel, 'debug-panel', () => {
-    const scope = createLifecycleScope();
-    for (const view of debugPanelSubviewDescriptors()) view.bind(panel);
-    syncDebugSubviewActivation({pollNow: true});
-    const disposeActions = bindActionDispatcher(panel, {
-    'debug-subtab': (_event, button) => setDebugSubTab(button.dataset.jsDebugSubtab),
-    });
-    scope.replace('actions', disposeActions, dispose => dispose?.());
-    scope.ownEvent('focusout', panel, 'focusout', event => {
+  if (!panel || panel.dataset.debugBound === 'true') return;
+  panel.dataset.debugBound = 'true';
+  bindDebugGraphTouchSelection(panel);
+  bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
+  syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
+  syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
+  panel.addEventListener('focusout', event => {
     const graph = event.target?.closest?.('[data-js-debug-graph]');
     if (!graph) return;
     setTimeout(() => { flushDeferredDebugGraphRefresh(graph); }, 0);
   });
-    scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
+  panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
   });
-    scope.ownEvent('pointermove', panel, 'pointermove', event => {
+  panel.addEventListener('pointermove', event => {
     handleDebugGraphPointerMove(event, panel);
   });
-    scope.ownEvent('pointerleave', panel, 'pointerleave', () => {
+  panel.addEventListener('pointerleave', () => {
     debugGraphClearInteractionLinesUnlessPinned(panel);
   });
-    scope.ownEvent('pointerup', panel, 'pointerup', event => {
+  panel.addEventListener('pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
   });
-    scope.ownEvent('pointercancel', panel, 'pointercancel', event => {
+  panel.addEventListener('pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
     handleDebugGraphPointerCancel(event, panel);
   });
-    scope.ownEvent('input', panel, 'input', event => {
+  panel.addEventListener('input', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-    scope.ownEvent('change', panel, 'change', event => {
+  panel.addEventListener('change', event => {
     handleDebugGraphControlEvent(event, panel);
   });
-    scope.ownEvent('click', panel, 'click', event => {
+  panel.addEventListener('click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
+    const subtab = event.target.closest('[data-js-debug-subtab]');
+    if (subtab && panel.contains(subtab)) {
+      event.preventDefault();
+      setDebugSubTab(subtab.dataset.jsDebugSubtab);
+      return;
+    }
     const systemRefresh = event.target.closest('[data-js-debug-system-refresh]');
     if (systemRefresh && panel.contains(systemRefresh)) {
       event.preventDefault();
@@ -10691,14 +10696,5 @@ function bindDebugPanel(panel) {
       clearJsDebugEvents();
       statusEl.textContent = t('debug.cleared');
     }
-    });
-    return () => scope.dispose('debug-panel-unbound');
   });
 }
-
-registerDebugRuntimeFacade('panel', {
-  createDebugPanel,
-  createYoCostPanel,
-  renderDebugPanels,
-  renderYoCostPanels,
-});

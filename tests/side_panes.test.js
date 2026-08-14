@@ -14,12 +14,24 @@ async function runSidePaneSuite() {
     const api = loadYolomux('', ['1']);
     const generic = canonical(api.genericPaneRoleDefinition);
     const side = canonical(api.sidePaneRoleDefinition);
-
-    assert.deepStrictEqual(generic, {kind: 'generic', side: null, controls: 'standard', tabSizing: 'preference', preserveWidth: false, maxViewportFraction: 1, outermost: false});
-    assert.deepStrictEqual(
-      side,
-      {...generic, kind: 'side', controls: 'minimize-only', tabSizing: 'intrinsic', preserveWidth: true, maxViewportFraction: 1 / 3, outermost: true},
-    );
+    assert.deepStrictEqual(generic, {
+      kind: 'generic',
+      side: null,
+      controls: 'standard',
+      tabSizing: 'preference',
+      preserveWidth: false,
+      maxViewportFraction: 1,
+      outermost: false,
+    });
+    assert.deepStrictEqual(side, {
+      ...generic,
+      kind: 'side',
+      controls: 'minimize-only',
+      tabSizing: 'intrinsic',
+      preserveWidth: true,
+      maxViewportFraction: 1 / 3,
+      outermost: true,
+    });
     assert.deepStrictEqual(canonical(api.paneRoleDefinition(api.paneRoleSide, api.paneSideRight)), {...side, side: 'right'});
     assert.deepStrictEqual(canonical(api.paneRoleDefinition('invalid', 'left')), generic);
   });
@@ -27,8 +39,14 @@ async function runSidePaneSuite() {
   test('TAB_TYPES owns the complete side-pane item placement policy', () => {
     const api = loadYolomux('', ['1']);
     const policies = Object.fromEntries(api.TAB_TYPES.map(type => [type.key, type.panePlacement || api.panePlacementGenericOnly]));
-    assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideRequired).map(([key]) => key), ['finder', 'differ', 'tabber']);
-    assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key), ['info', 'yoagent', 'chat', 'debug', 'yocost']);
+    assert.deepStrictEqual(
+      Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideRequired).map(([key]) => key),
+      ['finder', 'differ', 'tabber'],
+    );
+    assert.deepStrictEqual(
+      Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key),
+      ['info', 'yoagent', 'chat', 'debug', 'yocost'],
+    );
     assert.equal(policies.preferences, api.panePlacementGenericOnly);
     assert.equal(policies['search-history'], api.panePlacementGenericOnly);
     assert.equal(policies['file-editor'], api.panePlacementGenericOnly);
@@ -62,7 +80,12 @@ async function runSidePaneSuite() {
     const encoded = api.layoutTabsParamValue(slots);
     assert.equal(encoded, 'left:@side-left,finder,differ*;right:1');
     const decoded = api.layoutTabStatesFromParam(encoded);
-    assert.deepStrictEqual(canonical(decoded.get('left')), {tabs: [api.finderItemId, api.differItemId], active: api.differItemId, paneRole: api.paneRoleSide, side: api.paneSideLeft});
+    assert.deepStrictEqual(canonical(decoded.get('left')), {
+      tabs: [api.finderItemId, api.differItemId],
+      active: api.differItemId,
+      paneRole: api.paneRoleSide,
+      side: api.paneSideLeft,
+    });
     assert.deepStrictEqual(canonical(decoded.get('right')), {tabs: ['1'], active: '1'});
   });
 
@@ -124,7 +147,12 @@ async function runSidePaneSuite() {
     };
     const adopted = api.layoutSlotsFromDockviewJson(api.dockviewJsonFromLayoutSlots(slots), slots);
     assert.deepStrictEqual(canonical(api.paneRoleForSlot('side', adopted)), canonical(api.paneRoleDefinition(api.paneRoleSide, api.paneSideLeft)));
-    assert.deepStrictEqual(canonical(adopted.side), {tabs: [api.finderItemId], active: api.finderItemId, paneRole: api.paneRoleSide, side: api.paneSideLeft});
+    assert.deepStrictEqual(canonical(adopted.side), {
+      tabs: [api.finderItemId],
+      active: api.finderItemId,
+      paneRole: api.paneRoleSide,
+      side: api.paneSideLeft,
+    });
   });
 
   test('Dockview adoption permits dual-role YO!* transfers and rejects incompatible transfers', () => {
@@ -152,34 +180,6 @@ async function runSidePaneSuite() {
     };
     const rejected = api.layoutSlotsFromDockviewJson(api.dockviewJsonFromLayoutSlots(invalidFinder), previous);
     assert.deepStrictEqual(canonical(rejected), canonical(previous), 'Finder remains Vertical-Side-only');
-  });
-
-  test('pending renamed tmux tab survives an incomplete post-rename Dockview adoption', () => {
-    const api = loadYolomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
-    const incompleteDockview = api.dockviewJsonFromLayoutSlots(api.currentSlots());
-    api.replaceTmuxSessionInClient('1', 'renamed', ['renamed']);
-    const renamedLayout = api.currentSlots();
-    api.queueDockviewLayoutAdoptionForTest(incompleteDockview);
-    api.adoptQueuedDockviewLayoutForTest();
-    assert.equal(api.itemInLayout('renamed'), true, 'an incomplete current-generation Dockview snapshot cannot drop a pending renamed session');
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), canonical(api.serialize(renamedLayout)), 'rejecting the incomplete snapshot preserves the app-owned renamed layout exactly');
-    const [reasserted] = api.dockviewFromJsonCallsForTest();
-    assert.deepStrictEqual(canonical(api.layoutSlotsFromDockviewJson(reasserted, renamedLayout)), canonical(renamedLayout), 'the vendor layout is reloaded with the renamed tab instead of retaining its incomplete snapshot');
-    const created = loadYolomux('?sessions=1&layout=left&tabs=left:files,1', ['1']);
-    const preCreateDockview = created.dockviewJsonFromLayoutSlots(created.currentSlots());
-    created.markPendingTmuxSessionForTest('created');
-    const withCreated = created.layoutWithItems(created.currentSlots(), ['created']);
-    created.setLayoutSlotsForTest(withCreated);
-    const createdLayout = created.currentSlots();
-    created.queueDockviewLayoutAdoptionForTest(preCreateDockview);
-    created.adoptQueuedDockviewLayoutForTest();
-    const [createdReasserted] = created.dockviewFromJsonCallsForTest();
-    assert.ok(createdReasserted?.panels?.created, `a post-create incomplete snapshot reasserts the created tab through the same owner: ${JSON.stringify({pending: created.pendingTmuxSessionNamesForTest(), layout: created.serialize(createdLayout), calls: created.dockviewFromJsonCallsForTest()})}`);
-    const control = loadYolomux('?sessions=1,2&layout=left&tabs=left:1,2', ['1', '2']);
-    const withoutStableSession = control.layoutWithoutItem('1');
-    control.queueDockviewLayoutAdoptionForTest(control.dockviewJsonFromLayoutSlots(withoutStableSession));
-    control.adoptQueuedDockviewLayoutForTest();
-    assert.equal(control.itemInLayout('1'), false, 'ordinary Dockview removal remains authoritative after no session transition is pending');
   });
 
   test('legacy Finder dock adapter preserves the triplet in an explicit Side Pane', () => {

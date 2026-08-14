@@ -2814,7 +2814,6 @@ function codeMirrorApiIsUsable(api) {
     && api?.highlightActiveLine
     && api?.search
     && api?.openSearchPanel
-    && api?.LanguageSupport
   );
 }
 
@@ -2863,10 +2862,8 @@ async function loadCodeMirrorApi() {
 }
 
 function codeMirrorMarkdownCodeLanguages(api) {
-  if (!api?.LanguageDescription || !api?.LanguageSupport) return null;
-  const stream = mode => safeCodeMirrorExtension('stream language', () => (
-    mode && api.StreamLanguage ? new api.LanguageSupport(api.StreamLanguage.define(mode)) : null
-  ));
+  if (!api?.LanguageDescription) return null;
+  const stream = mode => safeCodeMirrorExtension('stream language', () => (mode && api.StreamLanguage ? api.StreamLanguage.define(mode) : null));
   const languageEntries = [
     {name: 'JavaScript', alias: ['js', 'jsx', 'node'], support: () => api.javascript?.({jsx: true})},
     {name: 'TypeScript', alias: ['ts', 'tsx'], support: () => api.javascript?.({typescript: true, jsx: true})},

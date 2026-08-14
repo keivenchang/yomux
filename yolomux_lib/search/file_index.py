@@ -127,11 +127,9 @@ _SEARCH_PROGRESS_NOTIFIER: Callable[[dict[str, Any]], None] | None = None
 # cursor. Monkeypatchable so a test does not have to wait a real 500ms.
 SEARCH_PROGRESS_COALESCE_SECONDS = 0.5
 _SEARCH_PROGRESS_LOCK = threading.Lock()
-_SEARCH_PROGRESS_IDLE = threading.Condition(_SEARCH_PROGRESS_LOCK)
 _SEARCH_PROGRESS_LAST_EMIT: dict[str, float] = {}
 _SEARCH_PROGRESS_PENDING: dict[str, dict[str, Any]] = {}
 _SEARCH_PROGRESS_TIMERS: dict[str, threading.Timer] = {}
-_SEARCH_PROGRESS_ACTIVE_CALLBACKS = 0
 # The ONLY coverage fields that may cross the shared bus: numeric progress + terminal flags, never a
 # path or a name. The frame is built fresh from this allowlist so a caller cannot leak an extra key.
 _SEARCH_PROGRESS_COVERAGE_KEYS: tuple[str, ...] = (
@@ -890,49 +888,6 @@ def clear_memory_indexes() -> RetirementResult:
     return RetirementResult(requested=requested, completed=completed, late=late)
 
 
-class FileIndexTestScope:
-    """Idempotently own process-global file-index state for one test lifecycle.
-
-    Production callbacks remain process-lifetime registrations. A pytest worker,
-    however, creates and destroys many app/indexer owners in one process. This
-    scope clears every callback, trailing progress delivery, and in-memory index
-    both before and after its body so setup failures cannot leak into the next
-    test. Detached indexer suppression intentionally remains at the fixture
-    boundary because it is a process-launch policy, not file-index state.
-    """
-
-    CALLBACK_CLEAR_ORDER = (
-        "background_owner_checker",
-        "background_owner_refresh_requester",
-        "background_index_search_requester",
-        "background_owner_bytes_recorder",
-        "background_owner_done_notifier",
-        "search_progress_notifier",
-    )
-
-    def cleanup(self) -> RetirementResult:
-        set_background_owner_checker(None)
-        set_background_owner_refresh_requester(None)
-        set_background_index_search_requester(None)
-        set_background_owner_bytes_recorder(None)
-        set_background_owner_done_notifier(None)
-        set_search_progress_notifier(None)
-        _reset_search_progress_coalescing()
-        return clear_memory_indexes()
-
-    def __enter__(self) -> FileIndexTestScope:
-        try:
-            self.cleanup()
-        except BaseException:
-            self.cleanup()
-            raise
-        return self
-
-    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> bool:
-        self.cleanup()
-        return False
-
-
 def set_background_owner_checker(checker: Callable[[str], bool] | None) -> None:
     global _BACKGROUND_OWNER_CHECKER
     _BACKGROUND_OWNER_CHECKER = checker
@@ -978,7 +933,7 @@ def set_background_owner_done_notifier(notifier: Callable[[str, dict[str, Any]],
 
 def set_search_progress_notifier(notifier: Callable[[dict[str, Any]], None] | None) -> None:
     global _SEARCH_PROGRESS_NOTIFIER
-    with _SEARCH_PROGRESS_LOCK: _SEARCH_PROGRESS_NOTIFIER = notifier
+    _SEARCH_PROGRESS_NOTIFIER = notifier
 
 
 def _root_scope_id(root: Path) -> str:
@@ -1018,6 +973,8 @@ def notify_search_progress(root: Path, generation: int, revision: int, coverage:
     per root per `SEARCH_PROGRESS_COALESCE_SECONDS`, with the latest revision always delivered (a
     trailing emit) so a client never misses the final publication -- and the intervening revisions are
     safe to drop because the client pulls every ordered delta by cursor from committed SQLite."""
+    if _SEARCH_PROGRESS_NOTIFIER is None:
+        return
     scope_id = _root_scope_id(root)
     frame = {
         "scope_id": scope_id,
@@ -1026,9 +983,6 @@ def notify_search_progress(root: Path, generation: int, revision: int, coverage:
         "coverage": _redacted_progress_coverage(coverage),
     }
     with _SEARCH_PROGRESS_LOCK:
-        notifier = _SEARCH_PROGRESS_NOTIFIER
-        if notifier is None:
-            return
         now = time.monotonic()
         last = _SEARCH_PROGRESS_LAST_EMIT.get(scope_id)
         window = SEARCH_PROGRESS_COALESCE_SECONDS
@@ -1044,29 +998,8 @@ def notify_search_progress(root: Path, generation: int, revision: int, coverage:
             return
         _SEARCH_PROGRESS_LAST_EMIT[scope_id] = now
         _SEARCH_PROGRESS_PENDING.pop(scope_id, None)
-    _deliver_search_progress(notifier, frame)
-
-
-def _deliver_search_progress(notifier: Callable[[dict[str, Any]], None], frame: dict[str, Any]) -> None:
-    """Linearize callback delivery with lifecycle teardown.
-
-    Teardown first clears the registered identity, then waits for callbacks that
-    already crossed this gate. A timer that wakes late therefore cannot publish,
-    and once cleanup returns no captured callback remains in flight.
-    """
-
-    global _SEARCH_PROGRESS_ACTIVE_CALLBACKS
-    with _SEARCH_PROGRESS_LOCK:
-        if _SEARCH_PROGRESS_NOTIFIER is not notifier:
-            return
-        _SEARCH_PROGRESS_ACTIVE_CALLBACKS += 1
-    try:
-        notifier(frame)
-    finally:
-        with _SEARCH_PROGRESS_LOCK:
-            _SEARCH_PROGRESS_ACTIVE_CALLBACKS -= 1
-            if _SEARCH_PROGRESS_ACTIVE_CALLBACKS == 0:
-                _SEARCH_PROGRESS_IDLE.notify_all()
+        notifier = _SEARCH_PROGRESS_NOTIFIER
+    notifier(frame)
 
 
 def _flush_search_progress(scope_id: str) -> None:
@@ -1079,7 +1012,7 @@ def _flush_search_progress(scope_id: str) -> None:
         _SEARCH_PROGRESS_LAST_EMIT[scope_id] = time.monotonic()
         notifier = _SEARCH_PROGRESS_NOTIFIER
     if notifier is not None:
-        _deliver_search_progress(notifier, frame)
+        notifier(frame)
 
 
 def _reset_search_progress_coalescing() -> None:
@@ -1090,8 +1023,6 @@ def _reset_search_progress_coalescing() -> None:
         _SEARCH_PROGRESS_TIMERS.clear()
         _SEARCH_PROGRESS_PENDING.clear()
         _SEARCH_PROGRESS_LAST_EMIT.clear()
-        while _SEARCH_PROGRESS_ACTIVE_CALLBACKS:
-            _SEARCH_PROGRESS_IDLE.wait()
 
 
 def background_owner_can_build() -> bool:
@@ -2133,39 +2064,18 @@ def _replace_sqlite_entries(conn: sqlite3.Connection, entries: list[IndexEntry])
     )
 
 
-# The row publication fields are owned here because both the reader predicate and the BFS writer's
-# clean-generation invalidation depend on exactly this vocabulary. A startup-only claim carries none
-# of these fields; the first completed directory transaction writes all of them atomically.
-_SNAPSHOT_PUBLICATION_METADATA_KEYS = (
+# The metadata keys `_write_manifest` reads as REQUIRED. A published-snapshot metadata shape carries
+# all of them; a startup-only claim (just version/storage/skip_signature/root/producer_epoch/
+# active_generation/published_generation/built_at) does not, so a manifest must never be built from it.
+_PUBLISHED_SNAPSHOT_METADATA_KEYS = (
+    "skip_signature",
+    "root",
     "built_at",
     "truncated",
     "entry_count",
     "entries_signature",
-)
-_PROGRESSIVE_PUBLICATION_METADATA_KEYS = (
-    "published_generation",
-    "published_depth",
-    "frontier_depth",
-    "frontier_size",
-    "full_coverage",
-    "last_progress_at",
-)
-# The metadata keys `_write_manifest` reads as REQUIRED. A published-snapshot metadata shape carries
-# all of them, so a manifest must never be built from a startup-only claim.
-_PUBLISHED_SNAPSHOT_METADATA_KEYS = (
-    "skip_signature",
-    "root",
-    *_SNAPSHOT_PUBLICATION_METADATA_KEYS,
     "producer_epoch",
 )
-
-
-def _invalidate_snapshot_publication(conn: sqlite3.Connection) -> None:
-    """Atomically retire every field that can make cleared rows look published."""
-
-    keys = (*_SNAPSHOT_PUBLICATION_METADATA_KEYS, *_PROGRESSIVE_PUBLICATION_METADATA_KEYS)
-    placeholders = ", ".join("?" for _key in keys)
-    conn.execute(f"DELETE FROM metadata WHERE key IN ({placeholders})", keys)
 
 
 def _is_published_snapshot_metadata(metadata: dict[str, str], generation: int) -> bool:
@@ -2521,8 +2431,6 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "", *, 
             metadata = dict(conn.execute("SELECT key, value FROM metadata"))
             if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
                 return None
-            if not _row_serving_snapshot_metadata(metadata):
-                return None
             # Fail closed on an explicit unindex: a snapshot built at or before the deletion must not be
             # adopted/served, so a tombstoned root triggers a fresh crawl rather than re-loading the
             # deleted rows. `honor_tombstone=False` is for a build reading back the rows it just wrote --
@@ -2557,21 +2465,6 @@ def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: se
         and metadata.get("storage") == "sqlite"
         and metadata.get("skip_signature") == _disk_skip_signature(root, skip_dirs, exclude_signature)
     )
-
-
-def _row_serving_snapshot_metadata(metadata: dict[str, Any]) -> bool:
-    """Whether metadata identifies rows published by at least one completed directory transaction."""
-
-    signature = str(metadata.get("entries_signature") or "")
-    if signature.startswith("bfs:"):
-        try:
-            generation = int(signature.split(":", 2)[1])
-        except (IndexError, ValueError):
-            return False
-        return _is_published_snapshot_metadata(metadata, generation)
-    # Shipped v4 snapshots use an opaque non-BFS signature and predate built_at/producer_epoch.
-    # Their non-empty signature is the durable publication marker; startup claims never create one.
-    return bool(signature)
 
 
 @dataclass(frozen=True)
@@ -2818,9 +2711,6 @@ def _open_sqlite_snapshot(
         conn = sqlite3.connect(f"file:{_index_disk_path(root).as_posix()}?mode=ro", uri=True, timeout=30.0)
         metadata = dict(conn.execute("SELECT key, value FROM metadata"))
         if not _sqlite_metadata_matches(metadata, root, skip_dirs, exclude_signature):
-            conn.close()
-            return None
-        if not _row_serving_snapshot_metadata(metadata):
             conn.close()
             return None
         if honor_tombstone and _snapshot_is_tombstoned(root, metadata):

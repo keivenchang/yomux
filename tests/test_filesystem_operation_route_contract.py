@@ -22,7 +22,7 @@ import pytest
 from yolomux_lib import app as app_module
 from yolomux_lib import server_logs
 
-from tests.helpers.http_routes import capturing_route_request as _capturing_route_request
+from test_watch_diff_route_contract import _capturing_route_request
 
 
 class _RefusingFilesystemJob:

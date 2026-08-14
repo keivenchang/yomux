@@ -159,16 +159,16 @@ DEMAND_PRIMITIVE = "yolomux_lib.local_services.registry:LocalServiceRegistry.ens
 # The one latched-failure-clearing primitive. Every `def retry` in yolomux_lib delegates here.
 RECOVERY_PRIMITIVE = "yolomux_lib.local_services.registry:LocalServiceRegistry.retry"
 # The one status projection composed into /api/system-status.
-COMPOSED_PROJECTION = "yolomux_lib.app:SystemStatusProjector.runtime_local_services"
-SYSTEM_STATUS_SERVICE = "yolomux_lib.app:SystemStatusProjector.system_status_service"
+COMPOSED_PROJECTION = "yolomux_lib.app:TmuxWebtermApp.runtime_local_services"
+SYSTEM_STATUS_SERVICE = "yolomux_lib.app:TmuxWebtermApp.system_status_service"
 
 # M3 split the projection into three named owners. The inventory literal lives in one module,
 # the row producers in one map, and the composition in one collector.
 INVENTORY_MODULE = "yolomux_lib.local_service_projection"
 INVENTORY_NAME = "LOCAL_SERVICE_INVENTORY"
 INVENTORY_FILE = "yolomux_lib/local_service_projection.py"
-ROW_PRODUCER_MAP = "yolomux_lib.app:SystemStatusProjector.local_services_row_producers"
-SNAPSHOT_OWNER = "yolomux_lib.app:SystemStatusProjector.local_services_snapshot"
+ROW_PRODUCER_MAP = "yolomux_lib.app:TmuxWebtermApp.local_services_row_producers"
+SNAPSHOT_OWNER = "yolomux_lib.app:TmuxWebtermApp.local_services_snapshot"
 COLLECTOR = "yolomux_lib.local_service_projection:LocalServicesCollector.collect"
 
 # The two identity owners that read the persisted `*.service.json` process record. Both are
@@ -186,8 +186,8 @@ START_PRIMITIVE_ATTRIBUTES = frozenset({"ensure_started", "acquire_lease"})
 
 # The one hop statsd's row builder delegates through, asserted rather than assumed wherever it
 # is followed, so the client keeps owning statsd's identity and metrics after the M3 move.
-STATSD_IDENTITY_HOP = "current_runtime = app.stats_current_runtime.status()"
-STATSD_METRICS_HOP = "current_service = app.stats_current_client.runtime_status(current_service)"
+STATSD_IDENTITY_HOP = "current_runtime = self.stats_current_runtime.status()"
+STATSD_METRICS_HOP = "current_service = self.stats_current_client.runtime_status(current_service)"
 
 
 @dataclass(frozen=True)
@@ -252,7 +252,7 @@ CATALOG: dict[str, ServiceOwners] = {
         demand_entrypoint="yolomux_lib.search.search_indexer:SearchIndexerClient.ensure_started",
         demand_evidence="return self.registry.ensure_started()",
         status_owner="yolomux_lib.search.search_indexer:SearchIndexerClient.runtime_status",
-        status_row_expression="app.search_indexer.runtime_status",
+        status_row_expression="self.search_indexer.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="self.registry.status()",
         metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
@@ -282,8 +282,8 @@ CATALOG: dict[str, ServiceOwners] = {
         # M3: statsd's row was the one built inline in the projection body, so its shape lived
         # in two places. It is now a named producer like the other five, and that producer
         # delegates identity and metrics to the client through the two asserted hops above.
-        status_owner="yolomux_lib.app:SystemStatusProjector.statsd_runtime_status",
-        status_row_expression="app.statsd_runtime_status",
+        status_owner="yolomux_lib.app:TmuxWebtermApp.statsd_runtime_status",
+        status_row_expression="self.statsd_runtime_status",
         # statsd does not read LocalServiceRegistry.status(); its identity comes from a live
         # `status` RPC, so it carries no persisted process `record`. This is the one identity
         # divergence M2 did not resolve, and the only one left.
@@ -328,7 +328,7 @@ CATALOG: dict[str, ServiceOwners] = {
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.infra.jobd:JobClient.runtime_status",
-        status_row_expression="app.job_client.runtime_status",
+        status_row_expression="self.job_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="status = self.registry.status()",
         # The only service whose metrics cover worker children as well as the broker.
@@ -356,7 +356,7 @@ CATALOG: dict[str, ServiceOwners] = {
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.statusd_client:StatusClient.runtime_status",
-        status_row_expression="app.status_client.runtime_status",
+        status_row_expression="self.status_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="runtime = self.registry.status()",
         metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
@@ -384,15 +384,15 @@ CATALOG: dict[str, ServiceOwners] = {
         demand_evidence="if not self.ensure_started():",
         # The System row deliberately does NOT come from WatchClient.runtime_status; calling
         # it would demand-start a demand-scoped service from a diagnostics path.
-        status_owner="yolomux_lib.app:WatchBridge.watchd_runtime_status",
-        status_row_expression="app.watchd_runtime_status",
+        status_owner="yolomux_lib.app:TmuxWebtermApp.watchd_runtime_status",
+        status_row_expression="self.watchd_runtime_status",
         # M2 resolved this. It used to be the in-process bridge mirror, which knows a lease PID
         # but no birth time, so started_at was hardcoded 0.0 (uptime permanently blank) and
         # resources was hardcoded {} (no CPU/memory at all). Identity now comes from the same
         # persisted registry record the other four use -- read directly, with no RPC, because
         # an RPC from a diagnostics path would demand-start a demand-scoped service.
         identity_owner=REGISTRY_RECORD_IDENTITY,
-        identity_evidence="identity = local_service_projection.registry_process_identity(app.watch_client.registry)",
+        identity_evidence="identity = local_service_projection.registry_process_identity(self.watch_client.registry)",
         metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
         metrics_evidence='"resources": self.watch_client.registry.resources(identity.pid),',
         recovery_owner=RECOVERY_PRIMITIVE,
@@ -417,7 +417,7 @@ CATALOG: dict[str, ServiceOwners] = {
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
         demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.approval.approvald:ApprovalClient.runtime_status",
-        status_row_expression="app.approval_client.runtime_status",
+        status_row_expression="self.approval_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
         identity_evidence="status = self.registry.status()",
         metrics_owner="yolomux_lib.local_services.registry:LocalServiceRegistry.resources",
@@ -455,14 +455,14 @@ RETRY_DEFINITIONS = {
 # catalog below, so this map and the per-service `recovery_client_entrypoint` declarations
 # cannot drift apart.
 RECOVERY_ENTRYPOINT_EXPRESSIONS = {
-    "statsd": "app.stats_current_client.retry",
-    "jobd": "app.job_client.retry",
-    "statusd": "app.status_client.retry",
-    "watchd": "app.watch_client.retry",
-    "approvald": "app.approval_client.retry",
+    "statsd": "self.stats_current_client.retry",
+    "jobd": "self.job_client.retry",
+    "statusd": "self.status_client.retry",
+    "watchd": "self.watch_client.retry",
+    "approvald": "self.approval_client.retry",
 }
-RECOVERY_ENTRYPOINT_MAP = "yolomux_lib.app:SystemStatusProjector.local_services_recovery_entrypoints"
-RECOVERY_CONTROL_OWNER = "yolomux_lib.app:SystemStatusProjector.local_services_recovery_control"
+RECOVERY_ENTRYPOINT_MAP = "yolomux_lib.app:TmuxWebtermApp.local_services_recovery_entrypoints"
+RECOVERY_CONTROL_OWNER = "yolomux_lib.app:TmuxWebtermApp.local_services_recovery_control"
 RECOVERY_CONTROL = "yolomux_lib.app:LocalServiceRecoveryControl"
 # The whole public surface the observer is handed. Anything else here is a destructive operation
 # waiting to be reachable from the recovery path.
@@ -628,60 +628,6 @@ def _called_attributes(ref: str) -> frozenset[str]:
         for child in ast.walk(node)
         if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
     )
-
-
-def _runtime_row_projection_from_source(source: str) -> dict[str, str]:
-    """Return semantic keyword ownership for the one shared runtime-row projection call."""
-
-    function = ast.parse(source).body[0]
-    calls = [
-        child
-        for child in ast.walk(function)
-        if isinstance(child, ast.Call)
-        and isinstance(child.func, ast.Attribute)
-        and child.func.attr == "local_service_runtime_row"
-    ]
-    assert len(calls) == 1, "definition must call local_service_runtime_row exactly once"
-    call = calls[0]
-    return {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords if keyword.arg}
-
-
-def _runtime_row_projection(ref: str) -> dict[str, str]:
-    return _runtime_row_projection_from_source(_source(ref))
-
-
-def test_runtime_row_projection_guard_reads_calls_not_comments_and_rejects_duplicate_owners():
-    compliant = """def row(identity, registry):
-    # local_service_runtime_row(resources=wrong) is prose, not an owner.
-    return projection.local_service_runtime_row('watchd', pid=identity.pid, started_at=identity.started_at, version=1, healthy=True, last_failure='', resources=registry.resources(identity.pid))
-"""
-    projection = _runtime_row_projection_from_source(compliant)
-    assert projection["pid"] == "identity.pid"
-    assert projection["resources"] == "registry.resources(identity.pid)"
-
-    duplicate = """def row(identity, registry):
-    first = projection.local_service_runtime_row('watchd', pid=identity.pid, started_at=0, version=1, healthy=True, last_failure='', resources={})
-    return projection.local_service_runtime_row('watchd', pid=identity.pid, started_at=0, version=1, healthy=True, last_failure='', resources=registry.resources(identity.pid))
-"""
-    with pytest.raises(AssertionError, match="exactly once"):
-        _runtime_row_projection_from_source(duplicate)
-
-
-def _registry_row_projection(ref: str) -> dict[str, str]:
-    """Return the semantic arguments passed to the shared registry row adapter."""
-
-    function = ast.parse(_source(ref)).body[0]
-    calls = [
-        child
-        for child in ast.walk(function)
-        if isinstance(child, ast.Call)
-        and ((isinstance(child.func, ast.Name) and child.func.id == "registry_runtime_row")
-             or (isinstance(child.func, ast.Attribute) and child.func.attr == "registry_runtime_row"))
-    ]
-    assert len(calls) == 1, f"{ref} must call registry_runtime_row exactly once"
-    call = calls[0]
-    positional = [ast.unparse(argument) for argument in call.args]
-    return {"service": positional[0], "registry": positional[1], "status": positional[2], "payload": positional[3], **{keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords if keyword.arg}}
 
 
 def _inventory_literal_sites(inventory: tuple[str, ...]) -> frozenset[str]:
@@ -870,8 +816,8 @@ def test_each_service_row_has_exactly_one_status_producer():
     # This map is not merely declared, it is the one the published projection composes.
     snapshot_source = _source(SNAPSHOT_OWNER)
     assert "LocalServicesCollector(" in snapshot_source, snapshot_source
-    assert "app.local_services_row_producers," in snapshot_source, snapshot_source
-    assert "return app.local_services_snapshot().payload(" in _source(COMPOSED_PROJECTION)
+    assert "self.local_services_row_producers," in snapshot_source, snapshot_source
+    assert "return self.local_services_snapshot().payload(" in _source(COMPOSED_PROJECTION)
     # And the collector composes exactly the inventory: a service silently dropped from, or
     # smuggled into, the snapshot raises rather than rendering a projection with a hole in it.
     collector_source = _source(COLLECTOR)
@@ -912,16 +858,11 @@ def test_status_owner_source_proves_the_identity_and_metrics_owners():
     """Each row builder reads identity and metrics from exactly the declared owner, once."""
     for service, owners in CATALOG.items():
         status_source = _source(owners.status_owner)
+        # The row names `resources` once, wherever the sampling itself happens.
+        assert status_source.count('"resources":') == 1, (service, status_source.count('"resources":'))
         metrics_source = _metrics_source(service, owners)
-        if "local_service_runtime_row" in status_source:
-            assert "resources" in _runtime_row_projection(owners.status_owner), service
-        elif "registry_runtime_row" in status_source:
-            projection = _registry_row_projection(owners.status_owner)
-            assert projection["registry"].endswith("registry"), (service, projection)
-        else:
-            assert status_source.count('"resources":') == 1, (service, status_source.count('"resources":'))
-        if "registry_runtime_row" not in status_source and "local_service_runtime_row" not in status_source:
-            assert owners.metrics_evidence in metrics_source, (service, owners.metrics_evidence)
+        assert metrics_source.count('"resources":') == 1, (service, metrics_source.count('"resources":'))
+        assert owners.metrics_evidence in metrics_source, (service, owners.metrics_evidence)
         identity_source = _identity_source(service, owners)
         assert owners.identity_evidence in identity_source, (service, owners.identity_evidence)
 
@@ -961,11 +902,10 @@ def _identity_source(service: str, owners: ServiceOwners) -> str:
         # the record-derived `identity`, and the bridge PID appears only as the field that
         # reports a disagreement, never as the row's own pid.
         source = _source(owners.status_owner)
-        projection = _runtime_row_projection(owners.status_owner)
-        assert projection["pid"] == "identity.pid", projection
-        assert projection["started_at"] == "identity.started_at", projection
-        assert projection["resources"] == "app.watch_client.registry.resources(identity.pid)", projection
-        assert "bridge_pid_unverified" in source, source
+        assert '"pid": identity.pid,' in source, source
+        assert '"started_at": identity.started_at,' in source, source
+        assert '"pid": bridge_pid,' not in source, source
+        assert '"started_at": bridge_pid' not in source, source
         return source
     return _source(owners.status_owner)
 
@@ -1002,14 +942,12 @@ def test_statsd_is_the_only_service_off_the_registry_record_identity_owner():
     assert "response = self.client.status()" in statsd_identity, statsd_identity
     assert "record" not in statsd_identity, statsd_identity
 
-    watchd_source = _source("yolomux_lib.app:WatchBridge.watchd_runtime_status")
+    watchd_source = _source("yolomux_lib.app:TmuxWebtermApp.watchd_runtime_status")
     # The two M2 hardcodes are gone, and the row publishes the record-derived values instead.
     assert '"started_at": 0.0,' not in watchd_source, watchd_source
     assert '"resources": {},' not in watchd_source, watchd_source
-    watchd_projection = _runtime_row_projection("yolomux_lib.app:WatchBridge.watchd_runtime_status")
-    assert watchd_projection["started_at"] == "identity.started_at", watchd_projection
-    assert watchd_projection["pid"] == "identity.pid", watchd_projection
-    assert watchd_projection["resources"] == "app.watch_client.registry.resources(identity.pid)", watchd_projection
+    assert '"started_at": identity.started_at,' in watchd_source, watchd_source
+    assert '"pid": identity.pid,' in watchd_source, watchd_source
     # Unchanged and load-bearing: the row still issues no RPC of its own.
     assert "without making a status route call watchd" in watchd_source
     # WatchClient.runtime_status exists and is intentionally never reached from production.
@@ -1145,14 +1083,14 @@ def test_the_app_recovery_map_is_the_one_owner_the_observer_is_wired_to():
         declared = _resolve(CATALOG[service].recovery_client_entrypoint)
         assert getattr(_resolve(CATALOG[service].client_owner), "retry") is declared, service
         # And it is reached off a client attribute of the app, never off a registry.
-        assert client_attribute.startswith("app."), (service, expression)
+        assert client_attribute.startswith("self."), (service, expression)
         assert "registry" not in client_attribute, (service, expression)
 
     control = _resolve(RECOVERY_CONTROL)
     public = frozenset(name for name in vars(control) if not name.startswith("_"))
     assert public == RECOVERY_CONTROL_PUBLIC_SURFACE, sorted(public)
     assert _source(RECOVERY_CONTROL_OWNER).count("LocalServiceRecoveryControl(") == 1
-    assert "app.local_services_recovery_entrypoints" in _source(RECOVERY_CONTROL_OWNER)
+    assert "self.local_services_recovery_entrypoints" in _source(RECOVERY_CONTROL_OWNER)
 
     cli_source = (REPO_ROOT / "yolomux_lib" / "cli.py").read_text(encoding="utf-8")
     wiring = "recovery_control=app.local_services_recovery_control(),"

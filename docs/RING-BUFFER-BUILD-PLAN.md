@@ -1,7 +1,5 @@
 # Ring-buffer build plan
 
-> **STATUS 2026-08-12: LIVE PLAN, PARTIALLY EXECUTED.** Measured in `yolomux.dev7771`: the ring tables exist (`aggregate_publication`, `aggregate_rings`, `aggregate_ring_slots` in `yolomux_lib/stats_current/storage.py`), so steps 1-3 landed, but `SCHEMA_VERSION = 7` (`storage.py:34`) — **step 4 "activate v8" has not happened** and reads still come from the v7 path. Steps 4-8 are open. This is a real plan to finish, not an archive.
-
 This plan moves YO!stats from the v7 `PublishedCache` read path to durable v8 per-resolution rings without a flag day. Each step is independently mergeable and leaves the active response path green. Port 7770, its v7 database, its WAL sidecars, its writer fence, and its socket are never migration targets.
 
 The transition is:

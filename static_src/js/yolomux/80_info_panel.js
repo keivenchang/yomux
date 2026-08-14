@@ -136,42 +136,44 @@ function bindInfoPanel(panel) {
 }
 
 function createInfoPanel() {
-  const panel = createFramedPanel({
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel info-tree-panel';
+  panel.id = panelDomId(infoItemId);
+  panel.innerHTML = panelFrameHtml({
     item: infoItemId,
-    className: 'panel info-panel info-tree-panel',
-    frame: {
-      controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
-      afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
+    controlsHtml: virtualPanelInnerControlsHtml(infoItemId),
+    afterHeadHtml: `<div class="info-actions-bar info-tree-actions-bar">
         ${infoGroupingControlsHtml()}
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-info-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.refresh'))}</button>
         </div>
       </div>`,
-      bodyClass: 'info-pane',
-      bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
-    },
-    bind: bindInfoPanel,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="info-content" class="info-list info-tree-list"></div>',
   });
+  bindPanelShell(panel, infoItemId);
+  bindInfoPanel(panel);
   if (typeof renderInfoPanel === 'function') renderInfoPanel();
   return panel;
 }
 
 function createYoagentPanel() {
-  const panel = createFramedPanel({
+  const panel = document.createElement('article');
+  panel.className = 'panel info-panel yoagent-panel';
+  panel.id = panelDomId(yoagentItemId);
+  panel.innerHTML = panelFrameHtml({
     item: yoagentItemId,
-    className: 'panel info-panel yoagent-panel',
-    frame: {
-      controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
-      afterHeadHtml: `<div class="info-actions-bar">
+    controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
+    afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
           <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}" ${activitySummaryEnabled ? '' : 'disabled aria-disabled="true"'}>${esc(t('yoagent.refresh'))}</button>
         </div>
       </div>`,
-      bodyClass: 'info-pane',
-      bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
-    },
-    bind: bindYoagentPanel,
+    bodyClass: 'info-pane',
+    bodyHtml: '<div id="yoagent-content" class="info-list yoagent-list"></div>',
   });
+  bindPanelShell(panel, yoagentItemId);
+  bindYoagentPanel(panel);
   showYoagentStartupInfoOnce();
   renderYoagentPanel({scrollBottom: true});
   loadYoagentConversation({silent: true, scrollBottom: true});

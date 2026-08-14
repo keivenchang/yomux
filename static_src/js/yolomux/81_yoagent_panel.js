@@ -576,8 +576,8 @@ function yoagentPendingWaitsHtml() {
 }
 
 function setYoagentJobs(items, options = {}) {
+  if (options.invalidateRequest !== false) yoagentJobsState.guard.invalidate();
   yoagentJobsState.items = Array.isArray(items) ? items : [];
-  if (options.invalidateRequest !== false) yoagentJobsResource().replace(yoagentJobsState.items, 'jobs-push', options);
   return yoagentJobsState.items;
 }
 
@@ -716,6 +716,7 @@ function yoagentChatQueueHtml() {
 function applyYoagentConversationPayload(payload = {}, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
   if (!Object.prototype.hasOwnProperty.call(payload, 'messages')) return false;
+  if (options.source !== 'request') yoagentConversationState.guard.invalidate();
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   const hadPendingWaits = Array.isArray(yoagentConversationState.pendingWaits) && yoagentConversationState.pendingWaits.length > 0;
   yoagentConversationState.pendingWaits = Array.isArray(payload.pending_waits) ? payload.pending_waits : [];
@@ -725,7 +726,6 @@ function applyYoagentConversationPayload(payload = {}, options = {}) {
   yoagentConversationState.displayPath = String(payload.transcript_display_path || yoagentConversationState.path);
   yoagentConversationState.loaded = true;
   yoagentConversationState.loading = false;
-  if (options.source !== 'request') yoagentConversationResource().replace(payload, 'conversation-push', options);
   if (hadPendingWaits && !yoagentConversationState.pendingWaits.length && yoagentChatState.queue.length) {
     if (typeof queueMicrotask === 'function') queueMicrotask(() => drainYoagentChatQueue());
     else Promise.resolve().then(() => drainYoagentChatQueue());
@@ -737,7 +737,7 @@ function applyYoagentStreamPayload(payload = {}) {
   if (!payload || typeof payload !== 'object') return false;
   const streamId = String(payload.stream_id || '').trim();
   if (!streamId) return false;
-  yoagentConversationState.resource?.invalidate({source: 'stream'});
+  yoagentConversationState.guard.invalidate();
   if (!(yoagentConversationState.streamingMessages instanceof Map)) yoagentConversationState.streamingMessages = new Map();
   const createdAt = String(payload.created_at || new Date().toISOString());
   const content = String(payload.content || '');
@@ -1004,74 +1004,56 @@ function yoagentRecentAgentsMessageHtml() {
   });
 }
 
-function syncYoagentLatestResourceState(state, snapshot) {
-  state.loading = snapshot.loading;
-  state.request = snapshot.request;
-}
-
-function yoagentConversationResource() {
-  if (yoagentConversationState.resource) return yoagentConversationState.resource;
-  yoagentConversationState.resource = createLatestResource({
-    initial: null,
-    load: () => apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'}),
-    apply(payload) {
-      applyYoagentConversationPayload(payload, {source: 'request'});
-      return payload;
-    },
-    result: () => true,
-    staleResult: () => false,
-    failureResult: () => false,
-    onState(snapshot, event) {
-      syncYoagentLatestResourceState(yoagentConversationState, snapshot);
-      const options = event.context || {};
-      if (event.phase === 'failed' && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error: snapshot.error}));
-      if (event.phase === 'settled' && options.render !== false) {
-        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
-      }
-    },
-  });
-  return yoagentConversationState.resource;
-}
-
-function yoagentJobsResource() {
-  if (yoagentJobsState.resource) return yoagentJobsState.resource;
-  yoagentJobsState.resource = createLatestResource({
-    initial: yoagentJobsState.items,
-    load: () => apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'}),
-    apply(payload) {
-      applyYoagentJobsPayload(payload, {source: 'request'});
-      return yoagentJobsState.items;
-    },
-    result: () => true,
-    staleResult: () => false,
-    failureResult: () => false,
-    onState(snapshot, event) {
-      syncYoagentLatestResourceState(yoagentJobsState, snapshot);
-      const options = event.context || {};
-      if (event.phase === 'failed' && !options.silent) console.warn('YO!agent jobs refresh failed', snapshot.error);
-      if (event.phase === 'applied' && options.render !== false && yoagentPanelIsActive()) {
-        renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
-      }
-    },
-  });
-  return yoagentJobsState.resource;
-}
-
-function loadYoagentConversation(options = {}) {
+async function loadYoagentConversation(options = {}) {
   if (readOnlyMode) return false;
   if (yoagentConversationState.request && options.force !== true) return yoagentConversationState.request;
   if (yoagentConversationState.loaded && options.force !== true) return;
+  const requestIsCurrent = yoagentConversationState.guard.begin();
   yoagentConversationState.loading = true;
   if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom === true});
-  const target = options.force === true ? Symbol('forced-conversation') : 'conversation';
-  return yoagentConversationResource().read(target, options);
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/conversation', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      return applyYoagentConversationPayload(payload, {source: 'request'});
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) statusErr(localizedHtml('yoagent.conversationLoadFailed', {error}));
+      return false;
+    } finally {
+      if (yoagentConversationState.request === request) {
+        yoagentConversationState.loading = false;
+        yoagentConversationState.request = null;
+        if (options.render !== false) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom ?? false});
+      }
+    }
+  })();
+  yoagentConversationState.request = request;
+  return request;
 }
 
-function loadYoagentJobs(options = {}) {
+async function loadYoagentJobs(options = {}) {
   if (yoagentJobsState.request && options.force !== true) return yoagentJobsState.request;
+  const requestIsCurrent = yoagentJobsState.guard.begin();
   yoagentJobsState.loading = true;
-  const target = options.force === true ? Symbol('forced-jobs') : 'jobs';
-  return yoagentJobsResource().read(target, options);
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson('/api/yoagent/jobs', {cache: 'no-store'});
+      if (!requestIsCurrent()) return false;
+      applyYoagentJobsPayload(payload, {source: 'request'});
+      if (options.render !== false && yoagentPanelIsActive()) renderYoagentPanel({preserveDraft: true, scrollBottom: options.scrollBottom || false});
+      return true;
+    } catch (error) {
+      if (requestIsCurrent() && !options.silent) console.warn('YO!agent jobs refresh failed', error);
+      return false;
+    } finally {
+      if (yoagentJobsState.request === request) {
+        yoagentJobsState.loading = false;
+        yoagentJobsState.request = null;
+      }
+    }
+  })();
+  yoagentJobsState.request = request;
+  return request;
 }
 
 let yoagentAgentAvailabilityRefreshPromise = null;
@@ -1378,7 +1360,7 @@ function cancelActiveYoagentChatRequest() {
 }
 
 async function clearYoagentConversation() {
-  yoagentConversationState.resource?.invalidate({source: 'clear'});
+  yoagentConversationState.guard.invalidate();
   yoagentConversationState.messages = [];
   yoagentConversationState.pendingWaits = [];
   yoagentChatState.queue = [];
@@ -1471,7 +1453,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
   const requestId = yoagentNewChatRequestId();
   const streamId = requestId;
   const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  yoagentConversationState.resource?.invalidate({source: 'chat-send'});
+  yoagentConversationState.guard.invalidate();
   yoagentChatState.activeRequest = {id: requestId, streamId, controller, text, cancelled: false};
   const focusSerial = yoagentFocusSerial;
   const shouldRestoreFocus = yoagentChatInputIsFocused() && yoagentDocumentHasFocus();
@@ -1548,7 +1530,7 @@ function updateYoagentActionPreview(previewId, patch) {
 
 async function executeYoagentActionSend(previewId) {
   if (!previewId || readOnlyMode || yoagentChatState.busy) return;
-  yoagentConversationState.resource?.invalidate({source: 'action-send'});
+  yoagentConversationState.guard.invalidate();
   hideYoagentStartupInfo();
   yoagentChatState.busy = true;
   updateYoagentActionPreview(previewId, yoagentActionStatusPatch('yoagent.action.state.sending', 'sending'));

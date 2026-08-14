@@ -22,8 +22,6 @@ from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
-from .local_services.command_router import CommonDaemonActions
-from .local_services.command_router import LocalServiceCommandRouter
 from .local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_CODE_REVISION
@@ -47,14 +45,6 @@ STATUSD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # status dots stuck on "running" long after the agent actually stopped. Mirrors the pre-statusd
 # AUTO_APPROVE_CACHE_MAX_AGE_SECONDS safety net removed when this daemon replaced that cache.
 STATUSD_SNAPSHOT_MAX_AGE_SECONDS = 5.003
-
-STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
-    "ping": "_handle_ping", "status": "_handle_status", "profile": "_handle_status",
-    "snapshot": "_handle_snapshot", "inventory": "_handle_inventory",
-    "activity_summary": "_handle_activity_summary", "wait_generation": "_handle_wait_generation",
-    "invalidate": "_handle_invalidate", "lease": "_handle_lease", "release": "_handle_release",
-    "shutdown": "_handle_shutdown", "shutdown_if_idle": "_handle_shutdown_if_idle",
-})
 
 
 class PersistentStatusService(LocalRpcServiceState):
@@ -465,83 +455,65 @@ class PersistentStatusService(LocalRpcServiceState):
                 },
             }
 
-    def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return CommonDaemonActions.ping(
-            STATUSD_SERVICE_NAME,
-            STATUSD_PROTOCOL_VERSION,
-            pid=os.getpid(),
-            code_revision=STATUSD_CODE_REVISION,
-            build_revision=1,
-        )
-
-    def _handle_status(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return CommonDaemonActions.status(self.status)
-
-    @staticmethod
-    def _bad_request(error: StatusProtocolError) -> tuple[dict[str, Any], bytes]:
-        return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
-
-    def _handle_snapshot(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        try:
-            return self._snapshot(request)
-        except StatusProtocolError as error:
-            return self._bad_request(error)
-
-    def _handle_inventory(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        try:
-            return self._inventory(request)
-        except StatusProtocolError as error:
-            return self._bad_request(error)
-
-    def _handle_activity_summary(self, request: dict[str, Any], body: bytes) -> tuple[dict[str, Any], bytes]:
-        try:
-            return self._activity_summary(request, body)
-        except StatusProtocolError as error:
-            return self._bad_request(error)
-
-    def _handle_wait_generation(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self._wait_generation(request)
-
-    def _handle_invalidate(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        with self.lock:
-            self.invalidation_generation += 1
-            self.invalidation_reason = str(request.get("reason") or "external")[:80]
-            self.lock.notify_all()
-        return {"ok": True, "generation": self.generation}, b""
-
-    def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        with self.lock:
-            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
-            self.lock.notify_all()
-        return {**response, "version": STATUSD_PROTOCOL_VERSION}, b""
-
-    def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        with self.lock:
-            response = release_client_lease(self.leases, request.get("lease_id"))
-            self.lock.notify_all()
-        return response, b""
-
-    def _handle_shutdown(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        self.stop_event.set()
-        with self.lock:
-            self.lock.notify_all()
-        return {"ok": True, "shutdown": True}, b""
-
-    def _handle_shutdown_if_idle(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        with self.lock:
-            leased = bool(self.leases)
-        if leased:
-            return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
-        return self._handle_shutdown({}, b"")
-
     def handle(self, request: dict[str, Any], request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
         self.last_client_at = time.monotonic()
         try:
             request = validate_request(request)
         except StatusProtocolError as error:
             return {"ok": False, "error": str(error), "required_protocol_version": STATUSD_PROTOCOL_VERSION}, b""
-        response = STATUSD_COMMAND_ROUTER.dispatch(self, str(request["action"]), request, request_binary)
-        return response if response is not None else ({"ok": False, "error": "unknown status action"}, b"")
+        action = str(request["action"])
+        if action == "ping":
+            return {"ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION, "code_revision": STATUSD_CODE_REVISION, "build_revision": 1}, b""
+        if action in {"status", "profile"}:
+            return self.status(), b""
+        if action == "snapshot":
+            try:
+                return self._snapshot(request)
+            except StatusProtocolError as error:
+                return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
+        if action == "inventory":
+            try:
+                return self._inventory(request)
+            except StatusProtocolError as error:
+                return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
+        if action == "activity_summary":
+            try:
+                return self._activity_summary(request, request_binary)
+            except StatusProtocolError as error:
+                return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
+        if action == "wait_generation":
+            return self._wait_generation(request)
+        if action == "invalidate":
+            with self.lock:
+                self.invalidation_generation += 1
+                self.invalidation_reason = str(request.get("reason") or "external")[:80]
+                self.lock.notify_all()
+            return {"ok": True, "generation": self.generation}, b""
+        if action == "lease":
+            with self.lock:
+                response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
+                self.lock.notify_all()
+            return {**response, "version": STATUSD_PROTOCOL_VERSION}, b""
+        if action == "release":
+            with self.lock:
+                response = release_client_lease(self.leases, request.get("lease_id"))
+                self.lock.notify_all()
+            return response, b""
+        if action == "shutdown":
+            self.stop_event.set()
+            with self.lock:
+                self.lock.notify_all()
+            return {"ok": True, "shutdown": True}, b""
+        if action == "shutdown_if_idle":
+            with self.lock:
+                leased = bool(self.leases)
+            if leased:
+                return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
+            self.stop_event.set()
+            with self.lock:
+                self.lock.notify_all()
+            return {"ok": True, "shutdown": True}, b""
+        return {"ok": False, "error": "unknown status action"}, b""
 
     def run(self) -> int:
         self.start_refresh_worker()

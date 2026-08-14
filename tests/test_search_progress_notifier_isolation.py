@@ -1,7 +1,23 @@
-"""File-index test-scope callback and timer isolation."""
+"""A leaked search-progress notifier must not survive its owning test.
+
+`app.TmuxWebtermApp.__init__` wires `file_index.set_search_progress_notifier(self.publish_search_progress)`
+alongside five other background producers. The autouse `isolated_file_index_background_hooks` fixture is
+the one owner that clears those producers between tests; before this regression it cleared the other
+five but not the search-progress notifier. A test that built an App therefore leaked a notifier bound
+to that torn-down App, and a later test's background crawl -- or a coalescing daemon `Timer` scheduled
+by the prior crawl -- fired `notify_search_progress`, forwarding onto `write_shared_background_client_event`,
+which `mkdir`/`chmod`s the host-state `background-owner` dir. Under `-n16` load that surfaced as
+`PermissionError: [Errno 13]` on an unrelated worker's host-state directory.
+
+These tests exercise the fixture's reset (`conftest.reset_file_index_background_hooks`) directly, so the
+regression is deterministic: red before the notifier + coalescing clears are added to the helper, green
+after.
+"""
 
 from pathlib import Path
-import threading
+
+import conftest
+
 from yolomux_lib import file_index
 
 
@@ -9,20 +25,33 @@ def test_reset_clears_leaked_search_progress_notifier_and_coalescing():
     calls: list[dict] = []
     file_index.set_search_progress_notifier(lambda frame: calls.append(frame))
 
+    # A first emit fires immediately; a second within the coalescing window parks a pending frame and
+    # schedules a trailing daemon Timer -- both are state a prior test would leak into the next one.
     file_index.notify_search_progress(Path("/leaked/root"), 1, 1, None)
     file_index.notify_search_progress(Path("/leaked/root"), 1, 2, None)
     assert len(calls) == 1
-    assert file_index._SEARCH_PROGRESS_PENDING and file_index._SEARCH_PROGRESS_TIMERS
-    file_index.FileIndexTestScope().cleanup()
+    assert file_index._SEARCH_PROGRESS_PENDING
+    assert file_index._SEARCH_PROGRESS_TIMERS
+
+    # The fixture's owner reset must clear the notifier AND cancel/drop the coalescing state, so no
+    # leaked frame or timer can reach the shared bus after the owning test is gone.
+    conftest.reset_file_index_background_hooks()
+
     assert file_index._SEARCH_PROGRESS_NOTIFIER is None
-    assert file_index._SEARCH_PROGRESS_TIMERS == {} and file_index._SEARCH_PROGRESS_PENDING == {}
+    assert file_index._SEARCH_PROGRESS_TIMERS == {}
+    assert file_index._SEARCH_PROGRESS_PENDING == {}
 
 
 def test_leaked_late_notify_cannot_write_or_chmod_a_foreign_host_state_dir(tmp_path):
+    # Stand in for another test's host-state dir. The real leaked notifier would mkdir+chmod+write here
+    # (write_shared_background_client_event -> file_lock(..., dir_mode=0o700)); make it unwritable so any
+    # such touch raises exactly the cross-test PermissionError we are closing.
     foreign_dir = tmp_path / "hosts" / "deadbeef" / "background-owner"
     foreign_dir.mkdir(parents=True)
     foreign_target = foreign_dir / "client-events.json"
+
     touched: list[dict] = []
+
     def leaked_notifier(frame):
         foreign_dir.chmod(0o700)
         foreign_target.write_text("leaked")
@@ -30,98 +59,15 @@ def test_leaked_late_notify_cannot_write_or_chmod_a_foreign_host_state_dir(tmp_p
 
     file_index.set_search_progress_notifier(leaked_notifier)
     foreign_dir.chmod(0o000)
-    file_index.FileIndexTestScope().cleanup()
+
+    # The owner reset removes the leaked notifier before any late crawl can fire it.
+    conftest.reset_file_index_background_hooks()
+
+    # A late/leaked notify from the torn-down context is now inert: it never reaches the notifier, so it
+    # cannot mkdir, chmod, or write the foreign host-state dir.
     file_index.notify_search_progress(Path("/leaked/root"), 2, 3, None)
+
+    # Restore traversal before inspecting the tree (a mode-0 parent would fail the stat itself).
     foreign_dir.chmod(0o700)
-    assert touched == [] and not foreign_target.exists()
-
-
-def test_test_scope_waits_for_inflight_publication_then_rejects_late_delivery():
-    entered, release = threading.Event(), threading.Event()
-    delivered = []
-
-    def blocking_notifier(frame):
-        entered.set()
-        assert release.wait(timeout=5.0) is True
-        delivered.append(frame["revision"])
-
-    file_index.set_search_progress_notifier(blocking_notifier)
-    publisher = threading.Thread(target=file_index.notify_search_progress, args=(Path("/owned/root"), 1, 1, None), daemon=True)
-    publisher.start()
-    assert entered.wait(timeout=5.0) is True
-    cleaned = threading.Event()
-
-    def cleanup():
-        file_index.FileIndexTestScope().cleanup()
-        cleaned.set()
-
-    teardown = threading.Thread(target=cleanup, daemon=True); teardown.start()
-    assert teardown.is_alive() is True and cleaned.is_set() is False
-    release.set()
-    teardown.join(timeout=5.0); publisher.join(timeout=5.0)
-    assert cleaned.is_set() is True and delivered == [1]
-    file_index.notify_search_progress(Path("/owned/root"), 1, 2, None)
-    assert delivered == [1]
-
-
-def test_test_scope_cleanup_is_idempotent_and_body_failure_still_cleans():
-    scope = file_index.FileIndexTestScope()
-    scope.cleanup(); scope.cleanup()
-    try:
-        with scope:
-            file_index.set_background_owner_checker(lambda _role: False)
-            raise RuntimeError("fixture failure")
-    except RuntimeError as exc:
-        assert str(exc) == "fixture failure"
-    else:
-        raise AssertionError("fixture failure was not propagated")
-    assert file_index.background_owner_can_build() is True
-
-
-def test_test_scope_rejects_late_gate_and_clears_callbacks_in_order(monkeypatch):
-    entered, release = threading.Event(), threading.Event()
-    delivered, errors = [], []
-    real_scope_id = file_index._root_scope_id
-
-    def blocked_scope_id(root):
-        entered.set()
-        assert release.wait(timeout=5.0)
-        return real_scope_id(root)
-    monkeypatch.setattr(file_index, "_root_scope_id", blocked_scope_id)
-    file_index.set_search_progress_notifier(lambda frame: delivered.append(frame["revision"]))
-
-    def publish():
-        try:
-            file_index.notify_search_progress(Path("/owned/root"), 1, 1, None)
-        except BaseException as error:
-            errors.append(error)
-    publisher = threading.Thread(target=publish, daemon=True); publisher.start()
-    assert entered.wait(timeout=5.0)
-    file_index.FileIndexTestScope().cleanup(); release.set()
-    publisher.join(timeout=5.0); assert not publisher.is_alive() and delivered == [] and errors == []
-    observed = []
-    setters = zip(file_index.FileIndexTestScope.CALLBACK_CLEAR_ORDER, (
-        "set_background_owner_checker", "set_background_owner_refresh_requester",
-        "set_background_index_search_requester", "set_background_owner_bytes_recorder",
-        "set_background_owner_done_notifier", "set_search_progress_notifier",
-    ))
-    for label, name in setters:
-        monkeypatch.setattr(file_index, name, lambda value, label=label: observed.append((label, value)))
-    monkeypatch.setattr(file_index, "_reset_search_progress_coalescing", lambda: None); monkeypatch.setattr(file_index, "clear_memory_indexes", lambda: file_index.RetirementResult())
-    file_index.FileIndexTestScope().cleanup(); assert observed == [(label, None) for label in file_index.FileIndexTestScope.CALLBACK_CLEAR_ORDER]
-
-
-def test_test_scope_retries_cleanup_when_enter_cleanup_raises(monkeypatch):
-    cleanup_calls = []
-
-    def clear_memory_indexes():
-        cleanup_calls.append(len(cleanup_calls) + 1)
-        if len(cleanup_calls) == 1:
-            raise RuntimeError("setup cleanup failed")
-        return file_index.RetirementResult()
-    monkeypatch.setattr(file_index, "clear_memory_indexes", clear_memory_indexes)
-    try:
-        with file_index.FileIndexTestScope():
-            raise AssertionError("scope body must not run")
-    except RuntimeError as exc: assert str(exc) == "setup cleanup failed"
-    assert cleanup_calls == [1, 2]
+    assert touched == []
+    assert not foreign_target.exists()

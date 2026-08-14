@@ -1,9 +1,7 @@
 import json
 import signal
 
-from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
-from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
-from tests.helpers.local_service_records import FixtureProcessRecordBuilder
+from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services.preflight import preflight_port
 from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
@@ -18,15 +16,20 @@ def _table(rows):
 
 
 def _process_record(pid):
-    return FixtureProcessRecordBuilder(pid=pid).build()
+    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
 
 
 def _tracked_state(tmp_path, port=8881, web_pid=400, *, socket_name="jobd.sock", payload=None):
-    FixtureLeaseRecordBuilder(pid=web_pid, pgid=web_pid, port=port).write(tmp_path)
+    lease_dir = tmp_path / "server-leases"
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    (lease_dir / f"{port}.lock").write_text(
+        json.dumps({**_process_record(web_pid), "port": port}),
+        encoding="utf-8",
+    )
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
     jobd_socket = service_dir / socket_name
-    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=jobd_socket).build()
+    record = {**_process_record(500), "service": "jobd", "socket": str(jobd_socket)}
     if payload is not None:
         record["payload"] = payload
     (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
@@ -221,12 +224,12 @@ def test_tracked_child_count_breach_fires_containment(tmp_path):
 
 
 def _lease(tmp_path, port=8881, pid=400, pgid=400, members=None):
-    FixtureLeaseRecordBuilder(
-        pid=pid,
-        pgid=pgid,
-        port=port,
-        members=tuple(members or ()),
-    ).write(tmp_path)
+    lease_dir = tmp_path / "server-leases"
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    record = {**_process_record(pid), "pgid": pgid, "port": port}
+    if members is not None:
+        record["members"] = members
+    (lease_dir / f"{port}.lock").write_text(json.dumps(record), encoding="utf-8")
 
 
 def test_preflight_refuses_a_wedged_live_owner(tmp_path):

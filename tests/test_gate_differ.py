@@ -23,10 +23,20 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import retire_expected_fixture_typed_api_failure
 from tests.gate_harness import wait_for_browser_boot
 from tests.mock_git_repo import create_mock_git_repository
-from tests.helpers.gate_editor import A8_FRAME_COUNTS
-from tests.helpers.gate_editor import _a8_missing_snapshot, _a8_latch_transient_inode_miss, _a8_recovered_snapshot, _a8_replace_inode, _a8_wait_varying_subsecond_interval
-from tests.helpers.gate_editor import _wait_for_active_watchd_descriptor, _wait_for_watchd_path_change, _dirty_conflict_snapshot, _open_editor, _publish_file_change, _type_dirty_text, _wait_for_file_event_stream
-from tests.helpers.gate_editor import gate_browser_runtime
+from tests.test_gate_editor import A8_FRAME_COUNTS
+from tests.test_gate_editor import _a8_missing_snapshot
+from tests.test_gate_editor import _a8_latch_transient_inode_miss
+from tests.test_gate_editor import _a8_recovered_snapshot
+from tests.test_gate_editor import _a8_replace_inode
+from tests.test_gate_editor import _a8_wait_varying_subsecond_interval
+from tests.test_gate_editor import _wait_for_active_watchd_descriptor
+from tests.test_gate_editor import _wait_for_watchd_path_change
+from tests.test_gate_editor import _dirty_conflict_snapshot
+from tests.test_gate_editor import _open_editor
+from tests.test_gate_editor import _publish_file_change
+from tests.test_gate_editor import _type_dirty_text
+from tests.test_gate_editor import _wait_for_file_event_stream
+from tests.test_gate_editor import gate_browser_runtime
 from tests.terminal_state_guard import assert_terminal_transition
 from yolomux_lib import filesystem
 from yolomux_lib import server as server_module
@@ -105,14 +115,6 @@ def _control_filesystem_operation_product(
 
     monkeypatch.setattr(client, "produce", produce)
     monkeypatch.setattr(client, "product", product)
-
-
-def _settle_controlled_filesystem_operation(gate_browser_runtime, release):
-    """Release the fake product and retain its patch until the accepted completion is terminal."""
-    release.set()
-    gate_browser_runtime.runtime.app.wait_for_jobd_operations_terminal(3)
-
-
 DIFFER_TERMINAL_STATE_TIMEOUT_MS = 12_000
 DIFFER_STALL_CONTRACT_TIMEOUT_MS = 8_000
 API_FETCH_DEADLINE_MS = 15_000
@@ -836,7 +838,7 @@ def test_hung_fs_read_paints_visible_typed_deadline_error(gate_browser_runtime, 
             API_FETCH_CONTRACT_TIMEOUT_MS,
         )
     finally:
-        _settle_controlled_filesystem_operation(gate_browser_runtime, release_backing)
+        release_backing.set()
 
     assert backing_started.is_set(), "the /api/fs/read request never reached its deliberately hung callback"
     assert not metrics.get("error"), metrics
@@ -982,7 +984,7 @@ def test_hung_fs_diff_paints_visible_typed_deadline_error(gate_browser_runtime, 
             API_FETCH_CONTRACT_TIMEOUT_MS,
         )
     finally:
-        _settle_controlled_filesystem_operation(gate_browser_runtime, release_backing)
+        release_backing.set()
 
     assert backing_started.is_set(), "the /api/fs/diff request never reached its deliberately hung callback"
     assert not metrics.get("error"), metrics

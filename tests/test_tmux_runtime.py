@@ -1,5 +1,4 @@
 from pathlib import Path
-import ast
 import os
 import shlex
 import subprocess
@@ -288,9 +287,8 @@ def test_wait_for_isolated_tmux_panes_honors_a_fixed_interval_and_returns_last_c
 
 
 def test_e2e_auto_approve_routes_tmux_waits_through_the_selenium_free_shared_owner():
-    tree = ast.parse(Path(__file__).with_name("test_e2e_auto_approve.py").read_text(encoding="utf-8"))
-    imports = {(node.module, alias.name) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
-    functions = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
-    assert ("tests.tmux_runtime", "wait_for_isolated_tmux_panes") in imports
-    assert "_wait_until" not in functions and "sleep" not in calls
+    source = Path(__file__).with_name("test_e2e_auto_approve.py").read_text(encoding="utf-8")
+
+    assert "from tests.tmux_runtime import wait_for_isolated_tmux_panes" in source
+    assert "def _wait_until(" not in source
+    assert "time.sleep(0.4)" not in source

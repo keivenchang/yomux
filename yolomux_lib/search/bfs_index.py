@@ -509,10 +509,6 @@ class ProgressiveBuild:
                     # A clean post-unindex generation must not leave the deleted store's journal deltas
                     # readable; the high-water metadata stays (monotonic), so revisions never reuse.
                     conn.execute("DELETE FROM change_journal")
-                    # Invalidate the deleted store's publication proof in the SAME transaction that
-                    # clears its rows. Until this generation publishes its first directory, readers
-                    # must see startup-only metadata and fall back to the live filesystem walk.
-                    file_index._invalidate_snapshot_publication(conn)
                 # missing / equal / strictly-newer: initialize / resume / advance.
                 self._write_active_metadata(conn)
                 self._persist_frontier_item(conn, item)

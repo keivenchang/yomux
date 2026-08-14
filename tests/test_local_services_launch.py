@@ -27,9 +27,6 @@ from yolomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
 from tests.serving_process import pid_is_serving
-from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
-from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
-from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -109,8 +106,9 @@ def test_serving_predicate_rejects_a_real_unreaped_zombie():
             time.sleep(0.01)
         assert registry_mod.process_state(child) == "Z", registry_mod.process_state(child)
 
-        # Red for the retired oracle: the zombie retains its start ticks.
-        assert registry_mod.process_start_identity(child)
+        # Linux retains readable start ticks for a zombie; macOS libproc deliberately does not.
+        if sys.platform != "darwin":
+            assert registry_mod.process_start_identity(child)
         # Green for the shared predicate: a zombie is not serving.
         assert pid_is_serving(child) is False
         # Fails closed: this live test process is still serving.
@@ -368,6 +366,8 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
 
     assert args[:3] == [sys.executable, "-m", "yolomux_lib.jobd"]
     assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
+    inherited_paths = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
+    assert all(path in inherited_paths for path in sys.path if path)
     assert args[args.index("--socket") + 1] == str(registry.socket_path)
     assert args[args.index("--idle-seconds") + 1] == "12.5"
     assert args[-2:] == ["--workers", "1"]
@@ -700,7 +700,8 @@ def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypa
     }
 
 
-def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path):
+def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path, monkeypatch):
+    monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
@@ -725,7 +726,11 @@ def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup
         assert len(ownership.generation_marker) == 32
         assert ownership.member_identities
         process_entry = registry_mod.bounded_process_table().get(process.pid)
-        assert process_entry is not None
+        assert process_entry is not None, {
+            "poll": process.poll(),
+            "state": registry_mod.process_state(process.pid),
+            "identity": registry_mod.process_start_identity(process.pid),
+        }
         assert registry_mod.process_spawn_generation(process.pid) == ownership.generation_marker
 
         stop_fixture_local_service_process(
@@ -1829,20 +1834,20 @@ def _table(rows):
 
 
 def _process_record(pid):
-    return FixtureProcessRecordBuilder(pid=pid).build()
+    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
 
 
 def _write_service_record(service_dir, name, pid, socket_path):
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / f"{name}.service.json").write_text(
-        registry_mod.json.dumps(FixtureLocalServiceRecordBuilder(service=name, socket_path=socket_path, pid=pid).build()),
+        registry_mod.json.dumps({**_process_record(pid), "service": name, "socket": str(socket_path)}),
         encoding="utf-8",
     )
 
 
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
     socket_path = tmp_path / "services" / "jobd.sock"
-    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=socket_path, pid=100).build()
+    record = {**_process_record(100), "service": "jobd", "socket": str(socket_path)}
     with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
@@ -1882,7 +1887,12 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
 
 
 def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
-    FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
+    lease_dir = tmp_path / "server-leases"
+    lease_dir.mkdir(parents=True)
+    (lease_dir / "8881.lock").write_text(
+        registry_mod.json.dumps({**_process_record(400), "port": 8881}),
+        encoding="utf-8",
+    )
     good = _table(
         [
             (400, 1, 400, 50.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),

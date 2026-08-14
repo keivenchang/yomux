@@ -207,7 +207,7 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           };
           const warm = async (rangeSeconds, resolutionSeconds) => {
             setDebugGraphRange(rangeSeconds);
-            if (Number(debugRuntimeState.graphResolutionOverrideSeconds) !== resolutionSeconds) {
+            if (Number(jsDebugGraphResolutionOverrideSeconds) !== resolutionSeconds) {
               setDebugGraphResolutionOverride(resolutionSeconds);
             }
             await waitForGeneration(rangeSeconds, resolutionSeconds);
@@ -244,8 +244,8 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           stopJsDebugStatsPolling();
           clearJsDebugGraphData();
           resetJsDebugHistoryReadiness();
-          debugRuntimeState.graphRangeSeconds = 900;
-          debugRuntimeState.graphResolutionOverrideSeconds = 10;
+          jsDebugGraphRangeSeconds = 900;
+          jsDebugGraphResolutionOverrideSeconds = 10;
           const client = YOLOmuxStatsCurrent.createBrowserClient({
             fetch: fixtureFetch,
             EventSource: FixtureEventSource,

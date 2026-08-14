@@ -26,13 +26,16 @@ from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import open_gate_stats_surface
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.helpers.browser_stats_coverage import _current_stats_fixture_html, _start_current_stats, _write_current_stats_fixture_assets
-from tests.helpers.gate_stats import NOW, _seed_realistic_stats
+from tests.test_browser_stats_coverage import _current_stats_fixture_html
+from tests.test_browser_stats_coverage import _start_current_stats
+from tests.test_browser_stats_coverage import _write_current_stats_fixture_assets
+from tests.test_gate_stats_range import NOW
+from tests.test_gate_stats_range import _seed_realistic_stats
 from tools.mockers.transcript import append_record as _append_record
 from tools.mockers.transcript import codex_meta as _codex_meta
 from tools.mockers.transcript import codex_usage as _codex_usage
 from tools.mockers.transcript import write_records as _write_records
-from tests.helpers.gate_stats import commit_scan as _commit
+from tests.test_stats_current_transcripts import _commit
 from yolomux_lib import server as server_module
 from yolomux_lib import app as app_module
 from yolomux_lib import web as web_module

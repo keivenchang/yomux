@@ -77,12 +77,9 @@ from dataclasses import dataclass
 from dataclasses import field
 from types import MappingProxyType
 from typing import Any
-from typing import cast
-from typing import TypedDict
 
 from .filesystem.io_ops import read_json_file
 from .local_services import registry as local_services_registry
-from .local_services.runtime import local_service_failure_text
 
 
 # The frozen inventory. This is the one place the six ids and their order are
@@ -137,101 +134,6 @@ IDENTITY_OK = ""
 IDENTITY_NO_RECORD = "no_service_record"
 IDENTITY_RECORD_UNREADABLE = "service_record_unreadable"
 IDENTITY_NOT_CURRENT = "process_identity_unverified"
-
-
-class LocalServiceRuntimeRow(TypedDict, total=False):
-    """The common wire shape produced for one local service.
-
-    Service-specific diagnostics remain optional fields.  Keeping this a
-    ``TypedDict`` preserves the existing runtime dictionaries while giving all
-    producers one named boundary that static tooling can check.
-    """
-
-    service: str
-    pid: int
-    started_at: float
-    version: int
-    healthy: bool
-    last_failure: str
-    resources: dict[str, Any]
-    demand_started: bool
-    absence_expected_reason: str
-    socket: str
-    clients: int
-    queues: dict[str, Any]
-    cache: dict[str, Any]
-
-
-def local_service_runtime_row(
-    service: str,
-    *,
-    pid: int,
-    started_at: float,
-    version: int | None,
-    healthy: bool,
-    last_failure: str,
-    resources: Mapping[str, Any],
-    fields_before_failure: Mapping[str, Any] | None = None,
-    fields_after_failure: Mapping[str, Any] | None = None,
-    fields_after_resources: Mapping[str, Any] | None = None,
-) -> LocalServiceRuntimeRow:
-    """Project common fields while preserving each established wire-key order."""
-
-    row = cast(LocalServiceRuntimeRow, {
-        "service": service,
-        "pid": int(pid),
-        "started_at": float(started_at),
-    })
-    if version is not None:
-        row["version"] = int(version)
-    row["healthy"] = bool(healthy)
-    if fields_before_failure:
-        row.update(fields_before_failure)
-    row["last_failure"] = str(last_failure)
-    if fields_after_failure:
-        row.update(fields_after_failure)
-    row["resources"] = dict(resources)
-    if fields_after_resources:
-        row.update(fields_after_resources)
-    return row
-
-
-def registry_runtime_row(
-    service: str,
-    registry: Any,
-    status: Mapping[str, Any],
-    payload: Mapping[str, Any],
-    *,
-    fields_before_failure: Mapping[str, Any] | None = None,
-    fields_after_failure: Mapping[str, Any] | None = None,
-    fields_after_resources: Mapping[str, Any] | None = None,
-    resource_pids: Sequence[int] | None = None,
-    include_version: bool = True,
-) -> LocalServiceRuntimeRow:
-    """Adapt an already-read registry status into the shared row projection.
-
-    The caller owns the status read.  This helper never probes, starts, leases,
-    retries, or otherwise changes a daemon's lifecycle.
-    """
-
-    pid = int(payload.get("pid") or 0)
-    resources = (
-        registry.resources_for_pids(pid, list(resource_pids))
-        if resource_pids is not None
-        else registry.resources(pid)
-    )
-    return local_service_runtime_row(
-        service,
-        pid=pid,
-        started_at=float(payload.get("started_at") or 0.0),
-        version=int(payload.get("version") or 0) if include_version else None,
-        healthy=bool(status.get("healthy")),
-        last_failure=local_service_failure_text(dict(status), dict(payload)),
-        resources=resources,
-        fields_before_failure=fields_before_failure,
-        fields_after_failure=fields_after_failure,
-        fields_after_resources=fields_after_resources,
-    )
 
 
 @dataclass(frozen=True)

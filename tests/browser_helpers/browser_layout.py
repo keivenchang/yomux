@@ -1,9 +1,9 @@
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from pathlib import Path
 import atexit
 import contextlib
 import difflib
+import functools
 from http import HTTPStatus
 import http.server
 from io import BytesIO
@@ -37,7 +37,6 @@ from yolomux_lib import web
 from yolomux_lib import yolo_rules as yolo_rules_module
 from yolomux_lib import server_auth
 from yolomux_lib.locales import locale_registry_payload
-from yolomux_lib.http_routes import route_for_request
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.server_logs import SERVER_LOGS
@@ -49,26 +48,13 @@ from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
 from tests.browser_helpers.webdriver_lease import WebDriverLease
 from tests.browser_helpers.webdriver_lease import retire_all
-from tests.helpers.fixture_content_root import FixtureContentRoot
-from tests.helpers.browser_boot import BROWSER_BOOT_PRESETS
-from tests.helpers.browser_boot import BROWSER_BOOT_ROUTES
-from tests.helpers.browser_boot import BrowserBootRoute
-from tests.helpers.browser_boot import BrowserBootScenario
-from tests.helpers.browser_boot import PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE
-from tests.helpers.browser_boot import PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE
-from tests.browser_helpers.visual_contracts import css_color_rgb as _css_color_rgb
-from tests.browser_helpers.visual_contracts import css_hex_to_rgb
-from tests.browser_helpers.visual_contracts import wcag_contrast_ratio
 from tests.gate_harness import finish_browser_fixture_boundary
-from tests.gate_harness import GateLiveServer
-from tests.gate_harness import GateLiveServerOptions
 from tests.gate_harness import patch_imported_writable_constants
 from tests.gate_harness import prepare_fixture_http_app
 from tests.gate_harness import rollback_failed_fixture_http_start
 from tests.gate_harness import run_fixture_cleanup_phases
 from tests.gate_harness import stop_fixture_app_runtime
 from tests.gate_harness import stop_fixture_http_app
-from tests.gate_harness import start_fixture_live_server
 from tests.gate_harness import track_fixture_http_requests
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import wait_for_fixture_client_event_demand
@@ -245,7 +231,14 @@ LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 # still work over file://, but routing them through http too is harmless and uniform.
 _FIXTURE_HTTP_BASE: str | None = None
 _FIXTURE_HTTP_LOCK = threading.Lock()
-_FIXTURE_CONTENT_ROOT = FixtureContentRoot.create(REPO_ROOT)
+_FIXTURE_PAGE_SEQ = 0
+# The canonical gate runs e2e, browser, and non-browser as separate `python3 -m pytest` PROCESSES
+# concurrently. Each process reuses the same xdist worker names (gw0, gw1, ...) and keeps its own
+# process-local _FIXTURE_PAGE_SEQ, so a bare `<worker>-<seq>-<filename>` path collided across lanes:
+# one lane overwrote another lane's fixture file at the shared REPO_ROOT, and a test then loaded a
+# foreign page (e.g. a stats fixture whose expected bucket `.start` was absent, crashing the reader).
+# Stamp a per-process PID+nonce namespace so two processes can never choose the same fixture path.
+_FIXTURE_PAGE_NAMESPACE = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 _EMPTY_FAVICON_HTML = '<link rel="icon" data-yolomux-favicon href="data:,">'
 _FIXTURE_PIXEL_GIF = bytes.fromhex(
     "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
@@ -259,7 +252,8 @@ def _fixture_http_base() -> str:
     with _FIXTURE_HTTP_LOCK:
         if _FIXTURE_HTTP_BASE:
             return _FIXTURE_HTTP_BASE
-        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _QuietHttpFixtureHandler)
+        handler = functools.partial(_QuietHttpFixtureHandler, directory=str(REPO_ROOT))
+        httpd = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler)
         httpd.daemon_threads = True
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         atexit.register(httpd.shutdown)
@@ -268,10 +262,6 @@ def _fixture_http_base() -> str:
 
 
 class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
-    def translate_path(self, path):
-        resolved = _FIXTURE_CONTENT_ROOT.resolve_request_path(path)
-        return str(resolved) if resolved is not None else str(_FIXTURE_CONTENT_ROOT.root / ".missing")
-
     def do_GET(self):  # noqa: N802 - inherited HTTP handler API
         parsed = urlsplit(self.path)
         if parsed.path == "/favicon.ico":
@@ -330,20 +320,27 @@ def fixture_asset_url(*parts: str) -> str:
 
 
 def serve_repo_fixture_page(filename: str, html: str) -> Path:
-    """Write a fixture page into this process's private served root and return its Path.
+    """Write a fixture page into REPO_ROOT (the served root) and return its Path.
 
-    The page lives at the HTTP origin root while `/static/*` resolves read-only from
-    the repository, so assets remain same-origin. A fresh URL per load avoids Chrome's
-    back/forward cache restoring a prior page's live JS state. A crash can leave only
-    the process's temporary root, never a repository file.
-    """
+    The page lives at the served root so its absolute fixture_asset_url() assets are
+    same-origin. Each call gets a UNIQUE URL (monotonic sequence): all fixtures now share
+    one http origin, so reusing a URL let Chrome's back/forward cache restore a prior page's
+    live JS state (e.g. share-replay epoch) into the next test. A fresh URL per load avoids
+    that. Removed at process exit; gitignored via .browser-fixture-*."""
+    global _FIXTURE_PAGE_SEQ
     worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
-    return _FIXTURE_CONTENT_ROOT.write_page(worker, filename, html)
+    with _FIXTURE_HTTP_LOCK:
+        _FIXTURE_PAGE_SEQ += 1
+        seq = _FIXTURE_PAGE_SEQ
+    page = REPO_ROOT / f".browser-fixture-{worker}-{_FIXTURE_PAGE_NAMESPACE}-{seq}-{filename}"
+    page.write_text(html, encoding="utf-8")
+    atexit.register(page.unlink, missing_ok=True)
+    return page
 
 
 def fixture_page_url(page: Path, search: str = "") -> str:
-    """Same-origin http:// URL for a fixture page served from the private root."""
-    return f"{_fixture_http_base()}{_FIXTURE_CONTENT_ROOT.url_path(page)}{search}"
+    """Same-origin http:// URL for a fixture page served from REPO_ROOT."""
+    return f"{_fixture_http_base()}/{page.name}{search}"
 
 _APP_CSS_CACHE: str | None = None
 _APP_ENGLISH_STRINGS_CACHE: Mapping[str, str] | None = None
@@ -502,6 +499,41 @@ def set_browser_visual_profile(browser, *, theme="dark", dpr=1):
     return browser.execute_script("return {theme: document.body.className, dpr: window.devicePixelRatio};")
 
 
+def _css_color_rgb(color):
+    value = str(color or "").strip()
+    if value.startswith("#"):
+        digits = value[1:]
+        if len(digits) == 3:
+            digits = "".join(character * 2 for character in digits)
+        if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+            raise ValueError(f"unsupported CSS color: {color!r}")
+        return tuple(float(int(digits[index:index + 2], 16)) for index in (0, 2, 4))
+    srgb = re.fullmatch(
+        r"color\(\s*srgb\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)\s+([-+]?[\d.]+)(?:\s*/\s*[^)]+)?\s*\)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if srgb:
+        return tuple(max(0.0, min(255.0, float(srgb.group(index)) * 255.0)) for index in (1, 2, 3))
+    match = re.match(r"rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)", value)
+    if not match:
+        raise ValueError(f"unsupported CSS color: {color!r}")
+    return tuple(max(0.0, min(255.0, float(match.group(index)))) for index in (1, 2, 3))
+
+
+def wcag_contrast_ratio(first, second):
+    def relative_luminance(color):
+        channels = []
+        for value in _css_color_rgb(color):
+            channel = value / 255.0
+            channels.append(channel / 12.92 if channel <= 0.03928 else ((channel + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+    left = relative_luminance(first)
+    right = relative_luminance(second)
+    return (max(left, right) + 0.05) / (min(left, right) + 0.05)
+
+
 def app_css() -> str:
     # The shipped app stylesheet, read once and reused. Every Selenium fixture used to re-read
     # static/yolomux.css from disk (~36 reads per run); the content is identical every time.
@@ -539,6 +571,17 @@ def ui_pin(name: str) -> str:
     if not isinstance(value, str) or not value:
         raise KeyError(f"unknown string UI pin: {name}")
     return value
+
+
+def css_hex_to_rgb(value: str) -> str:
+    """Convert a #rgb/#rrggbb pin into Selenium's computed `rgb(r, g, b)` spelling."""
+    digits = str(value or "").strip().removeprefix("#")
+    if len(digits) == 3:
+        digits = "".join(character * 2 for character in digits)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", digits):
+        raise ValueError(f"expected #rgb or #rrggbb, got {value!r}")
+    red, green, blue = (int(digits[index:index + 2], 16) for index in (0, 2, 4))
+    return f"rgb({red}, {green}, {blue})"
 
 
 def ui_pin_rgb(name: str) -> str:
@@ -704,68 +747,28 @@ def cleanup_isolated_browser_runtime_paths(paths):
     shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
 
 
-@dataclass(frozen=True)
-class FixtureRuntimeOptions:
-    session_count: int = 1
-    dangerously_yolo: bool = True
-    session_cwd: Path | None = None
-
-
-@dataclass
-class FixtureRuntime:
-    app: object
-    sessions: list[str]
-    tmux: object
-    paths: object
-
-    def close(self) -> None:
-        run_fixture_cleanup_phases("isolated browser app", (
-            ("app runtime", lambda: stop_fixture_app_runtime(self.app, label="isolated browser app")),
-            ("tmux runtime", lambda: stop_isolated_tmux_runtime(self.tmux)),
-            ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(self.paths)),
-        ))
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _error_type, _error, _traceback):
-        self.close()
-
-
-def start_fixture_runtime(monkeypatch, tmp_path, options: FixtureRuntimeOptions) -> FixtureRuntime:
+def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
     paths = None
     tmux_runtime = None
     try:
         paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-        tmux_runtime = start_isolated_tmux_runtime(
-            monkeypatch,
-            tmp_path,
-            session_count=options.session_count,
-            session_cwd=options.session_cwd,
-        )
-        app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=options.dangerously_yolo)
-        return FixtureRuntime(app, list(tmux_runtime.sessions), tmux_runtime, paths)
+        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=session_count, session_cwd=session_cwd)
+        app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=dangerously_yolo)
+        return SimpleNamespace(app=app, sessions=list(tmux_runtime.sessions), tmux=tmux_runtime, paths=paths)
     except Exception:
         stop_isolated_tmux_runtime(tmux_runtime)
         cleanup_isolated_browser_runtime_paths(paths)
         raise
 
 
-def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
-    return start_fixture_runtime(
-        monkeypatch,
-        tmp_path,
-        FixtureRuntimeOptions(session_count, dangerously_yolo, session_cwd),
-    )
-
-
 def stop_isolated_browser_share_app(runtime):
     if runtime is None:
         return
-    if isinstance(runtime, FixtureRuntime):
-        runtime.close()
-        return
-    FixtureRuntime(runtime.app, list(getattr(runtime, "sessions", ())), runtime.tmux, runtime.paths).close()
+    run_fixture_cleanup_phases("isolated browser app", (
+        ("app runtime", lambda: stop_fixture_app_runtime(runtime.app, label="isolated browser app")),
+        ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime.tmux)),
+        ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(runtime.paths)),
+    ))
 
 
 def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
@@ -775,14 +778,23 @@ def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, 
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     if auth_bypass:
         monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
-    runtime = start_fixture_live_server(
-        monkeypatch,
-        app,
-        GateLiveServerOptions(tls_context=tls_context, label="isolated browser"),
-    )
-    runtime.server._fixture_server_log_boundary = runtime.server_log_boundary
-    runtime.server._fixture_gate_live_server = runtime
-    return runtime.server, runtime.thread
+    server_log_boundary = SERVER_LOGS.payload()
+    prepare_fixture_http_app(monkeypatch, app)
+    server = None
+    thread = None
+    try:
+        server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
+        server._fixture_server_log_boundary = server_log_boundary
+        track_fixture_http_requests(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+    except BaseException as start_error:
+        try:
+            rollback_failed_fixture_http_start(app, server, thread, label="isolated browser")
+        except BaseException as rollback_error:
+            raise start_error.with_traceback(start_error.__traceback__) from rollback_error
+        raise
+    return server, thread
 
 
 def stop_browser_share_server(
@@ -795,8 +807,7 @@ def stop_browser_share_server(
     wait_for_api_quiescence=True,
 ):
     invalid_browser_arguments = browser is not None and browsers
-    runtime = getattr(server, "_fixture_gate_live_server", None)
-    base_url = runtime.base_url if isinstance(runtime, GateLiveServer) else f"http://127.0.0.1:{server.server_address[1]}"
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
     owned_browsers = (browser, *tuple(browsers)) if invalid_browser_arguments else (tuple(browsers) if browsers else browser)
     validation_error = (
         ValueError("pass either browser or browsers to stop_browser_share_server, not both")
@@ -804,23 +815,15 @@ def stop_browser_share_server(
         else None
     )
     try:
-        if isinstance(runtime, GateLiveServer):
-            runtime.finish(
-                owned_browsers,
-                server_log_reader=server_log_reader,
-                wait_for_api_quiescence=wait_for_api_quiescence,
-                require_owned_browsers=bool(browsers) or browser is not None,
-            )
-        else:
-            finish_browser_fixture_boundary(
-                owned_browsers,
-                base_url,
-                lambda: stop_fixture_http_app(server.app, server, thread, label="isolated browser"),
-                server_log_reader=server_log_reader,
-                server_log_boundary=getattr(server, "_fixture_server_log_boundary", None),
-                wait_for_api_quiescence=wait_for_api_quiescence,
-                require_owned_browsers=bool(browsers) or browser is not None,
-            )
+        finish_browser_fixture_boundary(
+            owned_browsers,
+            base_url,
+            lambda: stop_fixture_http_app(server.app, server, thread, label="isolated browser"),
+            server_log_reader=server_log_reader,
+            server_log_boundary=getattr(server, "_fixture_server_log_boundary", None),
+            wait_for_api_quiescence=wait_for_api_quiescence,
+            require_owned_browsers=bool(browsers) or browser is not None,
+        )
     except BaseException as cleanup_error:
         if validation_error is not None:
             raise validation_error from cleanup_error
@@ -956,7 +959,6 @@ def _reset_reused_browser_state(driver, *, retired_origin=None):
     driver.delete_all_cookies()
     driver.execute_cdp_cmd("Browser.resetPermissions", {})
     driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
-    driver.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
     driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
     driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
     read_browser_console_log(driver)
@@ -2269,23 +2271,38 @@ def split_seam_fixture_html():
     )
 
 
-def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
-    sessions = list(scenario.sessions)
-    settings = dict(scenario.settings)
-    bootstrap: dict[str, object] = {
+def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
+    css = app_css()
+    brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
+    script_uri = runtime_script_uri or fixture_asset_url("static", "yolomux.js")
+    dockview_css_uri = fixture_asset_url("static", "vendor", "dockview.css")
+    dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
+    settings = settings or {}
+    sessions = sessions or ["1"]
+    stats_capabilities = stats_resolution.wire_capabilities()
+    session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
+    fs_entries = fs_entries or {}
+    bootstrap = {
         "sessions": sessions,
-        "availableAgents": list(scenario.available_agents) if scenario.available_agents is not None else ["term"],
-        "accessRole": scenario.access_role,
-        "authUsername": scenario.auth_username if scenario.share_bootstrap is None else "",
-        "dangerouslyYolo": scenario.dangerously_yolo,
+        "availableAgents": list(available_agents) if available_agents is not None else ["term"],
+        "accessRole": access_role,
+        "authUsername": auth_username if share_bootstrap is None else "",
+        "dangerouslyYolo": dangerously_yolo,
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
+        # From the server that states it on every real page, never a literal here: the bundle
+        # fails closed to one request per item when the payload states no bound, so a fixture
+        # missing this block boots the Finder in an unbatched mode no user ever sees.
         "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
         "serverHostname": "localhost",
         "version": "test",
         "versionCommitTime": "test",
-        "settingsPayload": {"settings": settings, "defaults": settings_module.default_settings(), "mtime_ns": 0},
+        "settingsPayload": {
+            "settings": settings,
+            "defaults": settings_module.default_settings(),
+            "mtime_ns": 0,
+        },
         "statsWriterFence": {
             "protocol_version": stats_storage.MIN_WRITER_PROTOCOL,
             "schema_generation": stats_storage.SCHEMA_VERSION,
@@ -2297,77 +2314,16 @@ def build_browser_bootstrap(scenario: BrowserBootScenario) -> dict[str, object]:
             "errors": [],
         },
         "codeMirrorAssetUrl": fixture_asset_url("static", "codemirror.js"),
+        # the real page inlines the active locale catalog so t() resolves on the first render
+        # (the menu bar paints at boot). Mirror that here so the live-boot menu shows real labels.
         "locale": "en",
         "localeRegistry": locale_registry_payload(),
         "strings": {"en": dict(app_english_strings())},
     }
-    if scenario.share_bootstrap is not None:
-        bootstrap["share"] = dict(scenario.share_bootstrap)
-    if scenario.agent_auth is not None:
-        bootstrap["agentAuth"] = dict(scenario.agent_auth)
-    return bootstrap
-
-
-def validate_browser_boot_routes(stub_script: str) -> None:
-    for route in BROWSER_BOOT_ROUTES:
-        marker = f"url.pathname === '{route.path}'"
-        if stub_script.count(marker) != 1:
-            raise AssertionError(f"browser boot route {route.path!r} requires exactly one fake handler")
-        for method in route.methods:
-            if route_for_request(method, route.path) is None:
-                raise AssertionError(f"browser boot fake is more permissive than GateLiveServer: {method} {route.path}")
-
-
-def browser_boot_production_contract_errors(bootstrap: Mapping[str, object]) -> tuple[str, ...]:
-    production = json.loads(re.search(
-        r'<script id="yolomux-bootstrap" type="application/json">(.*?)</script>',
-        web.html_page(["1"]),
-        re.DOTALL,
-    ).group(1))
-    missing = (
-        set(production)
-        - set(bootstrap)
-        - PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE
-        - PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE
-    )
-    extra_unsupported = PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE - set(production)
-    return tuple(sorted((*[f"missing:{key}" for key in missing], *[f"stale-unsupported:{key}" for key in extra_unsupported])))
-
-
-def build_browser_boot_dom_shell(rendered_html: str) -> str:
-    """Named DOM-shell boundary; initially preserves the characterized bytes exactly."""
-
-    return rendered_html
-
-
-def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
-    settings = scenario.settings
-    transcript_current_path = scenario.transcript_current_path
-    transcript_git_root = scenario.transcript_git_root
-    session_files_payload = dict(scenario.session_files_payload) if scenario.session_files_payload is not None else None
-    fs_entries = dict(scenario.fs_entries)
-    sessions = list(scenario.sessions)
-    transcript_sessions = dict(scenario.transcript_sessions)
-    session_files_payloads = dict(scenario.session_files_payloads)
-    terminal_css = scenario.terminal_css
-    grid_width = scenario.grid_width
-    grid_height = scenario.grid_height
-    file_explorer_open_intent = scenario.file_explorer_open_intent
-    auto_approve_payload = dict(scenario.auto_approve_payload) if scenario.auto_approve_payload is not None else None
-    share_status_payload = dict(scenario.share_status_payload) if scenario.share_status_payload is not None else None
-    wrap_app_root = scenario.wrap_app_root
-    yoagent_chat_mode = scenario.yoagent_chat_mode
-    background_status_payload = dict(scenario.background_status_payload) if scenario.background_status_payload is not None else None
-    hold_auto_approve = scenario.hold_auto_approve
-    css = app_css()
-    brand_css = (REPO_ROOT / "static" / "brand.css").read_text(encoding="utf-8")
-    script_uri = scenario.runtime_script_uri or fixture_asset_url("static", "yolomux.js")
-    dockview_css_uri = fixture_asset_url("static", "vendor", "dockview.css")
-    dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
-    stats_capabilities = stats_resolution.wire_capabilities()
-    session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
-    fs_entries = fs_entries or {}
-    bootstrap = build_browser_bootstrap(scenario)
+    if share_bootstrap is not None:
+        bootstrap["share"] = share_bootstrap
+    if agent_auth is not None:
+        bootstrap["agentAuth"] = agent_auth
     file_explorer_intent_script = ""
     if file_explorer_open_intent is not None:
         file_explorer_intent_script = f"""
@@ -2385,7 +2341,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       window.__terminalOpened = 0;
       window.__terminalResizeCalls = [];
       window.__settingsMtime = 0;
-      window.__fixtureRouteMethods = __BROWSER_BOOT_ROUTE_METHODS__;
       window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
       window.__fixtureServerLogsPayload = {
         ok: true,
@@ -2668,12 +2623,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
       window.fetch = async (input, options = {}) => {
         const url = new URL(String(input), 'https://localhost');
         const body = options.body ? JSON.parse(options.body || '{}') : null;
-        const method = String(options.method || 'GET').toUpperCase();
-        window.__bootFetches.push({path: url.pathname, search: url.search, method, body});
-        const allowedMethods = window.__fixtureRouteMethods[url.pathname];
-        if (allowedMethods && !allowedMethods.includes(method)) {
-          return jsonResponse({error: 'fixture method not allowed'}, 405);
-        }
+        window.__bootFetches.push({path: url.pathname, search: url.search, method: options.method || 'GET', body});
         if (url.pathname === '/api/chat/bootstrap') {
           if (window.__fixtureHoldChatBootstrap) {
             await new Promise(resolve => { window.__fixtureReleaseChatBootstrap = resolve; });
@@ -3044,15 +2994,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         return jsonResponse({});
       };
     """
-    stub_script = stub_script.replace(
-        "__BROWSER_BOOT_ROUTE_METHODS__",
-        json.dumps({route.path: route.methods for route in BROWSER_BOOT_ROUTES}, separators=(",", ":")),
-    )
-    validate_browser_boot_routes(stub_script)
-    contract_errors = browser_boot_production_contract_errors(bootstrap)
-    if contract_errors:
-        raise AssertionError(f"browser boot bootstrap contract mismatch: {contract_errors}")
-    return build_browser_boot_dom_shell(f"""
+    return f"""
     <!doctype html>
     <html>
       <head>
@@ -3128,39 +3070,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         <script>window.{LIVE_RUNTIME_BUNDLE_SENTINEL} = true;</script>
       </body>
     </html>
-    """)
-
-
-def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/home/test/yolomux.dev", transcript_git_root="/home/test/yolomux.dev", session_files_payload=None, fs_entries=None, sessions=None, transcript_sessions=None, session_files_payloads=None, terminal_css=".terminal { width: 720px; height: 360px; }", grid_width=1000, grid_height=620, file_explorer_open_intent=None, auto_approve_payload=None, access_role="admin", auth_username="alice", share_bootstrap=None, share_status_payload=None, wrap_app_root=False, yoagent_chat_mode=None, available_agents=None, agent_auth=None, background_status_payload=None, runtime_script_uri=None, dangerously_yolo=False, hold_auto_approve=False):
-    """Compatibility facade for existing callers; BrowserBootScenario owns the fixture."""
-
-    return render_browser_boot_scenario(BrowserBootScenario(
-        settings=MappingProxyType(dict(settings or {})),
-        transcript_current_path=transcript_current_path,
-        transcript_git_root=transcript_git_root,
-        session_files_payload=session_files_payload,
-        fs_entries=MappingProxyType(dict(fs_entries or {})),
-        sessions=tuple(sessions or ("1",)),
-        transcript_sessions=MappingProxyType(dict(transcript_sessions or {})),
-        session_files_payloads=MappingProxyType(dict(session_files_payloads or {})),
-        terminal_css=terminal_css,
-        grid_width=grid_width,
-        grid_height=grid_height,
-        file_explorer_open_intent=file_explorer_open_intent,
-        auto_approve_payload=auto_approve_payload,
-        access_role=access_role,
-        auth_username=auth_username,
-        share_bootstrap=share_bootstrap,
-        share_status_payload=share_status_payload,
-        wrap_app_root=wrap_app_root,
-        yoagent_chat_mode=yoagent_chat_mode,
-        available_agents=tuple(available_agents) if available_agents is not None else None,
-        agent_auth=agent_auth,
-        background_status_payload=background_status_payload,
-        runtime_script_uri=runtime_script_uri,
-        dangerously_yolo=dangerously_yolo,
-        hold_auto_approve=hold_auto_approve,
-    ))
+    """
 
 
 def load_static_html_fixture(browser, tmp_path, filename, html):

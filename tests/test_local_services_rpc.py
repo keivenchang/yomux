@@ -18,8 +18,9 @@ from yolomux_lib.local_services.client import LocalServiceClient
 @pytest.fixture(autouse=True)
 def _isolated_local_service_traffic():
     """Every traffic assertion measures only its own requests."""
-    with rpc.local_service_traffic_scope():
-        yield
+    rpc.reset_local_service_traffic()
+    yield
+    rpc.reset_local_service_traffic()
 
 
 class FragmentedConnection:
@@ -768,31 +769,6 @@ def test_local_service_traffic_ledger_publishes_exact_count_total_and_max():
     assert ledger.snapshot()["schema_version"] == rpc.LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION
 
 
-def test_local_service_traffic_registry_is_injectable_without_touching_production_singleton():
-    injected = rpc.LocalServiceTrafficRegistry()
-    independent = rpc.LocalServiceTrafficRegistry()
-    rpc.local_service_traffic_ledger("isolated", registry=injected).record_failure(
-        rpc.LOCAL_SERVICE_TRAFFIC_WORK,
-        rpc.LOCAL_SERVICE_REASON_TRANSPORT,
-    )
-
-    assert rpc.local_service_traffic_snapshot(registry=injected)["isolated"]["work"]["errors"] == 1
-    assert rpc.local_service_traffic_snapshot(registry=independent) == {}
-
-
-def test_local_service_traffic_scope_owns_cross_thread_accounting_and_rejects_ambient_reset():
-    def record(index):
-        rpc.local_service_traffic_ledger("scoped").record_failure(
-            rpc.LOCAL_SERVICE_TRAFFIC_WORK,
-            f"failure-{index}",
-        )
-
-    with pytest.raises(RuntimeError, match="active scope"):
-        rpc.reset_local_service_traffic()
-    _fan_out(8, record, workers=4)
-    assert rpc.local_service_traffic_snapshot()["scoped"]["work"]["errors"] == 8
-
-
 def test_local_service_traffic_ledger_bounds_reason_vocabulary_without_losing_a_request():
     ledger = rpc.LocalServiceTrafficLedger("unitd")
     distinct = rpc.LOCAL_SERVICE_TRAFFIC_MAX_REASONS + 4
@@ -975,7 +951,9 @@ def test_a_capacity_refusal_written_before_the_peer_closed_is_not_lost(tmp_path,
 
 def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_path, monkeypatch):
     """Negative control for the recovery read: nothing on the wire means nothing to recover."""
-    socket_path = tmp_path / "silentd.sock"
+    requested_socket_path = tmp_path / "silentd.sock"
+    socket_path = rpc.safe_socket_path(requested_socket_path, prefix="yolomux-silentd")
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
     listener.listen(8)
@@ -1004,7 +982,7 @@ def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_
     monkeypatch.setattr(rpc, "write_message", write_after_the_peer_has_closed)
     envelope = rpc.new_envelope("silentd", "echo", {"action": "echo"}, timeout_seconds=10.0)
     with pytest.raises(BrokenPipeError):
-        rpc.request(socket_path, envelope, timeout_seconds=10.0)
+        rpc.request(requested_socket_path, envelope, timeout_seconds=10.0)
     monkeypatch.undo()
 
     closer.join(timeout=10.0)

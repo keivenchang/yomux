@@ -1143,7 +1143,7 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
             blocked = str(raw_path)
             if blocked not in _LOGGED_BLOCKED_REINDEX_PATHS:
                 _LOGGED_BLOCKED_REINDEX_PATHS.add(blocked)
-                LOGGER.info("Skipping unindexable filesystem change path (%s): %s", error.message_key or error.status, blocked)
+                LOGGER.warning("Skipping unindexable filesystem change path (%s): %s", error.message_key or error.status, blocked)
     if not normalized_paths:
         return []
 

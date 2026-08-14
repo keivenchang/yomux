@@ -1,12 +1,10 @@
 from pathlib import Path
 import re
-import ast
 import subprocess
 import sys
 
 import conftest as suite_conftest
 import pytest
-from tools.test_plan import automatic_test_markers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,8 +32,8 @@ def test_automated_tests_do_not_reference_live_yolomux_ports():
 
 
 def test_browser_filename_markers_and_selenium_guard_cover_selective_imports(tmp_path):
-    assert automatic_test_markers(Path("test_browser_selective.py")) == ("browser", "socket")
-    assert automatic_test_markers(Path("test_regular.py")) == ()
+    assert suite_conftest._automatic_test_markers(Path("test_browser_selective.py")) == ("browser", "socket")
+    assert suite_conftest._automatic_test_markers(Path("test_regular.py")) == ()
     selenium_test = tmp_path / "test_selective.py"
     selenium_test.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
     assert suite_conftest._test_path_imports_selenium(selenium_test) is True
@@ -137,14 +135,16 @@ def test_live_port_guard_scans_nested_python_and_top_level_javascript():
 
 
 def test_generated_share_browser_tests_use_isolated_tmux_runtime():
-    tree = ast.parse((REPO_ROOT / "tests" / "test_browser_share.py").read_text(encoding="utf-8"))
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_generated_share_link_")]
-    assert functions
-    for function in functions:
-        calls = {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-        assert "start_isolated_browser_share_app" in calls, function.name
-        constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-        assert "ensureTerminalRunning('1')" not in constants and "sessions: ['1']" not in constants, function.name
+    source = (REPO_ROOT / "tests" / "test_browser_share.py").read_text(encoding="utf-8")
+    blocks = re.findall(r"def (test_generated_share_link_[\s\S]*?)(?=\ndef test_|\Z)", source)
+    assert blocks, "expected generated-share browser tests to exist"
+
+    for block in blocks:
+        name = block.split("(", 1)[0]
+        assert "start_isolated_browser_share_app(" in block, f"{name} must create a private tmux/runtime fixture"
+        assert 'TmuxWebtermApp(["1"], dangerously_yolo=True)' not in block, f"{name} must not target a live/default tmux session"
+        assert "ensureTerminalRunning('1')" not in block, f"{name} must not open hard-coded tmux session 1"
+        assert "sessions: ['1']" not in block, f"{name} must not create a share scoped to hard-coded tmux session 1"
 
 
 def _spawn_fixture_page_path(worker: str, filename: str, sentinel: str) -> str:

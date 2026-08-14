@@ -333,8 +333,6 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
-  const transportLifecycle = pageTransportLifecycle;
-  const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
   const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
   const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
@@ -343,6 +341,11 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
+  // Some internal probes have an EXPECTED non-2xx outcome (e.g. an open-editor deletion-confirmation
+  // read that a genuine 404 answers). Recording that expected status as a jsDebug API failure is a false
+  // positive the strict browser error gate flags. quietStatuses suppresses the debug event ONLY for those
+  // exact expected response statuses; every other status, and any thrown transport/network error, still
+  // records loud, so genuine failures never go silent.
   const quietStatuses = Array.isArray(internalOptions.quietStatuses)
     ? new Set(internalOptions.quietStatuses.map(Number))
     : null;
@@ -397,14 +400,12 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
-    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
     if (timeoutError) noteTimeout();
-    else if (!retirementReason) noteBackendHealthFailure();
+    else noteBackendHealthFailure();
     if (recordDebug) {
       notePageLoadApiCompleted();
       recordApiDebugEvent(url, method, startedAt, {
         error,
-        ...(retirementReason ? {deliveryOutcome: 'retired', reason: retirementReason} : {deliveryOutcome: 'failed'}),
         requestBytes,
         requestId,
         provenance: diagnosticProvenance,
@@ -413,7 +414,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     cleanup();
     throw error;
   }
-  transportLifecycle.noteDelivery(transportToken); noteBackendHealthSuccess();
+  noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
   // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
@@ -1401,7 +1402,6 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
   if (result.error) payload.error = jsDebugErrorText(result.error);
-  for (const field of ['deliveryOutcome', 'reason']) if (result[field]) payload[field] = String(result[field]).slice(0, 64);
   return recordJsDebugEvent('api', payload);
 }
 
@@ -1473,7 +1473,7 @@ function recordJsDebugEvent(type, payload = {}) {
 function jsDebugFailureClassification(event) {
   const type = String(event?.type || '');
   if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
-  const apiFailure = type === 'api' && event?.deliveryOutcome !== 'retired' && (
+  const apiFailure = type === 'api' && (
     event?.ok === false
     || (Number.isFinite(event?.status) && event.status >= 400)
     || Boolean(event?.error)
@@ -3992,38 +3992,6 @@ function replaceHtmlPreservingScroll(element, html) {
   restoreElementScrollPosition(element, scrollTop, scrollLeft);
 }
 
-function reconcilePanelBody({body, html, anchors = [], replace = null, afterReplace = null} = {}) {
-  if (!body) return false;
-  const captured = anchors.map(anchor => ({
-    anchor,
-    value: typeof anchor.capture === 'function' ? anchor.capture(body) : undefined,
-  }));
-  if (typeof replace === 'function') replace(body, html);
-  else body.innerHTML = html;
-  for (const {anchor, value} of captured) anchor.restore?.(body, value);
-  afterReplace?.(body);
-  return true;
-}
-
-function elementScrollAnchor(selector, fallbackToBody = false) {
-  return {
-    capture(body) {
-      const element = body.querySelector?.(selector) || (fallbackToBody ? body : null);
-      return {scrollTop: element?.scrollTop || 0, scrollLeft: element?.scrollLeft || 0};
-    },
-    restore(body, value) {
-      restoreElementScrollPosition(body.querySelector?.(selector) || (fallbackToBody ? body : null), value?.scrollTop || 0, value?.scrollLeft || 0);
-    },
-  };
-}
-
-function keyedScrollAnchor(selector) {
-  return {
-    capture: body => captureKeyedScrollPositions(body, selector),
-    restore: (body, value) => restoreKeyedScrollPositions(body, selector, value),
-  };
-}
-
 function wsUrl(session) {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
   if (shareViewMode) {
@@ -4100,6 +4068,10 @@ function normalizeTerminalLink(value) {
   return text;
 }
 
+function trimTerminalFileReferenceCandidate(value) {
+  return String(value || '').replace(/\.+$/, '');
+}
+
 function terminalRangesOverlap(leftStart, leftEnd, rightStart, rightEnd) {
   return leftStart < rightEnd && rightStart < leftEnd;
 }
@@ -4133,7 +4105,7 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
   terminalFileReferencePattern.lastIndex = 0;
   for (const match of lineText.matchAll(terminalFileReferencePattern)) {
     const prefix = match[1] || '';
-    const path = match[2] || '';
+    const path = trimTerminalFileReferenceCandidate(match[2]);
     if (!path || /^[a-z][a-z0-9+.-]*:/i.test(path)) continue;
     if (!terminalTextLooksLikeFileReference(path)) continue;
     const line = Number(match[3] || 0);
@@ -5063,8 +5035,7 @@ function createContextMenuController() {
 function makeButton(options = {}) {
   const button = document.createElement('button');
   button.type = options.type || 'button';
-  const classNames = new Set(['btn-base', ...String(options.className || '').split(/\s+/).filter(Boolean)]);
-  setDomBuilderOptions(button, {...options, className: [...classNames].join(' ')});
+  setDomBuilderOptions(button, options);
   button.disabled = options.disabled === true;
   if (options.pressed !== undefined) button.setAttribute('aria-pressed', options.pressed ? 'true' : 'false');
   if (options.checked !== undefined) {
@@ -5076,179 +5047,6 @@ function makeButton(options = {}) {
     if (typeof listener === 'function') button.addEventListener(type, listener);
   }
   return button;
-}
-
-const bindOnceRecords = new WeakMap();
-
-function bindOnce(root, key, installer) {
-  if (!root || key === undefined || key === null || typeof installer !== 'function') return null;
-  let records = bindOnceRecords.get(root);
-  if (!records) {
-    records = new Map();
-    bindOnceRecords.set(root, records);
-  }
-  const existing = records.get(key);
-  if (existing) return existing.dispose;
-  const uninstall = installer(root);
-  let disposed = false;
-  const dispose = () => {
-    if (disposed) return false;
-    disposed = true;
-    if (records.get(key)?.dispose === dispose) records.delete(key);
-    if (records.size === 0) bindOnceRecords.delete(root);
-    if (typeof uninstall === 'function') uninstall();
-    else uninstall?.dispose?.();
-    return true;
-  };
-  records.set(key, {dispose});
-  return dispose;
-}
-
-function createLifecycleScope(options = {}) {
-  const resources = new Map();
-  let disposed = false;
-  const disposeResource = record => {
-    if (!record || record.disposed) return false;
-    record.disposed = true;
-    record.dispose?.(record.value);
-    return true;
-  };
-  const scope = {
-    current() {
-      return !disposed && (typeof options.isCurrent !== 'function' || options.isCurrent() === true);
-    },
-    value(key) {
-      return resources.get(key)?.value ?? null;
-    },
-    replace(key, value, dispose) {
-      const existing = resources.get(key);
-      if (existing?.value === value) return value;
-      if (existing) disposeResource(existing);
-      resources.delete(key);
-      if (value === null || value === undefined) return value;
-      if (disposed) {
-        disposeResource({value, dispose, disposed: false});
-        return value;
-      }
-      resources.set(key, {value, dispose, disposed: false});
-      return value;
-    },
-    release(key, value = undefined) {
-      const record = resources.get(key);
-      if (!record || (value !== undefined && record.value !== value)) return false;
-      resources.delete(key);
-      return disposeResource(record);
-    },
-    relinquish(key, value = undefined) {
-      const record = resources.get(key);
-      if (!record || (value !== undefined && record.value !== value)) return false;
-      resources.delete(key);
-      record.disposed = true;
-      return true;
-    },
-    ownEvent(key, target, type, listener, listenerOptions = undefined) {
-      target?.addEventListener?.(type, listener, listenerOptions);
-      return scope.replace(key, listener, () => target?.removeEventListener?.(type, listener, listenerOptions));
-    },
-    ownTimer(key, timer, clear = clearTimeout) {
-      return scope.replace(key, timer, value => clear(value));
-    },
-    ownObserver(key, observer) {
-      return scope.replace(key, observer, value => value?.disconnect?.());
-    },
-    ownStream(key, stream) {
-      return scope.replace(key, stream, value => value?.close?.());
-    },
-    dispose(reason = 'disposed') {
-      if (disposed) return false;
-      disposed = true;
-      for (const record of [...resources.values()].reverse()) disposeResource(record);
-      resources.clear();
-      options.onDispose?.(reason);
-      return true;
-    },
-    disposed() { return disposed; },
-  };
-  return Object.freeze(scope);
-}
-
-function createLatestResource(options = {}) {
-  let value = options.initial;
-  let target = null;
-  let request = null;
-  let error = null;
-  let lifecycleScope = createLifecycleScope();
-
-  const snapshot = () => Object.freeze({value, target, request, error, loading: request !== null});
-  const notify = (phase, context = null) => options.onState?.(snapshot(), Object.freeze({phase, context}));
-  const renewScope = reason => {
-    lifecycleScope.dispose(reason);
-    lifecycleScope = createLifecycleScope();
-    return lifecycleScope;
-  };
-  const assign = (nextValue, nextTarget = target) => {
-    target = nextTarget;
-    value = nextValue;
-    error = null;
-    return value;
-  };
-  const resource = {
-    snapshot,
-    read(nextTarget, context = null) {
-      if (request && Object.is(target, nextTarget)) return request;
-      const scope = renewScope('latest-resource-superseded');
-      target = nextTarget;
-      error = null;
-      const controller = typeof AbortController === 'function' ? new AbortController() : null;
-      if (controller) scope.replace('request-controller', controller, value => value.abort());
-      let loaded;
-      try {
-        loaded = options.load(nextTarget, Object.freeze({context, signal: controller?.signal}));
-      } catch (failure) {
-        loaded = Promise.reject(failure);
-      }
-      const currentRequest = Promise.resolve(loaded)
-        .then(payload => {
-          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
-          const applied = options.apply(payload, Object.freeze({context, target: nextTarget, previous: value}));
-          if (applied !== undefined) assign(applied, nextTarget);
-          error = null;
-          notify('applied', context);
-          return typeof options.result === 'function' ? options.result(payload, applied) : value;
-        })
-        .catch(failure => {
-          if (!scope.current()) return typeof options.staleResult === 'function' ? options.staleResult() : value;
-          error = failure;
-          notify('failed', context);
-          return typeof options.failureResult === 'function' ? options.failureResult(failure, value) : value;
-        })
-        .finally(() => {
-          if (!scope.current() || request !== currentRequest) return;
-          request = null;
-          scope.release('request-controller', controller);
-          notify('settled', context);
-        });
-      request = currentRequest;
-      notify('loading', context);
-      return currentRequest;
-    },
-    replace(nextValue, nextTarget = target, context = null) {
-      renewScope('latest-resource-replaced');
-      request = null;
-      assign(nextValue, nextTarget);
-      notify('replaced', context);
-      return value;
-    },
-    assign,
-    invalidate(context = null) {
-      renewScope('latest-resource-invalidated');
-      request = null;
-      error = null;
-      notify('invalidated', context);
-      return value;
-    },
-  };
-  return Object.freeze(resource);
 }
 
 function delegate(parent, type, selector, handler, options = {}) {

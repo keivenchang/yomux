@@ -1,6 +1,6 @@
 import argparse
-import ast
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import hashlib
 from http import HTTPStatus
@@ -14,7 +14,8 @@ import threading
 import time
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -29,13 +30,36 @@ from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
 from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
-from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
-from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
-from tests.subsystems import app_darwin_memory
+
+
+class _StubOperationReservation:
+    """Stand-in completion reservation handle with exactly-once release for test doubles."""
+
+    def __init__(self, on_release=None):
+        self._on_release = on_release
+        self._released = False
+
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        if self._on_release is not None:
+            self._on_release()
+
+    @property
+    def released(self):
+        return self._released
+
+
+def _reservation_must_not_release():
+    raise AssertionError("an accepted operation owns its completion reservation")
 from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
-from yolomux_lib.common import AgentInfo, PaneInfo, SessionInfo, UploadedFile
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
+from yolomux_lib.common import UploadedFile
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEGRADED_STATES
 from yolomux_lib.backend_health.observer import observed_health
 from yolomux_lib.backend_health.store import BackendHealthStore
@@ -45,7 +69,6 @@ from yolomux_lib.local_services.rpc import encode_metadata
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from yolomux_lib.local_services.rpc import new_envelope
 from yolomux_lib.local_services import runtime as local_service_runtime
-from yolomux_lib.local_services.client import TransportFailure
 from yolomux_lib import server_logs
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
@@ -70,10 +93,66 @@ BROWSER_OPERATION_DEADLINE_SECONDS = int(re.search(
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
-def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch): app_darwin_memory.assert_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch)
-def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch): app_darwin_memory.assert_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch)
+def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):
+    counters = app_module.DarwinVmStatistics64()
+    counters.internal_page_count = 30
+    counters.wire_count = 10
+    counters.compressor_page_count = 20
+    counters.external_page_count = 40
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: SimpleNamespace(used_bytes=25))
+    native_values = {
+        "kern.memorystatus_level": 80,
+        "kern.memorystatus_vm_pressure_level": 2,
+    }
+    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: native_values.get(name))
+
+    assert app_module.current_darwin_system_memory_details() == app_module.DarwinSystemMemoryDetails(
+        physical_memory_bytes=1000,
+        memory_used_bytes=600,
+        cached_files_bytes=400,
+        app_memory_bytes=300,
+        wired_memory_bytes=100,
+        compressed_memory_bytes=200,
+        swap_used_bytes=25,
+        pressure_percent=20.0,
+        pressure_level=2,
+    )
+
+
+def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch):
+    counters = app_module.DarwinVmStatistics64()
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
+    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: None)
+
+    details = app_module.current_darwin_system_memory_details()
+
+    assert details is not None
+    assert details.swap_used_bytes is None
+    assert details.pressure_percent is None
+    assert details.pressure_level is None
+
+
 @pytest.mark.parametrize(("native_level", "expected"), [(1, 1), (2, 2), (4, 4), (0, None), (3, None), (5, None)])
-def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected): app_darwin_memory.assert_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected)
+def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected):
+    counters = app_module.DarwinVmStatistics64()
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
+    monkeypatch.setattr(
+        app_module,
+        "darwin_sysctl_value",
+        lambda name, value_type: native_level if name == "kern.memorystatus_vm_pressure_level" else 80,
+    )
+
+    details = app_module.current_darwin_system_memory_details()
+
+    assert details is not None
+    assert details.pressure_percent == 20.0
+    assert details.pressure_level == expected
 
 
 def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
@@ -925,15 +1004,16 @@ def test_yoagent_controller_facade_allows_only_declared_dependencies(monkeypatch
     monkeypatch.setattr(app_module, "normalized_prompt_state", lambda _prompt=None: {"source": "patched"})
     assert deps.normalized_prompt_state() == {"source": "patched"}
 
-    app_tree = ast.parse(Path(app_module.__file__).read_text(encoding="utf-8"))
-    deps_class = next(node for node in app_tree.body if isinstance(node, ast.ClassDef) and node.name == "YoagentAppDeps")
-    assert not any(isinstance(node, ast.FunctionDef) and node.name == "__getattr__" for node in deps_class.body)
-    poll_calls = [node for node in ast.walk(app_tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "poll_yoagent_jobs_once"]
-    assert len(poll_calls) == 1
-    assert ast.unparse(poll_calls[0].func.value) == "app.yoagent_controller"
-    route_tree = ast.parse((Path(app_module.__file__).parent / "http_routes.py").read_text(encoding="utf-8"))
-    chat_calls = [node for node in ast.walk(route_tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "yoagent_chat"]
-    assert chat_calls and all(ast.unparse(node.func.value) == "request.server.app.yoagent_controller" for node in chat_calls)
+    app_source = Path(app_module.__file__).read_text(encoding="utf-8")
+    facade_source = app_source[app_source.index("class YoagentAppDeps:"):app_source.index("class TmuxWebtermApp:")]
+    route_source = (Path(app_module.__file__).parent / "http_routes.py").read_text(encoding="utf-8")
+    assert "def __getattr__" not in facade_source
+    assert "return self.yoagent_controller." not in app_source
+    assert "self.yoagent_controller.poll_yoagent_jobs_once()" in app_source
+    assert "self.poll_yoagent_jobs_once()" not in app_source
+    assert "request.server.app.yoagent_chat(" not in route_source
+    assert "request.server.app.yoagent_controller.yoagent_chat(" in route_source
+
 
 def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
     class MissingProcStat:
@@ -4003,7 +4083,6 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
         webapp.control_server.stop()
 
 
-def test_app_domain_owners_are_composed_and_preserve_facade_overrides(monkeypatch): assert_composed_owners_preserve_facade_overrides(monkeypatch)
 def test_client_event_watcher_parallel_lifecycle_attributes_are_retired():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
@@ -9533,181 +9612,6 @@ def test_context_product_receipt_completes_through_operation_event_and_replay(mo
     assert published[-1][0] == "operation_terminal"
     assert published[-1][1]["operation"]["id"] == operation_id
     assert replay == published[-1][1]
-
-
-def _script_jobd_transport(monkeypatch, tmp_path, responses):
-    client = jobd.JobClient(tmp_path / "scripted-jobd.sock")
-    script = list(responses)
-    emitted = []
-    monkeypatch.setattr(client, "_request_once", lambda *_args, **_kwargs: script.pop(0))
-    monkeypatch.setattr(client, "_emit_transport_error", emitted.append)
-    return client, emitted
-
-
-def _timeout_transport_failure(action):
-    return TransportFailure(
-        error=TimeoutError("scripted receive timeout"),
-        traceback_text="Traceback (most recent call last):\nTimeoutError: scripted receive timeout",
-        action=action,
-        request_id=f"request-{action}",
-        client_elapsed_ms=501.0,
-    )
-
-
-def test_jobd_result_timeout_then_ready_is_silent_inside_operation_budget(monkeypatch, tmp_path):
-    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
-    completed = {"ok": True, "job": {"job_id": "job-1", "status": "completed", "result": {"ready": True}}}
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
-        (timeout, b"", _timeout_transport_failure("result")),
-        (completed, b"", None),
-    ])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
-    try:
-        assert webapp.wait_for_jobd_operation_job("job-1", time.time() + 1.0) == completed["job"]
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert emitted == []
-
-
-def test_session_files_result_timeout_then_completed_reuses_silent_result_poll_owner(monkeypatch, tmp_path):
-    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
-    payload = {"session": "5", "files": [{"path": "recovered.py"}], "repos": [], "errors": []}
-    completed = {
-        "ok": True,
-        "job": {
-            "job_id": "session-files-1",
-            "status": "completed",
-            "result": {"payload": payload, "status": int(HTTPStatus.OK)},
-        },
-    }
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
-        (timeout, b"", _timeout_transport_failure("result")),
-        (completed, b"", None),
-    ])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
-    try:
-        assert webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 1.0) == (
-            payload,
-            HTTPStatus.OK,
-        )
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert emitted == []
-
-
-def test_session_files_result_deadline_preserves_typed_failure_and_one_diagnostic(monkeypatch, tmp_path):
-    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
-        (timeout, b"", _timeout_transport_failure("result")),
-    ])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    try:
-        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
-            webapp.wait_for_session_files_operation_job("session-files-1", time.time() - 1.0)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert raised.value.failure["status"] == "deadline_expired"
-    assert raised.value.failure["transient_polls"] == 1
-    assert len(emitted) == 1
-
-
-def test_session_files_unrecoverable_absent_client_fails_immediately_with_cause():
-    calls = []
-
-    class AbsentJobClient:
-        def result(self, job_id):
-            calls.append(job_id)
-            return {
-                "ok": False,
-                "error": "jobd socket absent",
-                "_transport_error": "absent",
-                "cause": {"kind": "service_absent", "frames": [{"operation": "jobd.result"}]},
-            }
-
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = AbsentJobClient()
-    started = time.monotonic()
-    try:
-        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
-            webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 30.0)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert time.monotonic() - started < 2.0
-    assert calls == ["session-files-1"]
-    assert raised.value.failure["_transport_error"] == "absent"
-    assert raised.value.failure["cause"] == {
-        "kind": "service_absent",
-        "frames": [{"operation": "jobd.result"}],
-    }
-
-
-@pytest.mark.parametrize("producer_state", ["failed", "cancelled", "superseded", "timed_out"])
-def test_session_files_result_terminal_states_fail_without_retry(monkeypatch, tmp_path, producer_state):
-    terminal = {
-        "ok": True,
-        "job": {"job_id": "session-files-1", "status": producer_state, "error": "producer ended"},
-    }
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [(terminal, b"", None)])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    try:
-        with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
-            webapp.wait_for_session_files_operation_job("session-files-1", time.time() + 1.0)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert raised.value.failure["status"] == producer_state
-    assert emitted == []
-
-
-def test_jobd_product_timeout_then_ready_is_silent_inside_operation_budget(monkeypatch, tmp_path):
-    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
-    body = json.dumps({"ready": True}).encode("utf-8")
-    ready = {"ok": True, "state": "ready", "generation": 7}
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
-        (timeout, b"", _timeout_transport_failure("product")),
-        (ready, body, None),
-    ])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-1", generation=7)
-    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS", 0.0)
-    try:
-        assert webapp.wait_for_jobd_operation_product(producer, time.time() + 1.0) == {"ready": True}
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert emitted == []
-
-
-def test_jobd_product_deadline_publishes_one_deferred_transport_error(monkeypatch, tmp_path):
-    timeout = {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"}
-    client, emitted = _script_jobd_transport(monkeypatch, tmp_path, [
-        (timeout, b"", _timeout_transport_failure("product")),
-    ])
-    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    webapp.job_client = client
-    producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-1", generation=7)
-    try:
-        with pytest.raises(app_module.JobdOperationUnavailable) as raised:
-            webapp.wait_for_jobd_operation_product(producer, time.time() - 1.0)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-    assert raised.value.code == "deadline_expired"
-    assert raised.value.failure["transient_polls"] == 1
-    assert raised.value.failure["last_transient_transport"] == "timeout"
-    assert len(emitted) == 1
-    assert emitted[0].request_id == "request-product"
 
 
 def test_context_product_completed_without_mapping_terminalizes_protocol_failure(monkeypatch, tmp_path):

@@ -1,7 +1,5 @@
 # Phase 2 gate census
 
-> **STATUS 2026-08-12: HISTORICAL SNAPSHOT, not current state.** The counts below were measured on 2026-08-01 at commit `a94b63804` on the `phase2-infrastructure` branch. The gate has changed shape twice since (0.7.3, then the 0.7.4 lane/catalog rework): the non-browser lane alone now collects over 17,000 tests, against the 74 recorded here. Read this as a record of that sweep, never as the current census. For current lanes run `python3 tools/check.py --list-lanes`.
-
 ## Current measured state — 2026-08-01
 
 **Commit measured:** `a94b63804` (the rebased `phase2-infrastructure` pre-launch sweep). **Selection:** the sweep's non-browser collection and its separately selected browser collection; the latter is the full browser-marked gate collection, not the default boot-smoke browser lane. `python3 tools/static_build.py --check` passed before the sweep. This selection and commit are part of every verdict below: a count without them is not a dispatchable baseline.

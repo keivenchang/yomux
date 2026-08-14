@@ -1,4 +1,0 @@
-# 2026-07-19 Coherent Agent-status chart snapshots
-
-- Completed `DOIT.agent-status-chart-snapshot-integrity.md`. Agent windows and Agent sessions now share the positive statusd snapshot-revision join: a missing, mixed, or mismatched live revision shows truthful awaiting state on both cards without erasing historical bars, and a matching revision restores both together. Session legend swatches now use the same semantic working/attention/transition/idle paint as the window bars in both themes.
-- Verification beyond the standard gate: the owning Node and isolated Selenium fixture reproduce mismatch, validate both dark/light legend colors, prove recovery, and prevent a stale frame overwriting it. GUI.md records the contract and test owners. The guarded 7772 leader restart completed with HTTPS `/api/ping` 401.

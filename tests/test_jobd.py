@@ -311,32 +311,20 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
     shutdown at the exact moment it polls -- even with the broker forced well past its idle window --
     and releases it at the end so idle shutdown is NOT weakened (an unheld broker still idles out).
     """
-    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
-
-    class BrokerLeaseRegistry:
-        """Exercise the lease handlers synchronously; transport timing is not this contract."""
-
-        def __init__(self):
-            self.acquired: list[str] = []
-            self.released: list[str] = []
-
-        def acquire_lease(self, existing_lease_id=""):
-            response = broker.handle({
-                "action": "lease",
-                "client_pid": os.getpid(),
-                "lease_id": existing_lease_id,
-            })[0]
-            self.acquired.append(str(response.get("lease_id") or ""))
-            return response
-
-        def release_lease(self, lease_id):
-            self.released.append(lease_id)
-            return broker.handle({"action": "release", "lease_id": lease_id})[0]
-
-    registry = BrokerLeaseRegistry()
-    app = app_module.TmuxWebtermApp([], status_service_mode=True)
-    app.jobd_fs_batch_lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": registry})())
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=5.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
     try:
+        app = app_module.TmuxWebtermApp([], status_service_mode=True)
+        app.job_client = jobd.JobClient(socket_path)
+        # The app's fs-batch path holds this exact lease owner; bind it to the test broker's client.
+        app.jobd_fs_batch_lease = app_module.JobdInteractionLease(app.job_client)
+        deadline = time.monotonic() + 2.0
+        while not app.job_client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert app.job_client.registry.healthy() is True
+        # No interaction yet: the broker holds no client lease.
         assert broker.handle({"action": "status"})[0]["clients"] == 0
 
         observed: dict[str, object] = {}
@@ -365,11 +353,12 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
         # Released at the end: idle shutdown is NOT weakened -- an unheld broker still idles out.
         assert app.jobd_fs_batch_lease.held is False
         assert broker.handle({"action": "status"})[0]["clients"] == 0
-        assert registry.acquired == registry.released
         broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
         assert broker._idle_should_stop() is True
     finally:
-        app.stop_jobd_operation_service()
+        broker.handle({"action": "shutdown"})
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
 
 
 def test_watch_diff_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
@@ -471,7 +460,7 @@ def _poll_broker_product(broker, coalesce_key, *, wait_seconds=5.0):
     raise AssertionError("broker product never became ready")
 
 
-def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay(tmp_path, monkeypatch):
+def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay(tmp_path):
     """The retired `relay` action's job -- a browser byte download -- is served by zero-wait produce.
 
     `produce` submits and inspects the store atomically (no handler blocks), and the web side polls
@@ -481,39 +470,29 @@ def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay
     body = b"\x00raw\xff"
     path.write_bytes(body)
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    submitted: list[tuple[Future, object, tuple[object, ...]]] = []
+    broker._start_scheduler()
+    try:
+        assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
+        unknown, _empty = broker.handle({"action": "relay"})
+        assert unknown == {"ok": False, "error": "unknown jobd action"}
 
-    class Executor:
-        def submit(self, function, *args):
-            future = Future()
-            submitted.append((future, function, args))
-            return future
+        response, returned = broker.handle({
+            "action": "produce",
+            "task": "filesystem_operation",
+            "payload": _fs_descriptor(op="raw", path=str(path), args={"download": True}),
+            "priority": "interactive",
+            "coalesce_key": "relay-raw",
+            "generation": 1,
+            "deadline_ms": 5_000,
+            "delivery": "ready_or_receipt",
+        })
+        if not returned:
+            response, returned = _poll_broker_product(broker, "relay-raw")
+    finally:
+        broker.stop_event.set()
+        broker._on_shutdown()
 
-    monkeypatch.setattr(broker, "_executor", lambda *_args: Executor())
-    assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
-    unknown, _empty = broker.handle({"action": "relay"})
-    assert unknown == {"ok": False, "error": "unknown jobd action"}
-
-    response, returned = broker.handle({
-        "action": "produce",
-        "task": "filesystem_operation",
-        "payload": _fs_descriptor(op="raw", path=str(path), args={"download": True}),
-        "priority": "interactive",
-        "coalesce_key": "relay-raw",
-        "generation": 1,
-        "deadline_ms": 5_000,
-        "delivery": "ready_or_receipt",
-    })
-    assert returned == b""
-    assert response["state"] == "queued"
-
-    broker._pump()
-    future, function, args = submitted.pop()
-    future.set_result(function(*args))
-    broker._pump()
-    response, returned = broker.handle({"action": "product", "coalesce_key": "relay-raw"})
-
-    assert response["state"] == "ready"
+    assert response["state"] in {"ready", "stale"}
     assert response["product"]["format"] == "opaque_bytes"
     assert returned == body
 
@@ -1175,45 +1154,6 @@ def _wait_for_result(client: jobd.JobClient, job_id: str, *, timeout_seconds: fl
             return response
         time.sleep(0.02)
     raise AssertionError(f"job {job_id} did not settle")
-
-
-def test_jobd_control_plane_is_ready_before_blocked_data_plane_setup(tmp_path, monkeypatch):
-    socket_path = tmp_path / "jobd.sock"
-    executor_setup_started = threading.Event()
-    release_executor_setup = threading.Event()
-    priority_calls = []
-    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
-
-    def blocked_executor_setup(_worker_count):
-        executor_setup_started.set()
-        assert release_executor_setup.wait(5.0)
-        raise RuntimeError("fixture executor setup failure")
-
-    monkeypatch.setattr(service, "_new_executor", blocked_executor_setup)
-    monkeypatch.setattr(jobd, "apply_service_process_priority", lambda: priority_calls.append(threading.current_thread().name) or True)
-    worker = threading.Thread(target=service.run, daemon=True)
-    worker.start()
-    client = jobd.JobClient(socket_path)
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and not client.registry.healthy():
-        time.sleep(0.01)
-    assert client.registry.healthy() is True
-    deadline = time.monotonic() + 1.0
-    while service.scheduler_thread is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert service.scheduler_thread is not None
-    assert priority_calls == ["jobd-scheduler"]
-
-    submitted = client.submit("json_compact", {"ready": True}, priority="interactive", coalesce_key="blocked-setup")
-    assert submitted["ok"] is True
-    assert executor_setup_started.wait(1.0)
-    assert client.registry.healthy() is True
-    assert priority_calls == ["jobd-scheduler"]
-
-    release_executor_setup.set()
-    assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
-    worker.join(timeout=2.0)
-    assert worker.is_alive() is False
 
 
 def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path):

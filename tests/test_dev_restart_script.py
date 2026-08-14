@@ -176,6 +176,32 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'cd "$repo"' in startup_common
 
 
+def test_macos_lsof_no_match_is_an_empty_listener_set(tmp_path):
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    lsof = command_dir / "lsof"
+    lsof.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    lsof.chmod(0o755)
+    for name, target in (("sort", "/usr/bin/sort"), ("bash", "/bin/bash")):
+        (command_dir / name).symlink_to(target)
+
+    result = subprocess.run(
+        [
+            str(command_dir / "bash"),
+            "-c",
+            'source "$1"; yolomux_port_listener_pids 48124',
+            "listener-probe",
+            str(STARTUP_COMMON),
+        ],
+        env={**os.environ, "PATH": str(command_dir)},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+
+
 def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):
     lock_dir = tmp_path / "start.lock"
     holder = subprocess.Popen(

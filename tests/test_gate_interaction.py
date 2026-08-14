@@ -97,7 +97,7 @@ def _dockview_drag_preview(browser, *, x_ratio, y_ratio):
     )
     assert start and target
     before = browser.execute_script(
-        "return {started: runtimeState.layoutMutationGeneration, completed: runtimeState.layoutMutationCompletedGeneration};"
+        "return {started: layoutMutationGeneration, completed: layoutMutationCompletedGeneration};"
     )
     preview = None
     try:
@@ -138,7 +138,7 @@ def _dockview_drag_preview(browser, *, x_ratio, y_ratio):
         completion = WebDriverWait(browser, 5).until(
             lambda driver: driver.execute_script(
                 """
-                const state = {started: runtimeState.layoutMutationGeneration, completed: runtimeState.layoutMutationCompletedGeneration};
+                const state = {started: layoutMutationGeneration, completed: layoutMutationCompletedGeneration};
                 return state.started > arguments[0] && state.completed >= state.started ? state : false;
                 """,
                 before["started"],
@@ -149,9 +149,9 @@ def _dockview_drag_preview(browser, *, x_ratio, y_ratio):
             """
             const counters = Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]));
             return {
-              started: runtimeState.layoutMutationGeneration,
-              completed: runtimeState.layoutMutationCompletedGeneration,
-              pending: runtimeState.pendingLayoutMutationGeneration,
+              started: layoutMutationGeneration,
+              completed: layoutMutationCompletedGeneration,
+              pending: pendingLayoutMutationGeneration,
               pendingRender: Boolean(pendingLayoutRender),
               pendingRenderFrame: Boolean(pendingLayoutRenderFrame),
               pendingLoadFrame: Boolean(dockviewLayoutState.pendingLoadFrame),
@@ -326,8 +326,8 @@ def _i3b_drag_series(browser, tmp_path):
     first_generation = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
-            return runtimeState.layoutMutationGeneration === runtimeState.layoutMutationCompletedGeneration
-              ? {completed: runtimeState.layoutMutationCompletedGeneration}
+            return layoutMutationGeneration === layoutMutationCompletedGeneration
+              ? {completed: layoutMutationCompletedGeneration}
               : false;
             """
         )
@@ -377,7 +377,7 @@ def _i3b_drag_series(browser, tmp_path):
         "counters": counters,
         "recorded_samples": browser.execute_script("return window.__i3bDockviewLoadSamples.slice();"),
         "first_generation": first_generation,
-        "final_generation": browser.execute_script("return runtimeState.layoutMutationCompletedGeneration;"),
+        "final_generation": browser.execute_script("return layoutMutationCompletedGeneration;"),
     }
 
 

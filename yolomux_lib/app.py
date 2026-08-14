@@ -29,7 +29,7 @@ from dataclasses import field
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
-from functools import partial, wraps
+from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -47,11 +47,8 @@ from . import filesystem
 from .filesystem import exclusions
 from .filesystem.io_ops import read_json_file
 from .workspace import session_files
-from .workspace import published_caches
 from .local_services import registry as local_services_registry
-from .local_services.client import deferred_transport_errors
 from .local_services.client import local_service_failure_is_transient
-from .local_services.client import local_service_polling_capabilities
 from .local_services.rpc import local_service_traffic_snapshot
 from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
@@ -932,33 +929,7 @@ def darwin_sysctl_value(name: str, value_type: type[ctypes._SimpleCData]) -> int
 
 def current_darwin_system_cpu_times() -> tuple[float, float] | None:
     """Read aggregate CPU ticks through Mach, avoiding `ps -A`."""
-    if sys.platform != "darwin":
-        return None
-    try:
-        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
-        libsystem.mach_host_self.restype = ctypes.c_uint32
-        libsystem.mach_task_self.restype = ctypes.c_uint32
-        libsystem.host_processor_info.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(ctypes.c_int)), ctypes.POINTER(ctypes.c_uint32)]
-        libsystem.host_processor_info.restype = ctypes.c_int
-        libsystem.vm_deallocate.argtypes = [ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64]
-        libsystem.vm_deallocate.restype = ctypes.c_int
-        processor_count = ctypes.c_uint32()
-        info = ctypes.POINTER(ctypes.c_int)()
-        info_count = ctypes.c_uint32()
-        if libsystem.host_processor_info(libsystem.mach_host_self(), 2, ctypes.byref(processor_count), ctypes.byref(info), ctypes.byref(info_count)) != 0:
-            return None
-        try:
-            values = [int(info[index]) for index in range(int(info_count.value))]
-            total = float(sum(values))
-            # processor_cpu_load_info: user, system, idle, nice.
-            idle = float(sum(values[index] for index in range(2, len(values), 4)))
-            return (total, total - idle) if total > 0 else None
-        finally:
-            address = ctypes.cast(info, ctypes.c_void_p).value
-            if address:
-                libsystem.vm_deallocate(libsystem.mach_task_self(), address, ctypes.sizeof(ctypes.c_int) * int(info_count.value))
-    except (AttributeError, OSError):
-        return None
+    return stats_current_host_collectors._darwin_system_times()
 
 
 def system_cpu_percent_from_times(previous: tuple[float, float] | None, current: tuple[float, float] | None) -> float:
@@ -2326,5233 +2297,6 @@ class LocalServiceRecoveryControl:
         return bool(entrypoint())
 
 
-class WatchBridge:
-    """Cohesive watch/event behavior behind the TmuxWebtermApp facade."""
-    def __init__(self, app: "TmuxWebtermApp") -> None:
-        self._app = app
-        self.state = app.__dict__.pop("__owned_state__watch_bridge_state", None) or ClientWatchService()
-    def stop(self) -> None:
-        self._app.stop_client_event_watcher()
-    def wake_client_event_watcher(self, app) -> None:
-        with self.state.lock:
-            record = self.state.event_watcher_record
-        record.wake_event.set()
-
-    def note_client_event_recurring_work(self, app, record: ClientEventWatcherRecord, owner: str, *, useful: bool, failed: bool = False) -> None:
-        """Record bounded recurring-work evidence beside the watcher that owns it."""
-        if owner not in CLIENT_EVENT_RECURRING_WORK_SPECS:
-            raise ValueError(f"unknown client-event recurring-work owner: {owner}")
-        now = time.time()
-        with self.state.lock:
-            if self.state.event_watcher_record is not record:
-                return
-            entry = record.recurring_work.setdefault(owner, {
-                "attempts": 0,
-                "useful": 0,
-                "no_change": 0,
-                "failures": 0,
-                "last_attempt_at": 0.0,
-                "last_useful_at": 0.0,
-            })
-            entry["attempts"] = int(entry["attempts"]) + 1
-            entry["last_attempt_at"] = now
-            if failed:
-                entry["failures"] = int(entry["failures"]) + 1
-            if useful:
-                entry["useful"] = int(entry["useful"]) + 1
-                entry["last_useful_at"] = now
-            else:
-                entry["no_change"] = int(entry["no_change"]) + 1
-
-    def client_event_recurring_work_snapshot(self, app, record: ClientEventWatcherRecord, now: float | None = None) -> list[dict[str, Any]]:
-        """Return fixed-name timer diagnostics without paths, payloads, or client identity."""
-        monotonic_now = time.monotonic() if now is None else float(now)
-        next_due = {
-            "filesystem_reconcile": record.next_signature_poll_at,
-            "filesystem_fallback": record.next_file_poll_at,
-            "status_generation_lease": 0.0,
-            "attention_ack_fallback": record.next_attention_ack_poll_at,
-            "tmux_signal_fallback": record.next_tmux_signal_poll_at,
-            "watched_pr_reconcile": record.next_watched_pr_poll_at,
-            "yoagent_job_reconcile": record.next_yoagent_job_poll_at,
-        }
-        rows: list[dict[str, Any]] = []
-        for owner, spec in CLIENT_EVENT_RECURRING_WORK_SPECS.items():
-            entry = record.recurring_work.get(owner, {})
-            rows.append({
-                "owner": owner,
-                "class": spec["class"],
-                "cadence_seconds": spec["cadence_seconds"],
-                "demanded": app.client_event_recurring_work_demanded(owner),
-                "attempts": int(entry.get("attempts") or 0),
-                "useful": int(entry.get("useful") or 0),
-                "no_change": int(entry.get("no_change") or 0),
-                "failures": int(entry.get("failures") or 0),
-                "last_attempt_at": float(entry.get("last_attempt_at") or 0.0),
-                "last_useful_at": float(entry.get("last_useful_at") or 0.0),
-                "next_due_in_seconds": max(0.0, float(next_due[owner] or 0.0) - monotonic_now),
-            })
-        return rows
-
-    def client_event_recurring_work_demanded(self, app, owner: str) -> bool:
-        channels = app.client_events.aggregate_channels()
-        if owner in {"filesystem_reconcile", "filesystem_fallback"}:
-            return not channels.isdisjoint({"files", "transcripts", "activity"})
-        if owner in {"status_generation_lease", "attention_ack_fallback", "tmux_signal_fallback"}:
-            return not channels.isdisjoint({"status", "attention"})
-        if owner == "watched_pr_reconcile":
-            return not channels.isdisjoint({"core", "attention"})
-        return not channels.isdisjoint({"yoagent", "attention"})
-
-    def client_event_watch_sleep_seconds(self, app, now: float, record: ClientEventWatcherRecord | None = None) -> float:
-        current = record or self.state.event_watcher_record
-        channels = app.client_events.aggregate_channels()
-        deadlines: list[float] = []
-        if not channels.isdisjoint({"status", "attention"}):
-            if current.tmux_signal_refresh_at > 0:
-                deadlines.append(current.tmux_signal_refresh_at)
-            elif not app.tmux_signal_event_watcher_healthy():
-                deadlines.append(current.next_tmux_signal_poll_at)
-        if not channels.isdisjoint({"core", "attention"}):
-            deadlines.append(current.next_watched_pr_poll_at)
-            if now < app.search_progress_active_until:
-                deadlines.append(current.next_search_progress_poll_at)
-        if not channels.isdisjoint({"yoagent", "attention"}):
-            deadlines.append(current.next_yoagent_job_poll_at)
-        if not deadlines:
-            return 60.0
-        next_due = min(deadlines)
-        if next_due <= 0:
-            return app.server_event_poll_seconds()
-        return max(0.01, min(60.0, next_due - now))
-
-    def update_client_watch_roots(self, app, roots: Any) -> dict[str, Any]:
-        now = time.monotonic()
-        payload = roots if isinstance(roots, dict) else {"roots": roots}
-        client_id = normalize_client_event_client_id(payload.get("client_id") if isinstance(payload, dict) else "")
-        descriptor_id = client_id or f"legacy:{app.watch_root_owner_id}"
-        raw_roots = payload.get("roots", []) if isinstance(payload, dict) else []
-        unique = app.watch_root_index.normalize_paths(raw_roots)
-        normalized_files: list[str] = []
-        raw_files = payload.get("files", []) if isinstance(payload, dict) else []
-        if isinstance(raw_files, list):
-            for item in raw_files:
-                path = str(item or "").strip()
-                if not path.startswith("/"):
-                    continue
-                normalized_files.append(str(Path(path).expanduser()))
-        unique_files = sorted(set(normalized_files))[:CLIENT_WATCH_FILE_LIMIT]
-        active_file_set = set(unique_files)
-        normalized_background_files: list[str] = []
-        raw_background_files = payload.get("background_files", []) if isinstance(payload, dict) else []
-        if isinstance(raw_background_files, list):
-            for item in raw_background_files:
-                path = str(item or "").strip()
-                if not path.startswith("/"):
-                    continue
-                normalized_background_files.append(str(Path(path).expanduser()))
-        unique_background_files = [
-            path
-            for path in sorted(set(normalized_background_files))
-            if path not in active_file_set
-        ][:CLIENT_WATCH_FILE_LIMIT]
-        context_items = app.normalized_client_context_items(payload.get("context_items", []))
-        session_files_requests = app.normalized_client_session_files(payload.get("session_files", []))
-        activity_summary = app.normalized_client_activity_summary(payload.get("activity_summary", {}))
-        watch_update_started = time.perf_counter()
-        # Transitional cross-web mirror for existing background readers. watchd
-        # independently unions the leased descriptors and is the only watch owner.
-        app.watch_root_index.update_client_roots(unique, descriptor_id)
-        with self.state.lock:
-            previous_descriptor = self.state.descriptors.get(descriptor_id)
-            stable_descriptor = (
-                tuple(unique),
-                tuple(unique_files),
-                tuple(unique_background_files),
-                tuple(context_items),
-                tuple(session_files_requests),
-                activity_summary,
-            )
-            previous_stable = (
-                previous_descriptor.roots,
-                previous_descriptor.files,
-                previous_descriptor.background_files,
-                previous_descriptor.context_items,
-                previous_descriptor.session_files,
-                previous_descriptor.activity_summary,
-            ) if previous_descriptor is not None else None
-            descriptor_changed = previous_stable != stable_descriptor
-            descriptor_generation = (
-                previous_descriptor.descriptor_generation
-                if previous_descriptor is not None and previous_stable == stable_descriptor
-                else (previous_descriptor.descriptor_generation + 1 if previous_descriptor is not None else 1)
-            )
-            self.state.descriptors[descriptor_id] = ClientWatchDescriptor(
-                expires_at=now + CLIENT_WATCH_ROOT_TTL_SECONDS,
-                descriptor_generation=descriptor_generation,
-                roots=tuple(unique),
-                files=tuple(unique_files),
-                background_files=tuple(unique_background_files),
-                context_items=tuple(context_items),
-                session_files=tuple(session_files_requests),
-                activity_summary=activity_summary,
-            )
-        app.record_performance_sample(
-            BACKGROUND_ROLE_WATCH_ROOTS,
-            "client-roots-update",
-            trigger="watch-roots-api",
-            compute_ms=(time.perf_counter() - watch_update_started) * 1000,
-            payload={"roots": unique, "files": unique_files, "background_files": unique_background_files, "client_bound": bool(client_id)},
-            cache_status="updated",
-            count=len(unique),
-        )
-        if descriptor_changed:
-            app.wake_client_event_watcher()
-        with app.client_events.lock:
-            has_client_event_subscribers = bool(app.client_events.subscribers)
-        if descriptor_changed and has_client_event_subscribers:
-            app.start_client_watch_snapshot_publish()
-        return {
-            "ok": True,
-            "roots": unique,
-            "files": unique_files,
-            "background_files": unique_background_files,
-            "context_items": context_items,
-            "session_files": session_files_requests,
-            "activity_summary": activity_summary,
-            "mode": "lifecycle" if client_id and app.client_events.has_client_id(client_id) else "ttl-fallback",
-            "ttl_seconds": CLIENT_WATCH_ROOT_TTL_SECONDS,
-        }
-
-    def normalized_client_context_items(self, app, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        items: list[dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            session = str(item.get("session") or "").strip()
-            if not session:
-                continue
-            messages = int(max(1, min(app.float_value(item.get("messages"), 200), MAX_COMPACT_TRANSCRIPT_ITEMS)))
-            key = (session, messages)
-            if key in seen:
-                continue
-            seen.add(key)
-            items.append({"session": session, "messages": messages})
-        return items[:MAX_YOLOMUX_SESSION_TABS]
-
-    def normalized_client_session_files(self, app, value: Any) -> list[dict[str, Any]]:
-        if not isinstance(value, list):
-            return []
-        items: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            session = str(item.get("session") or "").strip() or None
-            hours = session_files.bounded_session_files_hours(app.float_value(item.get("hours"), 24.0))
-            from_ref = str(item.get("from_ref") or item.get("from") or "").strip() or None
-            to_ref = str(item.get("to_ref") or item.get("to") or "").strip() or None
-            repo_refs = item.get("repo_refs")
-            if not isinstance(repo_refs, dict):
-                repo_refs = None
-            request = {
-                "session": session,
-                "hours": hours,
-                "from_ref": from_ref,
-                "to_ref": to_ref,
-                "repo_refs": repo_refs,
-            }
-            signature = app.client_event_payload_signature(request)
-            if signature in seen:
-                continue
-            seen.add(signature)
-            items.append(request)
-        return items[:MAX_YOLOMUX_SESSION_TABS]
-
-    def normalized_client_activity_summary(self, app, value: Any) -> dict[str, Any]:
-        if not activity_summary_enabled():
-            return {}
-        if not isinstance(value, dict):
-            return {}
-        locale = normalize_locale(value.get("locale"))
-        visible = value.get("visible") is True
-        scope = app.normalized_activity_session_scope(value.get("scope"))
-        hours = session_files.bounded_session_files_hours(app.float_value(value.get("hours"), 24.0))
-        return {"locale": locale, "visible": visible, "scope": scope, "hours": hours}
-
-    def client_watch_roots_snapshot(self, app) -> list[str]:
-        app.prune_client_watch_descriptors()
-        return app.watch_root_index.snapshot()
-
-    def prune_client_watch_descriptors(self, app) -> None:
-        now = time.monotonic()
-        with self.state.lock:
-            expired = [client_id for client_id, descriptor in self.state.descriptors.items() if descriptor.expires_at <= now]
-            for client_id in expired:
-                self.state.descriptors.pop(client_id, None)
-        if expired:
-            for client_id in expired:
-                app.watch_root_index.remove_client_roots(client_id)
-            app.wake_client_event_watcher()
-
-    def touch_client_watch_descriptor(self, app, client_id: str) -> None:
-        """Renew the orphan backstop from a live SSE stream, never from a browser interval."""
-        normalized_client_id = normalize_client_event_client_id(client_id)
-        if not normalized_client_id:
-            return
-        now = time.monotonic()
-        with self.state.lock:
-            descriptor = self.state.descriptors.get(normalized_client_id)
-            if descriptor is None or descriptor.expires_at - now > CLIENT_WATCH_ROOT_TTL_SECONDS / 2:
-                return
-            descriptor.expires_at = now + CLIENT_WATCH_ROOT_TTL_SECONDS
-            roots = list(descriptor.roots)
-        app.watch_root_index.update_client_roots(roots, normalized_client_id)
-        app.wake_client_event_watcher()
-
-    def client_event_subscriber_disconnected(self, app, client_id: str) -> None:
-        """Release a browser's watch descriptor after its final same-id SSE stream closes."""
-        normalized_client_id = normalize_client_event_client_id(client_id)
-        if not normalized_client_id or app.client_events.has_client_id(normalized_client_id):
-            return
-        with self.state.lock:
-            self.state.descriptors.pop(normalized_client_id, None)
-        app.watch_root_index.remove_client_roots(normalized_client_id)
-        app.wake_client_event_watcher()
-
-    def client_watch_file_paths(self, app, *, background: bool) -> list[str]:
-        with self.state.lock:
-            descriptors = list(self.state.descriptors.values())
-            paths = {
-                path
-                for descriptor in descriptors
-                for path in (descriptor.background_files if background else descriptor.files)
-            }
-        return sorted(paths)[:CLIENT_WATCH_FILE_LIMIT]
-
-    def client_watch_files_snapshot(self, app) -> list[str]:
-        return app.client_watch_file_paths(background=False)
-
-    def client_watch_background_files_snapshot(self, app) -> list[str]:
-        return app.client_watch_file_paths(background=True)
-
-    def watchd_topology_signature(self, app) -> str | None:
-        """Fingerprint the tmux topology the descriptor transcript set is derived from.
-
-        One `tmux list-panes -a`: measured 0.57ms CPU / 5.24ms wall over 49 panes, against the
-        25.8ms CPU of the discover_sessions it gates. It must never do the work it exists to
-        avoid — no process table, no agent enrichment, no transcript stat or tail — so it sees
-        exactly what tmux reports. A new session, a new or killed pane, a renamed session or
-        window, and a pane whose foreground command changes all move it; an agent that starts
-        writing a transcript without changing any of those does not, which is what
-        WATCHD_DESCRIPTOR_RESYNC_SECONDS backstops.
-
-        Returns None when tmux cannot be read, which never matches a stored signature and so
-        forces the rebuild rather than pinning whatever was last derived.
-        """
-
-        panes, error = list_tmux_panes()
-        if error:
-            return None
-        watched = sorted(app.sessions)
-        rows = sorted(
-            (pane.session, pane.window, pane.window_name, pane.pane, pane.pane_id, pane.command, pane.pid)
-            for pane in panes
-            if pane.session in set(watched)
-        )
-        return hashlib.sha256(repr((watched, rows)).encode("utf-8")).hexdigest()
-
-    def watchd_transcript_paths(self, app) -> list[str]:
-        """The transcripts the descriptors watch, rebuilt on topology change or every 15s.
-
-        The revision loop calls this once per revision and the transcripts it returns are what
-        produce those revisions, so deriving it every time was a feedback loop: 25.8ms of CPU a
-        pass, which measured as ~90% of a core on the live server.
-        """
-
-        signature = app.watchd_topology_signature()
-        now = time.monotonic()
-        service = self.state
-        with service.lock:
-            reusable = (
-                signature is not None
-                and signature == service.watchd_transcripts_signature
-                and now - service.watchd_transcripts_at < WATCHD_DESCRIPTOR_RESYNC_SECONDS
-            )
-            if reusable:
-                return list(service.watchd_transcripts)
-        # discover_sessions runs outside the lock: it is the slow call this memo exists to
-        # bound, and holding the watch service lock across it would stall every route that
-        # touches a descriptor.
-        sessions, _errors = discover_sessions(app.sessions)
-        transcripts = sorted({
-            str(Path(agent.transcript).expanduser().resolve(strict=False))
-            for info in sessions.values()
-            for agent in info.agents
-            if agent.transcript
-        })[:CLIENT_WATCH_FILE_LIMIT]
-        with service.lock:
-            service.watchd_transcripts = list(transcripts)
-            service.watchd_transcripts_signature = signature or ""
-            service.watchd_transcripts_at = now
-        return transcripts
-
-    def watchd_descriptor_payloads(self, app) -> dict[str, dict[str, Any]]:
-        """Build bounded daemon descriptors off the request path."""
-        app.prune_client_watch_descriptors()
-        transcripts = app.watchd_transcript_paths()
-        settings = settings_payload().get("settings", {})
-        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
-        indexed_dirs = list(app.indexed_repo_discovery_dirs(file_explorer))
-        # Same shared policy owner the Finder index and Differ ask. The watch daemon needs BOTH
-        # halves: the directory-name half (skip_dirs) and the configured index_exclude_paths rules
-        # (exclude_rules), so it can compile the FULL policy through this one owner and apply it at
-        # native registration -- not a second ignore list inside watchd.
-        exclusion_policy = exclusions.ExclusionPolicy.from_settings(
-            file_explorer if isinstance(file_explorer, dict) else {},
-            session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES,
-        )
-        skip_dirs = sorted(exclusion_policy.skip_dir_names)
-        exclude_rules = list(exclusion_policy.exclude_rules)
-        configured_roots = [str(root) for root in filesystem._configured_fs_roots()]
-        with app.session_files_service.cache_lock:
-            repo_roots = sorted(app.session_files_service.repo_dirty_generations)
-        with self.state.lock:
-            descriptors = {
-                descriptor_id: copy.deepcopy(descriptor)
-                for descriptor_id, descriptor in self.state.descriptors.items()
-            }
-        expires_at = time.monotonic() + WATCHD_DESCRIPTOR_TTL_SECONDS
-        return {
-            descriptor_id: {
-                "descriptor_generation": descriptor.descriptor_generation,
-                "expires_at": expires_at,
-                "roots": list(descriptor.roots),
-                "files": list(descriptor.files),
-                "background_files": list(descriptor.background_files),
-                "transcripts": transcripts,
-                "repo_roots": repo_roots,
-                "indexed_dirs": indexed_dirs,
-                "skip_dirs": skip_dirs,
-                "exclude_rules": exclude_rules,
-                "settings_path": str(SETTINGS_PATH.expanduser().resolve(strict=False)),
-                "attention_path": str(app.tmux_ai_status_path.expanduser().resolve(strict=False)),
-                "configured_roots": configured_roots,
-            }
-            for descriptor_id, descriptor in descriptors.items()
-        }
-
-    def apply_watchd_revision(self, app, record: ClientEventWatcherRecord, revision: dict[str, Any], *, reset: bool = False) -> list[str]:
-        """Mirror compact daemon state and fan it into the existing SSE owners."""
-        epoch = str(revision.get("epoch") or "")
-        revision_number = int(revision.get("revision") or 0)
-        watch_generation = int(revision.get("watch_generation") or 0)
-        active_watch_generation = int(revision.get("active_watch_generation") or 0)
-        changed_paths = [
-            Path(path)
-            for path in revision.get("changed_paths", [])
-            if isinstance(path, str) and path.startswith("/")
-        ]
-        files_changed = revision.get("files_changed") if isinstance(revision.get("files_changed"), list) else []
-        roots = tuple(str(root) for root in revision.get("roots", []) if isinstance(root, str))
-        # watchd is a per-user daemon whose runtime socket derives from YOLOMUX_ROOT, not from a
-        # server's YOLOMUX_FS_ROOTS.  Two servers with different filesystem policies under the same
-        # YOLOMUX_ROOT therefore share ONE daemon, and its `wait_revision` takes no lease id and
-        # returns the caller-independent UNION of every co-tenant's leased roots and change paths.
-        # This consumer must scope that union to THIS server's own authorization boundary BEFORE it
-        # mirrors any state or fans an `fs_changed` SSE, or a narrow-policy server would disclose a
-        # broad co-tenant's roots and change activity to its own browser.  ``authorized_fs_roots()``
-        # is the same boundary S0's access-policy descriptor authorizes content reads against, so a
-        # root or path the daemon reports outside it is one this server may never publish or record.
-        authorized_roots = tuple(
-            filesystem._normalized_scope_path(root) for root in filesystem.authorized_fs_roots()
-        )
-
-        def _authorized_projection(path: Path) -> list[Path]:
-            """Two-direction intersection of one reported path with this server's authorized roots.
-
-            The daemon reports a co-tenant UNION, so a reported path may sit either INSIDE one of
-            this server's roots or OUTSIDE-and-ABOVE it (a coarse/root report whose ancestor spans
-            several tenants).  Both must resolve to a path this server is authorized for, and neither
-            may ever surface the broad ancestor:
-              * reported path is a descendant of (or equal to) an authorized root -> retain it;
-              * an authorized root is a descendant of the reported path -> substitute that authorized
-                root, so a coarse ancestor still delivers the server's OWN subtree without exposing
-                the ancestor;
-              * disjoint -> omit.
-            """
-            resolved = filesystem._normalized_scope_path(path)
-            projected: list[Path] = []
-            for authorized in authorized_roots:
-                if filesystem._path_is_within(resolved, authorized):
-                    projected.append(resolved)
-                elif filesystem._path_is_within(authorized, resolved):
-                    projected.append(authorized)
-            return projected
-
-        def _scope_paths(paths: list[Path]) -> list[Path]:
-            scoped: list[Path] = []
-            seen: set[str] = set()
-            for path in paths:
-                for projected in _authorized_projection(path):
-                    key = str(projected)
-                    if key not in seen:
-                        seen.add(key)
-                        scoped.append(projected)
-            return scoped
-
-        def _scope_generations(generations: dict[Any, Any]) -> dict[str, int]:
-            """Re-key a daemon generation map onto authorized paths, carrying the source generation.
-
-            A coarse ancestor key is substituted by the authorized descendant it covers, so the
-            generation still drives this server's own cache invalidation without storing a co-tenant
-            key it is not authorized to see.
-
-            When several source keys project onto ONE authorized key -- an ancestor repo and the
-            authorized repo itself both collapsing to the child -- their generations must compose
-            LOSSLESSLY.  They are independent monotonic-within-epoch counters, so `max` would let a
-            higher co-tenant counter mask the child's own increment (parent=100/child=5 and
-            parent=100/child=6 both `max` to 100, so a real .git change on the server's OWN tree
-            never invalidates).  Their sum is monotonic in every source, so any single source's
-            increment strictly changes the composed value and still triggers invalidation, while the
-            broad source path is still never exposed -- only the authorized child key is stored.
-            """
-            scoped: dict[str, int] = {}
-            for key, generation in generations.items():
-                if not isinstance(key, str):
-                    continue
-                value = int(generation or 0)
-                for projected in _authorized_projection(Path(key)):
-                    projected_key = str(projected)
-                    scoped[projected_key] = scoped.get(projected_key, 0) + value
-            return scoped
-
-        def _within_authorized(path: Path) -> bool:
-            resolved = filesystem._normalized_scope_path(path)
-            return any(filesystem._path_is_within(resolved, authorized) for authorized in authorized_roots)
-
-        daemon_reported_scope = bool(roots) or bool(changed_paths)
-        roots = tuple(str(root) for root in _scope_paths([Path(root) for root in roots]))
-        changed_paths = _scope_paths(changed_paths)
-        # `files_changed` carries specific files, never coarse roots, so it stays exact-descendant
-        # filtering: a file is mirrored only when it lives under an authorized root.
-        files_changed = [
-            entry
-            for entry in files_changed
-            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and _within_authorized(Path(entry["path"]))
-        ]
-        # True only when the daemon reported roots/paths and authorization removed ALL of them --
-        # a revision that touches only other tenants' roots.  A plain state revision that carried no
-        # roots/paths to begin with is NOT this case and must still record normally.
-        authorization_scoped_to_empty = daemon_reported_scope and not (roots or changed_paths)
-        root_generations = _scope_generations(
-            revision.get("root_generations") if isinstance(revision.get("root_generations"), dict) else {}
-        )
-        signature = tuple(
-            (root, (root, "watchd", int(root_generations.get(root) or 0), watch_generation, ()))
-            for root in sorted(roots)
-        )
-        token = str(revision.get("token") or f"{epoch}:{revision_number}")
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return []
-            if not reset and record.watchd_epoch == epoch and revision_number <= record.watchd_revision:
-                return []
-            if reset or record.watchd_epoch != epoch:
-                self.state.filesystem_history.clear()
-            previous_filesystem_roots = record.filesystem_roots
-            record.watchd_epoch = epoch
-            record.watchd_revision = revision_number
-            record.watchd_applied_generation = watch_generation
-            record.watchd_active_generation = active_watch_generation
-            record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
-            record.filesystem_roots = roots
-            record.watchd_state = "polling" if revision.get("fallback") else ("ready" if record.filesystem_healthy else "errored")
-            # Empty intersection (a revision that touches only other tenants' roots) leaves nothing
-            # authorized to mirror: skip the signature update and the history write entirely so this
-            # server records no co-tenant state, while the epoch/revision bookkeeping above still
-            # advances so the revision loop is not wedged.
-            if not authorization_scoped_to_empty:
-                self.state.filesystem_signature = signature
-                self.state.filesystem_history.append({
-                    "token": token,
-                    "created_at": float(revision.get("created_at") or time.time()),
-                    "signature": signature,
-                    "watchd_epoch": epoch,
-                    "watchd_revision": revision_number,
-                    "watch_generation": watch_generation,
-                    "active_watch_generation": active_watch_generation,
-                    "changed_paths": tuple(str(path) for path in changed_paths[:CLIENT_WATCH_FILE_LIMIT]),
-                    "files_changed": copy.deepcopy(files_changed[:CLIENT_WATCH_FILE_LIMIT]),
-                })
-                self.state.filesystem_history = self.state.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
-            # Scope the daemon's repo generations to authorized repos too: storing every co-tenant
-            # repo key would mirror out-of-policy state and is a second disclosure surface.
-            daemon_repo_generations = _scope_generations(
-                revision.get("repo_generations") if isinstance(revision.get("repo_generations"), dict) else {}
-            )
-            prior_daemon_generations = self.state.watchd_repo_generations
-            changed_repos = [
-                repo
-                for repo, generation in daemon_repo_generations.items()
-                if int(generation or 0) != int(prior_daemon_generations.get(repo) or 0)
-            ]
-            self.state.watchd_repo_generations = {
-                str(repo): int(generation or 0)
-                for repo, generation in daemon_repo_generations.items()
-            }
-        if record.filesystem_healthy:
-            app.publish_watchd_recovery(record)
-        if changed_repos:
-            with app.session_files_service.cache_lock:
-                for repo in changed_repos:
-                    if repo in app.session_files_service.repo_dirty_generations:
-                        app.session_files_service.repo_dirty_generations[repo] += 1
-        filesystem_roots = {Path(root) for root in (*previous_filesystem_roots, *roots)}
-        filesystem_changed = any(
-            filesystem_paths_intersect(path, root)
-            for path in changed_paths
-            for root in filesystem_roots
-        )
-        events: list[str] = []
-        if changed_paths:
-            app.mark_indexed_repo_discovery_dirty(changed_paths)
-            # Invalidate from the admissible working-tree paths, not from ".git"
-            # internals. Nothing beneath an ignored directory is published any
-            # more, so a ".git"-only filter here selects nothing and the branch
-            # and status caches would never be invalidated at all.
-            # ``invalidate_git_metadata_paths`` already intersects each path
-            # against the cached repository roots, so an ordinary file inside a
-            # repository invalidates exactly that repository.
-            invalidate_git_metadata_paths(changed_paths)
-            # Item 6: feed native watchd change evidence into the ONE hot-path index owner so a file
-            # created/modified/deleted outside YOLOmux (an external editor, a build) refreshes the
-            # Quick Open index in seconds instead of waiting for the safety TTL. These paths are
-            # already scoped to this server's authorized roots; the owner coalesces them by indexed
-            # root and either promotes the frontier or runs one bounded subtree repair.
-            filesystem.reindex_roots_for_paths([str(path) for path in changed_paths], reason="watchd")
-        if revision.get("attention_changed"):
-            events.extend(app.refresh_shared_attention_acks(trigger="watchd", notify_followers=True))
-        if revision.get("settings_changed"):
-            # Re-lease/enqueue when indexed-root settings change: added roots start layer-1 crawls,
-            # removed roots release the scheduler obligation. Only the owner acts (guarded inside).
-            app.refresh_search_indexer_schedule()
-            app.publish_client_event("settings_changed", {"data": app.settings_payload()}, trigger="watchd", cache="ready")
-            events.append("settings_changed")
-        if revision.get("transcripts_changed"):
-            app.clear_transcript_caches()
-            app.publish_client_event("transcripts_changed", {"refresh": True}, trigger="watchd", cache="refresh")
-            events.append("transcripts_changed")
-        if files_changed:
-            app.publish_client_event("files_changed", {"files": files_changed, "count": len(files_changed)}, trigger="watchd", cache="ready")
-            events.append("files_changed")
-        if revision_number > 0 and filesystem_changed:
-            app.publish_client_event(
-                "fs_changed",
-                {
-                    "roots": list(roots),
-                    "mode": "diff",
-                    "refresh": True,
-                    "token": token,
-                    "change_summary": {
-                        "roots_changed": len(changed_paths),
-                        "coarse": bool(revision.get("coarse")),
-                    },
-                    "daemon_state": record.watchd_state,
-                },
-                trigger="watchd",
-                cache="ready",
-            )
-            events.append("fs_changed")
-        if changed_paths:
-            events.extend(app.publish_session_files_ready_events(trigger="watchd"))
-        return events
-
-    def publish_watchd_recovery(self, app, record: ClientEventWatcherRecord) -> None:
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return
-            recovered_episode = record.watchd_failure_episode
-            if recovered_episode == 0:
-                return
-            recovered_started_at = record.watchd_failure_started_at
-            recovered_count = record.watchd_failure_count
-            recovered_delivery = record.watchd_failure_delivery
-            recovered_published = record.watchd_failure_published
-            record.watchd_failure_episode = 0
-            record.watchd_failure_started_at = 0.0
-            record.watchd_failure_count = 0
-            record.watchd_failure_delivery = ""
-            record.watchd_failure_action = ""
-            record.watchd_failure_error_code = ""
-            record.watchd_failure_published = False
-        if not recovered_published:
-            return
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return
-        recovery_seconds = min(86_400.0, max(0.0, time.monotonic() - recovered_started_at))
-        emit_server_log(
-            "info",
-            "watchd",
-            f"watchd recovered after {recovery_seconds:.1f}s and {recovered_count} failed attempt(s)",
-            category="transport",
-            dedupe_key=f"watchd-recovered:{recovered_episode}",
-            request_id=f"watchd-episode-{recovered_episode}",
-            route="local-service:watchd",
-            event="watchd_recovered",
-            delivery=f"recovered:{recovered_delivery}"[:64],
-        )
-
-    def publish_watchd_failure(self, app, record: ClientEventWatcherRecord, response: dict[str, Any], *, action: str) -> None:
-        if action not in WATCHD_FAILURE_ACTIONS:
-            raise ValueError("unknown watchd failure action")
-        transport = str(response.get("_transport_error") or "")
-        state = "not_running" if transport in {"absent", "refused"} else "errored"
-        if transport:
-            with self.state.lock:
-                if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                    return
-                record.watchd_state = state
-                record.filesystem_healthy = False
-            return
-        retrying = bool(transport) or bool(response.get("retryable"))
-        delivery = "retrying" if retrying else "failed"
-        error_code = str(response.get("error_code") or "service_unavailable")
-        if error_code not in WATCHD_FAILURE_CODES:
-            error_code = "service_unavailable"
-        now = time.monotonic()
-        publish_failure = False
-        failure_action = ""
-        failure_error_code = ""
-        failure_delivery = ""
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return
-            record.watchd_failure_count += 1
-            if record.watchd_failure_episode == 0:
-                record.watchd_failure_episode = record.watchd_next_failure_episode
-                record.watchd_next_failure_episode += 1
-                record.watchd_failure_started_at = now
-                record.watchd_failure_delivery = delivery
-                record.watchd_failure_action = action
-                record.watchd_failure_error_code = error_code
-            record.watchd_state = state
-            record.filesystem_healthy = False
-            if (
-                not record.watchd_failure_published
-                and now - record.watchd_failure_started_at >= WATCHD_FAILURE_LOG_GRACE_SECONDS
-            ):
-                record.watchd_failure_published = True
-                publish_failure = True
-                failure_action = record.watchd_failure_action
-                failure_error_code = record.watchd_failure_error_code
-                failure_delivery = record.watchd_failure_delivery
-        if publish_failure:
-            failure_retrying = failure_delivery == "retrying"
-            emit_server_log(
-                "warning" if failure_retrying else "error",
-                "watchd",
-                f"watchd {failure_action} failed ({failure_error_code}); retrying" if failure_retrying else f"watchd {failure_action} failed ({failure_error_code})",
-                category="transport",
-                dedupe_key=f"watchd-failure:{record.watchd_failure_episode}",
-                request_id=f"watchd-episode-{record.watchd_failure_episode}",
-                route="local-service:watchd",
-                event=f"watchd_{failure_action}_failure",
-                delivery=failure_delivery,
-            )
-
-    @staticmethod
-    def record_watchd_synced_generation(record: ClientEventWatcherRecord, response: dict[str, Any]) -> None:
-        """Own the one place a daemon response advances this client's rebuild window.
-
-        Every response that names a watch generation is evidence about whether
-        watchd still owes an activation, whichever client bumped it, so the
-        window opens from an upsert this bridge issued and from a generation a
-        different lease holder caused equally.
-        """
-        record.watchd_synced_generation = max(record.watchd_synced_generation, int(response.get("watch_generation") or 0))
-        record.watchd_active_generation = max(record.watchd_active_generation, int(response.get("active_watch_generation") or 0))
-
-    def sync_watchd_descriptors(self, app, record: ClientEventWatcherRecord) -> bool:
-        descriptors = app.watchd_descriptor_payloads()
-        active_ids = set(descriptors)
-        descriptor_generations = {
-            descriptor_id: int(descriptor.get("descriptor_generation") or 0)
-            for descriptor_id, descriptor in descriptors.items()
-        }
-        for descriptor_id, descriptor in descriptors.items():
-            response = app.watch_client.upsert(record.watchd_lease_id, descriptor_id, descriptor, reconfiguring=record.watchd_rebuild_window_open())
-            if response.get("ok") is not True:
-                app.publish_watchd_failure(record, response, action="upsert")
-                return False
-            # Record the bumped generation before the next request is armed: the
-            # upsert that opens a rebuild window is answered before the daemon
-            # blocks, so only the requests after it need the covering deadline.
-            app.record_watchd_synced_generation(record, response)
-        for descriptor_id in sorted(record.watchd_descriptor_ids - active_ids):
-            response = app.watch_client.remove(record.watchd_lease_id, descriptor_id, reconfiguring=record.watchd_rebuild_window_open())
-            if response.get("ok") is not True:
-                app.publish_watchd_failure(record, response, action="remove")
-                return False
-            app.record_watchd_synced_generation(record, response)
-        record.watchd_descriptor_ids = active_ids
-        record.watchd_descriptor_generations = descriptor_generations
-        app.publish_watchd_recovery(record)
-        return True
-
-    def watchd_revision_loop(self, app, record: ClientEventWatcherRecord) -> None:
-        worker = threading.current_thread()
-        iteration_started = 0.0
-        try:
-            while not record.stop_event.is_set() and not record.watchd_stop_event.is_set():
-                # Pace the loop, not the work inside it. See
-                # WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS: this loop's CPU is
-                # body_cpu / loop_period, and a cheaper body only re-arms sooner, so no
-                # amount of optimizing the body can bring it under budget. The remainder is
-                # waited on the stop event rather than slept, so a shutdown breaks out of it
-                # immediately instead of paying the floor. The first iteration never waits.
-                remaining = WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS - (time.monotonic() - iteration_started)
-                if remaining > 0 and record.watchd_stop_event.wait(remaining):
-                    break
-                if record.stop_event.is_set():
-                    break
-                iteration_started = time.monotonic()
-                if not record.watchd_lease_id:
-                    lease = app.watch_client.acquire_lease()
-                    if lease.get("ok") is not True:
-                        app.publish_watchd_failure(record, lease, action="acquire")
-                        record.watchd_stop_event.wait(1.0)
-                        continue
-                    record.watchd_lease_id = str(lease.get("lease_id") or "")
-                    record.watchd_pid = int(lease.get("pid") or 0)
-                    record.watchd_epoch = str(lease.get("epoch") or "")
-                    record.watchd_revision = 0
-                    record.watchd_synced_generation = 0
-                    record.watchd_applied_generation = 0
-                    record.watchd_active_generation = 0
-                    record.watchd_descriptor_generations = {}
-                    # A rebuild another lease holder started is already in flight
-                    # before this bridge issues anything, so the lease response is
-                    # the first evidence of the window it has to arm against.
-                    app.record_watchd_synced_generation(record, lease)
-                if not app.sync_watchd_descriptors(record):
-                    record.watchd_stop_event.wait(1.0)
-                    continue
-                response = app.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
-                if response.get("ok") is not True:
-                    app.publish_watchd_failure(record, response, action="wait_revision")
-                    if response.get("_transport_error") in {"absent", "refused"}:
-                        record.watchd_lease_id = ""
-                    record.watchd_stop_event.wait(1.0)
-                    continue
-                # A declared native-watch rebuild is an expected outcome carrying
-                # its own reason, not a failure: the daemon cannot answer while it
-                # registers, so the next request is armed against that window.
-                if WatchClient.response_is_reconfiguring(response):
-                    app.record_watchd_synced_generation(record, response)
-                    app.publish_watchd_recovery(record)
-                    record.watchd_stop_event.wait(WatchClient.reconfigure_backoff_seconds(response))
-                    continue
-                revision = response.get("revision") if isinstance(response.get("revision"), dict) else {}
-                if response.get("changed") and revision:
-                    app.apply_watchd_revision(record, revision, reset=bool(response.get("reset")))
-                else:
-                    app.publish_watchd_recovery(record)
-        finally:
-            lease_id = record.watchd_lease_id
-            if lease_id:
-                app.watch_client.release_lease(lease_id)
-            with self.state.lock:
-                if self.state.event_watcher_record is record and record.watchd_worker is worker:
-                    record.watchd_worker = None
-                    record.watchd_lease_id = ""
-                    record.watchd_pid = 0
-                    record.filesystem_healthy = False
-
-    def watchd_runtime_status(self, app) -> dict[str, Any]:
-        """Return the bridge mirror without making a status route call watchd.
-
-        The rule that governs this row is unchanged and must stay: `WatchClient.runtime_status`
-        exists, and calling it from here would issue a `status` RPC, which demand-starts a
-        demand-scoped service from a diagnostics path. Nothing below issues any RPC.
-
-        What changed in M2 is where the row's identity comes from. It used to be the bridge
-        mirror alone, which knows a lease PID but no birth time, so `started_at` was hardcoded
-        0.0 and the System view's Uptime cell was permanently blank, and `resources` was
-        hardcoded {} so watchd was the one service with no CPU/memory at all. Both now come from
-        the durable service record the registry already writes -- one file read plus a /proc
-        read, identity-fenced against this host and boot, and no traffic to the daemon.
-
-        The registry record is the identity owner, so its PID is the one this row reports and
-        samples. When the bridge holds a lease whose PID the record cannot verify, that
-        disagreement is published under `identity` rather than papered over by preferring
-        whichever number looks healthier.
-        """
-        with self.state.lock:
-            record = self.state.event_watcher_record
-            state = record.watchd_state
-            lease_id = record.watchd_lease_id
-            epoch = record.watchd_epoch
-            revision = record.watchd_revision
-            bridge_pid = int(record.watchd_pid or 0)
-        identity = local_service_projection.registry_process_identity(app.watch_client.registry)
-        return local_service_projection.local_service_runtime_row(
-            "watchd",
-            pid=identity.pid,
-            started_at=identity.started_at,
-            version=identity.protocol_version,
-            healthy=state in {"ready", "polling"},
-            last_failure="" if state in {"starting", "ready", "polling"} else state,
-            resources=app.watch_client.registry.resources(identity.pid),
-            fields_before_failure={
-                "clients": 1 if lease_id else 0,
-                "queues": {"depth": 0},
-                "cache": {"ready": revision > 0},
-                "epoch": epoch,
-                "revision": revision,
-                "fallback": state == "polling",
-                # watchd is spawned when a client attaches a watch and retires when the
-                # last one detaches. "Absent" is its correct resting state, so it must not
-                # read as an outage; only last_failure below can make it one. This is the ONE
-                # owner of that rule -- ESSENTIAL_LOCAL_SERVICES deliberately no longer repeats it.
-                "demand_started": True,
-                "identity": {
-                    **identity.as_dict(),
-                    "source": "service_record",
-                    "bridge_pid": bridge_pid,
-                    # True only when the bridge names a PID the durable record does not confirm.
-                    # A bridge with no lease yet is not a disagreement, it is just not started.
-                    "bridge_pid_unverified": bridge_pid > 0 and bridge_pid != identity.pid,
-                },
-            },
-        )
-
-    def start_watchd_revision_watcher(self, app, record: ClientEventWatcherRecord) -> bool:
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return False
-            worker = record.watchd_worker
-            if worker is not None and worker.is_alive():
-                return False
-            worker = threading.Thread(target=app.watchd_revision_loop, args=(record,), name="watchd-revision", daemon=True)
-            record.watchd_worker = worker
-
-        def rollback() -> None:
-            with self.state.lock:
-                if self.state.event_watcher_record is record and record.watchd_worker is worker:
-                    record.watchd_worker = None
-                    record.watchd_stop_event.set()
-
-        common.start_thread_with_rollback(worker, rollback)
-        return True
-
-    def record_filesystem_watch_snapshot(self, app, signature: tuple[Any, ...]) -> str:
-        now = time.time()
-        with self.state.lock:
-            if self.state.filesystem_history and self.state.filesystem_history[-1]["signature"] == signature:
-                return str(self.state.filesystem_history[-1]["token"])
-            signature_text = app.client_event_payload_signature(signature)
-            digest = hashlib.sha1(signature_text.encode("utf-8")).hexdigest()[:16]
-            token = f"{int(now * 1000)}-{digest}"
-            self.state.filesystem_history.append({
-                "token": token,
-                "created_at": now,
-                "signature": copy.deepcopy(signature),
-            })
-            min_created_at = now - FILESYSTEM_WATCH_HISTORY_SECONDS
-            self.state.filesystem_history = [
-                record
-                for record in self.state.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
-                if float(record.get("created_at") or 0.0) >= min_created_at
-            ]
-            return token
-
-    def filesystem_watch_record_for_token(self, app, token: str) -> dict[str, Any] | None:
-        clean_token = str(token or "").strip()
-        if not clean_token:
-            return None
-        with self.state.lock:
-            for record in self.state.filesystem_history:
-                if record.get("token") == clean_token:
-                    return copy.deepcopy(record)
-        return None
-
-    def latest_filesystem_watch_record(self, app) -> dict[str, Any] | None:
-        with self.state.lock:
-            if self.state.filesystem_history:
-                return copy.deepcopy(self.state.filesystem_history[-1])
-        return None
-
-    def filesystem_watch_signature_for_roots(
-        self, app,
-        roots: list[str],
-    ) -> tuple[Any, ...]:
-        return tuple(
-            (root, filesystem.watch_signature(root, child_limit=filesystem.WATCH_SIGNATURE_CHILD_LIMIT))
-            for root in roots[:CLIENT_WATCH_ROOT_LIMIT]
-        )
-
-    def filesystem_watch_full_plan(
-        self, app,
-        record: dict[str, Any],
-        reason: str = "full",
-    ) -> tuple[dict[str, Any], list[str]]:
-        signature = record.get("signature")
-        roots = sorted(filesystem_signature_root_map(signature).keys())
-        return {
-            "mode": "full",
-            "reason": reason,
-            "token": record.get("token", ""),
-            "removed_roots": [],
-        }, roots
-
-    def filesystem_watch_diff_plan(
-        self, app,
-        since_token: str = "",
-        force_full: bool = False,
-    ) -> tuple[dict[str, Any], list[str]]:
-        if force_full:
-            roots = app.client_watch_roots_snapshot()
-            return {
-                "mode": "full",
-                "reason": "forced",
-                "token": "",
-                "removed_roots": [],
-            }, roots
-        current = app.latest_filesystem_watch_record()
-        if current is None:
-            roots = app.client_watch_roots_snapshot()
-            if roots:
-                return {
-                    "mode": "full",
-                    "reason": "snapshot-unavailable",
-                    "token": "",
-                    "removed_roots": [],
-                }, roots
-            return {"mode": "none", "token": "", "directories": [], "removed_roots": []}, []
-        previous = app.filesystem_watch_record_for_token(since_token)
-        if previous is None:
-            return app.filesystem_watch_full_plan(current, "stale-since")
-        current_signature = current.get("signature")
-        previous_signature = previous.get("signature")
-        if previous.get("token") == current.get("token") or previous_signature == current_signature:
-            return {
-                "mode": "none",
-                "token": current.get("token", ""),
-                "since": previous.get("token", ""),
-                "directories": [],
-                "removed_roots": [],
-                "change_summary": filesystem_change_summary(previous_signature, current_signature),
-            }, []
-        changed_roots, removed_roots = filesystem_changed_roots(previous_signature, current_signature)
-        return {
-            "mode": "diff",
-            "token": current.get("token", ""),
-            "since": previous.get("token", ""),
-            "removed_roots": removed_roots,
-            "change_summary": filesystem_change_summary(previous_signature, current_signature),
-        }, changed_roots
-
-    @staticmethod
-    def decode_filesystem_watch_batch_product(body: bytes) -> dict[str, Any]:
-        try:
-            product = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise JobdOperationUnavailable(
-                "malformed completed filesystem batch product",
-                {"error": str(error), "status": "malformed_product"},
-            ) from error
-        if not isinstance(product, dict) or not isinstance(product.get("responses"), list):
-            raise JobdOperationUnavailable(
-                "malformed completed filesystem batch product",
-                {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
-            )
-        return product
-
-    def submit_filesystem_watch_batches(
-        self, app,
-        roots: list[str],
-        identity_seed: str,
-        *,
-        delivery: str = "receipt",
-    ) -> tuple[FilesystemWatchBatchProduct, ...]:
-        """Partition one bounded root list into jobd batches and submit each exactly once.
-
-        This is the only place watch roots are split.  Each chunk is a consecutive slice of the
-        caller's root order, so chunk ``n`` owns roots ``[offset, offset + len(chunk))`` and its
-        product response ids are re-based onto that window when the children are resolved.  Roots
-        are never truncated or dropped: every accepted root reaches exactly one child batch.
-        """
-        batches: list[FilesystemWatchBatchProduct] = []
-        for offset in range(0, len(roots), filesystem.MAX_BATCH_REQUESTS):
-            chunk = roots[offset:offset + filesystem.MAX_BATCH_REQUESTS]
-            batches.append(app.submit_filesystem_watch_batch(
-                chunk,
-                f"{identity_seed}#{offset}" if offset else identity_seed,
-                offset=offset,
-                delivery=delivery,
-            ))
-        return tuple(batches)
-
-    def submit_filesystem_watch_batch(
-        self, app,
-        roots: list[str],
-        identity_seed: str,
-        *,
-        offset: int = 0,
-        delivery: str = "receipt",
-    ) -> FilesystemWatchBatchProduct:
-        """Submit one jobd batch for a chunk that already fits the per-job request limit."""
-        if len(roots) > filesystem.MAX_BATCH_REQUESTS:
-            raise JobdOperationUnavailable(
-                f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
-                {
-                    "error": f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
-                    "status": "invalid_request",
-                    "roots": len(roots),
-                    "maximum": filesystem.MAX_BATCH_REQUESTS,
-                },
-                code="invalid_request",
-                status=HTTPStatus.BAD_REQUEST,
-            )
-        payload, product_key = filesystem_watch_batch_submission(roots, identity_seed)
-        response, body = app.job_client.produce(
-            "filesystem_batch",
-            payload,
-            priority="interactive",
-            generation=1,
-            coalesce_key=product_key,
-            deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
-            delivery=delivery,
-        )
-        job = response.get("job") if isinstance(response.get("job"), dict) else {}
-        job_id = str(job.get("job_id") or "")
-        state = str(job.get("status") or "")
-        if response.get("ok") is not True or not job_id or state not in {"queued", "running", "completed"}:
-            failure = dict(response)
-            raise JobdOperationUnavailable(
-                str(failure.get("error") or "jobd did not accept filesystem watch batch"),
-                failure,
-            )
-        if body and delivery == "receipt":
-            raise JobdOperationUnavailable(
-                "receipt-only filesystem watch batch unexpectedly returned product bytes",
-                {"error": "receipt-only filesystem watch batch unexpectedly returned product bytes"},
-            )
-        ready_product = app.decode_filesystem_watch_batch_product(body) if body else None
-        return FilesystemWatchBatchProduct(
-            producer=JobdProductOperation(job_id=job_id, product_key=product_key, generation=1),
-            ready_product=ready_product,
-            root_offset=int(offset),
-            root_count=len(roots),
-        )
-
-    def filesystem_watch_batch_identity_seed(
-        self, app,
-        base_payload: dict[str, Any],
-        roots: list[str],
-    ) -> str:
-        token = str(base_payload.get("token") or "")
-        if token:
-            return token
-        with self.state.lock:
-            latest = self.state.filesystem_history[-1] if self.state.filesystem_history else {}
-            latest_token = str(latest.get("token") or "")
-            latest_roots = sorted(filesystem_signature_root_map(latest.get("signature")).keys())
-            if latest_token and latest_roots == sorted(roots):
-                return latest_token
-            return f"event-generation:{self.state.filesystem_event_generation}"
-
-    def cached_filesystem_watch_products(self, app, product_key: str) -> list[dict[str, Any]] | None:
-        with self.state.lock:
-            record = self.state.filesystem_ready_product
-            if product_key not in record.keys or not record.products:
-                return None
-            return [copy.deepcopy(product) for product in record.products]
-
-    def cache_filesystem_watch_products(
-        self, app,
-        products: list[dict[str, Any]],
-        product_keys: set[str],
-    ) -> None:
-        with self.state.lock:
-            record = self.state.filesystem_ready_product
-            record.keys = frozenset(str(key) for key in product_keys if str(key))
-            record.products = tuple(copy.deepcopy(product) for product in products)
-
-    def materialize_filesystem_watch_products(
-        self, app,
-        base_payload: dict[str, Any],
-        roots: list[str],
-        products: list[dict[str, Any]],
-        *,
-        product_keys: set[str],
-    ) -> dict[str, Any]:
-        signature = filesystem_watch_product_signature(roots, products)
-        token = app.record_filesystem_watch_snapshot(signature)
-        token_product_key = filesystem_watch_request_product_key(roots, token)
-        app.cache_filesystem_watch_products(products, {*product_keys, token_product_key})
-        return app.filesystem_watch_payload_from_products(
-            {**copy.deepcopy(base_payload), "token": token},
-            roots,
-            products,
-        )
-
-    def resolve_filesystem_watch_batches(
-        self, app,
-        batches: tuple[FilesystemWatchBatchProduct, ...],
-        deadline_at: float,
-        *,
-        cancel_event: threading.Event | None = None,
-    ) -> list[dict[str, Any]]:
-        """Resolve every child batch under one shared deadline and re-base it onto parent roots.
-
-        Children may complete in any order; the merged product order is always the submission
-        order, and each response keeps its own per-root cause because only its ``id`` is shifted.
-        """
-        products: list[dict[str, Any]] = []
-        for batch in batches:
-            if batch.ready_product is not None:
-                products.append(filesystem_watch_product_at_offset(
-                    copy.deepcopy(batch.ready_product),
-                    batch.root_offset,
-                ))
-                continue
-            product = app.wait_for_jobd_operation_product(
-                batch.producer,
-                deadline_at,
-                cancel_event=cancel_event,
-            )
-            if not isinstance(product.get("responses"), list):
-                raise JobdOperationUnavailable(
-                    "malformed completed filesystem batch product",
-                    {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
-                )
-            products.append(filesystem_watch_product_at_offset(product, batch.root_offset))
-        return products
-
-    @staticmethod
-    def filesystem_watch_payload_from_products(
-        base_payload: dict[str, Any],
-        roots: list[str],
-        products: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        return watch_diff_payload_from_products(base_payload, roots, products)
-
-    def complete_filesystem_watch_diff_operation(
-        self, app,
-        receipt_fence: FilesystemWatchReceiptFence,
-        request_id: str,
-        base_payload: dict[str, Any],
-        roots: list[str],
-        deadline_at: float,
-        identity_seed: str,
-    ) -> None:
-        route = "GET /api/fs/watch-diff"
-        operation = "jobd.produce"
-        data: dict[str, Any] | None = None
-        failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
-        # Hold the jobd interaction lease across the whole submit+product-poll window, exactly as
-        # POST /api/fs/batch does (W15 #4).  Under a saturated gate this completion worker can be
-        # starved between the submit ``produce`` and the product poll for longer than the broker's
-        # idle window; the held lease vetoes the broker's idle shutdown so its socket cannot vanish
-        # mid-interaction, which was the live ``GET /api/fs/watch-diff`` jobd-404.  This is the same
-        # ONE lease owner fs/batch holds -- best-effort liveness, never a safety gate -- so the
-        # ``try/finally`` always releases even when acquire could not pin the broker (release is
-        # ref-counted and no-ops at holders==0).
-        app.jobd_fs_batch_lease.acquire()
-        try:
-            batches = app.submit_filesystem_watch_batches(
-                roots,
-                identity_seed,
-                delivery="ready_or_receipt",
-            )
-            operation = "jobd.product"
-            products = app.resolve_filesystem_watch_batches(
-                batches,
-                deadline_at,
-                cancel_event=receipt_fence.cancelled,
-            )
-            # The HTTP path looks the retained product up under the whole-request key, so a
-            # partitioned request has to publish that key beside its per-chunk keys or the next
-            # identical request would resubmit every child batch.
-            request_product_key = filesystem_watch_request_product_key(roots, identity_seed)
-            data = app.materialize_filesystem_watch_products(
-                base_payload,
-                roots,
-                products,
-                product_keys={request_product_key, *(batch.producer.product_key for batch in batches)},
-            )
-        except JobdOperationUnavailable as error:
-            failure = (error.failure, operation, error.status, error.code)
-        except Exception as error:
-            failure = (
-                {"error": str(error), "cause": local_service_exception_cause(error)},
-                "filesystem-watch-diff.complete",
-                HTTPStatus.INTERNAL_SERVER_ERROR,
-                "producer_failed",
-            )
-        finally:
-            app.jobd_fs_batch_lease.release()
-        operation_id = receipt_fence.wait_for_operation_id()
-        if not operation_id:
-            return
-        if failure is None:
-            assert data is not None
-            result = app.operation_ready_result(request_id, data)
-            status = HTTPStatus.OK
-        else:
-            failure_payload, failure_operation, status, code = failure
-            result = app.jobd_operation_failure_result(
-                request_id,
-                failure_payload,
-                route=route,
-                operation_id=operation_id,
-                operation=failure_operation,
-                code=code,
-            )
-        app.terminalize_operation(operation_id, result, status)
-
-    def accept_filesystem_watch_diff_operation(
-        self, app,
-        request_id: str,
-        base_payload: dict[str, Any],
-        roots: list[str],
-        identity_seed: str,
-        reservation: JobdOperationReservation,
-    ) -> tuple[dict[str, Any], HTTPStatus]:
-        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
-        # The receipt is the only place the caller learns how much bounded work it is waiting on.
-        # Submission itself stays on the completion worker, so this is a count, not a wait.
-        batch_count = math.ceil(len(roots) / filesystem.MAX_BATCH_REQUESTS)
-        receipt_fence = FilesystemWatchReceiptFence()
-        submitted = app.jobd_operation_service.submit_reserved(
-            reservation,
-            app.complete_filesystem_watch_diff_operation,
-            receipt_fence,
-            request_id,
-            base_payload,
-            roots,
-            deadline_at,
-            identity_seed,
-        )
-        if not submitted:
-            return app.jobd_operation_failure_result(
-                request_id,
-                {"error": "filesystem watch completion worker could not start"},
-                route="GET /api/fs/watch-diff",
-                operation="jobd.produce",
-                code="producer_failed",
-            ), HTTPStatus.SERVICE_UNAVAILABLE
-        try:
-            receipt = app.queued_delivery_ledger.accept_operation(
-                request_id=request_id,
-                route="GET /api/fs/watch-diff",
-                deadline_at=deadline_at,
-                progress={
-                    "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
-                    "producer": "jobd",
-                    "producer_state": "submitting",
-                    "batches_total": batch_count,
-                },
-                producer={
-                    "service": "jobd",
-                    "delivery": "ready_or_receipt",
-                },
-                kind="fs_watch_diff",
-                context={
-                    "mode": str(base_payload.get("mode") or ""),
-                    "token": str(base_payload.get("token") or ""),
-                    "since": str(base_payload.get("since") or ""),
-                    "roots": len(roots),
-                    "batches": batch_count,
-                },
-            )
-        except Exception:
-            receipt_fence.cancel()
-            raise
-        operation_id = str(receipt["operation"]["id"])
-        receipt_fence.accept(operation_id)
-        return receipt, HTTPStatus.ACCEPTED
-
-    def filesystem_watch_diff_http_payload(
-        self, app,
-        since_token: str = "",
-        force_full: bool = False,
-        request_id: str = "",
-    ) -> tuple[dict[str, Any], HTTPStatus]:
-        request_id = str(request_id or app.new_api_request_id())
-        base_payload, roots = app.filesystem_watch_diff_plan(since_token, force_full)
-        if not roots:
-            return base_payload, HTTPStatus.OK
-        # The watch-root contract is CLIENT_WATCH_ROOT_LIMIT, not the per-job batch size: a
-        # snapshot of 65-128 roots is accepted upstream by SharedWatchRootIndex and is split into
-        # jobd batches of at most MAX_BATCH_REQUESTS by submit_filesystem_watch_batches().
-        if len(roots) > CLIENT_WATCH_ROOT_LIMIT:
-            return common.error_payload(
-                f"filesystem watch roots must contain at most {CLIENT_WATCH_ROOT_LIMIT} items",
-                message_key="request.error.tooManyItems",
-                message_params={"field": "roots", "max": CLIENT_WATCH_ROOT_LIMIT},
-                canonical=True,
-                code="invalid_request",
-                origin="server.http",
-                retryable=False,
-                details={"roots": len(roots), "maximum": CLIENT_WATCH_ROOT_LIMIT},
-                stack=[{
-                    "component": "server.http",
-                    "operation": "GET /api/fs/watch-diff",
-                    "code": "invalid_request",
-                }],
-                request_id=request_id,
-            ), HTTPStatus.BAD_REQUEST
-        identity_seed = app.filesystem_watch_batch_identity_seed(base_payload, roots)
-        product_key = filesystem_watch_request_product_key(roots, identity_seed)
-        cached_products = app.cached_filesystem_watch_products(product_key)
-        if cached_products is not None:
-            return app.materialize_filesystem_watch_products(
-                base_payload,
-                roots,
-                cached_products,
-                product_keys={product_key},
-            ), HTTPStatus.OK
-        reservation = app.jobd_operation_service.reserve("bulk")
-        if reservation is None:
-            result = app.jobd_operation_failure_result(
-                request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
-                route="GET /api/fs/watch-diff",
-                operation="jobd.produce",
-                code="service_busy",
-            )
-            app.record_operation_failure("", result)
-            return result, HTTPStatus.SERVICE_UNAVAILABLE
-        return app.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed, reservation)
-
-    def clear_transcript_content_caches(self, app) -> None:
-        with app.activity_transcript_service.transcript_tail_cache_lock:
-            app.activity_transcript_service.transcript_tail_cache.clear()
-        with app.activity_transcript_service.context_items_cache_lock:
-            app.activity_transcript_service.context_items_cache.clear()
-
-    def clear_transcript_caches(self, app) -> None:
-        app.clear_transcript_content_caches()
-        with app.activity_transcript_service.transcripts_payload_cache_lock:
-            record = app.activity_transcript_service.transcripts_payload_cache_record
-            record.generation += 1
-            record.stored_at = None
-            record.payload = None
-            # Invalidation supersedes the in-flight build, so it must release the whole guard, not
-            # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
-            # intent behind that belonged to a caller this invalidation had already superseded.
-            record.release_worker()
-        # A queued follow-up build is a promise to a forced caller waiting on a named generation.
-        # The invalidated worker can no longer keep it -- its finish is a generation mismatch and
-        # returns before the drain -- so the promise was left sitting on the record until some
-        # unrelated later build inherited it and published an extra follow-up. Drain it here through
-        # the one owner instead: the caller gets the build it was promised, and the record is left
-        # with no worker and no queued intent.
-        app.start_queued_transcripts_payload_rebuild()
-
-    def start_client_watch_snapshot_publish(self, app) -> bool:
-        generation = 0
-        worker: threading.Thread | None = None
-        with self.state.lock:
-            watcher_record = self.state.event_watcher_record
-            if watcher_record.snapshot_worker is not None:
-                return False
-            def run() -> None:
-                app.publish_client_watch_snapshot(watcher_record, generation)
-
-            worker = threading.Thread(target=run, daemon=True)
-            watcher_record.snapshot_worker = worker
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
-        try:
-            worker.start()
-        except RuntimeError:
-            with self.state.lock:
-                if self.state.event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
-                    watcher_record.snapshot_worker = None
-            app.finish_transcripts_payload_work(generation, worker, invalidate=True)
-            raise
-        return True
-
-    def client_watch_snapshot_is_current(self, app, record: ClientEventWatcherRecord, worker: threading.Thread) -> bool:
-        with self.state.lock:
-            return (
-                self.state.event_watcher_record is record
-                and record.snapshot_worker is worker
-                and not record.stop_event.is_set()
-            )
-
-    def publish_client_watch_snapshot(
-        self, app,
-        record: ClientEventWatcherRecord | None = None,
-        generation: int | None = None,
-    ) -> None:
-        worker = threading.current_thread()
-        guarded = record is not None
-        if generation is None:
-            generation = app.begin_transcripts_payload_work(worker, replace=True)
-        try:
-            started = time.perf_counter()
-            payload = app.build_transcripts_payload()
-            if guarded and not app.client_watch_snapshot_is_current(record, worker):
-                return
-            if not app.commit_transcripts_payload_cache(payload, generation):
-                return
-            signature = app.transcripts_payload_event_signature(payload)
-            with self.state.lock:
-                if guarded and (
-                    self.state.event_watcher_record is not record
-                    or record.snapshot_worker is not worker
-                    or record.stop_event.is_set()
-                ):
-                    return
-                previous_signature = self.state.transcripts_payload_signature
-                self.state.transcripts_payload_signature = signature
-            if previous_signature != signature:
-                app.publish_client_event(
-                    "transcripts_changed",
-                    {"signature": signature, "refresh": True},
-                    trigger="watch_state",
-                    cache="ready",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                )
-            if guarded and not app.client_watch_snapshot_is_current(record, worker):
-                return
-            app.publish_context_items_ready_events(trigger="watch_state")
-            if guarded and not app.client_watch_snapshot_is_current(record, worker):
-                return
-            app.publish_activity_summary_ready_events(trigger="watch_state")
-            if guarded and not app.client_watch_snapshot_is_current(record, worker):
-                return
-            app.publish_session_files_ready_events(trigger="watch_state")
-        finally:
-            app.finish_transcripts_payload_work(generation, worker)
-            with self.state.lock:
-                if guarded and self.state.event_watcher_record is record and record.snapshot_worker is worker:
-                    record.snapshot_worker = None
-
-    def record_dependency_invalidation(self, app, trigger: str) -> None:
-        # Bounded by trigger reason (fs_changed, transcripts_changed, transcript_content_changed,
-        # watch), never by event/session count, so this dict cannot grow with traffic volume.
-        key = str(trigger or "watch")
-        with self.state.lock:
-            counts = self.state.invalidation_counts
-            counts[key] = counts.get(key, 0) + 1
-
-    def publish_context_items_ready_events(self, app, trigger: str = "watch") -> list[str]:
-        app.prune_client_watch_descriptors()
-        context_items, _session_files, _activity = self.state.snapshot()
-        events: list[str] = []
-        for item in context_items:
-            started = time.perf_counter()
-            payload, status = app.context_items(item["session"], int(item["messages"]), accept_pending=False)
-            if status != HTTPStatus.OK or payload.get("pending"):
-                continue
-            event_payload = {"session": item["session"], "messages": item["messages"], "status": int(status), "data": payload}
-            signature = app.client_event_payload_signature(event_payload)
-            key = app.client_event_payload_signature({"session": item["session"], "messages": item["messages"]})
-            with self.state.lock:
-                previous_signature = self.state.context_item_payload_signatures.get(key)
-                self.state.context_item_payload_signatures[key] = signature
-            if previous_signature == signature:
-                continue
-            app.record_dependency_invalidation(trigger)
-            app.publish_client_event(
-                "context_items_ready",
-                event_payload,
-                trigger=trigger,
-                cache="ready",
-                compute_ms=(time.perf_counter() - started) * 1000,
-            )
-            events.append("context_items_ready")
-        return events
-
-    def publish_activity_summary_ready_events(self, app, trigger: str = "watch") -> list[str]:
-        if not activity_summary_enabled():
-            return []
-        if str(trigger or "") not in ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS:
-            return []
-        app.prune_client_watch_descriptors()
-        _context_items, _session_files, activity_summary = self.state.snapshot()
-        if activity_summary.get("visible") is not True:
-            return []
-        started = time.perf_counter()
-        payload = app.activity_summary_payload(
-            locale=str(activity_summary.get("locale") or "en"),
-            session_scope=activity_summary.get("scope"),
-            hours=activity_summary.get("hours"),
-        )
-        signature = app.stable_client_event_payload_signature(payload)
-        with self.state.lock:
-            previous_signature = self.state.activity_summary_signature
-            self.state.activity_summary_signature = signature
-        if previous_signature == signature:
-            return []
-        app.publish_client_event(
-            "activity_summary_ready",
-            {"locale": payload.get("locale", activity_summary.get("locale") or "en"), "data": payload},
-            trigger=trigger,
-            cache="ready",
-            compute_ms=(time.perf_counter() - started) * 1000,
-        )
-        return ["activity_summary_ready"]
-
-    def publish_session_files_ready_events(self, app, trigger: str = "watch", *, force: bool = False) -> list[str]:
-        app.prune_client_watch_descriptors()
-        _context_items, session_files_requests, _activity = self.state.snapshot()
-        if force and not session_files_requests:
-            session_files_requests = [
-                {"session": session, "hours": 24.0}
-                for session in app.sessions
-            ]
-        events: list[str] = []
-        for item in session_files_requests:
-            started = time.perf_counter()
-            payload, status = app.session_files_payload(
-                item.get("session"),
-                app.float_value(item.get("hours"), 24.0),
-                from_ref=item.get("from_ref"),
-                to_ref=item.get("to_ref"),
-                repo_refs=item.get("repo_refs"),
-                # A watch event already advances the repository generation used by the shared
-                # cache key. Keep last-known-good data and let its one background refresh
-                # coalesce instead of turning every watcher notification into interactive Git.
-                force=False,
-                requester="background-refresh",
-            )
-            event_payload = {"request": item, "status": int(status), "data": payload}
-            stable_event_payload = copy.deepcopy(event_payload)
-            if isinstance(stable_event_payload.get("data"), dict):
-                stable_event_payload["data"].pop("cache", None)
-            signature = app.client_event_payload_signature(stable_event_payload)
-            key = app.client_event_payload_signature(item)
-            with self.state.lock:
-                previous_signature = self.state.session_file_payload_signatures.get(key)
-                self.state.session_file_payload_signatures[key] = signature
-            if previous_signature == signature and not force:
-                continue
-            app.record_dependency_invalidation(trigger)
-            app.publish_client_event(
-                "session_files_ready",
-                event_payload,
-                trigger=trigger,
-                cache="ready",
-                compute_ms=(time.perf_counter() - started) * 1000,
-            )
-            events.append("session_files_ready")
-        if events:
-            app.request_tabber_activity_refresh(f"session-files:{trigger}")
-        return events
-
-    def start_status_generation_watcher(self, app, record: ClientEventWatcherRecord) -> bool:
-        """Start one demand-scoped statusd generation waiter for this web process."""
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                return False
-            worker = record.status_generation_worker
-            if worker is not None and worker.is_alive():
-                return True
-            if time.monotonic() < record.status_generation_retry_at:
-                return False
-        lease = app.status_client.acquire_generation_lease()
-        lease_id = str(lease.get("lease_id") or "") if lease.get("ok") is True else ""
-        if not lease_id:
-            with self.state.lock:
-                if self.state.event_watcher_record is record:
-                    record.status_generation_retry_at = time.monotonic() + 1.0
-            return False
-        response, _body = app.status_client.snapshot(app.sessions, timeout=1.0)
-        if response.get("ok") is not True:
-            app.status_client.release_generation_lease(lease_id)
-            with self.state.lock:
-                if self.state.event_watcher_record is record:
-                    record.status_generation_retry_at = time.monotonic() + 1.0
-            return False
-        generation = max(0, int(response.get("generation") or 0))
-        snapshot_payload: dict[str, Any] | None = None
-        if _body:
-            metadata = None
-            try:
-                metadata = validate_status_snapshot(response, _body)
-                decoded_snapshot = json.loads(_body)
-            except (StatusProtocolError, ValueError, TypeError):
-                decoded_snapshot = None
-            if metadata is not None and metadata.generation == generation and isinstance(decoded_snapshot, dict):
-                snapshot_payload = decoded_snapshot
-        with self.state.lock:
-            if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                app.status_client.release_generation_lease(lease_id)
-                return False
-            record.status_generation_stop_event.clear()
-            record.status_generation_lease_id = lease_id
-            record.status_generation = generation
-            self.state.auto_approve_signature = f"statusd:{generation}:{int(response.get('status') or HTTPStatus.OK)}"
-            self.state.auto_approve_payload = copy.deepcopy(snapshot_payload)
-            worker = threading.Thread(target=app.status_generation_wait_loop, args=(record,), name="statusd-generation-wait", daemon=True)
-            record.status_generation_worker = worker
-        common.start_thread_with_rollback(worker, lambda: app.stop_status_generation_watcher(record))
-        return True
-
-    def stop_status_generation_watcher(self, app, record: ClientEventWatcherRecord) -> None:
-        with self.state.lock:
-            worker = record.status_generation_worker
-            lease_id = record.status_generation_lease_id
-            record.status_generation_stop_event.set()
-            record.status_generation_worker = None
-            record.status_generation_lease_id = ""
-        if lease_id:
-            app.status_client.release_generation_lease(lease_id)
-        if worker is not None and worker is not threading.current_thread():
-            worker.join(timeout=2.0)
-
-    def status_generation_wait_loop(self, app, record: ClientEventWatcherRecord) -> None:
-        worker = threading.current_thread()
-        retry_seconds = 0.25
-        try:
-            while not record.stop_event.is_set() and not record.status_generation_stop_event.is_set():
-                with self.state.lock:
-                    if self.state.event_watcher_record is not record:
-                        return
-                    generation = record.status_generation
-                response = app.status_client.probe_generation(generation)
-                if response.get("ok") is True:
-                    next_generation = max(0, int(response.get("generation") or 0))
-                    changed = response.get("changed") is True and next_generation > generation
-                    app.note_client_event_recurring_work(record, "status_generation_lease", useful=changed)
-                    if changed:
-                        event_payload: dict[str, object] = {
-                            "status": int(HTTPStatus.OK),
-                            "refresh": True,
-                            "generation": next_generation,
-                            "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}",
-                        }
-                        snapshot_response, snapshot_body = app.status_client.snapshot(app.sessions, timeout=1.0)
-                        snapshot_payload = None
-                        if snapshot_response.get("ok") is True and snapshot_body:
-                            metadata = None
-                            try:
-                                metadata = validate_status_snapshot(snapshot_response, snapshot_body)
-                                snapshot_payload = json.loads(snapshot_body)
-                            except (StatusProtocolError, ValueError, TypeError):
-                                snapshot_payload = None
-                            if metadata is not None and metadata.generation == next_generation and isinstance(snapshot_payload, dict):
-                                event_payload["refresh"] = False
-                        with self.state.lock:
-                            if self.state.event_watcher_record is not record:
-                                return
-                            previous_payload = copy.deepcopy(self.state.auto_approve_payload)
-                            record.status_generation = next_generation
-                            self.state.auto_approve_signature = f"statusd:{next_generation}:{int(HTTPStatus.OK)}"
-                            if isinstance(snapshot_payload, dict):
-                                self.state.auto_approve_payload = copy.deepcopy(snapshot_payload)
-                        if isinstance(snapshot_payload, dict):
-                            patch = app.auto_approve_client_event_patch(previous_payload, snapshot_payload)
-                            if patch is None:
-                                retry_seconds = 0.25
-                                continue
-                            event_payload = {**event_payload, **patch}
-                        app.publish_client_event("auto_approve_changed", event_payload, trigger="statusd-generation", cache="ready")
-                    retry_seconds = 0.25
-                    if not changed and record.status_generation_stop_event.wait(STATUS_GENERATION_RPC_WAIT_SECONDS):
-                        return
-                    continue
-                if record.status_generation_stop_event.wait(retry_seconds):
-                    return
-                app.note_client_event_recurring_work(record, "status_generation_lease", useful=False, failed=True)
-                retry_seconds = min(5.0, retry_seconds * 2.0)
-        finally:
-            with self.state.lock:
-                if self.state.event_watcher_record is record and record.status_generation_worker is worker:
-                    record.status_generation_worker = None
-
-    def poll_tmux_signals_client_event_once(self, app) -> list[str]:
-        started = time.perf_counter()
-        payload = app.tmux_signal_snapshot(force=True)
-        signature = app.stable_client_event_payload_signature(app.tmux_signal_signature_payload(payload))
-        with self.state.lock:
-            previous = self.state.tmux_signal_signature
-            previous_payload = copy.deepcopy(self.state.tmux_signal_payload) if self.state.tmux_signal_payload is not None else None
-            self.state.tmux_signal_signature = signature
-            self.state.tmux_signal_payload = copy.deepcopy(payload)
-        if not previous:
-            return []
-        if previous == signature:
-            return []
-        event_payload = app.tmux_signal_patch_payload(previous_payload, payload)
-        app.publish_client_event(
-            "tmux_signals_changed",
-            event_payload,
-            trigger="timer",
-            cache="ready",
-            compute_ms=(time.perf_counter() - started) * 1000,
-        )
-        app.request_tabber_activity_refresh("tmux-signals")
-        return ["tmux_signals_changed"]
-
-    def handle_tmux_signal_event(self, app, event: dict[str, Any]) -> None:
-        event_type = str(event.get("type") or event.get("event") or "")
-        if event_type in {"output", "extended-output"}:
-            output_snapshot_at = time.monotonic() + TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
-            with self.state.lock:
-                record = self.state.event_watcher_record
-                next_snapshot_at = record.tmux_signal_refresh_at
-                schedule_snapshot = next_snapshot_at <= time.monotonic() or next_snapshot_at > output_snapshot_at
-                if schedule_snapshot:
-                    record.tmux_signal_refresh_at = output_snapshot_at
-            if schedule_snapshot:
-                # Terminal bytes already travel on their own WebSocket. Coalesce the metadata
-                # invalidation so a busy pane cannot launch a full tmux snapshot per output frame.
-                app.tmux_signal_cache.clear()
-                record.wake_event.set()
-            return
-        if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
-            event_time = float(event.get("time") or time.time())
-            with self.state.lock:
-                self.state.tmux_signal_removal_event = {"type": event_type, "time": event_time}
-            # The retained statusd roster is the sole agent-window authority. A topology event
-            # must retire it so its next snapshot cannot keep a dead pane as a transition row.
-            app.status_client.invalidate("tmux-topology")
-        app.tmux_signal_cache.clear()
-        with self.state.lock:
-            record = self.state.event_watcher_record
-            record.tmux_signal_refresh_at = time.monotonic()
-        record.wake_event.set()
-
-    def tmux_signal_event_watcher_healthy(self, app) -> bool:
-        return app.tmux_signal_event_watcher_status().get("state") == "attached"
-
-    def tmux_signal_event_watcher_status(self, app) -> dict[str, Any]:
-        with self.state.lock:
-            watcher = app.tmux_signal_event_watcher
-        status = TmuxSignalEventWatcher.never_started_status() if watcher is None else watcher.status_payload()
-        status["demanded"] = int(app.client_events.snapshot().get("subscribers") or 0) > 0
-        return status
-
-    def log_tmux_signal_event_error(self, app, message: str) -> None:
-        app.log_event(
-            None,
-            "tmux_signal_event_error",
-            message,
-            {"diagnostic": message},
-            message_key="events.message.tmuxSignalEvent.watchFailed",
-        )
-
-    def start_tmux_signal_event_watcher(self, app) -> bool:
-        with self.state.lock:
-            current = app.tmux_signal_event_watcher
-            if current is not None and current.thread is not None and current.thread.is_alive():
-                return False
-            watcher = TmuxSignalEventWatcher(lambda: list(app.sessions), app.handle_tmux_signal_event, app.log_tmux_signal_event_error)
-            app.tmux_signal_event_watcher = watcher
-        if current is not None:
-            current.stop()
-        return watcher.start()
-
-    def stop_tmux_signal_event_watcher(self, app) -> None:
-        with self.state.lock:
-            watcher = app.tmux_signal_event_watcher
-            app.tmux_signal_event_watcher = None
-        if watcher is not None:
-            watcher.stop()
-
-    def poll_watched_prs_client_event_once(self, app) -> list[str]:
-        started = time.perf_counter()
-        payload = app.watched_prs_payload()
-        signature = app.client_event_payload_signature(payload)
-        with self.state.lock:
-            previous = self.state.watched_prs_signature
-            self.state.watched_prs_signature = signature
-        if not previous:
-            return []
-        if previous == signature:
-            return []
-        app.publish_client_event(
-            "watched_prs_changed",
-            {"data": payload},
-            trigger="timer",
-            cache="ready",
-            compute_ms=(time.perf_counter() - started) * 1000,
-        )
-        return ["watched_prs_changed"]
-
-    def start_client_event_watcher(self, app) -> None:
-        now = time.monotonic()
-        with self.state.lock:
-            current = self.state.event_watcher_record
-            if current.worker is not None and current.worker.is_alive():
-                # A retained client-event worker must not make a previously failed tmux signal
-                # watcher permanent. New SSE subscribers are the lifecycle re-entry point.
-                app.start_tmux_signal_event_watcher()
-                return
-            record = ClientEventWatcherRecord(
-                next_attention_ack_poll_at=now + app.server_attention_ack_event_poll_seconds(),
-                next_tmux_signal_poll_at=now + app.server_tmux_signal_event_poll_seconds(),
-            )
-            worker = threading.Thread(target=app.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
-            record.worker = worker
-            self.state.event_watcher_record = record
-
-        def rollback() -> None:
-            owned = False
-            with self.state.lock:
-                if self.state.event_watcher_record is record and record.worker is worker:
-                    record.stop_event.set()
-                    record.watchd_stop_event.set()
-                    record.wake_event.set()
-                    self.state.event_watcher_record = ClientEventWatcherRecord()
-                    owned = True
-            if owned:
-                app.stop_tmux_signal_event_watcher()
-
-        try:
-            app.start_tmux_signal_event_watcher()
-        except Exception:
-            rollback()
-            raise
-        common.start_thread_with_rollback(worker, rollback)
-        try:
-            app.start_watchd_revision_watcher(record)
-        except RuntimeError as exc:
-            # watchd owns both native watching and its polling fallback. The web
-            # process reports a typed unavailable state and never scans locally.
-            app.log_event(
-                None,
-                "watchd_error",
-                f"watchd revision bridge failed to start: {exc}",
-                {"diagnostic": str(exc)},
-                message_key="events.message.clientEvent.directoryWatchFailed",
-            )
-
-    def stop_client_event_watcher(self, app) -> None:
-        app.stop_tmux_signal_event_watcher()
-        with self.state.lock:
-            record = self.state.event_watcher_record
-            record.stop_event.set()
-            record.watchd_stop_event.set()
-            record.wake_event.set()
-            thread = record.worker
-            watchd_worker = record.watchd_worker
-            snapshot_worker = record.snapshot_worker
-            record.snapshot_worker = None
-        app.stop_status_generation_watcher(record)
-        if snapshot_worker is not None:
-            with app.activity_transcript_service.transcripts_payload_cache_lock:
-                cache_record = app.activity_transcript_service.transcripts_payload_cache_record
-                snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
-            if snapshot_generation:
-                app.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-        if watchd_worker is not None and watchd_worker is not threading.current_thread():
-            watchd_worker.join(timeout=5.0)
-        with self.state.lock:
-            if self.state.event_watcher_record is record:
-                self.state.event_watcher_record = ClientEventWatcherRecord()
-
-    def stop_client_event_watcher_if_idle(self, app) -> bool:
-        with app.client_events.lock:
-            if app.client_events.subscribers:
-                return False
-        app.stop_client_event_watcher()
-        return True
-
-    def client_event_watch_loop(self, app, record: ClientEventWatcherRecord | None = None) -> None:
-        current = record or self.state.event_watcher_record
-        worker = threading.current_thread()
-        try:
-            while not current.stop_event.is_set():
-                try:
-                    now = time.monotonic()
-                    status_demand = app.client_events.has_demand("status", "attention")
-                    notification_demand = app.client_events.has_demand("attention")
-                    if status_demand:
-                        app.start_status_generation_watcher(current)
-                    else:
-                        app.stop_status_generation_watcher(current)
-                    tmux_refresh_due = current.tmux_signal_refresh_at > 0 and now >= current.tmux_signal_refresh_at
-                    tmux_fallback_due = not app.tmux_signal_event_watcher_healthy() and now >= current.next_tmux_signal_poll_at
-                    if status_demand and (tmux_refresh_due or tmux_fallback_due):
-                        events = app.poll_tmux_signals_client_event_once()
-                        if tmux_fallback_due:
-                            app.note_client_event_recurring_work(current, "tmux_signal_fallback", useful=bool(events))
-                        current.tmux_signal_refresh_at = 0.0
-                        if tmux_fallback_due:
-                            current.next_tmux_signal_poll_at = now + app.server_tmux_signal_event_poll_seconds()
-                    if (app.client_events.has_demand("core") or notification_demand) and now >= current.next_watched_pr_poll_at:
-                        events = app.poll_watched_prs_client_event_once()
-                        app.note_client_event_recurring_work(current, "watched_pr_reconcile", useful=bool(events))
-                        current.next_watched_pr_poll_at = now + app.server_watched_pr_event_poll_seconds()
-                    if (app.client_events.has_demand("yoagent") or notification_demand) and now >= current.next_yoagent_job_poll_at:
-                        events = app.yoagent_controller.poll_yoagent_jobs_once()
-                        app.note_client_event_recurring_work(current, "yoagent_job_reconcile", useful=bool(events))
-                        current.next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
-                    if (app.client_events.has_demand("core") or notification_demand) and now < app.search_progress_active_until and now >= current.next_search_progress_poll_at:
-                        # Streaming Quick Open: while a crawl this process kicked is active and a palette
-                        # client is subscribed, forward indexd's buffered progress frames onto the bus.
-                        app.drain_and_publish_search_progress()
-                        current.next_search_progress_poll_at = now + SEARCH_PROGRESS_DRAIN_POLL_SECONDS
-                except (OSError, RuntimeError, ValueError) as exc:
-                    app.log_event(
-                        None,
-                        "client_event_watch_error",
-                        f"client event watch failed: {exc}",
-                        {"diagnostic": str(exc)},
-                        message_key="events.message.clientEvent.watchFailed",
-                    )
-                if current.wake_event.wait(app.client_event_watch_sleep_seconds(time.monotonic(), current)):
-                    current.wake_event.clear()
-        finally:
-            app.stop_status_generation_watcher(current)
-            with self.state.lock:
-                if self.state.event_watcher_record is current and current.worker is worker:
-                    current.worker = None
-
-
-class OwnedStateAttribute:
-    """Expose one composed owner's state field through the compatibility facade."""
-
-    def __init__(self, owner_name: str, state_name: str) -> None:
-        self.owner_name = owner_name
-        self.state_name = state_name
-        self.compatibility_name = f"__owned_state_{owner_name}_{state_name}"
-
-    def __get__(self, instance: object, owner: type[object]) -> Any:
-        if instance is None:
-            return self
-        composed = instance.__dict__.get(self.owner_name)
-        if composed is None:
-            return instance.__dict__.get(self.compatibility_name)
-        return getattr(composed, self.state_name)
-
-    def __set__(self, instance: object, value: Any) -> None:
-        composed = instance.__dict__.get(self.owner_name)
-        if composed is None:
-            instance.__dict__[self.compatibility_name] = value
-            return
-        setattr(composed, self.state_name, value)
-
-class SessionFilesCoordinator:
-    """Own session-files caches, work records, publication, and operation lifecycle."""
-    def __init__(self, app: "TmuxWebtermApp") -> None:
-        self._app = app
-        self.state = app.__dict__.pop("__owned_state__session_files_coordinator_state", None) or SessionFilesService()
-    def start(self) -> None:
-        self.state.allow_work()
-    def stop(self) -> None:
-        self.state.cancel_all_work()
-    def cache_set_limited(self, app, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
-        cache[key] = value
-        while len(cache) > limit:
-            cache.pop(next(iter(cache)))
-    def session_files_exclusion_policy(self, app) -> exclusions.ExclusionPolicy:
-        """Snapshot the configured Differ exclusion policy in the WEB process.
-
-        Settings are read here and nowhere below: the snapshot is signed into the cache identity
-        and shipped in the jobd task payload, so a worker judging paths can never be judging by a
-        different policy than the one the cached answer is keyed on.
-        """
-
-        settings = app.settings_payload().get("settings", {}).get("file_explorer", {})
-        return exclusions.ExclusionPolicy.from_settings(settings, session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
-    def session_files_cache_key( self, app, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
-        repo_refs = session_files.canonical_repository_refs(repo_refs)
-        repo_signatures: list[tuple[str, tuple[Any, ...]]] = []
-        repo_roots = {
-            session_files.canonical_repository_path(repo)
-            for info in infos.values()
-            for repo in session_files.session_candidate_repo_roots(info)
-        }
-        for repo_text in sorted(repo_roots):
-            override = (repo_refs or {}).get(repo_text) or {}
-            repo_from = str(override.get("from") or "").strip() or from_ref
-            repo_to = str(override.get("to") or "").strip() or to_ref
-            repo = Path(repo_text)
-            # CRITICAL for "zero git spawns in warm requests": a `git status` identity ran here on
-            # every key build after a repo change. When the fs watcher covers the repo, its dirty
-            # generation int is the authoritative change signal, so use it and spawn NO git. The real
-            # git identity/snapshot is recomputed inside the jobd worker on an actual recompute. When
-            # the watcher is unhealthy, fall back to the git-spawn identity; the time-based
-            # SESSION_FILES_CACHE_SECONDS staleness remains the no-watcher backstop.
-            if app.watcher_covers_repo(repo):
-                repo_signatures.append((repo_text, app.repo_dirty_generation(repo_text)))
-            else:
-                repo_signatures.append((repo_text, app.shared_git_identity(repo, repo_from, repo_to)[0]))
-        return (
-            kind,
-            SESSION_FILES_CACHE_KEY_VERSION,
-            session or "",
-            session_files.bounded_session_files_hours(hours),
-            str(from_ref or ""),
-            str(to_ref or ""),
-            repo_refs_cache_signature(repo_refs),
-            # The exclusion policy decides which files the answer CONTAINS, so it belongs in the
-            # identity of that answer. Without it, editing Preferences leaves every cached payload
-            # -- memory, disk and the jobd coalesce key derived from this tuple -- serving rows the
-            # new policy excludes.
-            app.session_files_exclusion_policy().signature,
-            tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
-            tuple(repo_signatures),
-        )
-    def session_files_refresh_request_payload( self, app, cache_key: tuple[Any, ...], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> dict[str, Any]:
-        return {
-            "session": session or "",
-            "hours": session_files.bounded_session_files_hours(hours),
-            "from_ref": str(from_ref or ""),
-            "to_ref": str(to_ref or ""),
-            "repo_refs": repo_refs or {},
-            "cache_key": repr(cache_key),
-            "cache_key_data": cache_key,
-        }
-    def requested_session_files_cache_key( self, app, payload: dict[str, Any], fallback: tuple[Any, ...], ) -> tuple[Any, ...]:
-        def freeze(value: Any) -> Any:
-            if isinstance(value, (list, tuple)):
-                return tuple(freeze(item) for item in value)
-            return value
-
-        requested = freeze(payload.get("cache_key_data"))
-        if not isinstance(requested, tuple) or len(requested) != len(fallback):
-            return fallback
-        # The owner may observe newer tmux/transcript metadata or repository state than the follower,
-        # so the final info/repo signatures may differ. All request-controlled dimensions must match
-        # before the owner writes its current result under the follower's key.
-        if requested[:-2] != fallback[:-2]:
-            return fallback
-        return requested
-    def repo_dirty_generation(self, app, repo_text: str) -> int:
-        repo_text = session_files.canonical_repository_path(repo_text)
-        with self.state.cache_lock:
-            return self.state.repo_dirty_generations.setdefault(repo_text, 0)
-    def mark_repo_state_dirty(self, app, changed_paths: list[Path]) -> None:
-        with self.state.cache_lock:
-            generations = self.state.repo_dirty_generations
-            for repo_text in generations:
-                repo_path = Path(repo_text)
-                if any(
-                    path == repo_path or filesystem._path_is_within(path, repo_path)
-                    for path in changed_paths
-                ):
-                    generations[repo_text] += 1
-    def store_git_identity(self, app, identity_key: tuple[Any, ...], dirty_generation: int, identity: tuple[Any, ...]) -> None:
-        with self.state.cache_lock:
-            self.state.repo_identity_cache[identity_key] = (dirty_generation, time.monotonic(), identity)
-    def watcher_covers_repo(self, app, repo: Path) -> bool:
-        """True when the native fs watcher is healthy AND watching a root that contains `repo`.
-
-        This is the one predicate that decides whether a repo's dirty generation is authoritative,
-        so both the cache-KEY path (which uses the generation int instead of spawning `git`) and the
-        identity-reuse path (`reusable_git_identity`) share it rather than re-deriving the coverage
-        test with divergent edge cases.
-        """
-        record = app.client_watch_service.event_watcher_record
-        if not record.filesystem_healthy:
-            return False
-        resolved_repo = Path(str(repo)).expanduser().resolve(strict=False)
-        return any(
-            resolved_repo == Path(root) or filesystem._path_is_within(resolved_repo, Path(root))
-            for root in record.filesystem_roots
-        )
-    def reusable_git_identity(self, app, identity_key: tuple[Any, ...], repo: Path) -> tuple[Any, ...] | None:
-        if not app.watcher_covers_repo(repo):
-            return None
-        with self.state.cache_lock:
-            entry = self.state.repo_identity_cache.get(identity_key)
-            if entry is None:
-                return None
-            generation_at_compute, computed_at, identity = entry
-            if generation_at_compute != self.state.repo_dirty_generations.get(identity_key[0], 0):
-                return None
-        if time.monotonic() - computed_at > app.SESSION_FILES_GIT_IDENTITY_SAFETY_SECONDS:
-            return None
-        return identity
-    def session_files_disk_cache_path(self, app, key: tuple[Any, ...]) -> tuple[Path, str]: # Stable logical view identity only (kind, version, session, hours, refs, # per-repo ref overrides): the volatile info/repo signatures (key[-2:]) # are a replaceable source generation stored INSIDE the record, so agent # status or transcript appends REPLACE one durable file per view instead # of minting a new filename per generation.
-        key_text = app.client_event_payload_signature(key[:-2])
-        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
-        return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
-    def session_files_source_generation(self, app, key: tuple[Any, ...]) -> str:
-        """The replaceable half of the cache identity: info + repo signatures."""
-        return hashlib.sha256(app.client_event_payload_signature(key[-2:]).encode("utf-8")).hexdigest()
-    def session_files_disk_manifest_path(self, app, signature: str) -> Path:
-        return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
-    def prune_session_files_disk_cache( self, app, *, max_age_seconds: float | None = None, max_bytes: int | None = None, now: float | None = None, ) -> dict[str, Any]:
-        return session_files.prune_disk_cache(
-            SESSION_FILES_CACHE_DIR,
-            max_age_seconds=SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds,
-            max_bytes=SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max_bytes,
-            batch_size=SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
-            now=now,
-        )
-    def run_session_files_disk_cache_prune(self, app, record: SessionFilesDiskPruneRecord | None = None) -> None:
-        active_record = record or self.state.disk_prune_record
-        try:
-            result = app.prune_session_files_disk_cache()
-        except (OSError, RuntimeError, ValueError) as exc:
-            result = {"error": str(exc)}
-            logger.warning("session-files disk cache prune failed: %s", exc)
-        with self.state.disk_prune_lock:
-            if self.state.disk_prune_record is active_record:
-                active_record.last_result = result
-                active_record.running = False
-                active_record.worker = None
-        if result.get("removed_entries"):
-            app.log_event(
-                None,
-                "session_files_cache_pruned",
-                "Session-files disk cache pruned",
-                result,
-                message_key="events.message.sessionFiles.cachePruned",
-            )
-    def request_session_files_disk_cache_prune(self, app, reason: str = "") -> bool:
-        now = time.monotonic()
-        with self.state.disk_prune_lock:
-            record = self.state.disk_prune_record
-            if record.running or now < record.next_at:
-                return False
-            record.running = True
-            record.next_at = now + SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
-        try:
-            response, _body = app.job_client.produce(
-                "session_files_cache_prune",
-                {
-                    "cache_dir": str(SESSION_FILES_CACHE_DIR),
-                    "max_age_seconds": SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS,
-                    "max_bytes": SESSION_FILES_DISK_CACHE_MAX_BYTES,
-                    "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
-                },
-                priority="maintenance",
-                generation=1,
-                coalesce_key="session-files-cache-prune",
-                delivery="receipt",
-            )
-        except (OSError, RuntimeError, ValueError) as exc:
-            response = {"ok": False, "error": str(exc)}
-        job = response.get("job") if isinstance(response.get("job"), dict) else {}
-        accepted = response.get("ok") is True and str(job.get("status") or "") in {"queued", "running", "completed"}
-        with self.state.disk_prune_lock:
-            if self.state.disk_prune_record is record:
-                record.running = False
-                record.worker = None
-                record.last_result = {
-                    "submitted": accepted,
-                    "reason": reason,
-                    "job_id": str(job.get("job_id") or ""),
-                    **({"error": str(response.get("error") or "jobd did not accept session-files cache prune")} if not accepted else {}),
-                }
-        return accepted
-    def session_files_payload_signature(self, app, payload: SessionFilesPayload | dict[str, Any]) -> str:
-        payload_text = app.client_event_payload_signature(payload)
-        return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
-    def set_session_files_memory_cache( self, app, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus, stored_at: float | None = None, ) -> None:
-        with self.state.cache_lock:
-            app.cache_set_limited(
-                self.state.cache,
-                key,
-                (time.monotonic() if stored_at is None else stored_at, (copy.deepcopy(payload), status)),
-                SESSION_FILES_CACHE_MAX_ITEMS,
-            )
-    def read_session_files_disk_cache( self, app, key: tuple[Any, ...], max_age_seconds: float | None = None, allow_stale: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
-        path, signature = app.session_files_disk_cache_path(key)
-        source_generation = app.session_files_source_generation(key)
-        result = app.session_files_published_cache().read(
-            path,
-            signature,
-            published_caches.SessionFilesFreshnessKey(source_generation),
-            max_age_seconds=max_age_seconds,
-            allow_stale=allow_stale,
-        )
-        if result is None:
-            return None
-        payload = result.payload.payload
-        status = result.payload.status
-        state = result.freshness
-        # A source-mismatched record remains last-known-good only. Do not put it
-        # under the requested in-memory key, where a strict read would see it.
-        if state.current:
-            app.set_session_files_memory_cache(key, payload, status, stored_at=time.monotonic() - state.age_seconds)
-        return copy.deepcopy(payload), status, state.fresh, state.age_seconds
-    def session_files_published_cache(self, app):
-        return published_caches.session_files_cache(
-            version=SESSION_FILES_CACHE_VERSION,
-            cache_dir=SESSION_FILES_CACHE_DIR,
-            payload_signature=app.session_files_payload_signature,
-            owner_generation=lambda: app.background_owner.status_payload().get("generation", {}),
-            record_phase=app.record_session_files_phase,
-            request_prune=app.request_session_files_disk_cache_prune,
-            clock=time.time,
-            writer=atomic_write_text,
-        )
-    def write_session_files_disk_cache_unlocked( self, app, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", ) -> None:
-        app.session_files_published_cache().write(
-            path,
-            signature,
-            published_caches.SessionFilesCachedPayload(payload, status),
-            published_caches.SessionFilesFreshnessKey(source_generation, status),
-        )
-    def write_session_files_disk_cache(self, app, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
-        path, signature = app.session_files_disk_cache_path(key)
-        try:
-            with file_lock(path, dir_mode=0o700):
-                app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key))
-        except OSError as exc:
-            logger.warning("failed to write session-files cache %s: %s", path, exc)
-    def record_session_files_phase(self, app, phase: str, compute_ms: float, details: dict[str, Any]) -> None:
-        app.record_performance_sample(
-            BACKGROUND_ROLE_SESSION_FILES,
-            f"phase:{str(phase or 'unknown')[:80]}",
-            trigger="payload",
-            compute_ms=compute_ms,
-            cache_key={"kind": "session-files-phase"},
-            cache_status="computed",
-            details=details,
-        )
-    def shared_git_identity(self, app, repo: Path, from_ref: str | None, to_ref: str | None) -> tuple[tuple[Any, ...], str]:
-        """One identity owner for BOTH the cache-key path and the snapshot path.
-
-        Order of preference: watcher-cached (repository-state record unchanged
-        -> ZERO Git commands), coalesced (another caller is computing it right
-        now), computed. The future is removed once it completes, so sequential
-        calls still recompute when the record is dirty and a file change is
-        visible to the very next request — nothing is delayed or hidden.
-        """
-        identity_key = (str(repo), from_ref or "", to_ref or "")
-        cached_identity = app.reusable_git_identity(identity_key, repo)
-        if cached_identity is not None:
-            return cached_identity, "watcher-cached"
-        with self.state.cache_lock:
-            identity_future = self.state.git_identity_futures.get(identity_key)
-            identity_owner = identity_future is None
-            if identity_owner:
-                identity_future = Future()
-                self.state.git_identity_futures[identity_key] = identity_future
-        if not identity_owner:
-            return identity_future.result(), "coalesced"
-        try:
-            dirty_generation_at_start = app.repo_dirty_generation(identity_key[0])
-            snapshot_identity = session_files.git_snapshot_identity(repo, from_ref, to_ref)
-            app.store_git_identity(identity_key, dirty_generation_at_start, snapshot_identity)
-            identity_future.set_result(snapshot_identity)
-        except BaseException as error:
-            identity_future.set_exception(error)
-            raise
-        finally:
-            with self.state.cache_lock:
-                self.state.git_identity_futures.pop(identity_key, None)
-        return snapshot_identity, "computed"
-    def shared_session_files_git_snapshot( self, app, repo: Path, from_ref: str | None, to_ref: str | None, *, identity: tuple[Any, ...] | None = None, ) -> dict[str, Any]:
-        signature_started = time.perf_counter()
-        if identity is not None:
-            snapshot_identity, identity_status = identity, "provided"
-        else:
-            snapshot_identity, identity_status = app.shared_git_identity(repo, from_ref, to_ref)
-        app.record_performance_sample(
-            BACKGROUND_ROLE_SESSION_FILES,
-            "phase:git-signature",
-            trigger="payload",
-            compute_ms=(time.perf_counter() - signature_started) * 1000,
-            cache_key={"kind": "git-snapshot"},
-            cache_status=identity_status,
-            cache_hit=identity_status != "computed",
-            details={"repo": str(repo)},
-        )
-        with self.state.cache_lock:
-            record = self.state.git_snapshot_records.get(snapshot_identity)
-            if record is not None and record.snapshot is not None:
-                app.record_performance_sample(
-                    BACKGROUND_ROLE_SESSION_FILES,
-                    "phase:git-snapshot",
-                    trigger="payload",
-                    compute_ms=0,
-                    cache_key={"kind": "git-snapshot"},
-                    cache_status="hit:fresh",
-                    cache_hit=True,
-                    cache_fresh=True,
-                    details={"repo": str(repo)},
-                )
-                return copy.deepcopy(record.snapshot)
-            if record is None:
-                record = SessionFilesGitSnapshotRecord()
-                self.state.git_snapshot_records[snapshot_identity] = record
-                owner = True
-            else:
-                owner = False
-        if not owner:
-            final_identity, snapshot = record.future.result()
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "phase:git-snapshot",
-                trigger="payload",
-                compute_ms=0,
-                cache_key={"kind": "git-snapshot"},
-                cache_status="coalesced",
-                cache_hit=True,
-                cache_fresh=final_identity == snapshot_identity,
-                details={"repo": str(repo)},
-            )
-            if final_identity != snapshot_identity:
-                return app.shared_session_files_git_snapshot(repo, from_ref, to_ref)
-            return copy.deepcopy(snapshot)
-        started = time.perf_counter()
-        try:
-            snapshot = session_files.build_git_snapshot(repo, from_ref, to_ref)
-            final_identity = session_files.git_snapshot_identity(repo, from_ref, to_ref)
-            compute_ms = (time.perf_counter() - started) * 1000
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "phase:git-snapshot",
-                trigger="payload",
-                compute_ms=compute_ms,
-                cache_key={"kind": "git-snapshot"},
-                cache_status="miss:computed",
-                cache_hit=False,
-                cache_fresh=final_identity == snapshot_identity,
-                details={"repo": str(repo)},
-            )
-            record.future.set_result((final_identity, copy.deepcopy(snapshot)))
-            with self.state.cache_lock:
-                if final_identity == snapshot_identity:
-                    record.snapshot = copy.deepcopy(snapshot)
-                    while len(self.state.git_snapshot_records) > SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS:
-                        oldest_key = next(iter(self.state.git_snapshot_records))
-                        if oldest_key == snapshot_identity and len(self.state.git_snapshot_records) > 1:
-                            oldest_key = next(key for key in self.state.git_snapshot_records if key != snapshot_identity)
-                        self.state.git_snapshot_records.pop(oldest_key, None)
-                elif self.state.git_snapshot_records.get(snapshot_identity) is record:
-                    self.state.git_snapshot_records.pop(snapshot_identity, None)
-            if final_identity != snapshot_identity:
-                return app.shared_session_files_git_snapshot(repo, from_ref, to_ref)
-            return copy.deepcopy(snapshot)
-        except Exception as exc:
-            if not record.future.done():
-                record.future.set_exception(exc)
-            with self.state.cache_lock:
-                if self.state.git_snapshot_records.get(snapshot_identity) is record:
-                    self.state.git_snapshot_records.pop(snapshot_identity, None)
-            raise
-    def complete_session_files_work( self, app, key: tuple[Any, ...], record: SessionFilesWorkRecord, result: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None, error: Exception | None = None, ) -> None:
-        if error is not None and not record.future.done():
-            record.future.set_exception(error)
-        elif result is not None and not record.future.done():
-            record.future.set_result((copy.deepcopy(result[0]), result[1], result[2], result[3]))
-        self.state.finish_work(key, record)
-    def compute_session_files_cache_entry( self, app, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
-        path, signature = app.session_files_disk_cache_path(key)
-        work_record, owner = self.state.claim_work(
-            key,
-            threading.get_ident(),
-            reserved=reserved,
-            stable_signature=signature,
-        )
-        if not owner:
-            payload, status, cache_hit, age_seconds = work_record.future.result()
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "cache-entry",
-                trigger="single-flight",
-                compute_ms=0,
-                payload=payload,
-                cache_key=key,
-                cache_status="coalesced",
-                cache_hit=True,
-                cache_fresh=True,
-            )
-            return copy.deepcopy(payload), status, cache_hit, age_seconds
-        started = time.perf_counter()
-        compute_attempted = False
-        compute_slot_acquired = False
-        computed_result: tuple[SessionFilesPayload, HTTPStatus] | None = None
-        try:
-            with file_lock(path, dir_mode=0o700):
-                cached = app.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=False)
-                if cached:
-                    payload, status, _fresh, age_seconds = cached
-                    app.record_performance_sample(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        "cache-entry",
-                        trigger="compute",
-                        compute_ms=(time.perf_counter() - started) * 1000,
-                        payload=payload,
-                        cache_key=key,
-                        cache_status="hit:fresh",
-                        cache_hit=True,
-                        cache_fresh=True,
-                    )
-                    result = (payload, status, True, age_seconds)
-                    app.complete_session_files_work(key, work_record, result=result)
-                    return result
-                # Only a true cache miss enters the owner-wide queue.  Hits and
-                # followers remain cheap, while unrelated HTTP handlers never
-                # contend for these transcript/Git slots.
-                queue_started = time.perf_counter()
-                self.state.acquire_compute_slot(app.session_files_max_workers())
-                compute_slot_acquired = True
-                app.record_session_files_phase(
-                    "cold-rebuild-queue",
-                    (time.perf_counter() - queue_started) * 1000,
-                    {"cache_key_kind": app.performance_cache_key_kind(key)},
-                )
-                compute_attempted = True
-                payload, status = compute()
-                computed_result = (payload, status)
-                serialization_started = time.perf_counter()
-                if self.state.stable_generation_is_current(work_record):
-                    app.set_session_files_memory_cache(key, payload, status)
-                    app.write_session_files_disk_cache_unlocked(path, signature, payload, status, app.session_files_source_generation(key))
-                app.record_session_files_phase(
-                    "cache-serialization",
-                    (time.perf_counter() - serialization_started) * 1000,
-                    {
-                        "cache_key_kind": app.performance_cache_key_kind(key),
-                        "payload_bytes": app.performance_payload_bytes(payload),
-                        # Cumulative work counters (git spawns per verb, catalog
-                        # traversal, append bytes, untracked stat/read work) so
-                        # per-build deltas are derivable from consecutive samples.
-                        "runtime_counters": session_files.session_files_runtime_counters(),
-                    },
-                )
-                app.record_performance_sample(
-                    BACKGROUND_ROLE_SESSION_FILES,
-                    "cache-entry",
-                    trigger="compute",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                    payload=payload,
-                    cache_key=key,
-                    cache_status="miss:computed",
-                    cache_hit=False,
-                    cache_fresh=True,
-                )
-                result = (copy.deepcopy(payload), status, False, 0.0)
-                app.complete_session_files_work(key, work_record, result=result)
-                return result
-        except OSError as exc:
-            logger.warning("failed to lock session-files cache %s: %s", path, exc)
-            if compute_attempted:
-                if computed_result is None:
-                    app.complete_session_files_work(key, work_record, error=exc)
-                    raise
-                payload, status = computed_result
-                result = (copy.deepcopy(payload), status, False, 0.0)
-                app.complete_session_files_work(key, work_record, result=result)
-                return result
-            try:
-                queue_started = time.perf_counter()
-                self.state.acquire_compute_slot(app.session_files_max_workers())
-                compute_slot_acquired = True
-                app.record_session_files_phase(
-                    "cold-rebuild-queue",
-                    (time.perf_counter() - queue_started) * 1000,
-                    {"cache_key_kind": app.performance_cache_key_kind(key), "lock_fallback": True},
-                )
-                compute_attempted = True
-                payload, status = compute()
-            except Exception as compute_exc:
-                app.complete_session_files_work(key, work_record, error=compute_exc)
-                raise
-            app.set_session_files_memory_cache(key, payload, status)
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "cache-entry",
-                trigger="compute-lock-fallback",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=payload,
-                cache_key=key,
-                cache_status="miss:lock-fallback",
-                cache_hit=False,
-                cache_fresh=True,
-            )
-            result = (copy.deepcopy(payload), status, False, 0.0)
-            app.complete_session_files_work(key, work_record, result=result)
-            return result
-        except Exception as exc:
-            app.complete_session_files_work(key, work_record, error=exc)
-            raise
-        finally:
-            if compute_slot_acquired:
-                self.state.release_compute_slot()
-    def get_session_files_cache( self, app, key: tuple[Any, ...], max_age_seconds: float | None = None, allow_stale: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
-        started = time.perf_counter()
-        now = time.monotonic()
-        stale_cached: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None
-        with self.state.cache_lock:
-            cached = self.state.cache.get(key)
-            if cached:
-                stored_at, value = cached
-                age_seconds = max(0.0, now - stored_at)
-                fresh = max_age_seconds is None or age_seconds <= max_age_seconds
-                payload, status = value
-                if fresh:
-                    app.record_performance_sample(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        "cache-read",
-                        trigger="memory",
-                        compute_ms=(time.perf_counter() - started) * 1000,
-                        payload=payload,
-                        cache_key=key,
-                        cache_status="hit:fresh",
-                        cache_hit=True,
-                        cache_fresh=True,
-                    )
-                    return copy.deepcopy(payload), status, True, age_seconds
-                stale_cached = (copy.deepcopy(payload), status, False, age_seconds)
-        disk_cached = app.read_session_files_disk_cache(key, max_age_seconds=max_age_seconds, allow_stale=allow_stale)
-        if disk_cached:
-            if stale_cached is None or disk_cached[3] <= stale_cached[3]:
-                app.record_performance_sample(
-                    BACKGROUND_ROLE_SESSION_FILES,
-                    "cache-read",
-                    trigger="disk",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                    payload=disk_cached[0],
-                    cache_key=key,
-                    cache_status="hit:fresh" if disk_cached[2] else "hit:stale",
-                    cache_hit=True,
-                    cache_fresh=bool(disk_cached[2]),
-                )
-                return disk_cached
-        if stale_cached is not None and allow_stale:
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "cache-read",
-                trigger="memory",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=stale_cached[0],
-                cache_key=key,
-                cache_status="hit:stale",
-                cache_hit=True,
-                cache_fresh=False,
-            )
-            return stale_cached
-        app.record_performance_sample(
-            BACKGROUND_ROLE_SESSION_FILES,
-            "cache-read",
-            trigger="miss",
-            compute_ms=(time.perf_counter() - started) * 1000,
-            cache_key=key,
-            cache_status="miss",
-            cache_hit=False,
-        )
-        return None
-    def set_session_files_cache(self, app, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
-        app.set_session_files_memory_cache(key, payload, status)
-        app.write_session_files_disk_cache(key, payload, status)
-    def clear_session_files_cache(self, app) -> None:
-        with self.state.cache_lock:
-            self.state.cache.clear()
-            self.state.git_snapshot_records.clear()
-    def session_files_git_identity_for_cache_key(self, app, cache_key: tuple[Any, ...] | None, repo: Path) -> tuple[Any, ...] | None:
-        if not cache_key or not isinstance(cache_key[-1], tuple):
-            return None
-        canonical_repo = session_files.canonical_repository_path(repo)
-        for item in cache_key[-1]:
-            if not isinstance(item, tuple) or len(item) != 2 or str(item[0]) != canonical_repo:
-                continue
-            return item[1] if isinstance(item[1], tuple) else None
-        return None
-    def session_files_git_snapshot_provider(self, app, cache_key: tuple[Any, ...] | None) -> Callable[[Path, str | None, str | None], dict[str, Any]]:
-        def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
-            return app.shared_session_files_git_snapshot(repo, repo_from, repo_to, identity=app.session_files_git_identity_for_cache_key(cache_key, repo))
-        return provider
-    def compute_session_files_payload_for_info( self, app, info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...] | None = None, ) -> SessionFilesPayload:
-        return session_files.session_files_payload_for_info(
-            info,
-            hours=hours,
-            from_ref=from_ref,
-            to_ref=to_ref,
-            repo_refs=repo_refs,
-            git_snapshot_provider=app.session_files_git_snapshot_provider(cache_key),
-            phase_recorder=app.record_session_files_phase,
-        )
-    def session_files_view_coalesce_identity(self, app, cache_key: tuple[Any, ...]) -> tuple[str, int]:
-        """Cross-port product identity for `session_files_view`.
-
-        The coalesce_key is the stable view signature plus the replaceable info+repo source
-        generation, so two web ports sharing one jobd socket and one disk-cache dir dedupe to ONE
-        worker execution for the same product. The numeric generation is derived from that same
-        source signature and drives jobd's generation guard, so an older completion can never
-        overwrite a newer product for the same view.
-        """
-        _path, signature = app.session_files_disk_cache_path(cache_key)
-        source_generation = app.session_files_source_generation(cache_key)
-        coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
-        generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
-        return coalesce_key, generation
-    def session_files_jobd_source_profile(self, app, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
-        """Return bounded source-change facts for jobd diagnostics, never raw cache-key contents."""
-        _path, stable_view = app.session_files_disk_cache_path(cache_key)
-        repo_generations = [item[1] for item in cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
-        return {
-            "requester": requester,
-            "stable_view": stable_view,
-            "info_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-2]).encode("utf-8")).hexdigest(),
-            "repo_signature": hashlib.sha256(app.client_event_payload_signature(cache_key[-1]).encode("utf-8")).hexdigest(),
-            "repo_dirty_generation_count": len(repo_generations),
-            "repo_dirty_generation_max": max(repo_generations, default=0),
-        }
-    @staticmethod
-    def session_files_jobd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
-        """Pass only watcher-authoritative repository generations to jobd's Git-facts cache."""
-        states = []
-        for item in cache_key[-1]:
-            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
-                states.append({"path": session_files.canonical_repository_path(item[0]), "generation": item[1]})
-        return states
-    def submit_session_files_job( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[dict[str, Any], str, int]:
-        """Submit one immutable session-files job and return its atomic broker receipt."""
-        coalesce_key, generation = app.session_files_view_coalesce_identity(cache_key)
-        payload = {
-            "session": session or "",
-            "infos": {name: asdict(info) for name, info in infos.items()},
-            "hours": session_files.bounded_session_files_hours(hours),
-            "from_ref": str(from_ref or ""),
-            "to_ref": str(to_ref or ""),
-            "repo_refs": repo_refs or {},
-            "include_cross_session_attribution": not bool(session),
-            "source": app.session_files_jobd_source_profile(cache_key, requester),
-            "repository_states": app.session_files_jobd_repository_states(cache_key),
-            # Serializable policy, not a lookup: the worker applies exactly this at both doors.
-            "exclusion_policy": app.session_files_exclusion_policy().as_payload(),
-        }
-        response = app.job_client.submit(
-            "session_files_view",
-            payload,
-            priority=priority,
-            generation=generation,
-            coalesce_key=coalesce_key,
-            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
-        )
-        return response, coalesce_key, generation
-    def compute_session_files_payload_via_jobd( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        """Materialize a session-files payload in the background cache worker."""
-        response, coalesce_key, generation = app.submit_session_files_job(
-            session,
-            infos,
-            hours,
-            from_ref,
-            to_ref,
-            repo_refs,
-            cache_key,
-            priority=priority,
-            requester=requester,
-        )
-        if not response.get("ok"):
-            raise SessionFilesJobdUnavailable(
-                str(response.get("error") or "jobd submit rejected"),
-                response,
-            )
-        try:
-            _meta, body, state = wait_for_jobd_product(
-                app.job_client, coalesce_key, generation, SESSION_FILES_JOBD_WAIT_SECONDS
-            )
-        except JobdProductRpcUnavailable as error:
-            raise SessionFilesJobdUnavailable(str(error)) from error
-        if body is None:
-            raise SessionFilesJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
-        return app.session_files_payload_from_product(body)
-    def session_files_payload_from_product(self, app, body: bytes) -> tuple[SessionFilesPayload, HTTPStatus]:
-        data = json.loads(body.decode("utf-8"))
-        payload = data.get("payload") if isinstance(data, dict) else None
-        if not isinstance(payload, dict):
-            raise SessionFilesJobdUnavailable("malformed jobd session-files product")
-        status = HTTPStatus(int(data.get("status") or int(HTTPStatus.OK)))
-        return payload, status
-    def session_files_payload_from_job(self, app, job: dict[str, Any]) -> tuple[SessionFilesPayload, HTTPStatus]:
-        result = job.get("result")
-        payload = result.get("payload") if isinstance(result, dict) else None
-        if not isinstance(payload, dict):
-            raise SessionFilesJobdUnavailable(
-                "malformed jobd session-files result",
-                {"error": "malformed jobd session-files result", "status": str(job.get("status") or "")},
-            )
-        status = HTTPStatus(int(result.get("status") or int(HTTPStatus.OK)))
-        return payload, status
-    def wait_for_session_files_operation_job( self, app, job_id: str, deadline_at: float, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        """Wait only in the accepted-operation worker; HTTP returns before this loop starts."""
-        try:
-            job = app.wait_for_jobd_operation_job(job_id, deadline_at)
-        except JobdOperationUnavailable as error:
-            raise SessionFilesJobdUnavailable(str(error), error.failure) from error
-        return app.session_files_payload_from_job(job)
-    def complete_session_files_operation( self, app, operation_id: str, request_id: str, job_id: str, cache_key: tuple[Any, ...], deadline_at: float, ) -> None:
-        """Supervisor boundary for one accepted producer and its terminal delivery."""
-        try:
-            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(
-                cache_key,
-                lambda: app.wait_for_session_files_operation_job(job_id, deadline_at),
-            )
-            terminal_payload = copy.deepcopy(payload)
-            terminal_payload["cache"] = {
-                "hit": bool(cache_hit),
-                "stale": False,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": SESSION_FILES_CACHE_SECONDS,
-            }
-            result = app.session_files_ready_result(request_id, terminal_payload)
-            app.terminalize_operation(operation_id, result, status)
-        except SessionFilesJobdUnavailable as error:
-            result = app.session_files_failure_result(
-                request_id,
-                error.failure or {"error": str(error)},
-                operation_id=operation_id,
-                operation="jobd.result",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
-        except Exception as error:
-            result = app.session_files_failure_result(
-                request_id,
-                {
-                    "error": str(error),
-                    "cause": local_service_exception_cause(error),
-                },
-                operation_id=operation_id,
-                operation="session-files.complete",
-                code="producer_failed",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
-    def start_session_files_operation( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str, requester: str, ) -> tuple[dict[str, Any], HTTPStatus]:
-        request_id = app.new_api_request_id()
-        response, coalesce_key, generation = app.submit_session_files_job(
-            session,
-            infos,
-            hours,
-            from_ref,
-            to_ref,
-            repo_refs,
-            cache_key,
-            priority=priority,
-            requester=requester,
-        )
-        job = response.get("job") if isinstance(response.get("job"), dict) else {}
-        job_id = str(job.get("job_id") or "")
-        producer_state = str(job.get("status") or "")
-        if not response.get("ok") or not job_id or producer_state not in {"queued", "running", "completed"}:
-            failure = dict(response)
-            if not failure.get("error"):
-                failure["error"] = "jobd did not return an accepted job receipt"
-            result = app.session_files_failure_result(
-                request_id,
-                failure,
-                operation="jobd.submit",
-            )
-            app.record_operation_failure("", result)
-            return result, HTTPStatus.SERVICE_UNAVAILABLE
-        reservation = app.jobd_operation_service.reserve("bulk")
-        if reservation is None:
-            result = app.session_files_failure_result(
-                request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
-                operation="jobd.submit",
-                code="service_busy",
-            )
-            app.record_operation_failure("", result)
-            return result, HTTPStatus.SERVICE_UNAVAILABLE
-        deadline_at = time.time() + (SESSION_FILES_JOBD_JOB_DEADLINE_MS / 1000.0)
-        try:
-            receipt = app.queued_delivery_ledger.accept_operation(
-                request_id=request_id,
-                route="GET /api/session-files",
-                deadline_at=deadline_at,
-                progress={
-                    "phase": "waiting_for_product",
-                    "producer": "jobd",
-                    "producer_state": producer_state,
-                },
-                producer={
-                    "service": "jobd",
-                    "job_id": job_id,
-                    "coalesce_key": coalesce_key,
-                    "generation": generation,
-                },
-                kind="session_files",
-                context={
-                    "session": str(session or ""),
-                    "from_ref": str(from_ref or ""),
-                    "to_ref": str(to_ref or ""),
-                    "hours": float(hours),
-                    "repo_refs": session_files.canonical_repository_refs(repo_refs),
-                },
-            )
-        except Exception:
-            reservation.release()
-            raise
-        operation_id = str(receipt["operation"]["id"])
-        submitted = app.jobd_operation_service.submit_reserved(
-            reservation,
-            app.complete_session_files_operation,
-            operation_id,
-            request_id,
-            job_id,
-            cache_key,
-            deadline_at,
-        )
-        if not submitted:
-            result = app.session_files_failure_result(
-                request_id,
-                {"error": "jobd operation completion worker could not start"},
-                operation_id=operation_id,
-                operation="session-files.start",
-                code="producer_failed",
-            )
-            app.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
-            return result, HTTPStatus.INTERNAL_SERVER_ERROR
-        return receipt, HTTPStatus.ACCEPTED
-    def refresh_session_files_payload_cache( self, app, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        started = time.perf_counter()
-        refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": session or ""}, cache_key=cache_key)
-        app.log_sampled_background_refresh_event(
-            "background_refresh_started",
-            BACKGROUND_ROLE_SESSION_FILES,
-            "Session-files background refresh started",
-            refresh_details,
-            message_key="events.message.backgroundRefresh.started",
-            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-        )
-        try:
-            app.compute_session_files_cache_entry(
-                cache_key,
-                lambda: app.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-refresh"),
-                reserved=True,
-            )
-            compute_ms = (time.perf_counter() - started) * 1000
-            done_details = dict(refresh_details)
-            done_details["compute_ms"] = round(compute_ms, 3)
-            app.log_sampled_background_refresh_event(
-                "background_refresh_done",
-                BACKGROUND_ROLE_SESSION_FILES,
-                "Session-files background refresh finished",
-                done_details,
-                message_key="events.message.backgroundRefresh.finished",
-                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-            )
-            app.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
-        except SessionFilesJobdUnavailable as exc:
-            # jobd could not produce the product this cycle. The single-flight is already released by
-            # compute_session_files_cache_entry; nothing stale is cached and the next request retries.
-            logger.info("session-files payload refresh deferred (jobd) for %s: %s", cache_key, exc)
-        except Exception as exc:
-            logger.warning("session-files payload refresh failed for %s: %s", cache_key, exc)
-            raise
-    def refresh_session_files_info_cache( self, app, cache_key: tuple[Any, ...], info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        started = time.perf_counter()
-        refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session}, cache_key=cache_key)
-        app.log_sampled_background_refresh_event(
-            "background_refresh_started",
-            BACKGROUND_ROLE_SESSION_FILES,
-            "Session-files background refresh started",
-            refresh_details,
-            message_key="events.message.backgroundRefresh.started",
-            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-        )
-        try:
-            app.compute_session_files_cache_entry(
-                cache_key,
-                lambda: app.compute_session_files_payload_via_jobd(info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-info-refresh"),
-                reserved=True,
-            )
-            compute_ms = (time.perf_counter() - started) * 1000
-            done_details = dict(refresh_details)
-            done_details["compute_ms"] = round(compute_ms, 3)
-            app.log_sampled_background_refresh_event(
-                "background_refresh_done",
-                BACKGROUND_ROLE_SESSION_FILES,
-                "Session-files background refresh finished",
-                done_details,
-                message_key="events.message.backgroundRefresh.finished",
-                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
-            )
-            app.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
-        except SessionFilesJobdUnavailable as exc:
-            logger.info("session-files info refresh deferred (jobd) for %s: %s", cache_key, exc)
-        except Exception as exc:
-            logger.warning("session-files info refresh failed for %s: %s", cache_key, exc)
-            raise
-    def start_session_files_cache_refresh(self, app, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            if target == app.refresh_session_files_payload_cache and len(args) >= 6:
-                session, _infos, hours, from_ref, to_ref, repo_refs = args[:6]
-                request_payload = app.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs)
-            else:
-                request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
-            app.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
-            return False
-        _path, stable_signature = app.session_files_disk_cache_path(cache_key)
-        record = self.state.reserve_work(cache_key, stable_signature)
-        if record is None:
-            return False
-        def run_reserved_worker() -> None:
-            try:
-                target(cache_key, *args)
-            except BaseException as exc:
-                if not record.future.done():
-                    record.future.set_exception(exc)
-                raise
-            finally:
-                self.state.finish_reserved_worker(cache_key, record, threading.current_thread())
-
-        worker = threading.Thread(target=run_reserved_worker, daemon=True)
-        try:
-            if not self.state.start_reserved_worker(cache_key, record, worker):
-                return False
-        except RuntimeError as exc:
-            if not record.future.done():
-                record.future.set_exception(exc)
-            raise
-        return True
-    def start_requested_session_files_cache_refresh(self, app, payload: dict[str, Any]) -> bool:
-        session = str(payload.get("session") or "").strip()
-        scope = [session] if session else list(app.sessions)
-        infos, _errors = discover_sessions(scope)
-        if session and session not in infos:
-            return False
-        hours = session_files.bounded_session_files_hours(app.float_value(payload.get("hours"), 24.0))
-        from_ref = str(payload.get("from_ref") or "").strip() or None
-        to_ref = str(payload.get("to_ref") or "").strip() or None
-        raw_repo_refs = payload.get("repo_refs")
-        repo_refs = raw_repo_refs if isinstance(raw_repo_refs, dict) else {}
-        fallback_key = app.session_files_cache_key("payload", infos, session or None, hours, from_ref, to_ref, repo_refs)
-        cache_key = app.requested_session_files_cache_key(payload, fallback_key)
-        return app.start_session_files_cache_refresh(
-            cache_key,
-            app.refresh_session_files_payload_cache,
-            session or None,
-            infos,
-            hours,
-            from_ref,
-            to_ref,
-            repo_refs,
-        )
-    def cached_session_files_payload_for_info( self, app, info: SessionInfo, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, *, wait_for_fresh: bool = True, ) -> SessionFilesPayload:
-        infos = {info.session: info}
-        key = app.session_files_cache_key("payload", infos, info.session, hours, from_ref, to_ref, repo_refs)
-        cached = app.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=True)
-        if cached:
-            payload, _status, fresh, _age = cached
-            if not fresh:
-                if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    app.start_session_files_cache_refresh(key, app.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
-                else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = app.request_background_refresh(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        app.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
-                    )
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        try:
-                            payload, _status, _hit, _age = app.compute_session_files_cache_entry(
-                                key,
-                                lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
-                            )
-                        except SessionFilesJobdUnavailable:
-                            # Serve the stale bytes already read above; never resurrect inline git here.
-                            pass
-            return payload
-        if not wait_for_fresh:
-            app.start_session_files_cache_refresh(
-                key,
-                app.refresh_session_files_info_cache,
-                info,
-                hours,
-                from_ref,
-                to_ref,
-                repo_refs,
-            )
-            return {
-                "session": info.session,
-                "hours": session_files.bounded_session_files_hours(hours),
-                "files": [],
-                "repos": [],
-                "errors": [],
-                "refreshing_elsewhere": True,
-            }
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            refresh_result = app.request_background_refresh(
-                BACKGROUND_ROLE_SESSION_FILES,
-                app.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
-            )
-            app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-            if app.background_refresh_should_fallback(refresh_result):
-                try:
-                    payload, _status, _hit, _age = app.compute_session_files_cache_entry(
-                        key,
-                        lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
-                    )
-                    return copy.deepcopy(payload)
-                except SessionFilesJobdUnavailable:
-                    pass
-            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
-        try:
-            payload, _status, _hit, _age = app.compute_session_files_cache_entry(
-                key,
-                lambda: app.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-cache-miss"),
-            )
-            return copy.deepcopy(payload)
-        except SessionFilesJobdUnavailable:
-            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
-    def warm_start_session_files_payload_cache(self, app) -> None:
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            app.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"reason": "warm-start"})
-            return
-        sessions, _errors = discover_sessions(app.sessions)
-        for session in app.sessions:
-            info = sessions.get(session)
-            if info is not None and info.agents:
-                key = app.session_files_cache_key("payload", {session: info}, session, 24.0, None, None, None)
-                app.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
-    def warm_start_tabber_activity_cache(self, app) -> None:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warm-start"})
-            return
-        source_signature = app.tabber_activity_source_signature()
-        app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=24.0, source_signature=source_signature)
-    def cached_session_files_payloads_for_infos( self, app, infos: dict[str, SessionInfo], hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, ) -> dict[str, SessionFilesPayload]:
-        if not infos:
-            return {}
-        if len(infos) == 1:
-            session, info = next(iter(infos.items()))
-            return {session: app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)}
-        if not app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-            return {
-                session: app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-                for session, info in infos.items()
-            }
-        payloads: dict[str, SessionFilesPayload] = {}
-        for session, info in infos.items():
-            payloads[session] = app.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-        return payloads
-    def session_files_payload_for_infos( self, app, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        started = time.perf_counter()
-        cache_key = app.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
-        max_age = SESSION_FILES_CACHE_SECONDS
-        cached = None if force else app.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
-        priority = "interactive" if force else "freshness"
-
-        def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
-            return app.compute_session_files_payload_via_jobd(
-                session,
-                infos,
-                hours,
-                from_ref,
-                to_ref,
-                repo_refs,
-                cache_key,
-                priority=priority,
-                requester=requester,
-            )
-
-        cache_meta: dict[str, Any]
-        if cached:
-            payload, status, fresh, age_seconds = cached
-            cache_meta = {
-                "hit": True,
-                "stale": not fresh,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": max_age,
-            }
-            if not fresh:
-                if app.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                    refreshing = app.start_session_files_cache_refresh(cache_key, app.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
-                    cache_meta["refreshing"] = refreshing
-                else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
-                    refresh_result = app.request_background_refresh(
-                        BACKGROUND_ROLE_SESSION_FILES,
-                        app.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
-                    )
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        try:
-                            payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd)
-                            cache_meta = {
-                                "hit": cache_hit,
-                                "stale": False,
-                                "age_seconds": round(age_seconds, 3),
-                                "refresh_seconds": max_age,
-                                "fallback": True,
-                            }
-                        except SessionFilesJobdUnavailable:
-                            cache_meta["refreshing_elsewhere"] = True
-                    else:
-                        cache_meta["refreshing_elsewhere"] = True
-        else:
-            if accepted_operation:
-                payload, status = app.start_session_files_operation(
-                    session,
-                    infos,
-                    hours,
-                    from_ref,
-                    to_ref,
-                    repo_refs,
-                    cache_key,
-                    priority=priority,
-                    requester=requester,
-                )
-                cache_meta = {
-                    "hit": False,
-                    "stale": False,
-                    "refreshing_elsewhere": status == HTTPStatus.ACCEPTED,
-                }
-            else:
-                try:
-                    payload, status, cache_hit, age_seconds = app.compute_session_files_cache_entry(cache_key, compute_via_jobd)
-                    cache_meta = {
-                        "hit": cache_hit,
-                        "stale": False,
-                        "age_seconds": round(age_seconds, 3),
-                        "refresh_seconds": max_age,
-                        "refreshing": False,
-                    }
-                except SessionFilesJobdUnavailable as error:
-                    payload = {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": str(error), "terminal": True}
-                    status = HTTPStatus.SERVICE_UNAVAILABLE
-                    cache_meta = {"hit": False, "stale": False, "refreshing_elsewhere": False}
-        payload = copy.deepcopy(payload)
-        if status == HTTPStatus.ACCEPTED:
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "payload",
-                trigger="force" if force else "request",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=payload,
-                cache_key=cache_key,
-                cache_status="refreshing-elsewhere",
-                cache_hit=False,
-                cache_fresh=False,
-                details={"session": session or "", "status": int(status)},
-            )
-            return payload, status
-        if status >= HTTPStatus.BAD_REQUEST and payload.get("state") == "failed":
-            app.record_performance_sample(
-                BACKGROUND_ROLE_SESSION_FILES,
-                "payload",
-                trigger="force" if force else "request",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=payload,
-                cache_key=cache_key,
-                cache_status=str(int(status)),
-                cache_hit=False,
-                cache_fresh=False,
-                details={"session": session or "", "status": int(status)},
-            )
-            return payload, status
-        structured_extra_errors = [
-            value if isinstance(value, dict) else message_descriptor("diff.warning.discovery", value, {"error": value})
-            for value in (extra_errors or [])
-        ]
-        payload["errors"] = [*structured_extra_errors, *payload.get("errors", [])]
-        payload["cache"] = cache_meta
-        app.record_performance_sample(
-            BACKGROUND_ROLE_SESSION_FILES,
-            "payload",
-            trigger="force" if force else "request",
-            compute_ms=(time.perf_counter() - started) * 1000,
-            payload=payload,
-            cache_key=cache_key,
-            cache_status="hit:stale" if cache_meta.get("hit") and cache_meta.get("stale") else ("hit:fresh" if cache_meta.get("hit") else ("refreshing-elsewhere" if cache_meta.get("refreshing_elsewhere") else "miss:computed")),
-            cache_hit=bool(cache_meta.get("hit")),
-            cache_fresh=not bool(cache_meta.get("stale")),
-            details={"session": session or "", "status": int(status)},
-        )
-        return payload, status
-    def session_files_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        refresh_errors = app.refresh_sessions()
-        if session and session not in app.sessions:
-            diagnostic = f"unknown session: {session}"
-            return {"session": session, **user_message_payload("status.sessionEnded", diagnostic, session=session)}, HTTPStatus.NOT_FOUND
-        scope = [session] if session else app.sessions
-        infos, errors = discover_sessions(scope)
-        return app.session_files_payload_for_infos(
-            session,
-            infos,
-            hours,
-            from_ref=from_ref,
-            to_ref=to_ref,
-            repo_refs=repo_refs,
-            force=force,
-            requester=requester,
-            extra_errors=[*refresh_errors, *errors],
-            accepted_operation=accepted_operation,
-        )
-    def session_files_http_payload( self, app, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
-        payload, status = app.session_files_payload(
-            session,
-            hours,
-            from_ref=from_ref,
-            to_ref=to_ref,
-            repo_refs=repo_refs,
-            force=force,
-            accepted_operation=True,
-        )
-        if payload.get("state") in {"queued", "failed"}:
-            return payload, status
-        request_id = app.new_api_request_id()
-        if status < HTTPStatus.BAD_REQUEST:
-            return app.session_files_ready_result(request_id, payload), status
-        descriptor = payload.get("user_message") if isinstance(payload.get("user_message"), dict) else {}
-        message = str(descriptor.get("fallback") or payload.get("error") or "session-files request failed")
-        return common.error_payload(
-            message,
-            message_key=str(descriptor.get("key") or "common.requestFailed"),
-            message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
-            canonical=True,
-            code="session_files_request_failed",
-            origin="server.http",
-            retryable=False,
-            details={"session": str(session or ""), "status": int(status)},
-            stack=[{
-                "component": "server.http",
-                "operation": "GET /api/session-files",
-                "code": "session_files_request_failed",
-            }],
-            request_id=request_id,
-        ), status
-    def session_files_batch_payload( self, app, sessions: list[str] | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
-        refresh_errors = app.refresh_sessions()
-        requested: list[str] = []
-        seen: set[str] = set()
-        for raw_session in sessions or app.sessions:
-            session = str(raw_session or "").strip()
-            if not session or session in seen:
-                continue
-            seen.add(session)
-            requested.append(session)
-        invalid = [session for session in requested if session not in app.sessions]
-        valid = [session for session in requested if session in app.sessions]
-        infos, errors = discover_sessions(valid)
-        payloads: dict[str, SessionFilesPayload] = {}
-        statuses: dict[str, int] = {}
-        batch_infos: dict[str, SessionInfo] = {}
-        for session in requested:
-            if session in invalid:
-                diagnostic = f"unknown session: {session}"
-                payloads[session] = {"session": session, "errors": [], **user_message_payload("status.sessionEnded", diagnostic, session=session)}
-                statuses[session] = int(HTTPStatus.NOT_FOUND)
-                continue
-            info = infos.get(session)
-            if info is None:
-                diagnostic = f"session unavailable: {session}"
-                payloads[session] = {"session": session, "errors": [], **user_message_payload("diff.error.sessionUnavailable", diagnostic, session=session)}
-                statuses[session] = int(HTTPStatus.NOT_FOUND)
-                continue
-            batch_infos[session] = info
-
-        def load_session_payload(name: str, info: SessionInfo) -> tuple[SessionFilesPayload, HTTPStatus]:
-            return app.session_files_payload_for_infos(
-                name,
-                {name: info},
-                hours,
-                from_ref=from_ref,
-                to_ref=to_ref,
-                repo_refs=repo_refs,
-                force=force,
-                requester="api-session-files-batch",
-            )
-
-        if len(batch_infos) == 1:
-            session, info = next(iter(batch_infos.items()))
-            payload, status = load_session_payload(session, info)
-            payloads[session] = payload
-            statuses[session] = int(status)
-        elif batch_infos:
-            for session, info in batch_infos.items():
-                payload, status = load_session_payload(session, info)
-                payloads[session] = payload
-                statuses[session] = int(status)
-        return {
-            "sessions": payloads,
-            "statuses": statuses,
-            "errors": [*refresh_errors, *errors],
-        }, HTTPStatus.OK
-
-
-class ActivityCache:
-    """Own retained activity/transcript cache state and warmer lifecycle."""
-    def __init__(self, app: "TmuxWebtermApp") -> None:
-        self._app = app
-        self.state = app.__dict__.pop("__owned_state__activity_cache_state", None) or app.__dict__.get("activity_transcript_service") or ActivityTranscriptService()
-        self.watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = app.__dict__.pop("__owned_state__activity_cache_watched_pr_truncated_signature", None)
-    def demote(self) -> None:
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_warmer_record
-            self.state.tabber_warmer_record = TabberActivityWarmerRecord()
-            self.state.tabber_cache_record.refresh_worker = None
-        record.wake.set()
-    def watched_prs_payload(self, app, allow_network: bool = True) -> dict[str, Any]: # resolve the github.watched_prs watchlist to live PR metadata, independent of any open # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist # does not exhaust the GitHub rate limit.
-        settings = settings_payload().get("settings", {})
-        refs = settings.get("github", {}).get("watched_prs", [])
-        result = watched_pr_metadata(refs, app.metadata_cache, allow_network=allow_network)
-        # log the truncation only when the capped state CHANGES (count or watchlist), not on
-        # every poll — otherwise the event log fills with one identical entry per refresh.
-        truncated = result["truncated"]
-        signature = (truncated, tuple(str(ref) for ref in refs)) if truncated else None
-        if signature != self.watched_pr_truncated_signature:
-            self.watched_pr_truncated_signature = signature
-            if truncated:
-                app.log_event(
-                    None,
-                    "watched_pr_truncated",
-                    f"watched PR list capped: {truncated} entries beyond the limit are not polled",
-                    {"truncated": truncated},
-                    message_key="info.watched.truncated",
-                    message_params={"count": truncated},
-                )
-        return {
-            "watched_prs": result["watched_prs"],
-            "truncated": result["truncated"],
-            "invalid": result["invalid"],
-        }
-    def tabber_activity_agents_snapshot(self, app, force: bool = False) -> list[dict[str, Any]]:
-        if force:
-            payload = app.refresh_tabber_activity_cache()
-            agents = payload.get("agents") if isinstance(payload, dict) else []
-            return copy.deepcopy(agents) if isinstance(agents, list) else []
-        source_signature = app.tabber_activity_source_signature()
-        cached = app.get_tabber_activity_cache(app.tabber_activity_refresh_seconds(), allow_stale=True, source_signature=source_signature)
-        if cached:
-            payload, _fresh, _age_seconds = cached
-            agents = payload.get("agents") if isinstance(payload, dict) else []
-            return copy.deepcopy(agents) if isinstance(agents, list) else []
-        payload = app.refresh_tabber_activity_cache()
-        agents = payload.get("agents") if isinstance(payload, dict) else []
-        return copy.deepcopy(agents) if isinstance(agents, list) else []
-    def activity_session_info_payload( self, app, session: str, info: SessionInfo, work: dict[str, Any], files_payload: dict[str, Any], summary: dict[str, Any], recent_events: list[dict[str, Any]] | None = None, locale: str = "en", ) -> dict[str, Any]:
-        selected = info.selected_pane
-        agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
-        git_data = work.get("git") if isinstance(work.get("git"), dict) else {}
-        pull_request = work.get("pull_request") if isinstance(work.get("pull_request"), dict) else None
-        rolling = app.yoagent_session_summary_record(session)
-        latest_summary = str(rolling.get("rolling_summary") or summary.get("local") or "").strip()
-        return {
-            "session": session,
-            "path": str((git_data or {}).get("root") or (git_data or {}).get("cwd") or (agent.cwd if agent else "") or (selected.current_path if selected else "")),
-            "cwd": str((agent.cwd if agent else "") or (selected.current_path if selected else "")),
-            "tmux_target": str(selected.target if selected else ""),
-            "agent": app.compact_agent_for_run_history(agent),
-            "git": git_data,
-            "pull_request": pull_request,
-            "ci": pull_request.get("checks") if isinstance(pull_request, dict) and isinstance(pull_request.get("checks"), dict) else None,
-            "linear": work.get("linear") if isinstance(work.get("linear"), list) else [],
-            "files": summary.get("files") if isinstance(summary.get("files"), dict) else {},
-            "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}, locale=locale),
-            "latest_summary": truncate_text(latest_summary, 1200),
-            "latest_summary_updated_ts": max(0.0, app.float_value(rolling.get("updated_ts"), 0.0)),
-            "recent_events": recent_events if recent_events is not None else app.event_log.tail(session=session, limit=5),
-            "work": work,
-        }
-    def cached_activity_work_by_session(self, app) -> dict[str, dict[str, Any]]:
-        """Project only already-cached transcript work into one bounded statusd request."""
-
-        result: dict[str, dict[str, Any]] = {}
-        encoded_size = 2
-        # Project while the immutable cache snapshot is locked. Calling
-        # cached_transcripts_work_graph() here would deep-copy the entire canonical graph in the
-        # web request before selecting this small projection, retaining much of the CPU being moved.
-        with self.state.transcripts_payload_cache_lock:
-            payload = self.state.transcripts_payload_cache_record.payload
-            cached_sessions = payload.get("sessions") if isinstance(payload, dict) else None
-            for session in dict.fromkeys(app.sessions):
-                cached_session = cached_sessions.get(session) if isinstance(cached_sessions, dict) else None
-                graph = cached_session.get("work_graph") if isinstance(cached_session, dict) else None
-                if not isinstance(graph, dict):
-                    continue
-                work = activity_work_summary_from_graph(graph)
-                encoded_entry = json.dumps({session: work}, ensure_ascii=False, separators=(",", ":"))[1:-1].encode("utf-8")
-                next_size = encoded_size + (1 if result else 0) + len(encoded_entry)
-                if next_size <= STATUSD_ACTIVITY_MAX_WORK_BYTES:
-                    result[session] = work
-                    encoded_size = next_size
-        return result
-    def restore_activity_summary_web_state(self, app, payload: dict[str, Any]) -> dict[str, Any]:
-        """Restore web-owned rolling-summary attachments and worker state after RPC decode."""
-
-        summaries = payload.get("sessions")
-        if isinstance(summaries, dict):
-            for session, summary in summaries.items():
-                if isinstance(session, str) and isinstance(summary, dict):
-                    app.yoagent_controller.attach_yoagent_session_summary(session, summary)
-        rolling_updated = app.yoagent_controller.latest_yoagent_session_summary_updated_ts()
-        with app.yoagent_summary_worker_lock:
-            summary_worker = app.yoagent_summary_worker_record
-            worker_state = {
-                "first_launch_started": summary_worker.first_launch_started,
-                "running": summary_worker.running,
-            }
-        daemon_state = payload.get("yoagent_summaries")
-        payload["yoagent_summaries"] = {
-            **(daemon_state if isinstance(daemon_state, dict) else {}),
-            **worker_state,
-            "updated_ts": rolling_updated,
-            "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
-        }
-        return payload
-    def activity_summary_payload(self, app, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
-        """Decode one daemon-owned activity summary without assembling it in the web process."""
-
-        require_activity_summary_enabled()
-        normalized_locale = normalize_locale(locale)
-        normalized_scope = app.normalized_activity_session_scope(session_scope)
-        bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        response, body = app.status_client.activity_summary(
-            list(dict.fromkeys(app.sessions)),
-            force=bool(force),
-            locale=normalized_locale,
-            session_scope=normalized_scope,
-            hours=bounded_hours,
-            work_by_session=app.cached_activity_work_by_session(),
-        )
-        if response.get("ok") is not True or not body:
-            raise ActivitySummaryStatusdUnavailable(response)
-        payload = validate_activity_summary(response, body)
-        return app.restore_activity_summary_web_state(payload)
-    def activity_summary_bytes(self, app, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> tuple[bytes, HTTPStatus]:
-        """Return typed HTTP bytes for a completed activity summary or terminal daemon failure."""
-
-        if not activity_summary_enabled():
-            metadata, body = activity_summary_disabled_response()
-            return body, HTTPStatus(int(metadata["status"]))
-        try:
-            payload = app.activity_summary_payload(force, locale, session_scope, hours)
-        except ActivitySummaryStatusdUnavailable as error:
-            failure = {
-                "status": "unavailable",
-                "error": str(error),
-                "terminal": True,
-                "upstream": error.response,
-            }
-            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.FAILED_DEPENDENCY
-        except StatusProtocolError as error:
-            failure = {
-                "status": "upgrade_required",
-                "error": str(error),
-                "terminal": True,
-            }
-            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.UPGRADE_REQUIRED
-        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.OK
-    def assemble_activity_summary_payload( self, app, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0, work_by_session: dict[str, dict[str, Any]] | None = None, timings: dict[str, float] | None = None, ) -> dict[str, Any]:
-        """Assemble the activity summary inside statusd's dedicated app instance."""
-
-        require_activity_summary_enabled()
-        started = time.perf_counter()
-        locale = normalize_locale(locale)
-        session_names, scope_errors, scope = app.activity_session_names(session_scope)
-        bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        add_phase_timing(timings, "scope_ms", started)
-        started = time.perf_counter()
-        sessions, errors = discover_sessions(session_names)
-        add_phase_timing(timings, "discover_ms", started)
-        errors = [*scope_errors, *errors]
-        provided_work = work_by_session if isinstance(work_by_session, dict) else {}
-        work_signature = app.client_event_payload_signature(provided_work)
-        inflight_key = (bool(force), locale, scope, tuple(session_names), bounded_hours, work_signature)
-        service = self.state
-        with service.activity_summary_lock:
-            future = service.activity_summary_futures.get(inflight_key)
-            if future is None:
-                future = Future()
-                service.activity_summary_futures[inflight_key] = future
-                owner = True
-            else:
-                owner = False
-        if not owner:
-            return copy.deepcopy(future.result())
-        try:
-            with service.activity_summary_compute_lock:
-                payload = app._activity_summary_payload_owner(
-                    force=force,
-                    locale=locale,
-                    session_names=session_names,
-                    scope=scope,
-                    bounded_hours=bounded_hours,
-                    sessions=sessions,
-                    errors=errors,
-                    work_by_session=provided_work,
-                    timings=timings,
-                )
-            future.set_result(copy.deepcopy(payload))
-            return payload
-        except BaseException as error:
-            future.set_exception(error)
-            raise
-        finally:
-            with service.activity_summary_lock:
-                if service.activity_summary_futures.get(inflight_key) is future:
-                    service.activity_summary_futures.pop(inflight_key, None)
-    def _activity_summary_payload_owner( self, app, *, force: bool, locale: str, session_names: list[str], scope: str, bounded_hours: float, sessions: dict[str, SessionInfo], errors: list[str], work_by_session: dict[str, dict[str, Any]], timings: dict[str, float] | None, ) -> dict[str, Any]:
-        service = self.state
-        started = time.perf_counter()
-        ordered_sessions = app.tmux_recency_ordered_sessions(session_names)
-        app.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
-        add_phase_timing(timings, "order_ms", started)
-        summaries: dict[str, Any] = {}
-        ordered_summaries: list[dict[str, Any]] = []
-        session_files_by_session: dict[str, SessionFilesPayload] = {}
-        transcript_views_by_path: dict[str, dict[str, Any]] = {}
-        session_info: dict[str, Any] = {}
-        started = time.perf_counter()
-        recent_events_by_session = app.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
-        add_phase_timing(timings, "events_ms", started)
-        if force:
-            with service.activity_summary_lock:
-                service.activity_summary_cache.clear()
-            app.clear_session_files_cache()
-        for session in ordered_sessions:
-            info = sessions.get(session)
-            if info is None:
-                continue
-            started = time.perf_counter()
-            provided_work = work_by_session.get(session)
-            if isinstance(provided_work, dict):
-                work = copy.deepcopy(provided_work)
-            else:
-                work_graph = app.cached_transcripts_work_graph(session)
-                if work_graph is None:
-                    work_graph = session_work_graph(info, app.metadata_cache, allow_network=False)
-                work = activity_work_summary_from_graph(work_graph)
-            add_phase_timing(timings, "work_ms", started)
-            started = time.perf_counter()
-            files_payload = app.cached_session_files_payload_for_info(
-                info,
-                hours=bounded_hours,
-                wait_for_fresh=False,
-            )
-            add_phase_timing(timings, "files_ms", started)
-            session_files_by_session[session] = files_payload
-            primary_agent = next((item for item in info.agents if item.transcript), None)
-            transcript_view: dict[str, Any] | None = None
-            started = time.perf_counter()
-            if primary_agent is not None and primary_agent.transcript:
-                view_payload, view_status = app.transcript_compact_view(session, 80, info=info, agent_override=primary_agent)
-                if view_status == HTTPStatus.OK:
-                    transcript_view = view_payload
-                    transcript_views_by_path[str(primary_agent.transcript)] = view_payload
-            add_phase_timing(timings, "transcripts_ms", started)
-            started = time.perf_counter()
-            signature = activity_signature(info, work, files_payload)
-            cache_key = (locale, session)
-            with service.activity_summary_lock:
-                cached = service.activity_summary_cache.get(cache_key)
-            if cached and cached.get("signature") == signature:
-                summary = dict(cached["summary"])
-            else:
-                if transcript_view is None:
-                    summary = build_session_activity_summary(info, work, files_payload, locale=locale)
-                else:
-                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view)
-                with service.activity_summary_lock:
-                    service.activity_summary_cache[cache_key] = {"signature": signature, "summary": dict(summary)}
-            app.yoagent_controller.attach_yoagent_session_summary(session, summary)
-            add_phase_timing(timings, "summaries_ms", started)
-            summaries[session] = summary
-            ordered_summaries.append(summary)
-            started = time.perf_counter()
-            session_info[session] = app.activity_session_info_payload(
-                session,
-                info,
-                work,
-                files_payload,
-                summary,
-                recent_events=recent_events_by_session.get(session, []),
-                locale=locale,
-            )
-            add_phase_timing(timings, "session_info_ms", started)
-        with service.activity_summary_lock:
-            for cache_key in list(service.activity_summary_cache):
-                if cache_key[1] not in sessions:
-                    service.activity_summary_cache.pop(cache_key, None)
-        generated = datetime.now(timezone.utc)
-        rolling_updated = app.yoagent_controller.latest_yoagent_session_summary_updated_ts()
-        with app.yoagent_summary_worker_lock:
-            summary_worker = app.yoagent_summary_worker_record
-            summary_worker_status = {
-                "first_launch_started": summary_worker.first_launch_started,
-                "running": summary_worker.running,
-            }
-        started = time.perf_counter()
-        agents = app.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path)
-        add_phase_timing(timings, "agents_ms", started)
-        started = time.perf_counter()
-        global_summary = build_global_activity_summary(ordered_summaries, errors, locale=locale)
-        add_phase_timing(timings, "global_ms", started)
-        return {
-            "generated_at": generated.isoformat(),
-            "generated_ts": generated.timestamp(),
-            "session_order": [session for session in ordered_sessions if session in summaries],
-            "sessions": summaries,
-            "session_info": session_info,
-            "agents": agents,
-            "global": global_summary,
-            "capabilities": yoagent_capabilities_payload(locale),
-            "errors": errors,
-            "locale": locale,
-            "session_scope": scope,
-            "session_file_hours": bounded_hours,
-            "yoagent_summaries": {
-                "mode": "first_launch",
-                **summary_worker_status,
-                "updated_ts": rolling_updated,
-                "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
-            },
-        }
-    def tabber_activity_session_source_signature( self, app, info: SessionInfo, files_payload: SessionFilesPayload | dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_target: dict[str, dict[str, Any]], attention_ack_rev: int, owned_rows_for_session: dict[tuple[str, str, str], dict[str, Any]] | None = None, ) -> str:
-        activity_rows = {
-            key: value
-            for key, value in activity_snapshot.items()
-            if key == info.session or key.startswith(f"{info.session}:")
-        }
-        pane_rows = [
-            (
-                pane.target,
-                pane.window,
-                pane.pane,
-                pane.current_path,
-                pane.command,
-                pane.process_label or "",
-                pane.pid,
-                pane.active,
-                pane.window_active,
-            )
-            for pane in info.panes
-        ]
-        screen_rows = []
-        for agent in info.agents:
-            target = str(agent.pane_target or "")
-            screen = preclassified_by_target.get(target, {})
-            state = app.agent_window_state_from_screen(screen)
-            screen_rows.append((target, state, app.agent_window_attention_signature(state, screen)))
-        # `statusd`'s owned roster row (state/attention/cooldown for statusd-classified agents,
-        # see agent_window_gathered_agents) is normally a byproduct of the same tmux screen text
-        # already folded into `screen_rows` above -- but a roster-only change (e.g. a cooldown
-        # timer advancing with no new screen capture) would otherwise be invisible here, so this
-        # session would keep reusing a stale owned row until something else changed. Folding the
-        # owned rows in directly closes that gap without keying on the GLOBAL roster revision
-        # (which would defeat per-session reuse on every unrelated session's roster tick).
-        owned_rows_signature = sorted(
-            (window, target, kind, app.stable_client_event_payload_signature(row))
-            for (_row_session, window, target, kind), row in (owned_rows_for_session or {}).items()
-        )
-        signature_payload = {
-            "info": session_info_cache_signature(info),
-            "panes": pane_rows,
-            "files": app.session_files_payload_signature(files_payload),
-            "activity": activity_rows,
-            "screens": screen_rows,
-            "attention_ack_rev": attention_ack_rev,
-            "owned": owned_rows_signature,
-        }
-        return app.stable_client_event_payload_signature(signature_payload)
-    def tabber_activity_view_coalesce_identity(self, app, scope: str, bounded_hours: float, source_signature: str) -> tuple[str, int]:
-        """Cross-port product identity for `tabber_activity_view`, derived from the existing
-        per-refresh `source_signature` rather than a new persisted schema field, so this reuses the
-        TabberActivityCacheRecord's current reuse/staleness contract unchanged."""
-        coalesce_key = f"tabber_activity:{scope}:{bounded_hours}:{source_signature}"[:256]
-        generation = int(hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:12], 16)
-        return coalesce_key, generation
-    def compute_tabber_activity_rows_via_jobd( self, app, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
-        """Gather impure per-session inputs (tmux screen state, attention/cooldown, path/git) in the
-        web owner, then submit the WHOLE changed-session batch to jobd for pure assembly in one call.
-
-        All gathering happens here (a jobd spawn worker has no tmux/app-state access); the worker only
-        reconstructs SessionInfo and runs assemble_agent_window_rows/build_recent_agents_payload.
-        Raises TabberActivityJobdUnavailable (never falls back to inline assembly here) when jobd
-        cannot produce a matching product within the bounded wait; the caller decides the fallback.
-        """
-        if not changed_sessions:
-            return {}
-        sessions_payload: dict[str, Any] = {}
-        for session, info in changed_sessions.items():
-            files_payload = session_files_by_session.get(session, {})
-            transcript_views_by_path: dict[str, dict[str, Any]] = {}
-            for agent in info.agents:
-                if not agent.transcript:
-                    continue
-                view_payload, view_status = app.transcript_compact_view(session, 80, info=info, agent_override=agent)
-                if view_status == HTTPStatus.OK:
-                    transcript_views_by_path[str(agent.transcript)] = view_payload
-            gathered_agents = app.agent_window_gathered_agents(
-                session,
-                info=info,
-                discovered_sessions=discovered_sessions,
-                activity_snapshot=activity_snapshot,
-                preclassified_by_target=preclassified_by_session.get(session),
-                files_payload=files_payload,
-                owned_rows_by_target=owned_agent_rows,
-            )
-            recent_paths_by_agent = []
-            for agent in info.agents:
-                window, _pane = session_files.agent_window_for_info(info, agent)
-                recent_paths_by_agent.append(
-                    recent_agent_paths_from_files(files_payload, agent=agent, window=window)
-                )
-            sessions_payload[session] = {
-                "info": asdict(info),
-                "gathered_agents": gathered_agents,
-                "recent_paths_by_agent": recent_paths_by_agent,
-                "transcript_views_by_path": transcript_views_by_path,
-            }
-        coalesce_key, generation = app.tabber_activity_view_coalesce_identity(scope, bounded_hours, source_signature)
-        response = app.job_client.submit(
-            "tabber_activity_view",
-            {"sessions": sessions_payload, "locale": locale, "snapshot_revision": snapshot_revision},
-            priority="freshness",
-            generation=generation,
-            coalesce_key=coalesce_key,
-            deadline_ms=TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS,
-        )
-        if not response.get("ok"):
-            raise TabberActivityJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
-        try:
-            _meta, body, state = wait_for_jobd_product(
-                app.job_client, coalesce_key, generation, TABBER_ACTIVITY_JOBD_WAIT_SECONDS
-            )
-        except JobdProductRpcUnavailable as error:
-            raise TabberActivityJobdUnavailable(str(error)) from error
-        if body is None:
-            raise TabberActivityJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
-        data = json.loads(body.decode("utf-8"))
-        rows = data.get("session_rows") if isinstance(data, dict) else None
-        if not isinstance(rows, dict):
-            raise TabberActivityJobdUnavailable("malformed jobd tabber-activity product")
-        return rows
-    def build_activity_payload(self, app, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
-        session_names, scope_errors, scope = app.activity_session_names(session_scope)
-        bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        sessions, errors = discover_sessions(session_names)
-        errors = [*scope_errors, *errors]
-        ordered_sessions = app.tmux_recency_ordered_sessions(session_names)
-        agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
-        session_files_by_session = app.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
-        activity_snapshot = app.activity_snapshot_with_recency()
-        # Auto-approve owns prompt/screen classification.  Reuse its immutable roster rows
-        # here so activity cannot publish a contradictory state for the same observation.
-        # Do not make activity's cold path synchronously build a second roster.  At startup the
-        # roster refresh owns the first classification; until it commits, activity keeps its
-        # existing path and joins the owned revision on the next refresh.
-        roster_payload = app.status_snapshot_payload()
-        snapshot_revision, owned_agent_rows = (
-            app.agent_window_snapshot_rows_by_target(roster_payload)
-            if roster_payload is not None
-            else (0, {})
-        )
-        app.merge_shared_attention_acks()
-        with app.client_watch_service.lock:
-            attention_ack_rev = app.client_watch_service.attention_ack_rev
-        preclassified_by_session: dict[str, dict[str, dict[str, Any]]] = {}
-        session_signatures: dict[str, str] = {}
-        for session, info in agent_infos.items():
-            screens = {
-                str(agent.pane_target or ""): app.agent_window_screen_state(agent)
-                for agent in info.agents
-                if agent.pane_target
-            }
-            preclassified_by_session[session] = screens
-            owned_rows_for_session = {
-                key: row for key, row in owned_agent_rows.items() if key[0] == session
-            }
-            session_signatures[session] = app.tabber_activity_session_source_signature(
-                info,
-                session_files_by_session.get(session, {}),
-                activity_snapshot,
-                screens,
-                attention_ack_rev,
-                owned_rows_for_session,
-            )
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_cache_record
-            can_reuse = record.session_scope == scope and record.session_file_hours == bounded_hours
-            previous_signatures = dict(record.session_signatures) if can_reuse else {}
-            previous_rows = copy.deepcopy(record.session_rows) if can_reuse else {}
-        session_rows: dict[str, dict[str, Any]] = {}
-        reused = 0
-        changed_sessions: dict[str, SessionInfo] = {}
-        for session, info in agent_infos.items():
-            signature = session_signatures[session]
-            previous = previous_rows.get(session)
-            if previous_signatures.get(session) == signature and isinstance(previous, dict):
-                session_rows[session] = previous
-                reused += 1
-                continue
-            changed_sessions[session] = info
-        rebuilt = 0
-        if changed_sessions:
-            try:
-                jobd_rows = app.compute_tabber_activity_rows_via_jobd(
-                    changed_sessions,
-                    discovered_sessions=sessions,
-                    session_files_by_session=session_files_by_session,
-                    activity_snapshot=activity_snapshot,
-                    preclassified_by_session=preclassified_by_session,
-                    owned_agent_rows=owned_agent_rows,
-                    snapshot_revision=snapshot_revision,
-                    scope=scope,
-                    bounded_hours=bounded_hours,
-                    source_signature=app.stable_client_event_payload_signature(sorted(session_signatures.items())),
-                )
-                for session in changed_sessions:
-                    row = jobd_rows.get(session)
-                    if isinstance(row, dict):
-                        session_rows[session] = row
-                        rebuilt += 1
-            except TabberActivityJobdUnavailable as exc:
-                logger.info("tabber activity batch refresh deferred (jobd) for %d session(s): %s", len(changed_sessions), exc)
-            # A changed session jobd could not (re)compute keeps serving its last-known-good rows
-            # (stale) rather than substituting an empty payload; a genuinely new session with no
-            # prior rows gets an explicit empty shape instead of vanishing from the response.
-            for session in changed_sessions:
-                if session in session_rows:
-                    continue
-                previous = previous_rows.get(session)
-                session_rows[session] = previous if isinstance(previous, dict) else {"agents": [], "agent_windows": []}
-        # `discover_sessions` is intentionally lightweight and can temporarily miss an agent
-        # process during tmux/client handoff.  statusd has already committed the authoritative
-        # roster for this revision, so do not publish an apparently coherent Tabber payload that
-        # erases every known window.  These rows carry status only; normal discovery still owns
-        # transcript/path enrichment as soon as it is available again.
-        for session in ordered_sessions:
-            roster_rows = [
-                copy.deepcopy(row)
-                for (row_session, _window, _target, _kind), row in owned_agent_rows.items()
-                if row_session == session
-            ]
-            existing = session_rows.get(session)
-            existing_windows = existing.get("agent_windows") if isinstance(existing, dict) else None
-            if roster_rows and not existing_windows:
-                roster_rows.sort(key=lambda row: (
-                    app.agent_window_index_key(row.get("window_index") if row.get("window_index") is not None else row.get("window")),
-                    str(row.get("pane_target") or ""),
-                    str(row.get("kind") or ""),
-                ))
-                session_rows[session] = {
-                    "agents": app.status_roster_recent_agent_rows(session, roster_rows),
-                    "agent_windows": roster_rows,
-                }
-        agents = [
-            agent
-            for session in ordered_sessions
-            for agent in session_rows.get(session, {}).get("agents", [])
-            if isinstance(agent, dict)
-        ]
-        agent_windows = {
-            session: copy.deepcopy(session_rows[session].get("agent_windows", []))
-            for session in ordered_sessions
-            if session in session_rows
-        }
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_cache_record
-            record.session_scope = scope
-            record.session_file_hours = bounded_hours
-            record.session_signatures = dict(session_signatures)
-            record.session_rows = copy.deepcopy(session_rows)
-        app.record_performance_sample(
-            BACKGROUND_ROLE_TABBER_ACTIVITY,
-            "row-refresh",
-            trigger="build",
-            count=rebuilt,
-            cache_key={"kind": "tabber-activity"},
-            cache_status="reused" if rebuilt == 0 else "partial" if reused else "rebuilt",
-            details={"rebuilt": rebuilt, "reused": reused, "removed": len(set(previous_rows) - set(session_rows))},
-        )
-        return {
-            "activity": activity_snapshot,
-            "agents": agents,
-            "agent_windows": agent_windows,
-            "errors": errors,
-            "session_scope": scope,
-            "session_file_hours": bounded_hours,
-            "agent_window_snapshot_revision": snapshot_revision,
-        }
-    def tabber_activity_source_signature(self, app, session_scope: Any = "configured") -> str: # Acknowledgements change agent-window visibility without changing the process or # transcript identity below. Fold the durable revision into this cache key so every # server stops serving an earlier unacknowledged Tabber snapshot immediately.
-        app.merge_shared_attention_acks()
-        with app.client_watch_service.lock:
-            attention_ack_rev = app.client_watch_service.attention_ack_rev
-        session_names, _scope_errors, scope = app.activity_session_names(session_scope)
-        sessions, _errors = discover_sessions(session_names)
-        tmux_signature = app.stable_client_event_payload_signature(
-            app.tmux_signal_signature_payload(app.tmux_signal_snapshot())
-        )
-        rows = []
-        for session in sorted(session_names):
-            info = sessions.get(session)
-            if info is None:
-                rows.append((session, None))
-                continue
-            selected_path = info.selected_pane.current_path if info.selected_pane and info.selected_pane.current_path else ""
-            rows.append((
-                session,
-                selected_path,
-                tuple((agent.kind or "", agent.cwd or "", agent.transcript or "", agent.session_id or "") for agent in info.agents),
-                tuple(
-                    (
-                        pane.target,
-                        pane.window,
-                        pane.pane,
-                        pane.current_path,
-                        pane.process_label or "",
-                        pane.pid,
-                        pane.active,
-                        pane.window_active,
-                    )
-                    for pane in info.panes
-                ),
-            ))
-        key_text = app.client_event_payload_signature(
-            {
-                "scope": scope,
-                "sessions": rows,
-                "attention_ack_rev": attention_ack_rev,
-                "tmux_signature": tmux_signature,
-            }
-        )
-        return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
-    def tabber_activity_cache_disk_path(self, app, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made followers see an empty cache miss.
-        del source_signature
-        key_text = json.dumps(
-            {
-                "kind": "tabber-activity",
-                "hours": session_files.bounded_session_files_hours(hours),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
-        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.json", signature
-    def tabber_activity_cache_manifest_path(self, app, signature: str) -> Path:
-        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.manifest.json"
-    def read_tabber_activity_disk_cache( self, app, hours: float, max_age_seconds: float | None = None, allow_stale: bool = True, source_signature: str = "", allow_source_mismatch: bool = False, ) -> tuple[dict[str, Any], bool, float] | None:
-        path, signature = app.tabber_activity_cache_disk_path(hours, source_signature)
-        result = app.tabber_published_cache().read(
-            path,
-            signature,
-            published_caches.TabberFreshnessKey(source_signature, hours, allow_source_mismatch),
-            max_age_seconds=max_age_seconds,
-            allow_stale=allow_stale,
-        )
-        if result is None:
-            return None
-        payload = result.payload
-        state = result.freshness
-        app.set_tabber_activity_cache(payload, stored_at=time.monotonic() - state.age_seconds, write_disk=False, source_signature=source_signature)
-        return copy.deepcopy(payload), state.fresh, state.age_seconds
-    def tabber_published_cache(self, app):
-        return published_caches.tabber_cache(
-            version=TABBER_ACTIVITY_CACHE_VERSION,
-            payload_signature=app.session_files_payload_signature,
-            owner_generation=lambda: app.background_owner.status_payload().get("generation", {}),
-            bounded_hours=lambda value: session_files.bounded_session_files_hours(app.float_value(value, 24.0)),
-            clock=time.time,
-            writer=atomic_write_text,
-        )
-    def write_tabber_activity_disk_cache_unlocked(self, app, path: Path, signature: str, payload: dict[str, Any], source_signature: str) -> None:
-        hours = session_files.bounded_session_files_hours(app.float_value(payload.get("session_file_hours"), 24.0))
-        app.tabber_published_cache().write(
-            path,
-            signature,
-            payload,
-            published_caches.TabberFreshnessKey(source_signature, hours, False),
-        )
-    def write_tabber_activity_disk_cache(self, app, payload: dict[str, Any], source_signature: str = "") -> None:
-        if not source_signature:
-            source_signature = app.tabber_activity_source_signature()
-        hours = session_files.bounded_session_files_hours(app.float_value(payload.get("session_file_hours"), 24.0))
-        path, signature = app.tabber_activity_cache_disk_path(hours, source_signature)
-        try:
-            with file_lock(path, dir_mode=0o700):
-                app.write_tabber_activity_disk_cache_unlocked(path, signature, payload, source_signature)
-        except OSError as exc:
-            logger.warning("failed to write tabber activity cache %s: %s", path, exc)
-    def set_tabber_activity_cache(self, app, payload: dict[str, Any], stored_at: float | None = None, write_disk: bool = True, source_signature: str = "") -> None:
-        if write_disk and not source_signature:
-            source_signature = app.tabber_activity_source_signature()
-        with self.state.tabber_cache_lock:
-            self.state.tabber_cache_record.stored_at = time.monotonic() if stored_at is None else stored_at
-            self.state.tabber_cache_record.payload = copy.deepcopy(payload)
-            self.state.tabber_cache_record.source_signature = source_signature
-        if write_disk:
-            app.write_tabber_activity_disk_cache(payload, source_signature=source_signature)
-    def get_tabber_activity_cache( self, app, max_age_seconds: float, allow_stale: bool = True, hours: float | None = None, source_signature: str = "", allow_source_mismatch: bool = False, ) -> tuple[dict[str, Any], bool, float] | None:
-        started = time.perf_counter()
-        now = time.monotonic()
-        bounded_hours = session_files.bounded_session_files_hours(24.0 if hours is None else hours)
-        stale_cached: tuple[dict[str, Any], bool, float] | None = None
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_cache_record
-            if record.stored_at is not None and record.payload is not None:
-                stored_at = record.stored_at
-                payload = record.payload
-                cached_hours = session_files.bounded_session_files_hours(app.float_value(payload.get("session_file_hours"), 24.0))
-                source_matches = not source_signature or record.source_signature == source_signature
-                if cached_hours == bounded_hours and (source_matches or allow_source_mismatch):
-                    age_seconds = max(0.0, now - stored_at)
-                    fresh = source_matches and age_seconds <= max_age_seconds
-                    if fresh:
-                        app.record_performance_sample(
-                            BACKGROUND_ROLE_TABBER_ACTIVITY,
-                            "cache-read",
-                            trigger="memory",
-                            compute_ms=(time.perf_counter() - started) * 1000,
-                            payload=payload,
-                            cache_key={"kind": "tabber-activity"},
-                            cache_status="hit:fresh",
-                            cache_hit=True,
-                            cache_fresh=True,
-                        )
-                        return copy.deepcopy(payload), True, age_seconds
-                    stale_cached = (copy.deepcopy(payload), False, age_seconds)
-        disk_cached = app.read_tabber_activity_disk_cache(
-            bounded_hours,
-            max_age_seconds=max_age_seconds,
-            allow_stale=allow_stale,
-            source_signature=source_signature,
-            allow_source_mismatch=allow_source_mismatch,
-        )
-        if disk_cached and (stale_cached is None or disk_cached[2] <= stale_cached[2]):
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "cache-read",
-                trigger="disk",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=disk_cached[0],
-                cache_key={"kind": "tabber-activity"},
-                cache_status="hit:fresh" if disk_cached[1] else "hit:stale",
-                cache_hit=True,
-                cache_fresh=bool(disk_cached[1]),
-            )
-            return disk_cached
-        if stale_cached is not None and allow_stale:
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "cache-read",
-                trigger="memory",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=stale_cached[0],
-                cache_key={"kind": "tabber-activity"},
-                cache_status="hit:stale",
-                cache_hit=True,
-                cache_fresh=False,
-            )
-            return stale_cached
-        app.record_performance_sample(
-            BACKGROUND_ROLE_TABBER_ACTIVITY,
-            "cache-read",
-            trigger="miss",
-            compute_ms=(time.perf_counter() - started) * 1000,
-            cache_key={"kind": "tabber-activity"},
-            cache_status="miss",
-            cache_hit=False,
-        )
-        return None
-    def refresh_tabber_activity_cache(self, app, hours: Any = 24.0) -> dict[str, Any]:
-        bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        source_signature = app.tabber_activity_source_signature()
-        inflight_key = (bounded_hours, source_signature)
-        with self.state.tabber_cache_lock:
-            future = self.state.tabber_cache_record.inflight_by_key.get(inflight_key)
-            if future is None:
-                future = Future()
-                self.state.tabber_cache_record.inflight_by_key[inflight_key] = future
-                owner = True
-            else:
-                owner = False
-        if not owner:
-            payload = future.result()
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "refresh",
-                trigger="single-flight",
-                compute_ms=0,
-                payload=payload,
-                cache_key={"kind": "tabber-activity"},
-                cache_status="coalesced",
-                cache_hit=True,
-                cache_fresh=True,
-            )
-            return copy.deepcopy(payload)
-        try:
-            payload = app.refresh_tabber_activity_cache_owner(bounded_hours, source_signature)
-            future.set_result(copy.deepcopy(payload))
-            return payload
-        except Exception as exc:
-            future.set_exception(exc)
-            raise
-        finally:
-            with self.state.tabber_cache_lock:
-                if self.state.tabber_cache_record.inflight_by_key.get(inflight_key) is future:
-                    self.state.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
-    def refresh_tabber_activity_cache_owner(self, app, bounded_hours: float, source_signature: str) -> dict[str, Any]:
-        started = time.perf_counter()
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
-            cached = app.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
-            if cached:
-                payload, _fresh, _age = cached
-                app.record_performance_sample(
-                    BACKGROUND_ROLE_TABBER_ACTIVITY,
-                    "refresh",
-                    trigger="follower-cache",
-                    compute_ms=(time.perf_counter() - started) * 1000,
-                    payload=payload,
-                    cache_key={"kind": "tabber-activity"},
-                    cache_status="hit:follower",
-                    cache_hit=True,
-                )
-                return payload
-            payload = {"activity": {}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": bounded_hours}
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "refresh",
-                trigger="follower-empty",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=payload,
-                cache_key={"kind": "tabber-activity"},
-                cache_status="refreshing-elsewhere",
-                cache_hit=False,
-            )
-            return payload
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_cache_record
-            current_payload = copy.deepcopy(record.payload) if record.payload is not None else None
-            current_signature = record.source_signature
-        if current_payload is not None and current_signature == source_signature:
-            app.record_performance_sample(
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "refresh",
-                trigger="owner",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=current_payload,
-                cache_key={"kind": "tabber-activity"},
-                cache_status="hit:unchanged",
-                cache_hit=True,
-                cache_fresh=True,
-            )
-            return current_payload
-        payload = app.build_activity_payload(hours=bounded_hours)
-        app.set_tabber_activity_cache(payload, source_signature=source_signature)
-        app.record_performance_sample(
-            BACKGROUND_ROLE_TABBER_ACTIVITY,
-            "refresh",
-            trigger="owner",
-            compute_ms=(time.perf_counter() - started) * 1000,
-            payload=payload,
-            cache_key={"kind": "tabber-activity"},
-            cache_status="computed",
-            cache_hit=False,
-            cache_fresh=True,
-        )
-        return payload
-    def publish_tabber_activity_refresh_if_changed(self, app, *, compute_ms: float) -> bool:
-        """Notify demanded Tabber clients after a newly readable cache generation.
-
-        The source signature is an internal cache identity, while the client-event
-        broker owns the monotonic delivery revision.  Comparing it under the cache
-        lock avoids turning the warmer's unchanged reconciliation into an SSE wakeup.
-        """
-        with self.state.tabber_cache_lock:
-            record = self.state.tabber_cache_record
-            source_signature = record.source_signature
-            if record.payload is None or not source_signature or source_signature == record.published_source_signature:
-                return False
-            record.published_source_signature = source_signature
-        app.publish_background_refresh_done(
-            BACKGROUND_ROLE_TABBER_ACTIVITY,
-            {"compute_ms": compute_ms, "cache_changed": True},
-        )
-        return True
-    def run_tabber_activity_cache_refresh(self, app, worker: threading.Thread) -> None:
-        try:
-            started = time.perf_counter()
-            refresh_details = app.background_refresh_event_details(BACKGROUND_ROLE_TABBER_ACTIVITY, {"cache_key_kind": "tabber-activity"}, cache_key={"kind": "tabber-activity"})
-            app.log_sampled_background_refresh_event(
-                "background_refresh_started",
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "Tabber activity background refresh started",
-                refresh_details,
-                message_key="events.message.backgroundRefresh.started",
-                message_params={"target": message_descriptor("tabber.title", "Tabber")},
-            )
-            app.refresh_tabber_activity_cache()
-            compute_ms = (time.perf_counter() - started) * 1000
-            done_details = dict(refresh_details)
-            done_details["compute_ms"] = round(compute_ms, 3)
-            app.log_sampled_background_refresh_event(
-                "background_refresh_done",
-                BACKGROUND_ROLE_TABBER_ACTIVITY,
-                "Tabber activity background refresh finished",
-                done_details,
-                message_key="events.message.backgroundRefresh.finished",
-                message_params={"target": message_descriptor("tabber.title", "Tabber")},
-            )
-            app.publish_tabber_activity_refresh_if_changed(compute_ms=compute_ms)
-        finally:
-            with self.state.tabber_cache_lock:
-                if self.state.tabber_cache_record.refresh_worker is worker:
-                    self.state.tabber_cache_record.refresh_worker = None
-    def start_tabber_activity_cache_refresh(self, app) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
-            return False
-        with self.state.tabber_cache_lock:
-            if self.state.tabber_cache_record.refresh_worker is not None:
-                return False
-            worker: threading.Thread
-
-            def run_refresh() -> None:
-                app.run_tabber_activity_cache_refresh(worker)
-
-            worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
-            self.state.tabber_cache_record.refresh_worker = worker
-        def rollback() -> None:
-            with self.state.tabber_cache_lock:
-                if self.state.tabber_cache_record.refresh_worker is worker:
-                    self.state.tabber_cache_record.refresh_worker = None
-
-        common.start_thread_with_rollback(worker, rollback)
-        return True
-    def start_tabber_activity_cache_warmer(self, app) -> bool:
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warmer"})
-            return False
-        with self.state.tabber_cache_lock:
-            current = self.state.tabber_warmer_record
-            if current.running and current.thread is not None and current.thread.is_alive():
-                return False
-            record = TabberActivityWarmerRecord(running=True, consumer_until=current.consumer_until, refresh_due_at=current.refresh_due_at, refresh_triggers=set(current.refresh_triggers))
-            worker = threading.Thread(target=app.tabber_activity_cache_warmer_loop, args=(record,), name="tabber-activity-cache", daemon=True)
-            record.thread = worker
-            self.state.tabber_warmer_record = record
-
-            def rollback() -> None:
-                # tabber_cache_lock is already held by this caller; clear the just-published thread
-                # in place. capture_thread_owners reads tabber_warmer_record.thread under this same
-                # lock and stop_tabber_warmer joins it, so publication and start must be atomic.
-                if self.state.tabber_warmer_record is record and record.thread is worker:
-                    record.thread = None
-                    record.running = False
-
-            # Start under the lock so a teardown capturing tabber_warmer_record.thread in the gap
-            # cannot observe or join a published-but-unstarted warmer thread.
-            common.start_thread_with_rollback(worker, rollback)
-        return True
-    def tabber_activity_cache_warmer_loop(self, app, record: TabberActivityWarmerRecord) -> None:
-        try:
-            while True:
-                with self.state.tabber_cache_lock:
-                    if self.state.tabber_warmer_record is not record or not record.running:
-                        return
-                if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-                    return
-                with self.state.tabber_cache_lock:
-                    due_at = record.refresh_due_at
-                if due_at <= 0.0:
-                    if not app.tabber_activity_has_recent_consumer():
-                        app.record_performance_sample(
-                            BACKGROUND_ROLE_TABBER_ACTIVITY,
-                            "warmer",
-                            trigger="idle",
-                            cache_key={"kind": "tabber-activity"},
-                            cache_status="skipped:no-consumer",
-                        )
-                    record.wake.clear()
-                    record.wake.wait()
-                    continue
-                remaining = max(0.0, due_at - time.monotonic())
-                if remaining:
-                    record.wake.clear()
-                    record.wake.wait(remaining)
-                    continue
-                started = time.monotonic()
-                try:
-                    with self.state.tabber_cache_lock:
-                        if record.refresh_due_at != due_at:
-                            continue
-                        record.refresh_due_at = 0.0
-                        record.refresh_triggers.clear()
-                    if app.tabber_activity_has_recent_consumer():
-                        app.refresh_tabber_activity_cache()
-                        app.publish_tabber_activity_refresh_if_changed(compute_ms=(time.monotonic() - started) * 1000)
-                except (OSError, RuntimeError, ValueError) as exc:
-                    app.log_event(
-                        None,
-                        "client_event_watch_error",
-                        f"Tabber activity cache refresh failed: {exc}",
-                        {"diagnostic": str(exc)},
-                        message_key="events.message.tabberActivity.refreshFailed",
-                    )
-        finally:
-            with self.state.tabber_cache_lock:
-                if self.state.tabber_warmer_record is record:
-                    record.running = False
-    def empty_tabber_activity_payload(self, app, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
-        return {
-            "activity": {},
-            "agents": [],
-            "agent_windows": {},
-            "errors": [],
-            "session_scope": "configured",
-            "session_file_hours": bounded_hours,
-            "cache": {
-                "hit": False,
-                "stale": True,
-                "age_seconds": None,
-                "refresh_seconds": refresh_seconds,
-                **cache,
-            },
-        }
-    def activity_payload(self, app, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
-        visible_consumer = app.mark_tabber_activity_consumer(visible)
-        refresh_seconds = app.tabber_activity_refresh_seconds()
-        bounded_hours = session_files.bounded_session_files_hours(app.float_value(hours, 24.0))
-        source_signature = app.tabber_activity_source_signature()
-        cached = app.get_tabber_activity_cache(refresh_seconds, allow_stale=True, hours=bounded_hours, source_signature=source_signature)
-        if cached is None:
-            # A new source generation must never blank a visible Tabber. Reuse the
-            # last readable generation as explicitly stale while one owner refreshes.
-            cached = app.get_tabber_activity_cache(
-                refresh_seconds,
-                allow_stale=True,
-                hours=bounded_hours,
-                source_signature=source_signature,
-                allow_source_mismatch=True,
-            )
-        if cached:
-            payload, fresh, age_seconds = cached
-            cached_hours = session_files.bounded_session_files_hours(app.float_value(payload.get("session_file_hours"), 24.0))
-            if cached_hours != bounded_hours:
-                payload = app.build_activity_payload(hours=bounded_hours)
-                app.set_tabber_activity_cache(payload, source_signature=source_signature)
-                payload = copy.deepcopy(payload)
-                payload["cache"] = {
-                    "hit": False,
-                    "stale": False,
-                    "age_seconds": 0,
-                    "refresh_seconds": refresh_seconds,
-                    "refreshing": False,
-                }
-                return payload, HTTPStatus.OK
-            payload["cache"] = {
-                "hit": True,
-                "stale": not fresh,
-                "age_seconds": round(age_seconds, 3),
-                "refresh_seconds": refresh_seconds,
-            }
-            if not fresh:
-                if not visible_consumer:
-                    payload["cache"]["refreshing"] = False
-                    payload["cache"]["idle_no_consumer"] = True
-                elif app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-                    payload["cache"]["refreshing"] = app.start_tabber_activity_cache_refresh()
-                else:
-                    app.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
-                    refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
-                    app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-                    if app.background_refresh_should_fallback(refresh_result):
-                        payload = app.build_activity_payload(hours=bounded_hours)
-                        app.set_tabber_activity_cache(payload, source_signature=source_signature)
-                        payload = copy.deepcopy(payload)
-                        payload["cache"] = {
-                            "hit": False,
-                            "stale": False,
-                            "age_seconds": 0,
-                            "refresh_seconds": refresh_seconds,
-                            "fallback": True,
-                        }
-                    else:
-                        payload["cache"]["refreshing_elsewhere"] = True
-            return payload, HTTPStatus.OK
-        if not visible_consumer:
-            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, idle_no_consumer=True), HTTPStatus.OK
-        if not app.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
-            refresh_result = app.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
-            app.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
-            if app.background_refresh_should_fallback(refresh_result):
-                payload = app.build_activity_payload(hours=bounded_hours)
-                app.set_tabber_activity_cache(payload, source_signature=source_signature)
-                payload = copy.deepcopy(payload)
-                payload["cache"] = {
-                    "hit": False,
-                    "stale": False,
-                    "age_seconds": 0,
-                    "refresh_seconds": refresh_seconds,
-                    "fallback": True,
-                }
-                return payload, HTTPStatus.OK
-            return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing_elsewhere=True), HTTPStatus.OK
-        refreshing = app.start_tabber_activity_cache_refresh()
-        return app.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing=refreshing), HTTPStatus.OK
-
-
-class SystemStatusProjector:
-    """Own retained backend-health and system-status projection lifecycle."""
-    def __init__(self, app: "TmuxWebtermApp") -> None:
-        self._app = app
-        self.backend_health_store: Any | None = app.__dict__.pop("backend_health_store", None)
-        self.backend_health_liveness_provider: Callable[[], Mapping[str, Any]] | None = app.__dict__.pop("backend_health_liveness_provider", None)
-        self.snapshot: system_status_snapshot_module.SystemStatusSnapshotOwner | None = app.__dict__.pop("snapshot", None)
-
-    def stop(self) -> None:
-        self._app.stop_system_status_snapshot_owner()
-    @staticmethod
-    def system_status_metric( value: object, *, running: bool, missing_state: str, missing_reason_code: str, missing_reason: str, ) -> dict[str, object]: # One envelope owner (`local_service_projection.measurement`), two callers: these # three process metrics and the M8 health metrics. The dict used to be built here, # which meant the health block would have been a second copy of the same shape.
-        if running:
-            return local_service_projection.measurement(
-                value,
-                state=missing_state,
-                reason_code=missing_reason_code,
-                reason=missing_reason,
-            )
-        return local_service_projection.measurement(
-            value,
-            state="not_running",
-            reason_code="not_started",
-            reason="Service is not running",
-        )
-    def system_status_service( self, app, row: dict[str, Any], *, health: local_service_projection.RetainedHealth | None = None, ) -> dict[str, Any]:
-        service_id = str(row.get("service") or "").strip()
-        labels = {
-            "indexd": "Quick Open index",
-            "statsd": "YO!stats",
-            "jobd": "Filesystem jobs",
-            "statusd": "Tmux status",
-            # watchd had no entry, so the System row named it "watchd" -- the raw id -- while
-            # every other service got a capability name. This label is what the System row and the
-            # Daemons roster display verbatim, so a missing entry is a user-visible defect, not a
-            # cosmetic one.
-            "watchd": "File watching",
-            "approvald": "Auto-approval",
-        }
-        pid = int(row.get("pid") or 0)
-        # A demand daemon that idle-exits becomes a zombie until the registry reaper wait()s it:
-        # `os.kill(pid, 0)` still succeeds and the service record still names it, so both `pid > 0`
-        # here and the `pid`-derived `running` inside `observed_health` would read a dead-and-unreaped
-        # child as a running-but-unhealthy service and raise a false "errored". Its `/proc` State is
-        # the truth -- `Z` means dead, which for a demand-scoped service is absent-by-design, not an
-        # outage. Reading the state distinguishes an idle-exited/zombie daemon (classified idle/absent
-        # through the demand path below) from a genuinely-running-but-unhealthy one (state R/S/D with a
-        # recorded failure, which still alarms). Only `Z` is treated as dead: a `/proc`-less host
-        # returns "" for every pid, and a fully-gone pid is already fenced to 0 by the identity read.
-        pid_zombie = pid > 0 and local_services_registry.process_state(pid) == "Z"
-        health_row = {**row, "pid": 0} if pid_zombie else row
-        pid = 0 if pid_zombie else pid
-        running = pid > 0
-        transport_reason = str(row.get("transport_reason") or "").strip()
-        last_failure = str(row.get("last_failure") or "").strip()
-        # A service that is spawned on first use is absent by design until something asks
-        # for it. Absence alone therefore cannot mean "down" -- only a recorded reason can.
-        # This used to be keyed off `healthy is not False`, but every runtime_status coerces
-        # healthy to a bool, so the idle branch was unreachable and a legitimately-absent
-        # watchd classified exactly like a broken daemon.
-        #
-        # ONE DERIVATION, TWO VOCABULARIES -- THE RECORDED DECISION
-        # ---------------------------------------------------------
-        # This panel used to decide `running`/`idle`/`issue`/`unavailable` from the row itself,
-        # in parallel with `backend_health.observer.observed_health` deciding
-        # `ready`/`starting`/`degraded`/`down` from the same row. Two classifiers, one fact:
-        # an absent jobd on a process that lost the scheduler lease read `unavailable` and
-        # `alerting` here while the topbar indicator read `starting` and stayed quiet, because
-        # only the observer knew about `absence_expected_reason`.
-        #
-        # The single owner is `observed_health`. It is the typed reducer the health contract
-        # names, it is what the retained store and the topbar indicator already consume, and it
-        # is the one that reads all five distinct absence causes. The panel consumes it here and
-        # is NOT a second copy: this method still owns only the RENDERING vocabulary -- which of
-        # its four display states, which bounded `reason_code`, and which human sentence -- so
-        # the existing System/API contract is unchanged while the decision behind it is shared.
-        # Copying `observed_health`'s branches into this file was the rejected alternative; that
-        # is a third copy, not a fix.
-        #
-        # `demand_started` is still read here, before `essential`, exactly as before: the
-        # ordering assertion in tests/test_backend_health_catalog.py pins that absence-by-design
-        # is classified before essentiality is consulted, and the sentence a demand-scoped
-        # service shows ("Starts on demand") is a different sentence from a pending pin.
-        demand_started = row.get("demand_started") is True
-        health_state, _health_reason_code = observed_health(health_row)
-        if health_state == "ready":
-            state, reason_code, reason = "running", "", ""
-        elif health_state == "starting":
-            # Not serving, and not a failure: absent by design, or a named owner in this process
-            # is still bringing it up. Neither is an alert.
-            state, reason_code = "idle", "not_started"
-            reason = "Starts on demand" if demand_started else "Starting"
-        else:
-            state = "issue" if running else "unavailable"
-            reason_code = "transport_failed" if transport_reason else "service_unavailable"
-            reason = transport_reason or last_failure or "Service did not report healthy status"
-        essential = service_id in ESSENTIAL_LOCAL_SERVICES
-        resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
-        details = {
-            key: value
-            for key, value in row.items()
-            if key not in {"service", "pid", "started_at", "uptime_seconds", "resources"}
-        }
-        return {
-            **row,
-            "id": service_id,
-            "label": labels.get(service_id, service_id),
-            "state": state,
-            "reason_code": reason_code,
-            "reason": reason,
-            "essential": essential,
-            # The one predicate the UI may key a visible outage on. Absence by design is
-            # already excluded above (it classifies as "idle"), so this stays true to the
-            # requirement -- any service that recorded a failure is shown, essential or
-            # not -- and a second copy of the rule cannot drift from this one.
-            "alerting": state in {"issue", "unavailable"},
-            "metrics": {
-                "cpu_now_percent": app.system_status_metric(
-                    resources.get("cpu_percent"),
-                    running=running,
-                    missing_state="warming",
-                    missing_reason_code="baseline_pending",
-                    missing_reason="Waiting for a second cumulative CPU sample",
-                ),
-                "rss_bytes": app.system_status_metric(
-                    resources.get("rss_bytes"),
-                    running=running,
-                    missing_state="unavailable",
-                    missing_reason_code="process_read_failed",
-                    missing_reason="The operating system did not return process memory",
-                ),
-                "uptime_seconds": app.system_status_metric(
-                    row.get("uptime_seconds"),
-                    running=running,
-                    missing_state="unavailable",
-                    missing_reason_code="start_time_unavailable",
-                    missing_reason="The service start time is unavailable",
-                ),
-            },
-            # M8. The retained observation this row could not carry before: typed state and
-            # reason, when that state started, the bounded transition history, how complete
-            # each aggregate is, and the restart/request/error/latency numbers. `metrics`
-            # above is left at exactly its three process measurements -- the panel and
-            # `tests/test_gate_panels.py:164` pin that set, and the retained numbers have a
-            # different source and a different denominator, so they are published here with
-            # their own coverage rather than smuggled into it.
-            "health": (health if health is not None else local_service_projection.RetainedHealth()).service(service_id),
-            "details": details,
-        }
-    def stats_current_recovery_events(self, app, migration_status: dict[str, Any]) -> list[dict[str, str]]:
-        issues = migration_status.get("issue_records")
-        if not isinstance(issues, (list, tuple)):
-            return []
-        database_path = app.stats_current_client.database_path
-        events: list[dict[str, str]] = []
-        for issue in issues:
-            if not isinstance(issue, dict):
-                continue
-            kind = str(issue.get("kind") or "").strip()
-            if kind not in {"unreadable_current_database", "unsupported_legacy_database"}:
-                continue
-            source = Path(str(issue.get("source") or "")).name
-            if not source:
-                continue
-            events.append({
-                "subsystem": "statsd",
-                "event": kind,
-                "quarantined_artifact": source,
-                "quarantined_path": str(database_path.parent / source),
-                "destination_path": str(database_path),
-                "reason": str(issue.get("detail") or "Stats history was recovered from a damaged database")[:256],
-            })
-        return events[:16]
-    def statsd_runtime_status(self, app) -> dict[str, Any]:
-        """Build statsd's whole row, the same way the other five services build theirs.
-
-        Until M3 this was an inline dict literal inside `runtime_local_services()`, so
-        statsd's row shape lived in two places -- its client's projection and the composed
-        projection -- and only statsd's did. It is now one named row producer like every
-        other service, which is what lets the collector treat all six identically.
-        """
-        current_runtime = app.stats_current_runtime.status()
-        current_service = current_runtime.get("service") if isinstance(current_runtime.get("service"), dict) else {}
-        current_service = app.stats_current_client.runtime_status(current_service)
-        migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
-        build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
-        service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
-        transcript_usage = app.stats_current_transcript_usage.status()
-        token_family = current_runtime.get("families", {}).get("agent_tokens", {}) if isinstance(current_runtime.get("families"), dict) else {}
-        token_cadence = float(token_family.get("cadence_seconds") or STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS) if isinstance(token_family, dict) else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-        usage = dict(service_usage)
-        usage["transcripts"] = transcript_usage
-        usage["health"] = stats_current_usage_health(
-            service_usage,
-            transcript_usage,
-            token_cadence,
-            sampler_families=current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
-        )
-        return local_service_projection.local_service_runtime_row(
-            "statsd",
-            pid=int(current_service.get("pid") or 0),
-            started_at=float(current_service.get("started_at") or 0.0),
-            version=int(current_service.get("version") or 0),
-            healthy=current_service.get("ok") is True and migration.get("state") != "failed",
-            last_failure=str(migration.get("failure") or build.get("last_failure") or ""),
-            resources=current_service.get("resources") if isinstance(current_service.get("resources"), dict) else {},
-            fields_before_failure={
-                "clients": int(current_service.get("clients") or 0),
-                "queues": current_service.get("queue") if isinstance(current_service.get("queue"), dict) else {},
-                "cache": current_service.get("warm") if isinstance(current_service.get("warm"), dict) else {},
-                "migration": migration,
-                "build": build,
-                "delta": current_service.get("delta") if isinstance(current_service.get("delta"), dict) else {},
-                "sampler_families": current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
-                "usage": usage,
-            },
-            fields_after_failure={
-                # The one excuse statsd may state, and only while this process is mid-flight taking
-                # the pin. `observed_health` reads it AFTER `last_failure`/`transport_reason`, so a
-                # statsd that recorded a real failure alarms whether or not the pin is pending.
-                "absence_expected_reason": STATSD_ABSENT_WHILE_PIN_PENDING if statsd_pin_pending(current_runtime) else "",
-            },
-        )
-    def local_services_row_producers(self, app) -> dict[str, Callable[[], dict[str, Any]]]:
-        """The one map from service id to the callable that owns its whole row.
-
-        Resolved per collection, not cached: tests and runtime both replace client
-        objects on this app, and a producer bound once at construction would keep
-        calling the client that existed then.
-        """
-        return {
-            "indexd": app.search_indexer.runtime_status,
-            "statsd": app.statsd_runtime_status,
-            "jobd": app.job_client.runtime_status,
-            "statusd": app.status_client.runtime_status,
-            "watchd": app.watchd_runtime_status,
-            "approvald": app.approval_client.runtime_status,
-        }
-    def local_services_recovery_entrypoints(self, app) -> dict[str, Callable[[], bool]]:
-        """The one map from service id to that service's OWN client `retry` wrapper.
-
-        The recovery mirror of `local_services_row_producers()` above, and deliberately the same
-        shape: one owner, one map, resolved per call so a replaced client is the one retried. No
-        caller may retry a service any other way -- a per-service retry scattered across the
-        recovery path is how two callers end up with two ladders for one service.
-
-        Five of the six inventory services are here. indexd is absent because
-        `SearchIndexerClient` is not a `LocalServiceClient` and declares no retry wrapper at all;
-        that gap is the catalog's `recovery_client_entrypoint == ""` row, and
-        `tests/test_backend_health_catalog.py` derives this map's key set from it rather than
-        letting the two lists drift.
-
-        Every value below is a client wrapper that clears the latched failure through
-        `LocalServiceRegistry.retry` and then asks for a start. None of them stops, signals or
-        reclaims anything, which is what makes `LocalServiceRecoveryControl` non-destructive by
-        construction rather than by review.
-        """
-        return {
-            "statsd": app.stats_current_client.retry,
-            "jobd": app.job_client.retry,
-            "statusd": app.status_client.retry,
-            "watchd": app.watch_client.retry,
-            "approvald": app.approval_client.retry,
-        }
-    def local_services_recovery_control(self, app) -> LocalServiceRecoveryControl:
-        """The control the backend-health observer is constructed with (`cli.py`).
-
-        Handed the bound map method, not the map, so the control resolves clients at the moment
-        it retries. This is the only production place a recovery control is built.
-        """
-
-        return LocalServiceRecoveryControl(app.local_services_recovery_entrypoints)
-    def local_services_recovery_events(self, app, rows: Mapping[str, Mapping[str, Any]]) -> list[dict[str, str]]:
-        """Derive the statsd recovery banner from the collected row, not a second read.
-
-        The migration status used to be captured in the projection's own body because the
-        statsd row was built there. Reading it back off the collected row keeps exactly one
-        statsd status read per collection.
-        """
-        statsd_row = rows.get("statsd") or {}
-        migration = statsd_row.get("migration")
-        return app.stats_current_recovery_events(migration if isinstance(migration, Mapping) else {})
-    def local_services_snapshot(self, app) -> local_service_projection.LocalServicesSnapshot:
-        """Collect the one immutable local-services snapshot.
-
-        This is the single owner. `runtime_local_services()` renders it for HTTP, and the
-        `service_load` stats collector samples it; neither builds rows of its own. No call
-        below issues a start: every producer reads status or a persisted record, so a full
-        projection starts zero demand-scoped services.
-        """
-        collector = local_service_projection.LocalServicesCollector(
-            app.local_services_row_producers,
-            ledger=app.runtime_process_ledger,
-            recovery_events=app.local_services_recovery_events,
-        )
-        return collector.collect()
-    def attach_backend_health_store(self, app, store: Any) -> None:
-        """Hold this port's live retained-health store so the projection never reads its file.
-
-        RECORDED DECISION (M8) -- how a System row reaches the retained history.
-
-        The store is PUSHED in here, once, by whoever armed this port's observer
-        (`cli.start_backend_health_observer`). The HTTP request thread then reads the
-        document the observing process already holds in memory. It never opens
-        `STATE_DIR/backend-health/<port>.json`.
-
-        The rejected alternative was for the projection to construct its own store and call
-        `load()`. That is one directory `file_lock`, one open, one read and one JSON parse on
-        every `/api/system-status`, contending with the observer's own 2-second locked write,
-        to reproduce a document this process already has. It also cannot see the live
-        persistence state at all: a store that is failing to write says so only in memory
-        (`BackendHealthStore.persistence_status`), so a file reader would report a healthy
-        monitor that has not published in an hour.
-
-        The cost of the push is stated rather than hidden: `BackendHealthStore.status()`
-        round-trips the document through `json.dumps`/`json.loads`, so each
-        `/api/system-status` pays one bounded deep copy -- six resources, at most 128
-        retained transition rows each -- in CPU, with no I/O and no lock. It is taken ONCE
-        per projection, not once per row. `record()` rebinds `_document` to a freshly built
-        dict and mutates no part of the previous one, so this read needs no lock to be
-        consistent.
-
-        When nothing is attached -- any process that never armed an observer, and every unit
-        test that does not ask for one -- the projection publishes
-        `reason_code: "observer_unattached"` and null metrics. It does not render zeros.
-        """
-        self.backend_health_store = store
-    def attach_backend_health_observer(self, app, observer: Any) -> None:
-        """Hold the observer's liveness reader beside its history store."""
-        self.backend_health_liveness_provider = observer.liveness
-    def retained_backend_health(self, app) -> local_service_projection.RetainedHealth:
-        """Collect the two in-memory retained-health inputs ONCE per projection.
-
-        Both reads are process-local: the observer's published document, and this web
-        process's own RPC ledger. Neither opens a socket, starts a service, or touches disk.
-        """
-        store = self.backend_health_store
-        document = store.status() if store is not None else {}
-        # Liveness comes from the OBSERVER, not the store: only it knows the cadence and owns the
-        # thread whose survival is the question, and it answers on the monotonic clock it
-        # schedules on rather than a wall clock that can step.
-        provider = self.backend_health_liveness_provider
-        liveness = provider() if provider is not None else {}
-        return local_service_projection.RetainedHealth(
-            document=document if isinstance(document, dict) else {},
-            liveness=liveness if isinstance(liveness, dict) else {},
-            traffic=local_service_traffic_snapshot(),
-            now=time.time(),
-            web_process_started_at=SERVER_STARTED_AT,
-        )
-    def runtime_local_services(self, app) -> dict[str, Any]:
-        """Return bounded worker diagnostics without exposing service payloads."""
-        health = app.retained_backend_health()
-        return app.local_services_snapshot().payload(
-            lambda row: app.system_status_service(row, health=health),
-            health=health,
-        )
-    def runtime_process_ledger(self, app) -> dict[str, Any]:
-        """Bounded identity-verified process-group ledger for System diagnostics.
-
-        Same identity source the launch preflight and overload watchdog use, so
-        restart, containment, and diagnostics always agree on which PIDs belong
-        to this port. Fields stay bounded: names, PIDs, groups, and the newest
-        overload-evidence path — never command lines or payloads.
-        """
-        table = local_services_registry.bounded_process_table()
-        port = int(getattr(app.background_owner, "port", 0) or 0) if hasattr(self, "background_owner") else 0
-        port_group = local_services_registry.tracked_port_process_group(port, common.STATE_DIR, table) if port else {}
-        service_dir = common.STATE_DIR / "services"
-        tracked_groups = local_services_registry.tracked_local_service_groups(service_dir, table)
-        service_groups = [
-            {
-                key: group[key]
-                for key in ("service", "pid", "pgid", "member_pids", "launcher_pid", "launcher_port")
-            }
-            for group in tracked_groups
-        ]
-        untracked_orphans = local_services_registry.untracked_local_service_processes(
-            service_dir,
-            table,
-            tracked_groups,
-        )
-        evidence = sorted(Path("/tmp").glob(f"yolomux-overload-{port}-*.json")) if port else []
-        return {
-            "port_group": port_group,
-            "service_groups": service_groups,
-            "untracked_orphans": untracked_orphans,
-            "last_overload_evidence": str(evidence[-1]) if evidence else "",
-        }
-    def runtime_filesystem_batch_rows(self, app, metrics: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
-        """Return only the safe fs-batch attribution fields from bounded perf records."""
-        rows: list[dict[str, Any]] = []
-        recent = metrics.get("recent") if isinstance(metrics, dict) else []
-        for item in recent if isinstance(recent, list) else []:
-            if not isinstance(item, dict) or item.get("role") != "http-endpoint" or item.get("surface") != "POST /api/fs/batch":
-                continue
-            details = item.get("details") if isinstance(item.get("details"), dict) else {}
-            if details.get("fs_batch") is not True:
-                continue
-            rows.append({
-                "time": float(item.get("time") or 0.0),
-                "compute_ms": float(item.get("compute_ms") or 0.0),
-                "payload_bytes": int(item.get("payload_bytes") or 0),
-                "batch_size": int(details.get("fs_batch_size") or 0),
-                "operations": str(details.get("fs_batch_operations") or "{}"),
-                "path_hashes": str(details.get("fs_batch_path_hashes") or "[]"),
-                "triggers": str(details.get("fs_batch_triggers") or "{}"),
-                "client_revision": str(details.get("fs_batch_client_revision") or "unknown"),
-                "client_scope": str(details.get("fs_batch_client_scope") or "legacy"),
-            })
-        return rows[-max(1, int(limit or 8)):]
-    def runtime_control_report_payload(self, app) -> dict[str, Any]:
-        """Serve the control socket from in-memory endpoint evidence only.
-
-        The full System report may scan cache trees and query local services. That work can block
-        the single control-server thread precisely while diagnosing a loaded server, so the CLI
-        report uses this small in-memory projection instead.
-        """
-        status = app.background_owner.status_payload()
-        diagnostics = app.performance_diagnostics_payload()
-        metrics = diagnostics.get("perf") if isinstance(diagnostics.get("perf"), dict) else {}
-        client_events = app.client_events.snapshot()
-        chat_events = {
-            event_type: {
-                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
-                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
-            }
-            for event_type in ("chat_messages_changed", "chat_typing_changed")
-        }
-        # Keep the documented report shape without cache walks, service probes, event-log reads,
-        # or transcript scans on the single control-server thread.
-        bounded_cache = lambda path: {"path": str(path), "exists": Path(path).exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0, "truncated": True}
-        return {
-            "ok": True,
-            "state_dir": str(common.STATE_DIR),
-            "owner": {
-                "current_owner": status.get("current_owner"),
-                "status": status.get("status"),
-                "owner": bool(status.get("owner")),
-                "search_index": status.get("search_index"),
-                "debug": {},
-                "control": {"ok": True, "source": "live-owner-control"},
-            },
-            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("coalescing", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
-            "caches": {
-                "session_files": bounded_cache(SESSION_FILES_CACHE_DIR),
-                "activity": bounded_cache(TABBER_ACTIVITY_CACHE_DIR),
-                "search_index": bounded_cache(file_index.INDEX_DIR),
-            },
-            "search_index": {},
-            "local_services": {"services": [], "totals": {}, "ledger": {}, "bounded": True},
-            "top_endpoints": app.runtime_top_endpoints(diagnostics),
-            "top_background_work": app.runtime_top_background_work(diagnostics),
-            "top_event_types": [],
-            "client_events": client_events,
-            "chat": {**app.chat_service.diagnostics(), "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)), "events": chat_events},
-            "login_throttle": {**app.login_rate_limiter.diagnostics(), "edge": app.login_edge_controller.diagnostics()},
-            "largest_active_transcripts": [],
-            "transcripts_cache": {},
-            "filesystem_batch": app.runtime_filesystem_batch_rows(metrics),
-        }
-    def runtime_report_core( self, app, *, background_status: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        """The half of the report the Daemons roster SCANS: the service roster and its identity.
-
-        Split from `runtime_report_advanced` because these two halves have different demand. This
-        half is what a visible panel refreshes on its poll; the other half is what a reader opens
-        deliberately. Building them together meant transcript scans and performance folds ran on
-        every five-second poll of a panel whose Advanced section was closed.
-
-        The split is by CONSUMER, not by taste: every key here has a reader outside the Advanced
-        disclosure, and every key in the other half has either an Advanced-only reader or none.
-        """
-
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
-        client_events = app.client_events.snapshot()
-        chat_events = {
-            event_type: {
-                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
-                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
-            }
-            for event_type in ("chat_messages_changed", "chat_typing_changed")
-        }
-        services = local_services if isinstance(local_services, dict) else app.runtime_local_services()
-        return {
-            "ok": True,
-            "state_dir": str(common.STATE_DIR),
-            "owner": {
-                "current_owner": status.get("current_owner"),
-                "status": status.get("status"),
-                "owner": bool(status.get("owner")),
-                "search_index": status.get("search_index"),
-            },
-            "caches": {
-                "session_files": app.runtime_cache_dir_stats(SESSION_FILES_CACHE_DIR),
-                "activity": app.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
-                "search_index": app.runtime_cache_dir_stats(file_index.INDEX_DIR),
-            },
-            "search_index": (
-                owner_control_response.get("search_index_runtime")
-                if isinstance(owner_control_response, dict) and isinstance(owner_control_response.get("search_index_runtime"), dict)
-                else file_index.runtime_diagnostics()
-            ),
-            "local_services": services,
-            "client_events": client_events,
-            "chat": {
-                **app.chat_service.diagnostics(),
-                "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
-                "events": chat_events,
-            },
-            "tmux_signal_watcher": app.tmux_signal_event_watcher_status(),
-        }
-    def runtime_report_advanced( self, app, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        """The half a reader consults deliberately: refresh coordination, top-N folds, transcripts.
-
-        `local_services` is INJECTED rather than defaulted away. The approvald recurring-work row
-        below is read out of the local-service roster, and a `None` default would have published a
-        row of confident zeros for a subsystem nobody measured this cycle. When the caller has
-        already collected the roster it passes it; when this half is produced on its own it pays
-        for its own collection.
-        """
-
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
-        # Remote control responses from older servers may still carry perf, while the current
-        # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
-        diagnostic_status = dict(status)
-        if not isinstance(diagnostic_status.get("perf"), dict):
-            diagnostic_status.update(app.performance_diagnostics_payload())
-        transcript_payload = app.transcripts_payload(force=force_transcripts)
-        services = local_services if isinstance(local_services, dict) else app.runtime_local_services()
-        return {
-            "owner": {
-                "debug": app.runtime_owner_debug_summary(owner_debug),
-                "control": app.runtime_owner_control_summary(owner_control_response),
-            },
-            "refresh": app.runtime_refresh_state(status, services),
-            "top_endpoints": app.runtime_top_endpoints(diagnostic_status),
-            "top_background_work": app.runtime_top_background_work(diagnostic_status),
-            "top_event_types": app.runtime_top_event_types(),
-            # Privacy-safe login-throttle aggregates: allowed/blocked-by-scope counts,
-            # active rows, locked accounts, decision latency — never raw usernames/IPs.
-            "login_throttle": {
-                **app.login_rate_limiter.diagnostics(),
-                "edge": app.login_edge_controller.diagnostics(),
-            },
-            "largest_active_transcripts": app.runtime_largest_transcripts(transcript_payload),
-            "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
-        }
-    def runtime_report_payload( self, app, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
-        """The whole report: both halves, one local-service collection, one merge rule.
-
-        The CLI/control report and the composed system-status payload both want everything, so the
-        composition lives here once rather than as a second construction beside each caller.
-        """
-
-        status = background_status if isinstance(background_status, dict) else app.background_owner.status_payload()
-        local_services = app.runtime_local_services()
-        core = app.runtime_report_core(
-            background_status=status,
-            owner_control_response=owner_control_response,
-            local_services=local_services,
-        )
-        advanced = app.runtime_report_advanced(
-            background_status=status,
-            owner_debug=owner_debug,
-            owner_control_response=owner_control_response,
-            force_transcripts=force_transcripts,
-            local_services=local_services,
-        )
-        # `owner` is the one key both halves contribute to, so it is merged explicitly here rather
-        # than letting a dict splat silently drop the cheap identity fields.
-        return {**core, **advanced, "owner": {**core["owner"], **advanced["owner"]}}
-    def system_status_server_block(self, app, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
-        """Publish the web process's own row through the ONE metric-envelope owner.
-
-        `local_service_projection.measurement` already publishes every local service's
-        CPU/memory/uptime as a typed envelope. This block used to be the one exception --
-        plain floats built with `float(sample.get(...) or 0.0)` -- which is why an unpushed
-        sample arrived at the panel as a finite `0` and was stamped `measured`. It is the
-        same divergent-copy defect the panel's own comments forbid, so the web process now
-        goes through the same envelope as the six services beside it: a value nobody
-        sampled is `{"state": "unavailable", "value": None, "reason_code": ...}`, and the
-        roster's Memory/CPU totals skip it exactly as they already skip every other
-        unmeasured row.
-
-        `version`, `pid` and `started_at` are NOT measurements -- they are read here, are
-        always known, and stay plain scalars.
-        """
-
-        reason_code = str(sample.get("reason_code") or STATS_SAMPLE_NOT_PUSHED_REASON_CODE)
-        reason = str(sample.get("reason") or STATS_SAMPLE_NOT_PUSHED_REASON)
-        # A sample that stopped arriving is not a current measurement. `cpu_budget` already aged
-        # its own copy of this record and said `stale`, but these envelopes carried no age at all,
-        # so a frozen sample kept rendering as `measured` at its last value forever -- the last way
-        # this panel could present something unmeasured as measured.
-        read_at = float(now if now is not None else time.time())
-        age_seconds = stats_current_host_collectors.host_cpu_sample_age_seconds(sample, read_at)
-        if sample.get("cpu_percent") is not None:
-            if age_seconds is None:
-                # A value with no push timestamp. Its currency cannot be checked, and the one
-                # thing this must not do is invent an age: `STATS_SAMPLE_STALE_REASON.format(
-                # seconds=int(age_seconds or 0))` would have printed a confident "is 0s old"
-                # about a sample whose age is exactly what is unknown.
-                reason_code = STATS_SAMPLE_UNDATED_REASON_CODE
-                reason = STATS_SAMPLE_UNDATED_REASON
-                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
-            elif stats_current_host_collectors.host_cpu_sample_is_stale(age_seconds):
-                reason_code = STATS_SAMPLE_STALE_REASON_CODE
-                reason = STATS_SAMPLE_STALE_REASON.format(seconds=int(age_seconds))
-                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
-
-        def envelope(value: object) -> dict[str, Any]:
-            return local_service_projection.measurement(
-                value, state="unavailable", reason_code=reason_code, reason=reason,
-            )
-
-        return {
-            "version": YOLOMUX_VERSION,
-            # These two fall back to a locally KNOWN truth, not to zero, which is why they
-            # keep their `or`: this process's pid and start time are never unknown here.
-            "pid": int(sample.get("pid") or os.getpid()),
-            "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
-            # Uptime is DERIVED HERE, from this process's own start time and the one moment this
-            # response describes. The comment above this line used to say exactly that while the
-            # code published `envelope(sample["uptime_seconds"])` -- a value written only when a
-            # statsd CPU push arrived. So when delivery broke, CPU and RSS correctly went
-            # `unavailable` past the stale window while uptime sat FROZEN at the last push and
-            # stayed stamped `measured`: a number that stops advancing, presented as current,
-            # precisely when the reader is looking at the panel to find out what broke. A live
-            # smoke could not see it, because a healthy push made the frozen field advance.
-            #
-            # There is no cached copy left to disagree with this one: `handle_control_request` no
-            # longer writes `uptime_seconds` into the sample, and `latest_stats_sample` no longer
-            # synthesizes one. One field, one source, and it cannot freeze because nothing outside
-            # this process feeds it.
-            "uptime_seconds": envelope(max(0.0, read_at - SERVER_STARTED_AT)),
-            "cpu_percent": envelope(sample.get("cpu_percent")),
-            "system_cpu_percent": envelope(sample.get("system_cpu_percent")),
-            "rss_bytes": envelope(sample.get("rss_bytes")),
-        }
-    def system_status_core_payload(self, app) -> dict[str, Any]:
-        """The body the Daemons roster polls for. Produced in the background, never on a request.
-
-        This runs on the snapshot owner's thread; `/api/system-status` only reads what it
-        published. That is the whole point of the split - the panel's five-second poll used to
-        carry this entire assembly, so a server that was busy served its own diagnostics slowest.
-        """
-        # Diagnostics are a reader. Only the CPU family worker may advance the
-        # process/host baselines; otherwise a System refresh can consume the
-        # next one-second observation and leave no durable bucket for it.
-        # Assemble the SLOW runtime data FIRST, then take exactly one reading of the CPU sample
-        # and one timestamp, and render the whole response from that single moment.
-        #
-        # The old order read the sample, then did the slow work, then rendered the now-aged
-        # sample while `cpu_budget` re-read the cache and saw a newer push. One live response
-        # reported `server` stale at 5s and `cpu_budget.sample_age_seconds` 0.358 at the same
-        # time: the response manufactured its own staleness and flipped the row to an em dash
-        # for a reason that had nothing to do with statsd.
-        runtime_report = app.runtime_report_core()
-        generated_at = time.time()
-        sample = app.latest_stats_sample()
-        return {
-            **runtime_report,
-            "generated_at": generated_at,
-            "server": app.system_status_server_block(sample, now=generated_at),
-            "cpu_budget": app.server_cpu_budget_payload(now=generated_at, sample=sample),
-            # System mirrors the same canonical matrix used by the current
-            # capabilities endpoint; there is no diagnostic-only policy copy.
-            "resolution_capabilities": stats_resolution.wire_capabilities(),
-            "stats_current": app.stats_current_runtime.status(),
-            "host": collect_host_diagnostics().payload(admin=True),
-        }
-    def system_status_advanced_payload(self, app) -> dict[str, Any]:
-        """The Advanced-disclosure body, produced only when somebody has asked for it.
-
-        `force_transcripts=False` for the same reason the composed payload used it: a diagnostics
-        read must not drive a transcript refresh, only report the one already cached.
-        """
-
-        return {
-            "ok": True,
-            "generated_at": time.time(),
-            **app.runtime_report_advanced(force_transcripts=False),
-        }
-    def system_status_payload(self, app) -> dict[str, Any]:
-        """Both halves of the System view, composed. The CLI report and contract tests read this.
-
-        The route does NOT: it reads the published core snapshot, and the Advanced disclosure reads
-        the separately retained advanced body. This composition exists so a caller that genuinely
-        wants everything at once has one place to get it rather than a second assembly of its own.
-        """
-
-        core = app.system_status_core_payload()
-        advanced = app.system_status_advanced_payload()
-        return {
-            **core,
-            **{key: value for key, value in advanced.items() if key not in {"ok", "generated_at"}},
-            "owner": {**core["owner"], **advanced["owner"]},
-        }
-    def attach_system_status_snapshot_owner(self, app, owner: system_status_snapshot_module.SystemStatusSnapshotOwner) -> None:
-        """Hold the ONE owner of the retained system-status bodies."""
-
-        self.snapshot = owner
-    def start_system_status_snapshot_owner(self, app) -> bool:
-        """Build and start the owner once. Returns False when one is already attached."""
-
-        if self.snapshot is not None:
-            return False
-        app.attach_system_status_snapshot_owner(system_status_snapshot_module.SystemStatusSnapshotOwner(
-            build_core=app.system_status_core_payload,
-            build_advanced=app.system_status_advanced_payload,
-            on_diagnostic=app.report_system_status_snapshot_failure,
-        ))
-        return self.snapshot.start()
-    def stop_system_status_snapshot_owner(self, app) -> None:
-        owner = self.snapshot
-        if owner is not None:
-            owner.stop()
-    def report_system_status_snapshot_failure(self, app, slot: str, error: BaseException) -> None:
-        """Record a failed snapshot build where the diagnostics reader can see it.
-
-        The slot counts its own failures, but a counter inside the producer is not propagation, so
-        the failure also lands in the server log ring the Logs panel reads.
-        """
-
-        emit_server_log(
-            "error",
-            "system-status-snapshot",
-            f"{slot} snapshot build failed: {type(error).__name__}: {error}",
-            dedupe_key=f"system-status-snapshot:{slot}",
-            dedupe_seconds=30.0,
-        )
-    def system_status_snapshot_response(self, app, *, advanced: bool = False) -> tuple[bytes, Mapping[str, Any]]:
-        """The route's whole job: one read of the published body, or one typed refusal.
-
-        Returns pre-encoded bytes and their product metadata so the request thread neither
-        assembles, nor encodes, nor deep-copies the ~70 KB body it is about to write.
-        """
-
-        owner = self.snapshot
-        if owner is None:
-            # No owner armed in this process. This is a real state - a unit-test app, or a server
-            # torn down mid-request - and it is reported as one rather than silently rebuilt. It
-            # goes through the SAME refusal shape as every other unpublished read, with its own
-            # reason code, so a client has one thing to parse instead of two.
-            refusal = system_status_snapshot_module.owner_unattached_read().refusal_payload(
-                cadence_seconds=system_status_snapshot_module.SNAPSHOT_CADENCE_SECONDS,
-                deadline_seconds=system_status_snapshot_module.FRESHNESS_DEADLINE_SECONDS,
-            )
-            body = system_status_snapshot_module.encode_snapshot_body(refusal)
-            return body, common.inline_json_product_metadata(body)
-        slot = owner.advanced if advanced else owner.core
-        result = owner.read_advanced() if advanced else owner.read_core()
-        if result.snapshot is not None:
-            return result.snapshot.body, result.snapshot.product
-        body = system_status_snapshot_module.encode_snapshot_body(result.refusal_payload(
-            cadence_seconds=slot.cadence_seconds,
-            deadline_seconds=slot.deadline_seconds,
-        ))
-        return body, common.inline_json_product_metadata(body)
-
-
-def composed_owner_for(app: "TmuxWebtermApp", name: str, factory: Callable[["TmuxWebtermApp"], Any]) -> Any:
-    """Lazily compose an owner while retaining state assigned before app initialization."""
-    owner = app.__dict__.get(name)
-    if owner is None:
-        owner = factory(app)
-        app.__dict__[name] = owner
-    return owner
-system_status_projector_for = partial(composed_owner_for, name="_system_status_projector", factory=SystemStatusProjector)
-
-
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
@@ -7593,17 +2337,18 @@ class TmuxWebtermApp:
         self.activity_ledger.load()
         self.activity_heartbeat_next_rotate_at = 0.0
         self.input_heartbeat_record = InputHeartbeatRecord()
-        self._session_files_coordinator = SessionFilesCoordinator(self)
+        self.session_files_service = SessionFilesService()
         self.agent_window_git_inventory_cache: dict[str, tuple[int, float, dict[str, Any] | None]] = {}
         self.agent_window_git_inventory_cache_lock = threading.Lock()
-        self._activity_cache = ActivityCache(self)
-        self._watch_bridge = WatchBridge(self)
+        self.activity_transcript_service = ActivityTranscriptService()
+        self.client_watch_service = ClientWatchService()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
         self.client_watch_service.tmux_signal_payload: dict[str, Any] | None = None
         self.tmux_snapshot_history_lock = threading.RLock()
         self.tmux_snapshot_history_signatures: dict[tuple[str, str, int], tuple[int, int]] = {}
         # last-logged watched-PR truncation state, so the cap is logged only when it changes.
+        self._watched_pr_truncated_signature: tuple[int, tuple[str, ...]] | None = None
         self.metadata_warm_lock = threading.Lock()
         self.metadata_warm_record = MetadataWarmRecord()
         self.metadata_badge_lock = threading.Lock()
@@ -7613,7 +2358,7 @@ class TmuxWebtermApp:
         # M8: the live retained-health store, attached by whoever started this port's
         # observer. `None` until then, and the projection says `observer_unattached`
         # rather than publishing zeros. See `attach_backend_health_store`.
-        self._system_status_projector = SystemStatusProjector(self)
+        self.backend_health_store: Any | None = None
         self.job_client = JobClient()
         # Pins the jobd broker up for the duration of an fs-batch/differ browser interaction so a
         # saturated gate cannot idle-shut the broker between two /api/fs/batch calls (W15 #4).
@@ -8403,7 +3148,6 @@ class TmuxWebtermApp:
         # jobd is started only by the elected scheduler owner.  HTTP handlers
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
-        composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).start()
         self.pricing_refresh_coordinator.start_periodic()
         self.stats_current_runtime.start()
         self.refresh_search_indexer_schedule()
@@ -8899,11 +3643,15 @@ class TmuxWebtermApp:
     def demote_background_owner(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
-        composed_owner_for(self, "_session_files_coordinator", SessionFilesCoordinator).stop()
         self.job_client.stop_for_scheduler()
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
-        composed_owner_for(self, "_activity_cache", ActivityCache).demote()
+        with self.activity_transcript_service.tabber_cache_lock:
+            demoted_warmer = self.activity_transcript_service.tabber_warmer_record
+            self.activity_transcript_service.tabber_warmer_record = TabberActivityWarmerRecord()
+            self.activity_transcript_service.tabber_cache_record.refresh_worker = None
+        demoted_warmer.wake.set()  # unpark so a parked warmer exits promptly
+        self.session_files_service.cancel_all_work()
         # Release the configured-root scheduler lease so the daemon may idle out honestly and its
         # Daemons row stops reporting a scheduled obligation this demoted server no longer owns.
         self.search_indexer.release_scheduler_lease()
@@ -11017,120 +5765,1043 @@ class TmuxWebtermApp:
             return self.activity_transcript_service.tabber_warmer_record.consumer_until > now
 
     def wake_client_event_watcher(self) -> None:
-        return self._watch_bridge.wake_client_event_watcher(self)
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+        record.wake_event.set()
 
     def note_client_event_recurring_work(self, record: ClientEventWatcherRecord, owner: str, *, useful: bool, failed: bool = False) -> None:
-        return self._watch_bridge.note_client_event_recurring_work(self, record, owner, useful=useful, failed=failed)
+        """Record bounded recurring-work evidence beside the watcher that owns it."""
+        if owner not in CLIENT_EVENT_RECURRING_WORK_SPECS:
+            raise ValueError(f"unknown client-event recurring-work owner: {owner}")
+        now = time.time()
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record:
+                return
+            entry = record.recurring_work.setdefault(owner, {
+                "attempts": 0,
+                "useful": 0,
+                "no_change": 0,
+                "failures": 0,
+                "last_attempt_at": 0.0,
+                "last_useful_at": 0.0,
+            })
+            entry["attempts"] = int(entry["attempts"]) + 1
+            entry["last_attempt_at"] = now
+            if failed:
+                entry["failures"] = int(entry["failures"]) + 1
+            if useful:
+                entry["useful"] = int(entry["useful"]) + 1
+                entry["last_useful_at"] = now
+            else:
+                entry["no_change"] = int(entry["no_change"]) + 1
 
     def client_event_recurring_work_snapshot(self, record: ClientEventWatcherRecord, now: float | None = None) -> list[dict[str, Any]]:
-        return self._watch_bridge.client_event_recurring_work_snapshot(self, record, now)
+        """Return fixed-name timer diagnostics without paths, payloads, or client identity."""
+        monotonic_now = time.monotonic() if now is None else float(now)
+        next_due = {
+            "filesystem_reconcile": record.next_signature_poll_at,
+            "filesystem_fallback": record.next_file_poll_at,
+            "status_generation_lease": 0.0,
+            "attention_ack_fallback": record.next_attention_ack_poll_at,
+            "tmux_signal_fallback": record.next_tmux_signal_poll_at,
+            "watched_pr_reconcile": record.next_watched_pr_poll_at,
+            "yoagent_job_reconcile": record.next_yoagent_job_poll_at,
+        }
+        rows: list[dict[str, Any]] = []
+        for owner, spec in CLIENT_EVENT_RECURRING_WORK_SPECS.items():
+            entry = record.recurring_work.get(owner, {})
+            rows.append({
+                "owner": owner,
+                "class": spec["class"],
+                "cadence_seconds": spec["cadence_seconds"],
+                "demanded": self.client_event_recurring_work_demanded(owner),
+                "attempts": int(entry.get("attempts") or 0),
+                "useful": int(entry.get("useful") or 0),
+                "no_change": int(entry.get("no_change") or 0),
+                "failures": int(entry.get("failures") or 0),
+                "last_attempt_at": float(entry.get("last_attempt_at") or 0.0),
+                "last_useful_at": float(entry.get("last_useful_at") or 0.0),
+                "next_due_in_seconds": max(0.0, float(next_due[owner] or 0.0) - monotonic_now),
+            })
+        return rows
 
     def client_event_recurring_work_demanded(self, owner: str) -> bool:
-        return self._watch_bridge.client_event_recurring_work_demanded(self, owner)
+        channels = self.client_events.aggregate_channels()
+        if owner in {"filesystem_reconcile", "filesystem_fallback"}:
+            return not channels.isdisjoint({"files", "transcripts", "activity"})
+        if owner in {"status_generation_lease", "attention_ack_fallback", "tmux_signal_fallback"}:
+            return not channels.isdisjoint({"status", "attention"})
+        if owner == "watched_pr_reconcile":
+            return not channels.isdisjoint({"core", "attention"})
+        return not channels.isdisjoint({"yoagent", "attention"})
 
     def client_event_watch_sleep_seconds(self, now: float, record: ClientEventWatcherRecord | None = None) -> float:
-        return self._watch_bridge.client_event_watch_sleep_seconds(self, now, record)
+        current = record or self.client_watch_service.event_watcher_record
+        channels = self.client_events.aggregate_channels()
+        deadlines: list[float] = []
+        if not channels.isdisjoint({"status", "attention"}):
+            if current.tmux_signal_refresh_at > 0:
+                deadlines.append(current.tmux_signal_refresh_at)
+            elif not self.tmux_signal_event_watcher_healthy():
+                deadlines.append(current.next_tmux_signal_poll_at)
+        if not channels.isdisjoint({"core", "attention"}):
+            deadlines.append(current.next_watched_pr_poll_at)
+            if now < self.search_progress_active_until:
+                deadlines.append(current.next_search_progress_poll_at)
+        if not channels.isdisjoint({"yoagent", "attention"}):
+            deadlines.append(current.next_yoagent_job_poll_at)
+        if not deadlines:
+            return 60.0
+        next_due = min(deadlines)
+        if next_due <= 0:
+            return self.server_event_poll_seconds()
+        return max(0.01, min(60.0, next_due - now))
 
     def update_client_watch_roots(self, roots: Any) -> dict[str, Any]:
-        return self._watch_bridge.update_client_watch_roots(self, roots)
+        now = time.monotonic()
+        payload = roots if isinstance(roots, dict) else {"roots": roots}
+        client_id = normalize_client_event_client_id(payload.get("client_id") if isinstance(payload, dict) else "")
+        descriptor_id = client_id or f"legacy:{self.watch_root_owner_id}"
+        raw_roots = payload.get("roots", []) if isinstance(payload, dict) else []
+        unique = self.watch_root_index.normalize_paths(raw_roots)
+        normalized_files: list[str] = []
+        raw_files = payload.get("files", []) if isinstance(payload, dict) else []
+        if isinstance(raw_files, list):
+            for item in raw_files:
+                path = str(item or "").strip()
+                if not path.startswith("/"):
+                    continue
+                normalized_files.append(str(Path(path).expanduser()))
+        unique_files = sorted(set(normalized_files))[:CLIENT_WATCH_FILE_LIMIT]
+        active_file_set = set(unique_files)
+        normalized_background_files: list[str] = []
+        raw_background_files = payload.get("background_files", []) if isinstance(payload, dict) else []
+        if isinstance(raw_background_files, list):
+            for item in raw_background_files:
+                path = str(item or "").strip()
+                if not path.startswith("/"):
+                    continue
+                normalized_background_files.append(str(Path(path).expanduser()))
+        unique_background_files = [
+            path
+            for path in sorted(set(normalized_background_files))
+            if path not in active_file_set
+        ][:CLIENT_WATCH_FILE_LIMIT]
+        context_items = self.normalized_client_context_items(payload.get("context_items", []))
+        session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
+        activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
+        watch_update_started = time.perf_counter()
+        # Transitional cross-web mirror for existing background readers. watchd
+        # independently unions the leased descriptors and is the only watch owner.
+        self.watch_root_index.update_client_roots(unique, descriptor_id)
+        with self.client_watch_service.lock:
+            previous_descriptor = self.client_watch_service.descriptors.get(descriptor_id)
+            stable_descriptor = (
+                tuple(unique),
+                tuple(unique_files),
+                tuple(unique_background_files),
+                tuple(context_items),
+                tuple(session_files_requests),
+                activity_summary,
+            )
+            previous_stable = (
+                previous_descriptor.roots,
+                previous_descriptor.files,
+                previous_descriptor.background_files,
+                previous_descriptor.context_items,
+                previous_descriptor.session_files,
+                previous_descriptor.activity_summary,
+            ) if previous_descriptor is not None else None
+            descriptor_changed = previous_stable != stable_descriptor
+            descriptor_generation = (
+                previous_descriptor.descriptor_generation
+                if previous_descriptor is not None and previous_stable == stable_descriptor
+                else (previous_descriptor.descriptor_generation + 1 if previous_descriptor is not None else 1)
+            )
+            self.client_watch_service.descriptors[descriptor_id] = ClientWatchDescriptor(
+                expires_at=now + CLIENT_WATCH_ROOT_TTL_SECONDS,
+                descriptor_generation=descriptor_generation,
+                roots=tuple(unique),
+                files=tuple(unique_files),
+                background_files=tuple(unique_background_files),
+                context_items=tuple(context_items),
+                session_files=tuple(session_files_requests),
+                activity_summary=activity_summary,
+            )
+        self.record_performance_sample(
+            BACKGROUND_ROLE_WATCH_ROOTS,
+            "client-roots-update",
+            trigger="watch-roots-api",
+            compute_ms=(time.perf_counter() - watch_update_started) * 1000,
+            payload={"roots": unique, "files": unique_files, "background_files": unique_background_files, "client_bound": bool(client_id)},
+            cache_status="updated",
+            count=len(unique),
+        )
+        if descriptor_changed:
+            self.wake_client_event_watcher()
+        with self.client_events.lock:
+            has_client_event_subscribers = bool(self.client_events.subscribers)
+        if descriptor_changed and has_client_event_subscribers:
+            self.start_client_watch_snapshot_publish()
+        return {
+            "ok": True,
+            "roots": unique,
+            "files": unique_files,
+            "background_files": unique_background_files,
+            "context_items": context_items,
+            "session_files": session_files_requests,
+            "activity_summary": activity_summary,
+            "mode": "lifecycle" if client_id and self.client_events.has_client_id(client_id) else "ttl-fallback",
+            "ttl_seconds": CLIENT_WATCH_ROOT_TTL_SECONDS,
+        }
 
     def normalized_client_context_items(self, value: Any) -> list[dict[str, Any]]:
-        return self._watch_bridge.normalized_client_context_items(self, value)
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        seen: set[tuple[str, int]] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            session = str(item.get("session") or "").strip()
+            if not session:
+                continue
+            messages = int(max(1, min(self.float_value(item.get("messages"), 200), MAX_COMPACT_TRANSCRIPT_ITEMS)))
+            key = (session, messages)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"session": session, "messages": messages})
+        return items[:MAX_YOLOMUX_SESSION_TABS]
 
     def normalized_client_session_files(self, value: Any) -> list[dict[str, Any]]:
-        return self._watch_bridge.normalized_client_session_files(self, value)
+        if not isinstance(value, list):
+            return []
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            session = str(item.get("session") or "").strip() or None
+            hours = session_files.bounded_session_files_hours(self.float_value(item.get("hours"), 24.0))
+            from_ref = str(item.get("from_ref") or item.get("from") or "").strip() or None
+            to_ref = str(item.get("to_ref") or item.get("to") or "").strip() or None
+            repo_refs = item.get("repo_refs")
+            if not isinstance(repo_refs, dict):
+                repo_refs = None
+            request = {
+                "session": session,
+                "hours": hours,
+                "from_ref": from_ref,
+                "to_ref": to_ref,
+                "repo_refs": repo_refs,
+            }
+            signature = self.client_event_payload_signature(request)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            items.append(request)
+        return items[:MAX_YOLOMUX_SESSION_TABS]
 
     def normalized_client_activity_summary(self, value: Any) -> dict[str, Any]:
-        return composed_owner_for(self, "_watch_bridge", WatchBridge).normalized_client_activity_summary(self, value)
+        if not activity_summary_enabled():
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        locale = normalize_locale(value.get("locale"))
+        visible = value.get("visible") is True
+        scope = self.normalized_activity_session_scope(value.get("scope"))
+        hours = session_files.bounded_session_files_hours(self.float_value(value.get("hours"), 24.0))
+        return {"locale": locale, "visible": visible, "scope": scope, "hours": hours}
 
     def client_watch_roots_snapshot(self) -> list[str]:
-        return self._watch_bridge.client_watch_roots_snapshot(self)
+        self.prune_client_watch_descriptors()
+        return self.watch_root_index.snapshot()
 
     def prune_client_watch_descriptors(self) -> None:
-        return self._watch_bridge.prune_client_watch_descriptors(self)
+        now = time.monotonic()
+        with self.client_watch_service.lock:
+            expired = [client_id for client_id, descriptor in self.client_watch_service.descriptors.items() if descriptor.expires_at <= now]
+            for client_id in expired:
+                self.client_watch_service.descriptors.pop(client_id, None)
+        if expired:
+            for client_id in expired:
+                self.watch_root_index.remove_client_roots(client_id)
+            self.wake_client_event_watcher()
 
     def touch_client_watch_descriptor(self, client_id: str) -> None:
-        return self._watch_bridge.touch_client_watch_descriptor(self, client_id)
+        """Renew the orphan backstop from a live SSE stream, never from a browser interval."""
+        normalized_client_id = normalize_client_event_client_id(client_id)
+        if not normalized_client_id:
+            return
+        now = time.monotonic()
+        with self.client_watch_service.lock:
+            descriptor = self.client_watch_service.descriptors.get(normalized_client_id)
+            if descriptor is None or descriptor.expires_at - now > CLIENT_WATCH_ROOT_TTL_SECONDS / 2:
+                return
+            descriptor.expires_at = now + CLIENT_WATCH_ROOT_TTL_SECONDS
+            roots = list(descriptor.roots)
+        self.watch_root_index.update_client_roots(roots, normalized_client_id)
+        self.wake_client_event_watcher()
 
     def client_event_subscriber_disconnected(self, client_id: str) -> None:
-        return self._watch_bridge.client_event_subscriber_disconnected(self, client_id)
+        """Release a browser's watch descriptor after its final same-id SSE stream closes."""
+        normalized_client_id = normalize_client_event_client_id(client_id)
+        if not normalized_client_id or self.client_events.has_client_id(normalized_client_id):
+            return
+        with self.client_watch_service.lock:
+            self.client_watch_service.descriptors.pop(normalized_client_id, None)
+        self.watch_root_index.remove_client_roots(normalized_client_id)
+        self.wake_client_event_watcher()
 
     def client_watch_file_paths(self, *, background: bool) -> list[str]:
-        return self._watch_bridge.client_watch_file_paths(self, background=background)
+        with self.client_watch_service.lock:
+            descriptors = list(self.client_watch_service.descriptors.values())
+            paths = {
+                path
+                for descriptor in descriptors
+                for path in (descriptor.background_files if background else descriptor.files)
+            }
+        return sorted(paths)[:CLIENT_WATCH_FILE_LIMIT]
 
     def client_watch_files_snapshot(self) -> list[str]:
-        return self._watch_bridge.client_watch_files_snapshot(self)
+        return self.client_watch_file_paths(background=False)
 
     def client_watch_background_files_snapshot(self) -> list[str]:
-        return self._watch_bridge.client_watch_background_files_snapshot(self)
+        return self.client_watch_file_paths(background=True)
 
     def watchd_topology_signature(self) -> str | None:
-        return self._watch_bridge.watchd_topology_signature(self)
+        """Fingerprint the tmux topology the descriptor transcript set is derived from.
+
+        One `tmux list-panes -a`: measured 0.57ms CPU / 5.24ms wall over 49 panes, against the
+        25.8ms CPU of the discover_sessions it gates. It must never do the work it exists to
+        avoid — no process table, no agent enrichment, no transcript stat or tail — so it sees
+        exactly what tmux reports. A new session, a new or killed pane, a renamed session or
+        window, and a pane whose foreground command changes all move it; an agent that starts
+        writing a transcript without changing any of those does not, which is what
+        WATCHD_DESCRIPTOR_RESYNC_SECONDS backstops.
+
+        Returns None when tmux cannot be read, which never matches a stored signature and so
+        forces the rebuild rather than pinning whatever was last derived.
+        """
+
+        panes, error = list_tmux_panes()
+        if error:
+            return None
+        watched = sorted(self.sessions)
+        rows = sorted(
+            (pane.session, pane.window, pane.window_name, pane.pane, pane.pane_id, pane.command, pane.pid)
+            for pane in panes
+            if pane.session in set(watched)
+        )
+        return hashlib.sha256(repr((watched, rows)).encode("utf-8")).hexdigest()
 
     def watchd_transcript_paths(self) -> list[str]:
-        return self._watch_bridge.watchd_transcript_paths(self)
+        """The transcripts the descriptors watch, rebuilt on topology change or every 15s.
+
+        The revision loop calls this once per revision and the transcripts it returns are what
+        produce those revisions, so deriving it every time was a feedback loop: 25.8ms of CPU a
+        pass, which measured as ~90% of a core on the live server.
+        """
+
+        signature = self.watchd_topology_signature()
+        now = time.monotonic()
+        service = self.client_watch_service
+        with service.lock:
+            reusable = (
+                signature is not None
+                and signature == service.watchd_transcripts_signature
+                and now - service.watchd_transcripts_at < WATCHD_DESCRIPTOR_RESYNC_SECONDS
+            )
+            if reusable:
+                return list(service.watchd_transcripts)
+        # discover_sessions runs outside the lock: it is the slow call this memo exists to
+        # bound, and holding the watch service lock across it would stall every route that
+        # touches a descriptor.
+        sessions, _errors = discover_sessions(self.sessions)
+        transcripts = sorted({
+            str(Path(agent.transcript).expanduser().resolve(strict=False))
+            for info in sessions.values()
+            for agent in info.agents
+            if agent.transcript
+        })[:CLIENT_WATCH_FILE_LIMIT]
+        with service.lock:
+            service.watchd_transcripts = list(transcripts)
+            service.watchd_transcripts_signature = signature or ""
+            service.watchd_transcripts_at = now
+        return transcripts
 
     def watchd_descriptor_payloads(self) -> dict[str, dict[str, Any]]:
-        return self._watch_bridge.watchd_descriptor_payloads(self)
+        """Build bounded daemon descriptors off the request path."""
+        self.prune_client_watch_descriptors()
+        transcripts = self.watchd_transcript_paths()
+        settings = settings_payload().get("settings", {})
+        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
+        indexed_dirs = list(self.indexed_repo_discovery_dirs(file_explorer))
+        # Same shared policy owner the Finder index and Differ ask. The watch daemon needs BOTH
+        # halves: the directory-name half (skip_dirs) and the configured index_exclude_paths rules
+        # (exclude_rules), so it can compile the FULL policy through this one owner and apply it at
+        # native registration -- not a second ignore list inside watchd.
+        exclusion_policy = exclusions.ExclusionPolicy.from_settings(
+            file_explorer if isinstance(file_explorer, dict) else {},
+            session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES,
+        )
+        skip_dirs = sorted(exclusion_policy.skip_dir_names)
+        exclude_rules = list(exclusion_policy.exclude_rules)
+        configured_roots = [str(root) for root in filesystem._configured_fs_roots()]
+        with self.session_files_service.cache_lock:
+            repo_roots = sorted(self.session_files_service.repo_dirty_generations)
+        with self.client_watch_service.lock:
+            descriptors = {
+                descriptor_id: copy.deepcopy(descriptor)
+                for descriptor_id, descriptor in self.client_watch_service.descriptors.items()
+            }
+        expires_at = time.monotonic() + WATCHD_DESCRIPTOR_TTL_SECONDS
+        return {
+            descriptor_id: {
+                "descriptor_generation": descriptor.descriptor_generation,
+                "expires_at": expires_at,
+                "roots": list(descriptor.roots),
+                "files": list(descriptor.files),
+                "background_files": list(descriptor.background_files),
+                "transcripts": transcripts,
+                "repo_roots": repo_roots,
+                "indexed_dirs": indexed_dirs,
+                "skip_dirs": skip_dirs,
+                "exclude_rules": exclude_rules,
+                "settings_path": str(SETTINGS_PATH.expanduser().resolve(strict=False)),
+                "attention_path": str(self.tmux_ai_status_path.expanduser().resolve(strict=False)),
+                "configured_roots": configured_roots,
+            }
+            for descriptor_id, descriptor in descriptors.items()
+        }
 
     def apply_watchd_revision(self, record: ClientEventWatcherRecord, revision: dict[str, Any], *, reset: bool = False) -> list[str]:
-        return self._watch_bridge.apply_watchd_revision(self, record, revision, reset=reset)
+        """Mirror compact daemon state and fan it into the existing SSE owners."""
+        epoch = str(revision.get("epoch") or "")
+        revision_number = int(revision.get("revision") or 0)
+        watch_generation = int(revision.get("watch_generation") or 0)
+        active_watch_generation = int(revision.get("active_watch_generation") or 0)
+        changed_paths = [
+            Path(path)
+            for path in revision.get("changed_paths", [])
+            if isinstance(path, str) and path.startswith("/")
+        ]
+        files_changed = revision.get("files_changed") if isinstance(revision.get("files_changed"), list) else []
+        roots = tuple(str(root) for root in revision.get("roots", []) if isinstance(root, str))
+        # watchd is a per-user daemon whose runtime socket derives from YOLOMUX_ROOT, not from a
+        # server's YOLOMUX_FS_ROOTS.  Two servers with different filesystem policies under the same
+        # YOLOMUX_ROOT therefore share ONE daemon, and its `wait_revision` takes no lease id and
+        # returns the caller-independent UNION of every co-tenant's leased roots and change paths.
+        # This consumer must scope that union to THIS server's own authorization boundary BEFORE it
+        # mirrors any state or fans an `fs_changed` SSE, or a narrow-policy server would disclose a
+        # broad co-tenant's roots and change activity to its own browser.  ``authorized_fs_roots()``
+        # is the same boundary S0's access-policy descriptor authorizes content reads against, so a
+        # root or path the daemon reports outside it is one this server may never publish or record.
+        authorized_roots = tuple(
+            filesystem._normalized_scope_path(root) for root in filesystem.authorized_fs_roots()
+        )
+
+        def _authorized_projection(path: Path) -> list[Path]:
+            """Two-direction intersection of one reported path with this server's authorized roots.
+
+            The daemon reports a co-tenant UNION, so a reported path may sit either INSIDE one of
+            this server's roots or OUTSIDE-and-ABOVE it (a coarse/root report whose ancestor spans
+            several tenants).  Both must resolve to a path this server is authorized for, and neither
+            may ever surface the broad ancestor:
+              * reported path is a descendant of (or equal to) an authorized root -> retain it;
+              * an authorized root is a descendant of the reported path -> substitute that authorized
+                root, so a coarse ancestor still delivers the server's OWN subtree without exposing
+                the ancestor;
+              * disjoint -> omit.
+            """
+            resolved = filesystem._normalized_scope_path(path)
+            projected: list[Path] = []
+            for authorized in authorized_roots:
+                if filesystem._path_is_within(resolved, authorized):
+                    projected.append(resolved)
+                elif filesystem._path_is_within(authorized, resolved):
+                    projected.append(authorized)
+            return projected
+
+        def _scope_paths(paths: list[Path]) -> list[Path]:
+            scoped: list[Path] = []
+            seen: set[str] = set()
+            for path in paths:
+                for projected in _authorized_projection(path):
+                    key = str(projected)
+                    if key not in seen:
+                        seen.add(key)
+                        scoped.append(projected)
+            return scoped
+
+        def _scope_generations(generations: dict[Any, Any]) -> dict[str, int]:
+            """Re-key a daemon generation map onto authorized paths, carrying the source generation.
+
+            A coarse ancestor key is substituted by the authorized descendant it covers, so the
+            generation still drives this server's own cache invalidation without storing a co-tenant
+            key it is not authorized to see.
+
+            When several source keys project onto ONE authorized key -- an ancestor repo and the
+            authorized repo itself both collapsing to the child -- their generations must compose
+            LOSSLESSLY.  They are independent monotonic-within-epoch counters, so `max` would let a
+            higher co-tenant counter mask the child's own increment (parent=100/child=5 and
+            parent=100/child=6 both `max` to 100, so a real .git change on the server's OWN tree
+            never invalidates).  Their sum is monotonic in every source, so any single source's
+            increment strictly changes the composed value and still triggers invalidation, while the
+            broad source path is still never exposed -- only the authorized child key is stored.
+            """
+            scoped: dict[str, int] = {}
+            for key, generation in generations.items():
+                if not isinstance(key, str):
+                    continue
+                value = int(generation or 0)
+                for projected in _authorized_projection(Path(key)):
+                    projected_key = str(projected)
+                    scoped[projected_key] = scoped.get(projected_key, 0) + value
+            return scoped
+
+        def _within_authorized(path: Path) -> bool:
+            resolved = filesystem._normalized_scope_path(path)
+            return any(filesystem._path_is_within(resolved, authorized) for authorized in authorized_roots)
+
+        daemon_reported_scope = bool(roots) or bool(changed_paths)
+        roots = tuple(str(root) for root in _scope_paths([Path(root) for root in roots]))
+        changed_paths = _scope_paths(changed_paths)
+        # `files_changed` carries specific files, never coarse roots, so it stays exact-descendant
+        # filtering: a file is mirrored only when it lives under an authorized root.
+        files_changed = [
+            entry
+            for entry in files_changed
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and _within_authorized(Path(entry["path"]))
+        ]
+        # True only when the daemon reported roots/paths and authorization removed ALL of them --
+        # a revision that touches only other tenants' roots.  A plain state revision that carried no
+        # roots/paths to begin with is NOT this case and must still record normally.
+        authorization_scoped_to_empty = daemon_reported_scope and not (roots or changed_paths)
+        root_generations = _scope_generations(
+            revision.get("root_generations") if isinstance(revision.get("root_generations"), dict) else {}
+        )
+        signature = tuple(
+            (root, (root, "watchd", int(root_generations.get(root) or 0), watch_generation, ()))
+            for root in sorted(roots)
+        )
+        token = str(revision.get("token") or f"{epoch}:{revision_number}")
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return []
+            if not reset and record.watchd_epoch == epoch and revision_number <= record.watchd_revision:
+                return []
+            if reset or record.watchd_epoch != epoch:
+                self.client_watch_service.filesystem_history.clear()
+            previous_filesystem_roots = record.filesystem_roots
+            record.watchd_epoch = epoch
+            record.watchd_revision = revision_number
+            record.watchd_applied_generation = watch_generation
+            record.watchd_active_generation = active_watch_generation
+            record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
+            record.filesystem_roots = roots
+            record.watchd_state = "polling" if revision.get("fallback") else ("ready" if record.filesystem_healthy else "errored")
+            # Empty intersection (a revision that touches only other tenants' roots) leaves nothing
+            # authorized to mirror: skip the signature update and the history write entirely so this
+            # server records no co-tenant state, while the epoch/revision bookkeeping above still
+            # advances so the revision loop is not wedged.
+            if not authorization_scoped_to_empty:
+                self.client_watch_service.filesystem_signature = signature
+                self.client_watch_service.filesystem_history.append({
+                    "token": token,
+                    "created_at": float(revision.get("created_at") or time.time()),
+                    "signature": signature,
+                    "watchd_epoch": epoch,
+                    "watchd_revision": revision_number,
+                    "watch_generation": watch_generation,
+                    "active_watch_generation": active_watch_generation,
+                    "changed_paths": tuple(str(path) for path in changed_paths[:CLIENT_WATCH_FILE_LIMIT]),
+                    "files_changed": copy.deepcopy(files_changed[:CLIENT_WATCH_FILE_LIMIT]),
+                })
+                self.client_watch_service.filesystem_history = self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+            # Scope the daemon's repo generations to authorized repos too: storing every co-tenant
+            # repo key would mirror out-of-policy state and is a second disclosure surface.
+            daemon_repo_generations = _scope_generations(
+                revision.get("repo_generations") if isinstance(revision.get("repo_generations"), dict) else {}
+            )
+            prior_daemon_generations = self.client_watch_service.watchd_repo_generations
+            changed_repos = [
+                repo
+                for repo, generation in daemon_repo_generations.items()
+                if int(generation or 0) != int(prior_daemon_generations.get(repo) or 0)
+            ]
+            self.client_watch_service.watchd_repo_generations = {
+                str(repo): int(generation or 0)
+                for repo, generation in daemon_repo_generations.items()
+            }
+        if record.filesystem_healthy:
+            self.publish_watchd_recovery(record)
+        if changed_repos:
+            with self.session_files_service.cache_lock:
+                for repo in changed_repos:
+                    if repo in self.session_files_service.repo_dirty_generations:
+                        self.session_files_service.repo_dirty_generations[repo] += 1
+        filesystem_roots = {Path(root) for root in (*previous_filesystem_roots, *roots)}
+        filesystem_changed = any(
+            filesystem_paths_intersect(path, root)
+            for path in changed_paths
+            for root in filesystem_roots
+        )
+        events: list[str] = []
+        if changed_paths:
+            self.mark_indexed_repo_discovery_dirty(changed_paths)
+            # Invalidate from the admissible working-tree paths, not from ".git"
+            # internals. Nothing beneath an ignored directory is published any
+            # more, so a ".git"-only filter here selects nothing and the branch
+            # and status caches would never be invalidated at all.
+            # ``invalidate_git_metadata_paths`` already intersects each path
+            # against the cached repository roots, so an ordinary file inside a
+            # repository invalidates exactly that repository.
+            invalidate_git_metadata_paths(changed_paths)
+            # Item 6: feed native watchd change evidence into the ONE hot-path index owner so a file
+            # created/modified/deleted outside YOLOmux (an external editor, a build) refreshes the
+            # Quick Open index in seconds instead of waiting for the safety TTL. These paths are
+            # already scoped to this server's authorized roots; the owner coalesces them by indexed
+            # root and either promotes the frontier or runs one bounded subtree repair.
+            filesystem.reindex_roots_for_paths([str(path) for path in changed_paths], reason="watchd")
+        if revision.get("attention_changed"):
+            events.extend(self.refresh_shared_attention_acks(trigger="watchd", notify_followers=True))
+        if revision.get("settings_changed"):
+            # Re-lease/enqueue when indexed-root settings change: added roots start layer-1 crawls,
+            # removed roots release the scheduler obligation. Only the owner acts (guarded inside).
+            self.refresh_search_indexer_schedule()
+            self.publish_client_event("settings_changed", {"data": self.settings_payload()}, trigger="watchd", cache="ready")
+            events.append("settings_changed")
+        if revision.get("transcripts_changed"):
+            self.clear_transcript_caches()
+            self.publish_client_event("transcripts_changed", {"refresh": True}, trigger="watchd", cache="refresh")
+            events.append("transcripts_changed")
+        if files_changed:
+            self.publish_client_event("files_changed", {"files": files_changed, "count": len(files_changed)}, trigger="watchd", cache="ready")
+            events.append("files_changed")
+        if revision_number > 0 and filesystem_changed:
+            self.publish_client_event(
+                "fs_changed",
+                {
+                    "roots": list(roots),
+                    "mode": "diff",
+                    "refresh": True,
+                    "token": token,
+                    "change_summary": {
+                        "roots_changed": len(changed_paths),
+                        "coarse": bool(revision.get("coarse")),
+                    },
+                    "daemon_state": record.watchd_state,
+                },
+                trigger="watchd",
+                cache="ready",
+            )
+            events.append("fs_changed")
+        if changed_paths:
+            events.extend(self.publish_session_files_ready_events(trigger="watchd"))
+        return events
 
     def publish_watchd_recovery(self, record: ClientEventWatcherRecord) -> None:
-        return self._watch_bridge.publish_watchd_recovery(self, record)
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+            recovered_episode = record.watchd_failure_episode
+            if recovered_episode == 0:
+                return
+            recovered_started_at = record.watchd_failure_started_at
+            recovered_count = record.watchd_failure_count
+            recovered_delivery = record.watchd_failure_delivery
+            recovered_published = record.watchd_failure_published
+            record.watchd_failure_episode = 0
+            record.watchd_failure_started_at = 0.0
+            record.watchd_failure_count = 0
+            record.watchd_failure_delivery = ""
+            record.watchd_failure_action = ""
+            record.watchd_failure_error_code = ""
+            record.watchd_failure_published = False
+        if not recovered_published:
+            return
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+        recovery_seconds = min(86_400.0, max(0.0, time.monotonic() - recovered_started_at))
+        emit_server_log(
+            "info",
+            "watchd",
+            f"watchd recovered after {recovery_seconds:.1f}s and {recovered_count} failed attempt(s)",
+            category="transport",
+            dedupe_key=f"watchd-recovered:{recovered_episode}",
+            request_id=f"watchd-episode-{recovered_episode}",
+            route="local-service:watchd",
+            event="watchd_recovered",
+            delivery=f"recovered:{recovered_delivery}"[:64],
+        )
 
     def publish_watchd_failure(self, record: ClientEventWatcherRecord, response: dict[str, Any], *, action: str) -> None:
-        return self._watch_bridge.publish_watchd_failure(self, record, response, action=action)
+        if action not in WATCHD_FAILURE_ACTIONS:
+            raise ValueError("unknown watchd failure action")
+        transport = str(response.get("_transport_error") or "")
+        state = "not_running" if transport in {"absent", "refused"} else "errored"
+        if transport:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                    return
+                record.watchd_state = state
+                record.filesystem_healthy = False
+            return
+        retrying = bool(transport) or bool(response.get("retryable"))
+        delivery = "retrying" if retrying else "failed"
+        error_code = str(response.get("error_code") or "service_unavailable")
+        if error_code not in WATCHD_FAILURE_CODES:
+            error_code = "service_unavailable"
+        now = time.monotonic()
+        publish_failure = False
+        failure_action = ""
+        failure_error_code = ""
+        failure_delivery = ""
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+            record.watchd_failure_count += 1
+            if record.watchd_failure_episode == 0:
+                record.watchd_failure_episode = record.watchd_next_failure_episode
+                record.watchd_next_failure_episode += 1
+                record.watchd_failure_started_at = now
+                record.watchd_failure_delivery = delivery
+                record.watchd_failure_action = action
+                record.watchd_failure_error_code = error_code
+            record.watchd_state = state
+            record.filesystem_healthy = False
+            if (
+                not record.watchd_failure_published
+                and now - record.watchd_failure_started_at >= WATCHD_FAILURE_LOG_GRACE_SECONDS
+            ):
+                record.watchd_failure_published = True
+                publish_failure = True
+                failure_action = record.watchd_failure_action
+                failure_error_code = record.watchd_failure_error_code
+                failure_delivery = record.watchd_failure_delivery
+        if publish_failure:
+            failure_retrying = failure_delivery == "retrying"
+            emit_server_log(
+                "warning" if failure_retrying else "error",
+                "watchd",
+                f"watchd {failure_action} failed ({failure_error_code}); retrying" if failure_retrying else f"watchd {failure_action} failed ({failure_error_code})",
+                category="transport",
+                dedupe_key=f"watchd-failure:{record.watchd_failure_episode}",
+                request_id=f"watchd-episode-{record.watchd_failure_episode}",
+                route="local-service:watchd",
+                event=f"watchd_{failure_action}_failure",
+                delivery=failure_delivery,
+            )
 
     @staticmethod
     def record_watchd_synced_generation(record: ClientEventWatcherRecord, response: dict[str, Any]) -> None:
-        return WatchBridge.record_watchd_synced_generation(record, response)
+        """Own the one place a daemon response advances this client's rebuild window.
+
+        Every response that names a watch generation is evidence about whether
+        watchd still owes an activation, whichever client bumped it, so the
+        window opens from an upsert this bridge issued and from a generation a
+        different lease holder caused equally.
+        """
+        record.watchd_synced_generation = max(record.watchd_synced_generation, int(response.get("watch_generation") or 0))
+        record.watchd_active_generation = max(record.watchd_active_generation, int(response.get("active_watch_generation") or 0))
 
     def sync_watchd_descriptors(self, record: ClientEventWatcherRecord) -> bool:
-        return self._watch_bridge.sync_watchd_descriptors(self, record)
+        descriptors = self.watchd_descriptor_payloads()
+        active_ids = set(descriptors)
+        descriptor_generations = {
+            descriptor_id: int(descriptor.get("descriptor_generation") or 0)
+            for descriptor_id, descriptor in descriptors.items()
+        }
+        for descriptor_id, descriptor in descriptors.items():
+            response = self.watch_client.upsert(record.watchd_lease_id, descriptor_id, descriptor, reconfiguring=record.watchd_rebuild_window_open())
+            if response.get("ok") is not True:
+                self.publish_watchd_failure(record, response, action="upsert")
+                return False
+            # Record the bumped generation before the next request is armed: the
+            # upsert that opens a rebuild window is answered before the daemon
+            # blocks, so only the requests after it need the covering deadline.
+            self.record_watchd_synced_generation(record, response)
+        for descriptor_id in sorted(record.watchd_descriptor_ids - active_ids):
+            response = self.watch_client.remove(record.watchd_lease_id, descriptor_id, reconfiguring=record.watchd_rebuild_window_open())
+            if response.get("ok") is not True:
+                self.publish_watchd_failure(record, response, action="remove")
+                return False
+            self.record_watchd_synced_generation(record, response)
+        record.watchd_descriptor_ids = active_ids
+        record.watchd_descriptor_generations = descriptor_generations
+        self.publish_watchd_recovery(record)
+        return True
 
     def watchd_revision_loop(self, record: ClientEventWatcherRecord) -> None:
-        return self._watch_bridge.watchd_revision_loop(self, record)
+        worker = threading.current_thread()
+        iteration_started = 0.0
+        try:
+            while not record.stop_event.is_set() and not record.watchd_stop_event.is_set():
+                # Pace the loop, not the work inside it. See
+                # WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS: this loop's CPU is
+                # body_cpu / loop_period, and a cheaper body only re-arms sooner, so no
+                # amount of optimizing the body can bring it under budget. The remainder is
+                # waited on the stop event rather than slept, so a shutdown breaks out of it
+                # immediately instead of paying the floor. The first iteration never waits.
+                remaining = WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS - (time.monotonic() - iteration_started)
+                if remaining > 0 and record.watchd_stop_event.wait(remaining):
+                    break
+                if record.stop_event.is_set():
+                    break
+                iteration_started = time.monotonic()
+                if not record.watchd_lease_id:
+                    lease = self.watch_client.acquire_lease()
+                    if lease.get("ok") is not True:
+                        self.publish_watchd_failure(record, lease, action="acquire")
+                        record.watchd_stop_event.wait(1.0)
+                        continue
+                    record.watchd_lease_id = str(lease.get("lease_id") or "")
+                    record.watchd_pid = int(lease.get("pid") or 0)
+                    record.watchd_epoch = str(lease.get("epoch") or "")
+                    record.watchd_revision = 0
+                    record.watchd_synced_generation = 0
+                    record.watchd_applied_generation = 0
+                    record.watchd_active_generation = 0
+                    record.watchd_descriptor_generations = {}
+                    # A rebuild another lease holder started is already in flight
+                    # before this bridge issues anything, so the lease response is
+                    # the first evidence of the window it has to arm against.
+                    self.record_watchd_synced_generation(record, lease)
+                if not self.sync_watchd_descriptors(record):
+                    record.watchd_stop_event.wait(1.0)
+                    continue
+                response = self.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
+                if response.get("ok") is not True:
+                    self.publish_watchd_failure(record, response, action="wait_revision")
+                    if response.get("_transport_error") in {"absent", "refused"}:
+                        record.watchd_lease_id = ""
+                    record.watchd_stop_event.wait(1.0)
+                    continue
+                # A declared native-watch rebuild is an expected outcome carrying
+                # its own reason, not a failure: the daemon cannot answer while it
+                # registers, so the next request is armed against that window.
+                if WatchClient.response_is_reconfiguring(response):
+                    self.record_watchd_synced_generation(record, response)
+                    self.publish_watchd_recovery(record)
+                    record.watchd_stop_event.wait(WatchClient.reconfigure_backoff_seconds(response))
+                    continue
+                revision = response.get("revision") if isinstance(response.get("revision"), dict) else {}
+                if response.get("changed") and revision:
+                    self.apply_watchd_revision(record, revision, reset=bool(response.get("reset")))
+                else:
+                    self.publish_watchd_recovery(record)
+        finally:
+            lease_id = record.watchd_lease_id
+            if lease_id:
+                self.watch_client.release_lease(lease_id)
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.watchd_worker is worker:
+                    record.watchd_worker = None
+                    record.watchd_lease_id = ""
+                    record.watchd_pid = 0
+                    record.filesystem_healthy = False
 
     def watchd_runtime_status(self) -> dict[str, Any]:
-        return self._watch_bridge.watchd_runtime_status(self)
+        """Return the bridge mirror without making a status route call watchd.
+
+        The rule that governs this row is unchanged and must stay: `WatchClient.runtime_status`
+        exists, and calling it from here would issue a `status` RPC, which demand-starts a
+        demand-scoped service from a diagnostics path. Nothing below issues any RPC.
+
+        What changed in M2 is where the row's identity comes from. It used to be the bridge
+        mirror alone, which knows a lease PID but no birth time, so `started_at` was hardcoded
+        0.0 and the System view's Uptime cell was permanently blank, and `resources` was
+        hardcoded {} so watchd was the one service with no CPU/memory at all. Both now come from
+        the durable service record the registry already writes -- one file read plus a /proc
+        read, identity-fenced against this host and boot, and no traffic to the daemon.
+
+        The registry record is the identity owner, so its PID is the one this row reports and
+        samples. When the bridge holds a lease whose PID the record cannot verify, that
+        disagreement is published under `identity` rather than papered over by preferring
+        whichever number looks healthier.
+        """
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            state = record.watchd_state
+            lease_id = record.watchd_lease_id
+            epoch = record.watchd_epoch
+            revision = record.watchd_revision
+            bridge_pid = int(record.watchd_pid or 0)
+        identity = local_service_projection.registry_process_identity(self.watch_client.registry)
+        return {
+            "service": "watchd",
+            "pid": identity.pid,
+            "started_at": identity.started_at,
+            "version": identity.protocol_version,
+            "healthy": state in {"ready", "polling"},
+            "clients": 1 if lease_id else 0,
+            "queues": {"depth": 0},
+            "cache": {"ready": revision > 0},
+            "epoch": epoch,
+            "revision": revision,
+            "fallback": state == "polling",
+            # watchd is spawned when a client attaches a watch and retires when the
+            # last one detaches. "Absent" is its correct resting state, so it must not
+            # read as an outage; only last_failure below can make it one. This is the ONE
+            # owner of that rule -- ESSENTIAL_LOCAL_SERVICES deliberately no longer repeats it.
+            "demand_started": True,
+            "identity": {
+                **identity.as_dict(),
+                "source": "service_record",
+                "bridge_pid": bridge_pid,
+                # True only when the bridge names a PID the durable record does not confirm.
+                # A bridge with no lease yet is not a disagreement, it is just not started.
+                "bridge_pid_unverified": bridge_pid > 0 and bridge_pid != identity.pid,
+            },
+            "last_failure": "" if state in {"starting", "ready", "polling"} else state,
+            "resources": self.watch_client.registry.resources(identity.pid),
+        }
 
     def start_watchd_revision_watcher(self, record: ClientEventWatcherRecord) -> bool:
-        return self._watch_bridge.start_watchd_revision_watcher(self, record)
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return False
+            worker = record.watchd_worker
+            if worker is not None and worker.is_alive():
+                return False
+            worker = threading.Thread(target=self.watchd_revision_loop, args=(record,), name="watchd-revision", daemon=True)
+            record.watchd_worker = worker
+
+        def rollback() -> None:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.watchd_worker is worker:
+                    record.watchd_worker = None
+                    record.watchd_stop_event.set()
+
+        common.start_thread_with_rollback(worker, rollback)
+        return True
 
 
     def record_filesystem_watch_snapshot(self, signature: tuple[Any, ...]) -> str:
-        return self._watch_bridge.record_filesystem_watch_snapshot(self, signature)
+        now = time.time()
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_history and self.client_watch_service.filesystem_history[-1]["signature"] == signature:
+                return str(self.client_watch_service.filesystem_history[-1]["token"])
+            signature_text = self.client_event_payload_signature(signature)
+            digest = hashlib.sha1(signature_text.encode("utf-8")).hexdigest()[:16]
+            token = f"{int(now * 1000)}-{digest}"
+            self.client_watch_service.filesystem_history.append({
+                "token": token,
+                "created_at": now,
+                "signature": copy.deepcopy(signature),
+            })
+            min_created_at = now - FILESYSTEM_WATCH_HISTORY_SECONDS
+            self.client_watch_service.filesystem_history = [
+                record
+                for record in self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+                if float(record.get("created_at") or 0.0) >= min_created_at
+            ]
+            return token
 
     def filesystem_watch_record_for_token(self, token: str) -> dict[str, Any] | None:
-        return self._watch_bridge.filesystem_watch_record_for_token(self, token)
+        clean_token = str(token or "").strip()
+        if not clean_token:
+            return None
+        with self.client_watch_service.lock:
+            for record in self.client_watch_service.filesystem_history:
+                if record.get("token") == clean_token:
+                    return copy.deepcopy(record)
+        return None
 
     def latest_filesystem_watch_record(self) -> dict[str, Any] | None:
-        return self._watch_bridge.latest_filesystem_watch_record(self)
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_history:
+                return copy.deepcopy(self.client_watch_service.filesystem_history[-1])
+        return None
 
     def filesystem_watch_signature_for_roots(
         self,
         roots: list[str],
     ) -> tuple[Any, ...]:
-        return self._watch_bridge.filesystem_watch_signature_for_roots(self, roots)
+        return tuple(
+            (root, filesystem.watch_signature(root, child_limit=filesystem.WATCH_SIGNATURE_CHILD_LIMIT))
+            for root in roots[:CLIENT_WATCH_ROOT_LIMIT]
+        )
 
     def filesystem_watch_full_plan(
         self,
         record: dict[str, Any],
         reason: str = "full",
     ) -> tuple[dict[str, Any], list[str]]:
-        return self._watch_bridge.filesystem_watch_full_plan(self, record, reason)
+        signature = record.get("signature")
+        roots = sorted(filesystem_signature_root_map(signature).keys())
+        return {
+            "mode": "full",
+            "reason": reason,
+            "token": record.get("token", ""),
+            "removed_roots": [],
+        }, roots
 
     def filesystem_watch_diff_plan(
         self,
         since_token: str = "",
         force_full: bool = False,
     ) -> tuple[dict[str, Any], list[str]]:
-        return self._watch_bridge.filesystem_watch_diff_plan(self, since_token, force_full)
+        if force_full:
+            roots = self.client_watch_roots_snapshot()
+            return {
+                "mode": "full",
+                "reason": "forced",
+                "token": "",
+                "removed_roots": [],
+            }, roots
+        current = self.latest_filesystem_watch_record()
+        if current is None:
+            roots = self.client_watch_roots_snapshot()
+            if roots:
+                return {
+                    "mode": "full",
+                    "reason": "snapshot-unavailable",
+                    "token": "",
+                    "removed_roots": [],
+                }, roots
+            return {"mode": "none", "token": "", "directories": [], "removed_roots": []}, []
+        previous = self.filesystem_watch_record_for_token(since_token)
+        if previous is None:
+            return self.filesystem_watch_full_plan(current, "stale-since")
+        current_signature = current.get("signature")
+        previous_signature = previous.get("signature")
+        if previous.get("token") == current.get("token") or previous_signature == current_signature:
+            return {
+                "mode": "none",
+                "token": current.get("token", ""),
+                "since": previous.get("token", ""),
+                "directories": [],
+                "removed_roots": [],
+                "change_summary": filesystem_change_summary(previous_signature, current_signature),
+            }, []
+        changed_roots, removed_roots = filesystem_changed_roots(previous_signature, current_signature)
+        return {
+            "mode": "diff",
+            "token": current.get("token", ""),
+            "since": previous.get("token", ""),
+            "removed_roots": removed_roots,
+            "change_summary": filesystem_change_summary(previous_signature, current_signature),
+        }, changed_roots
 
     @staticmethod
     def decode_filesystem_watch_batch_product(body: bytes) -> dict[str, Any]:
-        return WatchBridge.decode_filesystem_watch_batch_product(body)
+        try:
+            product = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise JobdOperationUnavailable(
+                "malformed completed filesystem batch product",
+                {"error": str(error), "status": "malformed_product"},
+            ) from error
+        if not isinstance(product, dict) or not isinstance(product.get("responses"), list):
+            raise JobdOperationUnavailable(
+                "malformed completed filesystem batch product",
+                {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+            )
+        return product
 
     def submit_filesystem_watch_batches(
         self,
@@ -11139,7 +6810,23 @@ class TmuxWebtermApp:
         *,
         delivery: str = "receipt",
     ) -> tuple[FilesystemWatchBatchProduct, ...]:
-        return self._watch_bridge.submit_filesystem_watch_batches(self, roots, identity_seed, delivery=delivery)
+        """Partition one bounded root list into jobd batches and submit each exactly once.
+
+        This is the only place watch roots are split.  Each chunk is a consecutive slice of the
+        caller's root order, so chunk ``n`` owns roots ``[offset, offset + len(chunk))`` and its
+        product response ids are re-based onto that window when the children are resolved.  Roots
+        are never truncated or dropped: every accepted root reaches exactly one child batch.
+        """
+        batches: list[FilesystemWatchBatchProduct] = []
+        for offset in range(0, len(roots), filesystem.MAX_BATCH_REQUESTS):
+            chunk = roots[offset:offset + filesystem.MAX_BATCH_REQUESTS]
+            batches.append(self.submit_filesystem_watch_batch(
+                chunk,
+                f"{identity_seed}#{offset}" if offset else identity_seed,
+                offset=offset,
+                delivery=delivery,
+            ))
+        return tuple(batches)
 
     def submit_filesystem_watch_batch(
         self,
@@ -11149,24 +6836,83 @@ class TmuxWebtermApp:
         offset: int = 0,
         delivery: str = "receipt",
     ) -> FilesystemWatchBatchProduct:
-        return self._watch_bridge.submit_filesystem_watch_batch(self, roots, identity_seed, offset=offset, delivery=delivery)
+        """Submit one jobd batch for a chunk that already fits the per-job request limit."""
+        if len(roots) > filesystem.MAX_BATCH_REQUESTS:
+            raise JobdOperationUnavailable(
+                f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                {
+                    "error": f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                    "status": "invalid_request",
+                    "roots": len(roots),
+                    "maximum": filesystem.MAX_BATCH_REQUESTS,
+                },
+                code="invalid_request",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        payload, product_key = filesystem_watch_batch_submission(roots, identity_seed)
+        response, body = self.job_client.produce(
+            "filesystem_batch",
+            payload,
+            priority="interactive",
+            generation=1,
+            coalesce_key=product_key,
+            deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+            delivery=delivery,
+        )
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        state = str(job.get("status") or "")
+        if response.get("ok") is not True or not job_id or state not in {"queued", "running", "completed"}:
+            failure = dict(response)
+            raise JobdOperationUnavailable(
+                str(failure.get("error") or "jobd did not accept filesystem watch batch"),
+                failure,
+            )
+        if body and delivery == "receipt":
+            raise JobdOperationUnavailable(
+                "receipt-only filesystem watch batch unexpectedly returned product bytes",
+                {"error": "receipt-only filesystem watch batch unexpectedly returned product bytes"},
+            )
+        ready_product = self.decode_filesystem_watch_batch_product(body) if body else None
+        return FilesystemWatchBatchProduct(
+            producer=JobdProductOperation(job_id=job_id, product_key=product_key, generation=1),
+            ready_product=ready_product,
+            root_offset=int(offset),
+            root_count=len(roots),
+        )
 
     def filesystem_watch_batch_identity_seed(
         self,
         base_payload: dict[str, Any],
         roots: list[str],
     ) -> str:
-        return self._watch_bridge.filesystem_watch_batch_identity_seed(self, base_payload, roots)
+        token = str(base_payload.get("token") or "")
+        if token:
+            return token
+        with self.client_watch_service.lock:
+            latest = self.client_watch_service.filesystem_history[-1] if self.client_watch_service.filesystem_history else {}
+            latest_token = str(latest.get("token") or "")
+            latest_roots = sorted(filesystem_signature_root_map(latest.get("signature")).keys())
+            if latest_token and latest_roots == sorted(roots):
+                return latest_token
+            return f"event-generation:{self.client_watch_service.filesystem_event_generation}"
 
     def cached_filesystem_watch_products(self, product_key: str) -> list[dict[str, Any]] | None:
-        return self._watch_bridge.cached_filesystem_watch_products(self, product_key)
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.filesystem_ready_product
+            if product_key not in record.keys or not record.products:
+                return None
+            return [copy.deepcopy(product) for product in record.products]
 
     def cache_filesystem_watch_products(
         self,
         products: list[dict[str, Any]],
         product_keys: set[str],
     ) -> None:
-        return self._watch_bridge.cache_filesystem_watch_products(self, products, product_keys)
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.filesystem_ready_product
+            record.keys = frozenset(str(key) for key in product_keys if str(key))
+            record.products = tuple(copy.deepcopy(product) for product in products)
 
     def materialize_filesystem_watch_products(
         self,
@@ -11176,7 +6922,15 @@ class TmuxWebtermApp:
         *,
         product_keys: set[str],
     ) -> dict[str, Any]:
-        return self._watch_bridge.materialize_filesystem_watch_products(self, base_payload, roots, products, product_keys=product_keys)
+        signature = filesystem_watch_product_signature(roots, products)
+        token = self.record_filesystem_watch_snapshot(signature)
+        token_product_key = filesystem_watch_request_product_key(roots, token)
+        self.cache_filesystem_watch_products(products, {*product_keys, token_product_key})
+        return self.filesystem_watch_payload_from_products(
+            {**copy.deepcopy(base_payload), "token": token},
+            roots,
+            products,
+        )
 
     def resolve_filesystem_watch_batches(
         self,
@@ -11185,7 +6939,31 @@ class TmuxWebtermApp:
         *,
         cancel_event: threading.Event | None = None,
     ) -> list[dict[str, Any]]:
-        return self._watch_bridge.resolve_filesystem_watch_batches(self, batches, deadline_at, cancel_event=cancel_event)
+        """Resolve every child batch under one shared deadline and re-base it onto parent roots.
+
+        Children may complete in any order; the merged product order is always the submission
+        order, and each response keeps its own per-root cause because only its ``id`` is shifted.
+        """
+        products: list[dict[str, Any]] = []
+        for batch in batches:
+            if batch.ready_product is not None:
+                products.append(filesystem_watch_product_at_offset(
+                    copy.deepcopy(batch.ready_product),
+                    batch.root_offset,
+                ))
+                continue
+            product = self.wait_for_jobd_operation_product(
+                batch.producer,
+                deadline_at,
+                cancel_event=cancel_event,
+            )
+            if not isinstance(product.get("responses"), list):
+                raise JobdOperationUnavailable(
+                    "malformed completed filesystem batch product",
+                    {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+                )
+            products.append(filesystem_watch_product_at_offset(product, batch.root_offset))
+        return products
 
     @staticmethod
     def filesystem_watch_payload_from_products(
@@ -11193,7 +6971,7 @@ class TmuxWebtermApp:
         roots: list[str],
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        return WatchBridge.filesystem_watch_payload_from_products(base_payload, roots, products)
+        return watch_diff_payload_from_products(base_payload, roots, products)
 
     def complete_filesystem_watch_diff_operation(
         self,
@@ -11204,7 +6982,70 @@ class TmuxWebtermApp:
         deadline_at: float,
         identity_seed: str,
     ) -> None:
-        return self._watch_bridge.complete_filesystem_watch_diff_operation(self, receipt_fence, request_id, base_payload, roots, deadline_at, identity_seed)
+        route = "GET /api/fs/watch-diff"
+        operation = "jobd.produce"
+        data: dict[str, Any] | None = None
+        failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
+        # Hold the jobd interaction lease across the whole submit+product-poll window, exactly as
+        # POST /api/fs/batch does (W15 #4).  Under a saturated gate this completion worker can be
+        # starved between the submit ``produce`` and the product poll for longer than the broker's
+        # idle window; the held lease vetoes the broker's idle shutdown so its socket cannot vanish
+        # mid-interaction, which was the live ``GET /api/fs/watch-diff`` jobd-404.  This is the same
+        # ONE lease owner fs/batch holds -- best-effort liveness, never a safety gate -- so the
+        # ``try/finally`` always releases even when acquire could not pin the broker (release is
+        # ref-counted and no-ops at holders==0).
+        self.jobd_fs_batch_lease.acquire()
+        try:
+            batches = self.submit_filesystem_watch_batches(
+                roots,
+                identity_seed,
+                delivery="ready_or_receipt",
+            )
+            operation = "jobd.product"
+            products = self.resolve_filesystem_watch_batches(
+                batches,
+                deadline_at,
+                cancel_event=receipt_fence.cancelled,
+            )
+            # The HTTP path looks the retained product up under the whole-request key, so a
+            # partitioned request has to publish that key beside its per-chunk keys or the next
+            # identical request would resubmit every child batch.
+            request_product_key = filesystem_watch_request_product_key(roots, identity_seed)
+            data = self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                products,
+                product_keys={request_product_key, *(batch.producer.product_key for batch in batches)},
+            )
+        except JobdOperationUnavailable as error:
+            failure = (error.failure, operation, error.status, error.code)
+        except Exception as error:
+            failure = (
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                "filesystem-watch-diff.complete",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "producer_failed",
+            )
+        finally:
+            self.jobd_fs_batch_lease.release()
+        operation_id = receipt_fence.wait_for_operation_id()
+        if not operation_id:
+            return
+        if failure is None:
+            assert data is not None
+            result = self.operation_ready_result(request_id, data)
+            status = HTTPStatus.OK
+        else:
+            failure_payload, failure_operation, status, code = failure
+            result = self.jobd_operation_failure_result(
+                request_id,
+                failure_payload,
+                route=route,
+                operation_id=operation_id,
+                operation=failure_operation,
+                code=code,
+            )
+        self.terminalize_operation(operation_id, result, status)
 
     def accept_filesystem_watch_diff_operation(
         self,
@@ -11214,7 +7055,59 @@ class TmuxWebtermApp:
         identity_seed: str,
         reservation: JobdOperationReservation,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._watch_bridge.accept_filesystem_watch_diff_operation(self, request_id, base_payload, roots, identity_seed, reservation)
+        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
+        # The receipt is the only place the caller learns how much bounded work it is waiting on.
+        # Submission itself stays on the completion worker, so this is a count, not a wait.
+        batch_count = math.ceil(len(roots) / filesystem.MAX_BATCH_REQUESTS)
+        receipt_fence = FilesystemWatchReceiptFence()
+        submitted = self.jobd_operation_service.submit_reserved(
+            reservation,
+            self.complete_filesystem_watch_diff_operation,
+            receipt_fence,
+            request_id,
+            base_payload,
+            roots,
+            deadline_at,
+            identity_seed,
+        )
+        if not submitted:
+            return self.jobd_operation_failure_result(
+                request_id,
+                {"error": "filesystem watch completion worker could not start"},
+                route="GET /api/fs/watch-diff",
+                operation="jobd.produce",
+                code="producer_failed",
+            ), HTTPStatus.SERVICE_UNAVAILABLE
+        try:
+            receipt = self.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route="GET /api/fs/watch-diff",
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": "submitting",
+                    "batches_total": batch_count,
+                },
+                producer={
+                    "service": "jobd",
+                    "delivery": "ready_or_receipt",
+                },
+                kind="fs_watch_diff",
+                context={
+                    "mode": str(base_payload.get("mode") or ""),
+                    "token": str(base_payload.get("token") or ""),
+                    "since": str(base_payload.get("since") or ""),
+                    "roots": len(roots),
+                    "batches": batch_count,
+                },
+            )
+        except Exception:
+            receipt_fence.cancel()
+            raise
+        operation_id = str(receipt["operation"]["id"])
+        receipt_fence.accept(operation_id)
+        return receipt, HTTPStatus.ACCEPTED
 
     def filesystem_watch_diff_http_payload(
         self,
@@ -11222,100 +7115,738 @@ class TmuxWebtermApp:
         force_full: bool = False,
         request_id: str = "",
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._watch_bridge.filesystem_watch_diff_http_payload(self, since_token, force_full, request_id)
+        request_id = str(request_id or self.new_api_request_id())
+        base_payload, roots = self.filesystem_watch_diff_plan(since_token, force_full)
+        if not roots:
+            return base_payload, HTTPStatus.OK
+        # The watch-root contract is CLIENT_WATCH_ROOT_LIMIT, not the per-job batch size: a
+        # snapshot of 65-128 roots is accepted upstream by SharedWatchRootIndex and is split into
+        # jobd batches of at most MAX_BATCH_REQUESTS by submit_filesystem_watch_batches().
+        if len(roots) > CLIENT_WATCH_ROOT_LIMIT:
+            return common.error_payload(
+                f"filesystem watch roots must contain at most {CLIENT_WATCH_ROOT_LIMIT} items",
+                message_key="request.error.tooManyItems",
+                message_params={"field": "roots", "max": CLIENT_WATCH_ROOT_LIMIT},
+                canonical=True,
+                code="invalid_request",
+                origin="server.http",
+                retryable=False,
+                details={"roots": len(roots), "maximum": CLIENT_WATCH_ROOT_LIMIT},
+                stack=[{
+                    "component": "server.http",
+                    "operation": "GET /api/fs/watch-diff",
+                    "code": "invalid_request",
+                }],
+                request_id=request_id,
+            ), HTTPStatus.BAD_REQUEST
+        identity_seed = self.filesystem_watch_batch_identity_seed(base_payload, roots)
+        product_key = filesystem_watch_request_product_key(roots, identity_seed)
+        cached_products = self.cached_filesystem_watch_products(product_key)
+        if cached_products is not None:
+            return self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                cached_products,
+                product_keys={product_key},
+            ), HTTPStatus.OK
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                route="GET /api/fs/watch-diff",
+                operation="jobd.produce",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        return self.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed, reservation)
 
     def clear_transcript_content_caches(self) -> None:
-        return composed_owner_for(self, "_watch_bridge", WatchBridge).clear_transcript_content_caches(self)
+        with self.activity_transcript_service.transcript_tail_cache_lock:
+            self.activity_transcript_service.transcript_tail_cache.clear()
+        with self.activity_transcript_service.context_items_cache_lock:
+            self.activity_transcript_service.context_items_cache.clear()
 
     def clear_transcript_caches(self) -> None:
-        return composed_owner_for(self, "_watch_bridge", WatchBridge).clear_transcript_caches(self)
+        self.clear_transcript_content_caches()
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            record.generation += 1
+            record.stored_at = None
+            record.payload = None
+            # Invalidation supersedes the in-flight build, so it must release the whole guard, not
+            # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
+            # intent behind that belonged to a caller this invalidation had already superseded.
+            record.release_worker()
+        # A queued follow-up build is a promise to a forced caller waiting on a named generation.
+        # The invalidated worker can no longer keep it -- its finish is a generation mismatch and
+        # returns before the drain -- so the promise was left sitting on the record until some
+        # unrelated later build inherited it and published an extra follow-up. Drain it here through
+        # the one owner instead: the caller gets the build it was promised, and the record is left
+        # with no worker and no queued intent.
+        self.start_queued_transcripts_payload_rebuild()
 
     def start_client_watch_snapshot_publish(self) -> bool:
-        return self._watch_bridge.start_client_watch_snapshot_publish(self)
+        generation = 0
+        worker: threading.Thread | None = None
+        with self.client_watch_service.lock:
+            watcher_record = self.client_watch_service.event_watcher_record
+            if watcher_record.snapshot_worker is not None:
+                return False
+            def run() -> None:
+                self.publish_client_watch_snapshot(watcher_record, generation)
+
+            worker = threading.Thread(target=run, daemon=True)
+            watcher_record.snapshot_worker = worker
+            generation = self.begin_transcripts_payload_work(worker, replace=True)
+        try:
+            worker.start()
+        except RuntimeError:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is watcher_record and watcher_record.snapshot_worker is worker:
+                    watcher_record.snapshot_worker = None
+            self.finish_transcripts_payload_work(generation, worker, invalidate=True)
+            raise
+        return True
 
     def client_watch_snapshot_is_current(self, record: ClientEventWatcherRecord, worker: threading.Thread) -> bool:
-        return self._watch_bridge.client_watch_snapshot_is_current(self, record, worker)
+        with self.client_watch_service.lock:
+            return (
+                self.client_watch_service.event_watcher_record is record
+                and record.snapshot_worker is worker
+                and not record.stop_event.is_set()
+            )
 
     def publish_client_watch_snapshot(
         self,
         record: ClientEventWatcherRecord | None = None,
         generation: int | None = None,
     ) -> None:
-        return self._watch_bridge.publish_client_watch_snapshot(self, record, generation)
+        worker = threading.current_thread()
+        guarded = record is not None
+        if generation is None:
+            generation = self.begin_transcripts_payload_work(worker, replace=True)
+        try:
+            started = time.perf_counter()
+            payload = self.build_transcripts_payload()
+            if guarded and not self.client_watch_snapshot_is_current(record, worker):
+                return
+            if not self.commit_transcripts_payload_cache(payload, generation):
+                return
+            signature = self.transcripts_payload_event_signature(payload)
+            with self.client_watch_service.lock:
+                if guarded and (
+                    self.client_watch_service.event_watcher_record is not record
+                    or record.snapshot_worker is not worker
+                    or record.stop_event.is_set()
+                ):
+                    return
+                previous_signature = self.client_watch_service.transcripts_payload_signature
+                self.client_watch_service.transcripts_payload_signature = signature
+            if previous_signature != signature:
+                self.publish_client_event(
+                    "transcripts_changed",
+                    {"signature": signature, "refresh": True},
+                    trigger="watch_state",
+                    cache="ready",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                )
+            if guarded and not self.client_watch_snapshot_is_current(record, worker):
+                return
+            self.publish_context_items_ready_events(trigger="watch_state")
+            if guarded and not self.client_watch_snapshot_is_current(record, worker):
+                return
+            self.publish_activity_summary_ready_events(trigger="watch_state")
+            if guarded and not self.client_watch_snapshot_is_current(record, worker):
+                return
+            self.publish_session_files_ready_events(trigger="watch_state")
+        finally:
+            self.finish_transcripts_payload_work(generation, worker)
+            with self.client_watch_service.lock:
+                if guarded and self.client_watch_service.event_watcher_record is record and record.snapshot_worker is worker:
+                    record.snapshot_worker = None
 
 
     def record_dependency_invalidation(self, trigger: str) -> None:
-        return self._watch_bridge.record_dependency_invalidation(self, trigger)
+        # Bounded by trigger reason (fs_changed, transcripts_changed, transcript_content_changed,
+        # watch), never by event/session count, so this dict cannot grow with traffic volume.
+        key = str(trigger or "watch")
+        with self.client_watch_service.lock:
+            counts = self.client_watch_service.invalidation_counts
+            counts[key] = counts.get(key, 0) + 1
 
     def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
-        return self._watch_bridge.publish_context_items_ready_events(self, trigger)
+        self.prune_client_watch_descriptors()
+        context_items, _session_files, _activity = self.client_watch_service.snapshot()
+        events: list[str] = []
+        for item in context_items:
+            started = time.perf_counter()
+            payload, status = self.context_items(item["session"], int(item["messages"]), accept_pending=False)
+            if status != HTTPStatus.OK or payload.get("pending"):
+                continue
+            event_payload = {"session": item["session"], "messages": item["messages"], "status": int(status), "data": payload}
+            signature = self.client_event_payload_signature(event_payload)
+            key = self.client_event_payload_signature({"session": item["session"], "messages": item["messages"]})
+            with self.client_watch_service.lock:
+                previous_signature = self.client_watch_service.context_item_payload_signatures.get(key)
+                self.client_watch_service.context_item_payload_signatures[key] = signature
+            if previous_signature == signature:
+                continue
+            self.record_dependency_invalidation(trigger)
+            self.publish_client_event(
+                "context_items_ready",
+                event_payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
+            events.append("context_items_ready")
+        return events
 
     def publish_activity_summary_ready_events(self, trigger: str = "watch") -> list[str]:
-        return self._watch_bridge.publish_activity_summary_ready_events(self, trigger)
+        if not activity_summary_enabled():
+            return []
+        if str(trigger or "") not in ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS:
+            return []
+        self.prune_client_watch_descriptors()
+        _context_items, _session_files, activity_summary = self.client_watch_service.snapshot()
+        if activity_summary.get("visible") is not True:
+            return []
+        started = time.perf_counter()
+        payload = self.activity_summary_payload(
+            locale=str(activity_summary.get("locale") or "en"),
+            session_scope=activity_summary.get("scope"),
+            hours=activity_summary.get("hours"),
+        )
+        signature = self.stable_client_event_payload_signature(payload)
+        with self.client_watch_service.lock:
+            previous_signature = self.client_watch_service.activity_summary_signature
+            self.client_watch_service.activity_summary_signature = signature
+        if previous_signature == signature:
+            return []
+        self.publish_client_event(
+            "activity_summary_ready",
+            {"locale": payload.get("locale", activity_summary.get("locale") or "en"), "data": payload},
+            trigger=trigger,
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["activity_summary_ready"]
 
     def publish_session_files_ready_events(self, trigger: str = "watch", *, force: bool = False) -> list[str]:
-        return self._watch_bridge.publish_session_files_ready_events(self, trigger, force=force)
+        self.prune_client_watch_descriptors()
+        _context_items, session_files_requests, _activity = self.client_watch_service.snapshot()
+        if force and not session_files_requests:
+            session_files_requests = [
+                {"session": session, "hours": 24.0}
+                for session in self.sessions
+            ]
+        events: list[str] = []
+        for item in session_files_requests:
+            started = time.perf_counter()
+            payload, status = self.session_files_payload(
+                item.get("session"),
+                self.float_value(item.get("hours"), 24.0),
+                from_ref=item.get("from_ref"),
+                to_ref=item.get("to_ref"),
+                repo_refs=item.get("repo_refs"),
+                # A watch event already advances the repository generation used by the shared
+                # cache key. Keep last-known-good data and let its one background refresh
+                # coalesce instead of turning every watcher notification into interactive Git.
+                force=False,
+                requester="background-refresh",
+            )
+            event_payload = {"request": item, "status": int(status), "data": payload}
+            stable_event_payload = copy.deepcopy(event_payload)
+            if isinstance(stable_event_payload.get("data"), dict):
+                stable_event_payload["data"].pop("cache", None)
+            signature = self.client_event_payload_signature(stable_event_payload)
+            key = self.client_event_payload_signature(item)
+            with self.client_watch_service.lock:
+                previous_signature = self.client_watch_service.session_file_payload_signatures.get(key)
+                self.client_watch_service.session_file_payload_signatures[key] = signature
+            if previous_signature == signature and not force:
+                continue
+            self.record_dependency_invalidation(trigger)
+            self.publish_client_event(
+                "session_files_ready",
+                event_payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=(time.perf_counter() - started) * 1000,
+            )
+            events.append("session_files_ready")
+        if events:
+            self.request_tabber_activity_refresh(f"session-files:{trigger}")
+        return events
 
     def start_status_generation_watcher(self, record: ClientEventWatcherRecord) -> bool:
-        return self._watch_bridge.start_status_generation_watcher(self, record)
+        """Start one demand-scoped statusd generation waiter for this web process."""
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return False
+            worker = record.status_generation_worker
+            if worker is not None and worker.is_alive():
+                return True
+            if time.monotonic() < record.status_generation_retry_at:
+                return False
+        lease = self.status_client.acquire_generation_lease()
+        lease_id = str(lease.get("lease_id") or "") if lease.get("ok") is True else ""
+        if not lease_id:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record:
+                    record.status_generation_retry_at = time.monotonic() + 1.0
+            return False
+        response, _body = self.status_client.snapshot(self.sessions, timeout=1.0)
+        if response.get("ok") is not True:
+            self.status_client.release_generation_lease(lease_id)
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record:
+                    record.status_generation_retry_at = time.monotonic() + 1.0
+            return False
+        generation = max(0, int(response.get("generation") or 0))
+        snapshot_payload: dict[str, Any] | None = None
+        if _body:
+            metadata = None
+            try:
+                metadata = validate_status_snapshot(response, _body)
+                decoded_snapshot = json.loads(_body)
+            except (StatusProtocolError, ValueError, TypeError):
+                decoded_snapshot = None
+            if metadata is not None and metadata.generation == generation and isinstance(decoded_snapshot, dict):
+                snapshot_payload = decoded_snapshot
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                self.status_client.release_generation_lease(lease_id)
+                return False
+            record.status_generation_stop_event.clear()
+            record.status_generation_lease_id = lease_id
+            record.status_generation = generation
+            self.client_watch_service.auto_approve_signature = f"statusd:{generation}:{int(response.get('status') or HTTPStatus.OK)}"
+            self.client_watch_service.auto_approve_payload = copy.deepcopy(snapshot_payload)
+            worker = threading.Thread(target=self.status_generation_wait_loop, args=(record,), name="statusd-generation-wait", daemon=True)
+            record.status_generation_worker = worker
+        common.start_thread_with_rollback(worker, lambda: self.stop_status_generation_watcher(record))
+        return True
 
     def stop_status_generation_watcher(self, record: ClientEventWatcherRecord) -> None:
-        return self._watch_bridge.stop_status_generation_watcher(self, record)
+        with self.client_watch_service.lock:
+            worker = record.status_generation_worker
+            lease_id = record.status_generation_lease_id
+            record.status_generation_stop_event.set()
+            record.status_generation_worker = None
+            record.status_generation_lease_id = ""
+        if lease_id:
+            self.status_client.release_generation_lease(lease_id)
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
 
     def status_generation_wait_loop(self, record: ClientEventWatcherRecord) -> None:
-        return self._watch_bridge.status_generation_wait_loop(self, record)
+        worker = threading.current_thread()
+        retry_seconds = 0.25
+        try:
+            while not record.stop_event.is_set() and not record.status_generation_stop_event.is_set():
+                with self.client_watch_service.lock:
+                    if self.client_watch_service.event_watcher_record is not record:
+                        return
+                    generation = record.status_generation
+                response = self.status_client.probe_generation(generation)
+                if response.get("ok") is True:
+                    next_generation = max(0, int(response.get("generation") or 0))
+                    changed = response.get("changed") is True and next_generation > generation
+                    self.note_client_event_recurring_work(record, "status_generation_lease", useful=changed)
+                    if changed:
+                        event_payload: dict[str, object] = {
+                            "status": int(HTTPStatus.OK),
+                            "refresh": True,
+                            "generation": next_generation,
+                            "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}",
+                        }
+                        snapshot_response, snapshot_body = self.status_client.snapshot(self.sessions, timeout=1.0)
+                        snapshot_payload = None
+                        if snapshot_response.get("ok") is True and snapshot_body:
+                            metadata = None
+                            try:
+                                metadata = validate_status_snapshot(snapshot_response, snapshot_body)
+                                snapshot_payload = json.loads(snapshot_body)
+                            except (StatusProtocolError, ValueError, TypeError):
+                                snapshot_payload = None
+                            if metadata is not None and metadata.generation == next_generation and isinstance(snapshot_payload, dict):
+                                event_payload["refresh"] = False
+                        with self.client_watch_service.lock:
+                            if self.client_watch_service.event_watcher_record is not record:
+                                return
+                            previous_payload = copy.deepcopy(self.client_watch_service.auto_approve_payload)
+                            record.status_generation = next_generation
+                            self.client_watch_service.auto_approve_signature = f"statusd:{next_generation}:{int(HTTPStatus.OK)}"
+                            if isinstance(snapshot_payload, dict):
+                                self.client_watch_service.auto_approve_payload = copy.deepcopy(snapshot_payload)
+                        if isinstance(snapshot_payload, dict):
+                            patch = self.auto_approve_client_event_patch(previous_payload, snapshot_payload)
+                            if patch is None:
+                                retry_seconds = 0.25
+                                continue
+                            event_payload = {**event_payload, **patch}
+                        self.publish_client_event("auto_approve_changed", event_payload, trigger="statusd-generation", cache="ready")
+                    retry_seconds = 0.25
+                    if not changed and record.status_generation_stop_event.wait(STATUS_GENERATION_RPC_WAIT_SECONDS):
+                        return
+                    continue
+                if record.status_generation_stop_event.wait(retry_seconds):
+                    return
+                self.note_client_event_recurring_work(record, "status_generation_lease", useful=False, failed=True)
+                retry_seconds = min(5.0, retry_seconds * 2.0)
+        finally:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.status_generation_worker is worker:
+                    record.status_generation_worker = None
 
     def poll_tmux_signals_client_event_once(self) -> list[str]:
-        return self._watch_bridge.poll_tmux_signals_client_event_once(self)
+        started = time.perf_counter()
+        payload = self.tmux_signal_snapshot(force=True)
+        signature = self.stable_client_event_payload_signature(self.tmux_signal_signature_payload(payload))
+        with self.client_watch_service.lock:
+            previous = self.client_watch_service.tmux_signal_signature
+            previous_payload = copy.deepcopy(self.client_watch_service.tmux_signal_payload) if self.client_watch_service.tmux_signal_payload is not None else None
+            self.client_watch_service.tmux_signal_signature = signature
+            self.client_watch_service.tmux_signal_payload = copy.deepcopy(payload)
+        if not previous:
+            return []
+        if previous == signature:
+            return []
+        event_payload = self.tmux_signal_patch_payload(previous_payload, payload)
+        self.publish_client_event(
+            "tmux_signals_changed",
+            event_payload,
+            trigger="timer",
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        self.request_tabber_activity_refresh("tmux-signals")
+        return ["tmux_signals_changed"]
 
     def handle_tmux_signal_event(self, event: dict[str, Any]) -> None:
-        return self._watch_bridge.handle_tmux_signal_event(self, event)
+        event_type = str(event.get("type") or event.get("event") or "")
+        if event_type in {"output", "extended-output"}:
+            output_snapshot_at = time.monotonic() + TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
+            with self.client_watch_service.lock:
+                record = self.client_watch_service.event_watcher_record
+                next_snapshot_at = record.tmux_signal_refresh_at
+                schedule_snapshot = next_snapshot_at <= time.monotonic() or next_snapshot_at > output_snapshot_at
+                if schedule_snapshot:
+                    record.tmux_signal_refresh_at = output_snapshot_at
+            if schedule_snapshot:
+                # Terminal bytes already travel on their own WebSocket. Coalesce the metadata
+                # invalidation so a busy pane cannot launch a full tmux snapshot per output frame.
+                self.tmux_signal_cache.clear()
+                record.wake_event.set()
+            return
+        if event_type in {"pane-exited", "pane-died", "window-close", "sessions-changed"}:
+            event_time = float(event.get("time") or time.time())
+            with self.client_watch_service.lock:
+                self.client_watch_service.tmux_signal_removal_event = {"type": event_type, "time": event_time}
+            # The retained statusd roster is the sole agent-window authority. A topology event
+            # must retire it so its next snapshot cannot keep a dead pane as a transition row.
+            self.status_client.invalidate("tmux-topology")
+        self.tmux_signal_cache.clear()
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            record.tmux_signal_refresh_at = time.monotonic()
+        record.wake_event.set()
 
     def tmux_signal_event_watcher_healthy(self) -> bool:
-        return self._watch_bridge.tmux_signal_event_watcher_healthy(self)
+        return self.tmux_signal_event_watcher_status().get("state") == "attached"
 
     def tmux_signal_event_watcher_status(self) -> dict[str, Any]:
-        return self._watch_bridge.tmux_signal_event_watcher_status(self)
+        with self.client_watch_service.lock:
+            watcher = self.tmux_signal_event_watcher
+        status = TmuxSignalEventWatcher.never_started_status() if watcher is None else watcher.status_payload()
+        status["demanded"] = int(self.client_events.snapshot().get("subscribers") or 0) > 0
+        return status
 
     def log_tmux_signal_event_error(self, message: str) -> None:
-        return self._watch_bridge.log_tmux_signal_event_error(self, message)
+        self.log_event(
+            None,
+            "tmux_signal_event_error",
+            message,
+            {"diagnostic": message},
+            message_key="events.message.tmuxSignalEvent.watchFailed",
+        )
 
     def start_tmux_signal_event_watcher(self) -> bool:
-        return self._watch_bridge.start_tmux_signal_event_watcher(self)
+        with self.client_watch_service.lock:
+            current = self.tmux_signal_event_watcher
+            if current is not None and current.thread is not None and current.thread.is_alive():
+                return False
+            watcher = TmuxSignalEventWatcher(lambda: list(self.sessions), self.handle_tmux_signal_event, self.log_tmux_signal_event_error)
+            self.tmux_signal_event_watcher = watcher
+        if current is not None:
+            current.stop()
+        return watcher.start()
 
     def stop_tmux_signal_event_watcher(self) -> None:
-        return self._watch_bridge.stop_tmux_signal_event_watcher(self)
+        with self.client_watch_service.lock:
+            watcher = self.tmux_signal_event_watcher
+            self.tmux_signal_event_watcher = None
+        if watcher is not None:
+            watcher.stop()
 
     def poll_watched_prs_client_event_once(self) -> list[str]:
-        return self._watch_bridge.poll_watched_prs_client_event_once(self)
+        started = time.perf_counter()
+        payload = self.watched_prs_payload()
+        signature = self.client_event_payload_signature(payload)
+        with self.client_watch_service.lock:
+            previous = self.client_watch_service.watched_prs_signature
+            self.client_watch_service.watched_prs_signature = signature
+        if not previous:
+            return []
+        if previous == signature:
+            return []
+        self.publish_client_event(
+            "watched_prs_changed",
+            {"data": payload},
+            trigger="timer",
+            cache="ready",
+            compute_ms=(time.perf_counter() - started) * 1000,
+        )
+        return ["watched_prs_changed"]
 
     def start_client_event_watcher(self) -> None:
-        return self._watch_bridge.start_client_event_watcher(self)
+        now = time.monotonic()
+        with self.client_watch_service.lock:
+            current = self.client_watch_service.event_watcher_record
+            if current.worker is not None and current.worker.is_alive():
+                # A retained client-event worker must not make a previously failed tmux signal
+                # watcher permanent. New SSE subscribers are the lifecycle re-entry point.
+                self.start_tmux_signal_event_watcher()
+                return
+            record = ClientEventWatcherRecord(
+                next_attention_ack_poll_at=now + self.server_attention_ack_event_poll_seconds(),
+                next_tmux_signal_poll_at=now + self.server_tmux_signal_event_poll_seconds(),
+            )
+            worker = threading.Thread(target=self.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
+            record.worker = worker
+            self.client_watch_service.event_watcher_record = record
+
+        def rollback() -> None:
+            owned = False
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.worker is worker:
+                    record.stop_event.set()
+                    record.watchd_stop_event.set()
+                    record.wake_event.set()
+                    self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
+                    owned = True
+            if owned:
+                self.stop_tmux_signal_event_watcher()
+
+        try:
+            self.start_tmux_signal_event_watcher()
+        except Exception:
+            rollback()
+            raise
+        common.start_thread_with_rollback(worker, rollback)
+        try:
+            self.start_watchd_revision_watcher(record)
+        except RuntimeError as exc:
+            # watchd owns both native watching and its polling fallback. The web
+            # process reports a typed unavailable state and never scans locally.
+            self.log_event(
+                None,
+                "watchd_error",
+                f"watchd revision bridge failed to start: {exc}",
+                {"diagnostic": str(exc)},
+                message_key="events.message.clientEvent.directoryWatchFailed",
+            )
 
     def stop_client_event_watcher(self) -> None:
-        return self._watch_bridge.stop_client_event_watcher(self)
+        self.stop_tmux_signal_event_watcher()
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            record.stop_event.set()
+            record.watchd_stop_event.set()
+            record.wake_event.set()
+            thread = record.worker
+            watchd_worker = record.watchd_worker
+            snapshot_worker = record.snapshot_worker
+            record.snapshot_worker = None
+        self.stop_status_generation_watcher(record)
+        if snapshot_worker is not None:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                cache_record = self.activity_transcript_service.transcripts_payload_cache_record
+                snapshot_generation = cache_record.generation if cache_record.worker is snapshot_worker else 0
+            if snapshot_generation:
+                self.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        if watchd_worker is not None and watchd_worker is not threading.current_thread():
+            watchd_worker.join(timeout=5.0)
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is record:
+                self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
 
     def stop_client_event_watcher_if_idle(self) -> bool:
-        return self._watch_bridge.stop_client_event_watcher_if_idle(self)
+        with self.client_events.lock:
+            if self.client_events.subscribers:
+                return False
+        self.stop_client_event_watcher()
+        return True
 
 
     def client_event_watch_loop(self, record: ClientEventWatcherRecord | None = None) -> None:
-        return self._watch_bridge.client_event_watch_loop(self, record)
+        current = record or self.client_watch_service.event_watcher_record
+        worker = threading.current_thread()
+        try:
+            while not current.stop_event.is_set():
+                try:
+                    now = time.monotonic()
+                    status_demand = self.client_events.has_demand("status", "attention")
+                    notification_demand = self.client_events.has_demand("attention")
+                    if status_demand:
+                        self.start_status_generation_watcher(current)
+                    else:
+                        self.stop_status_generation_watcher(current)
+                    tmux_refresh_due = current.tmux_signal_refresh_at > 0 and now >= current.tmux_signal_refresh_at
+                    tmux_fallback_due = not self.tmux_signal_event_watcher_healthy() and now >= current.next_tmux_signal_poll_at
+                    if status_demand and (tmux_refresh_due or tmux_fallback_due):
+                        events = self.poll_tmux_signals_client_event_once()
+                        if tmux_fallback_due:
+                            self.note_client_event_recurring_work(current, "tmux_signal_fallback", useful=bool(events))
+                        current.tmux_signal_refresh_at = 0.0
+                        if tmux_fallback_due:
+                            current.next_tmux_signal_poll_at = now + self.server_tmux_signal_event_poll_seconds()
+                    if (self.client_events.has_demand("core") or notification_demand) and now >= current.next_watched_pr_poll_at:
+                        events = self.poll_watched_prs_client_event_once()
+                        self.note_client_event_recurring_work(current, "watched_pr_reconcile", useful=bool(events))
+                        current.next_watched_pr_poll_at = now + self.server_watched_pr_event_poll_seconds()
+                    if (self.client_events.has_demand("yoagent") or notification_demand) and now >= current.next_yoagent_job_poll_at:
+                        events = self.yoagent_controller.poll_yoagent_jobs_once()
+                        self.note_client_event_recurring_work(current, "yoagent_job_reconcile", useful=bool(events))
+                        current.next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
+                    if (self.client_events.has_demand("core") or notification_demand) and now < self.search_progress_active_until and now >= current.next_search_progress_poll_at:
+                        # Streaming Quick Open: while a crawl this process kicked is active and a palette
+                        # client is subscribed, forward indexd's buffered progress frames onto the bus.
+                        self.drain_and_publish_search_progress()
+                        current.next_search_progress_poll_at = now + SEARCH_PROGRESS_DRAIN_POLL_SECONDS
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.log_event(
+                        None,
+                        "client_event_watch_error",
+                        f"client event watch failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.clientEvent.watchFailed",
+                    )
+                if current.wake_event.wait(self.client_event_watch_sleep_seconds(time.monotonic(), current)):
+                    current.wake_event.clear()
+        finally:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is current and current.worker is worker:
+                    current.worker = None
 
     def cache_set_limited(self, cache: dict[Any, Any], key: Any, value: Any, limit: int) -> None:
-        return self._session_files_coordinator.cache_set_limited(self, cache, key, value, limit)
+        cache[key] = value
+        while len(cache) > limit:
+            cache.pop(next(iter(cache)))
 
     def session_files_exclusion_policy(self) -> exclusions.ExclusionPolicy:
-        return self._session_files_coordinator.session_files_exclusion_policy(self)
+        """Snapshot the configured Differ exclusion policy in the WEB process.
 
-    def session_files_cache_key( self, kind: str, infos: dict[str, SessionInfo], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> tuple[Any, ...]:
-        return self._session_files_coordinator.session_files_cache_key(self, kind, infos, session, hours, from_ref, to_ref, repo_refs)
+        Settings are read here and nowhere below: the snapshot is signed into the cache identity
+        and shipped in the jobd task payload, so a worker judging paths can never be judging by a
+        different policy than the one the cached answer is keyed on.
+        """
 
-    def session_files_refresh_request_payload( self, cache_key: tuple[Any, ...], session: str | None, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> dict[str, Any]:
-        return self._session_files_coordinator.session_files_refresh_request_payload(self, cache_key, session, hours, from_ref, to_ref, repo_refs)
+        settings = self.settings_payload().get("settings", {}).get("file_explorer", {})
+        return exclusions.ExclusionPolicy.from_settings(settings, session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
 
-    def requested_session_files_cache_key( self, payload: dict[str, Any], fallback: tuple[Any, ...], ) -> tuple[Any, ...]:
-        return self._session_files_coordinator.requested_session_files_cache_key(self, payload, fallback)
+    def session_files_cache_key(
+        self,
+        kind: str,
+        infos: dict[str, SessionInfo],
+        session: str | None,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> tuple[Any, ...]:
+        repo_refs = session_files.canonical_repository_refs(repo_refs)
+        repo_signatures: list[tuple[str, tuple[Any, ...]]] = []
+        repo_roots = {
+            session_files.canonical_repository_path(repo)
+            for info in infos.values()
+            for repo in session_files.session_candidate_repo_roots(info)
+        }
+        for repo_text in sorted(repo_roots):
+            override = (repo_refs or {}).get(repo_text) or {}
+            repo_from = str(override.get("from") or "").strip() or from_ref
+            repo_to = str(override.get("to") or "").strip() or to_ref
+            repo = Path(repo_text)
+            # CRITICAL for "zero git spawns in warm requests": a `git status` identity ran here on
+            # every key build after a repo change. When the fs watcher covers the repo, its dirty
+            # generation int is the authoritative change signal, so use it and spawn NO git. The real
+            # git identity/snapshot is recomputed inside the jobd worker on an actual recompute. When
+            # the watcher is unhealthy, fall back to the git-spawn identity; the time-based
+            # SESSION_FILES_CACHE_SECONDS staleness remains the no-watcher backstop.
+            if self.watcher_covers_repo(repo):
+                repo_signatures.append((repo_text, self.repo_dirty_generation(repo_text)))
+            else:
+                repo_signatures.append((repo_text, self.shared_git_identity(repo, repo_from, repo_to)[0]))
+        return (
+            kind,
+            SESSION_FILES_CACHE_KEY_VERSION,
+            session or "",
+            session_files.bounded_session_files_hours(hours),
+            str(from_ref or ""),
+            str(to_ref or ""),
+            repo_refs_cache_signature(repo_refs),
+            # The exclusion policy decides which files the answer CONTAINS, so it belongs in the
+            # identity of that answer. Without it, editing Preferences leaves every cached payload
+            # -- memory, disk and the jobd coalesce key derived from this tuple -- serving rows the
+            # new policy excludes.
+            self.session_files_exclusion_policy().signature,
+            tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
+            tuple(repo_signatures),
+        )
+
+    def session_files_refresh_request_payload(
+        self,
+        cache_key: tuple[Any, ...],
+        session: str | None,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> dict[str, Any]:
+        return {
+            "session": session or "",
+            "hours": session_files.bounded_session_files_hours(hours),
+            "from_ref": str(from_ref or ""),
+            "to_ref": str(to_ref or ""),
+            "repo_refs": repo_refs or {},
+            "cache_key": repr(cache_key),
+            "cache_key_data": cache_key,
+        }
+
+    def requested_session_files_cache_key(
+        self,
+        payload: dict[str, Any],
+        fallback: tuple[Any, ...],
+    ) -> tuple[Any, ...]:
+        def freeze(value: Any) -> Any:
+            if isinstance(value, (list, tuple)):
+                return tuple(freeze(item) for item in value)
+            return value
+
+        requested = freeze(payload.get("cache_key_data"))
+        if not isinstance(requested, tuple) or len(requested) != len(fallback):
+            return fallback
+        # The owner may observe newer tmux/transcript metadata or repository state than the follower,
+        # so the final info/repo signatures may differ. All request-controlled dimensions must match
+        # before the owner writes its current result under the follower's key.
+        if requested[:-2] != fallback[:-2]:
+            return fallback
+        return requested
 
     # ---- Repository-state record (DOIT.optimize-backends) ------------------
     # One dirty generation per canonical Git root, bumped by the native
@@ -11326,146 +7857,1428 @@ class TmuxWebtermApp:
     SESSION_FILES_GIT_IDENTITY_SAFETY_SECONDS = 60.0
 
     def repo_dirty_generation(self, repo_text: str) -> int:
-        return self._session_files_coordinator.repo_dirty_generation(self, repo_text)
+        repo_text = session_files.canonical_repository_path(repo_text)
+        with self.session_files_service.cache_lock:
+            return self.session_files_service.repo_dirty_generations.setdefault(repo_text, 0)
 
     def mark_repo_state_dirty(self, changed_paths: list[Path]) -> None:
-        return self._session_files_coordinator.mark_repo_state_dirty(self, changed_paths)
+        with self.session_files_service.cache_lock:
+            generations = self.session_files_service.repo_dirty_generations
+            for repo_text in generations:
+                repo_path = Path(repo_text)
+                if any(
+                    path == repo_path or filesystem._path_is_within(path, repo_path)
+                    for path in changed_paths
+                ):
+                    generations[repo_text] += 1
 
     def store_git_identity(self, identity_key: tuple[Any, ...], dirty_generation: int, identity: tuple[Any, ...]) -> None:
-        return self._session_files_coordinator.store_git_identity(self, identity_key, dirty_generation, identity)
+        with self.session_files_service.cache_lock:
+            self.session_files_service.repo_identity_cache[identity_key] = (dirty_generation, time.monotonic(), identity)
 
     def watcher_covers_repo(self, repo: Path) -> bool:
-        return self._session_files_coordinator.watcher_covers_repo(self, repo)
+        """True when the native fs watcher is healthy AND watching a root that contains `repo`.
+
+        This is the one predicate that decides whether a repo's dirty generation is authoritative,
+        so both the cache-KEY path (which uses the generation int instead of spawning `git`) and the
+        identity-reuse path (`reusable_git_identity`) share it rather than re-deriving the coverage
+        test with divergent edge cases.
+        """
+        record = self.client_watch_service.event_watcher_record
+        if not record.filesystem_healthy:
+            return False
+        resolved_repo = Path(str(repo)).expanduser().resolve(strict=False)
+        return any(
+            resolved_repo == Path(root) or filesystem._path_is_within(resolved_repo, Path(root))
+            for root in record.filesystem_roots
+        )
 
     def reusable_git_identity(self, identity_key: tuple[Any, ...], repo: Path) -> tuple[Any, ...] | None:
-        return self._session_files_coordinator.reusable_git_identity(self, identity_key, repo)
+        if not self.watcher_covers_repo(repo):
+            return None
+        with self.session_files_service.cache_lock:
+            entry = self.session_files_service.repo_identity_cache.get(identity_key)
+            if entry is None:
+                return None
+            generation_at_compute, computed_at, identity = entry
+            if generation_at_compute != self.session_files_service.repo_dirty_generations.get(identity_key[0], 0):
+                return None
+        if time.monotonic() - computed_at > self.SESSION_FILES_GIT_IDENTITY_SAFETY_SECONDS:
+            return None
+        return identity
 
-    def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]: # Stable logical view identity only (kind, version, session, hours, refs, # per-repo ref overrides): the volatile info/repo signatures (key[-2:]) # are a replaceable source generation stored INSIDE the record, so agent # status or transcript appends REPLACE one durable file per view instead # of minting a new filename per generation.
-        return self._session_files_coordinator.session_files_disk_cache_path(self, key)
+    def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]:
+        # Stable logical view identity only (kind, version, session, hours, refs,
+        # per-repo ref overrides): the volatile info/repo signatures (key[-2:])
+        # are a replaceable source generation stored INSIDE the record, so agent
+        # status or transcript appends REPLACE one durable file per view instead
+        # of minting a new filename per generation.
+        key_text = self.client_event_payload_signature(key[:-2])
+        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
+        return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
 
     def session_files_source_generation(self, key: tuple[Any, ...]) -> str:
-        return self._session_files_coordinator.session_files_source_generation(self, key)
+        """The replaceable half of the cache identity: info + repo signatures."""
+        return hashlib.sha256(self.client_event_payload_signature(key[-2:]).encode("utf-8")).hexdigest()
 
     def session_files_disk_manifest_path(self, signature: str) -> Path:
-        return self._session_files_coordinator.session_files_disk_manifest_path(self, signature)
+        return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
 
-    def prune_session_files_disk_cache( self, *, max_age_seconds: float | None = None, max_bytes: int | None = None, now: float | None = None, ) -> dict[str, Any]:
-        return self._session_files_coordinator.prune_session_files_disk_cache(self, max_age_seconds=max_age_seconds, max_bytes=max_bytes, now=now)
+    def prune_session_files_disk_cache(
+        self,
+        *,
+        max_age_seconds: float | None = None,
+        max_bytes: int | None = None,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        return session_files.prune_disk_cache(
+            SESSION_FILES_CACHE_DIR,
+            max_age_seconds=SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds,
+            max_bytes=SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max_bytes,
+            batch_size=SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
+            now=now,
+        )
 
     def run_session_files_disk_cache_prune(self, record: SessionFilesDiskPruneRecord | None = None) -> None:
-        return self._session_files_coordinator.run_session_files_disk_cache_prune(self, record)
+        active_record = record or self.session_files_service.disk_prune_record
+        try:
+            result = self.prune_session_files_disk_cache()
+        except (OSError, RuntimeError, ValueError) as exc:
+            result = {"error": str(exc)}
+            logger.warning("session-files disk cache prune failed: %s", exc)
+        with self.session_files_service.disk_prune_lock:
+            if self.session_files_service.disk_prune_record is active_record:
+                active_record.last_result = result
+                active_record.running = False
+                active_record.worker = None
+        if result.get("removed_entries"):
+            self.log_event(
+                None,
+                "session_files_cache_pruned",
+                "Session-files disk cache pruned",
+                result,
+                message_key="events.message.sessionFiles.cachePruned",
+            )
 
     def request_session_files_disk_cache_prune(self, reason: str = "") -> bool:
-        return self._session_files_coordinator.request_session_files_disk_cache_prune(self, reason)
+        now = time.monotonic()
+        with self.session_files_service.disk_prune_lock:
+            record = self.session_files_service.disk_prune_record
+            if record.running or now < record.next_at:
+                return False
+            record.running = True
+            record.next_at = now + SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        try:
+            response, _body = self.job_client.produce(
+                "session_files_cache_prune",
+                {
+                    "cache_dir": str(SESSION_FILES_CACHE_DIR),
+                    "max_age_seconds": SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS,
+                    "max_bytes": SESSION_FILES_DISK_CACHE_MAX_BYTES,
+                    "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
+                },
+                priority="maintenance",
+                generation=1,
+                coalesce_key="session-files-cache-prune",
+                delivery="receipt",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            response = {"ok": False, "error": str(exc)}
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        accepted = response.get("ok") is True and str(job.get("status") or "") in {"queued", "running", "completed"}
+        with self.session_files_service.disk_prune_lock:
+            if self.session_files_service.disk_prune_record is record:
+                record.running = False
+                record.worker = None
+                record.last_result = {
+                    "submitted": accepted,
+                    "reason": reason,
+                    "job_id": str(job.get("job_id") or ""),
+                    **({"error": str(response.get("error") or "jobd did not accept session-files cache prune")} if not accepted else {}),
+                }
+        return accepted
 
     def session_files_payload_signature(self, payload: SessionFilesPayload | dict[str, Any]) -> str:
-        return self._session_files_coordinator.session_files_payload_signature(self, payload)
+        payload_text = self.client_event_payload_signature(payload)
+        return hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
 
-    def set_session_files_memory_cache( self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus, stored_at: float | None = None, ) -> None:
-        return self._session_files_coordinator.set_session_files_memory_cache(self, key, payload, status, stored_at)
+    def set_session_files_memory_cache(
+        self,
+        key: tuple[Any, ...],
+        payload: SessionFilesPayload,
+        status: HTTPStatus,
+        stored_at: float | None = None,
+    ) -> None:
+        with self.session_files_service.cache_lock:
+            self.cache_set_limited(
+                self.session_files_service.cache,
+                key,
+                (time.monotonic() if stored_at is None else stored_at, (copy.deepcopy(payload), status)),
+                SESSION_FILES_CACHE_MAX_ITEMS,
+            )
 
-    def read_session_files_disk_cache( self, key: tuple[Any, ...], max_age_seconds: float | None = None, allow_stale: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
-        return self._session_files_coordinator.read_session_files_disk_cache(self, key, max_age_seconds, allow_stale)
+    def read_session_files_disk_cache(
+        self,
+        key: tuple[Any, ...],
+        max_age_seconds: float | None = None,
+        allow_stale: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
+        path, signature = self.session_files_disk_cache_path(key)
+        record = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get("version") != SESSION_FILES_CACHE_VERSION or record.get("signature") != signature:
+            return None
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        try:
+            status = HTTPStatus(int(record.get("status", int(HTTPStatus.OK))))
+            stored_at_wall = float(record.get("stored_at", 0.0))
+        except (TypeError, ValueError):
+            return None
+        source_generation = self.session_files_source_generation(key)
+        stored_generation = str(record.get("source_generation") or "")
+        if stored_generation != source_generation:
+            # Same logical view, older source generation: usable only as a
+            # stale last-known-good. Never memory-cache it under the requested
+            # key — a strict fresh lookup must not see it as current.
+            if not allow_stale:
+                return None
+            payload_stale = record.get("payload")
+            try:
+                status_stale = HTTPStatus(int(record.get("status", int(HTTPStatus.OK))))
+                stored_at_stale = float(record.get("stored_at", 0.0))
+            except (TypeError, ValueError):
+                return None
+            age_stale = max(0.0, time.time() - stored_at_stale)
+            return copy.deepcopy(payload_stale), status_stale, False, age_stale
+        payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
+        manifest_path = self.session_files_disk_manifest_path(signature)
+        manifest = read_json_file(manifest_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if isinstance(manifest, dict) and manifest.get("version") == SESSION_FILES_CACHE_VERSION and manifest.get("signature") == signature and manifest.get("payload_signature") == payload_signature:
+            try:
+                status = HTTPStatus(int(manifest.get("status", int(status))))
+                stored_at_wall = float(manifest.get("stored_at", stored_at_wall))
+            except (TypeError, ValueError):
+                pass
+        age_seconds = max(0.0, time.time() - stored_at_wall)
+        fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+        if not fresh and not allow_stale:
+            return None
+        self.set_session_files_memory_cache(key, payload, status, stored_at=time.monotonic() - age_seconds)
+        return copy.deepcopy(payload), status, fresh, age_seconds
 
-    def session_files_published_cache(self):
-        return self._session_files_coordinator.session_files_published_cache(self)
-
-    def write_session_files_disk_cache_unlocked( self, path: Path, signature: str, payload: SessionFilesPayload, status: HTTPStatus, source_generation: str = "", ) -> None:
-        return self._session_files_coordinator.write_session_files_disk_cache_unlocked(self, path, signature, payload, status, source_generation)
+    def write_session_files_disk_cache_unlocked(
+        self,
+        path: Path,
+        signature: str,
+        payload: SessionFilesPayload,
+        status: HTTPStatus,
+        source_generation: str = "",
+    ) -> None:
+        payload_signature = self.session_files_payload_signature(payload)
+        payload_changed = True
+        existing = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if isinstance(existing, dict) and existing.get("version") == SESSION_FILES_CACHE_VERSION and existing.get("signature") == signature:
+            existing_payload = existing.get("payload")
+            existing_payload_signature = str(existing.get("payload_signature") or "")
+            if not existing_payload_signature and isinstance(existing_payload, dict):
+                existing_payload_signature = self.session_files_payload_signature(existing_payload)
+            try:
+                existing_status = int(existing.get("status", int(status)))
+            except (TypeError, ValueError):
+                existing_status = -1
+            payload_changed = (
+                existing_payload_signature != payload_signature
+                or existing_status != int(status)
+                or str(existing.get("source_generation") or "") != source_generation
+            )
+        stored_at = time.time()
+        record = {
+            "version": SESSION_FILES_CACHE_VERSION,
+            "signature": signature,
+            "source_generation": source_generation,
+            "stored_at": stored_at,
+            "status": int(status),
+            "payload_signature": payload_signature,
+            "payload": payload,
+        }
+        if payload_changed:
+            atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+        manifest = {
+            "version": SESSION_FILES_CACHE_VERSION,
+            "signature": signature,
+            "stored_at": stored_at,
+            "status": int(status),
+            "payload_signature": payload_signature,
+            "payload_changed": payload_changed,
+            "owner": self.background_owner.status_payload().get("generation", {}),
+            "refresh_status": "ready",
+            "last_error": "",
+        }
+        atomic_write_text(self.session_files_disk_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
+        try:
+            payload_size = path.stat().st_size
+        except OSError:
+            payload_size = 0
+        try:
+            manifest_stat = self.session_files_disk_manifest_path(signature).stat()
+            payload_size += manifest_stat.st_size
+            mtime = max(stored_at, float(manifest_stat.st_mtime))
+        except OSError:
+            mtime = stored_at
+        session_files.update_disk_cache_index(SESSION_FILES_CACHE_DIR, signature, size=payload_size, mtime=mtime)
+        # Accounting (DOIT.optimize-backends): every durable generation write is a
+        # counted event with its payload+manifest bytes and the rewritten index
+        # size, so the bounded-storage rework can be justified from measurements.
+        try:
+            index_bytes = session_files.disk_cache_index_path(SESSION_FILES_CACHE_DIR).stat().st_size
+        except OSError:
+            index_bytes = 0
+        self.record_session_files_phase(
+            "durable-cache-write", 0.0,
+            {"payload_and_manifest_bytes": int(payload_size), "index_bytes_rewritten": int(index_bytes)},
+        )
+        self.request_session_files_disk_cache_prune("write")
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
-        return self._session_files_coordinator.write_session_files_disk_cache(self, key, payload, status)
+        path, signature = self.session_files_disk_cache_path(key)
+        try:
+            with file_lock(path, dir_mode=0o700):
+                self.write_session_files_disk_cache_unlocked(path, signature, payload, status, self.session_files_source_generation(key))
+        except OSError as exc:
+            logger.warning("failed to write session-files cache %s: %s", path, exc)
 
     def record_session_files_phase(self, phase: str, compute_ms: float, details: dict[str, Any]) -> None:
-        return self._session_files_coordinator.record_session_files_phase(self, phase, compute_ms, details)
+        self.record_performance_sample(
+            BACKGROUND_ROLE_SESSION_FILES,
+            f"phase:{str(phase or 'unknown')[:80]}",
+            trigger="payload",
+            compute_ms=compute_ms,
+            cache_key={"kind": "session-files-phase"},
+            cache_status="computed",
+            details=details,
+        )
 
     def shared_git_identity(self, repo: Path, from_ref: str | None, to_ref: str | None) -> tuple[tuple[Any, ...], str]:
-        return self._session_files_coordinator.shared_git_identity(self, repo, from_ref, to_ref)
+        """One identity owner for BOTH the cache-key path and the snapshot path.
 
-    def shared_session_files_git_snapshot( self, repo: Path, from_ref: str | None, to_ref: str | None, *, identity: tuple[Any, ...] | None = None, ) -> dict[str, Any]:
-        return self._session_files_coordinator.shared_session_files_git_snapshot(self, repo, from_ref, to_ref, identity=identity)
+        Order of preference: watcher-cached (repository-state record unchanged
+        -> ZERO Git commands), coalesced (another caller is computing it right
+        now), computed. The future is removed once it completes, so sequential
+        calls still recompute when the record is dirty and a file change is
+        visible to the very next request — nothing is delayed or hidden.
+        """
+        identity_key = (str(repo), from_ref or "", to_ref or "")
+        cached_identity = self.reusable_git_identity(identity_key, repo)
+        if cached_identity is not None:
+            return cached_identity, "watcher-cached"
+        with self.session_files_service.cache_lock:
+            identity_future = self.session_files_service.git_identity_futures.get(identity_key)
+            identity_owner = identity_future is None
+            if identity_owner:
+                identity_future = Future()
+                self.session_files_service.git_identity_futures[identity_key] = identity_future
+        if not identity_owner:
+            return identity_future.result(), "coalesced"
+        try:
+            dirty_generation_at_start = self.repo_dirty_generation(identity_key[0])
+            snapshot_identity = session_files.git_snapshot_identity(repo, from_ref, to_ref)
+            self.store_git_identity(identity_key, dirty_generation_at_start, snapshot_identity)
+            identity_future.set_result(snapshot_identity)
+        except BaseException as error:
+            identity_future.set_exception(error)
+            raise
+        finally:
+            with self.session_files_service.cache_lock:
+                self.session_files_service.git_identity_futures.pop(identity_key, None)
+        return snapshot_identity, "computed"
 
-    def complete_session_files_work( self, key: tuple[Any, ...], record: SessionFilesWorkRecord, result: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None, error: Exception | None = None, ) -> None:
-        return self._session_files_coordinator.complete_session_files_work(self, key, record, result, error)
+    def shared_session_files_git_snapshot(
+        self,
+        repo: Path,
+        from_ref: str | None,
+        to_ref: str | None,
+        *,
+        identity: tuple[Any, ...] | None = None,
+    ) -> dict[str, Any]:
+        signature_started = time.perf_counter()
+        if identity is not None:
+            snapshot_identity, identity_status = identity, "provided"
+        else:
+            snapshot_identity, identity_status = self.shared_git_identity(repo, from_ref, to_ref)
+        self.record_performance_sample(
+            BACKGROUND_ROLE_SESSION_FILES,
+            "phase:git-signature",
+            trigger="payload",
+            compute_ms=(time.perf_counter() - signature_started) * 1000,
+            cache_key={"kind": "git-snapshot"},
+            cache_status=identity_status,
+            cache_hit=identity_status != "computed",
+            details={"repo": str(repo)},
+        )
+        with self.session_files_service.cache_lock:
+            record = self.session_files_service.git_snapshot_records.get(snapshot_identity)
+            if record is not None and record.snapshot is not None:
+                self.record_performance_sample(
+                    BACKGROUND_ROLE_SESSION_FILES,
+                    "phase:git-snapshot",
+                    trigger="payload",
+                    compute_ms=0,
+                    cache_key={"kind": "git-snapshot"},
+                    cache_status="hit:fresh",
+                    cache_hit=True,
+                    cache_fresh=True,
+                    details={"repo": str(repo)},
+                )
+                return copy.deepcopy(record.snapshot)
+            if record is None:
+                record = SessionFilesGitSnapshotRecord()
+                self.session_files_service.git_snapshot_records[snapshot_identity] = record
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            final_identity, snapshot = record.future.result()
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "phase:git-snapshot",
+                trigger="payload",
+                compute_ms=0,
+                cache_key={"kind": "git-snapshot"},
+                cache_status="coalesced",
+                cache_hit=True,
+                cache_fresh=final_identity == snapshot_identity,
+                details={"repo": str(repo)},
+            )
+            if final_identity != snapshot_identity:
+                return self.shared_session_files_git_snapshot(repo, from_ref, to_ref)
+            return copy.deepcopy(snapshot)
+        started = time.perf_counter()
+        try:
+            snapshot = session_files.build_git_snapshot(repo, from_ref, to_ref)
+            final_identity = session_files.git_snapshot_identity(repo, from_ref, to_ref)
+            compute_ms = (time.perf_counter() - started) * 1000
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "phase:git-snapshot",
+                trigger="payload",
+                compute_ms=compute_ms,
+                cache_key={"kind": "git-snapshot"},
+                cache_status="miss:computed",
+                cache_hit=False,
+                cache_fresh=final_identity == snapshot_identity,
+                details={"repo": str(repo)},
+            )
+            record.future.set_result((final_identity, copy.deepcopy(snapshot)))
+            with self.session_files_service.cache_lock:
+                if final_identity == snapshot_identity:
+                    record.snapshot = copy.deepcopy(snapshot)
+                    while len(self.session_files_service.git_snapshot_records) > SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS:
+                        oldest_key = next(iter(self.session_files_service.git_snapshot_records))
+                        if oldest_key == snapshot_identity and len(self.session_files_service.git_snapshot_records) > 1:
+                            oldest_key = next(key for key in self.session_files_service.git_snapshot_records if key != snapshot_identity)
+                        self.session_files_service.git_snapshot_records.pop(oldest_key, None)
+                elif self.session_files_service.git_snapshot_records.get(snapshot_identity) is record:
+                    self.session_files_service.git_snapshot_records.pop(snapshot_identity, None)
+            if final_identity != snapshot_identity:
+                return self.shared_session_files_git_snapshot(repo, from_ref, to_ref)
+            return copy.deepcopy(snapshot)
+        except Exception as exc:
+            if not record.future.done():
+                record.future.set_exception(exc)
+            with self.session_files_service.cache_lock:
+                if self.session_files_service.git_snapshot_records.get(snapshot_identity) is record:
+                    self.session_files_service.git_snapshot_records.pop(snapshot_identity, None)
+            raise
 
-    def compute_session_files_cache_entry( self, key: tuple[Any, ...], compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]], *, reserved: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
-        return self._session_files_coordinator.compute_session_files_cache_entry(self, key, compute, reserved=reserved)
+    def complete_session_files_work(
+        self,
+        key: tuple[Any, ...],
+        record: SessionFilesWorkRecord,
+        result: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        if error is not None and not record.future.done():
+            record.future.set_exception(error)
+        elif result is not None and not record.future.done():
+            record.future.set_result((copy.deepcopy(result[0]), result[1], result[2], result[3]))
+        self.session_files_service.finish_work(key, record)
 
-    def get_session_files_cache( self, key: tuple[Any, ...], max_age_seconds: float | None = None, allow_stale: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
-        return self._session_files_coordinator.get_session_files_cache(self, key, max_age_seconds, allow_stale)
+    def compute_session_files_cache_entry(
+        self,
+        key: tuple[Any, ...],
+        compute: Callable[[], tuple[SessionFilesPayload, HTTPStatus]],
+        *,
+        reserved: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
+        path, signature = self.session_files_disk_cache_path(key)
+        work_record, owner = self.session_files_service.claim_work(
+            key,
+            threading.get_ident(),
+            reserved=reserved,
+            stable_signature=signature,
+        )
+        if not owner:
+            payload, status, cache_hit, age_seconds = work_record.future.result()
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "cache-entry",
+                trigger="single-flight",
+                compute_ms=0,
+                payload=payload,
+                cache_key=key,
+                cache_status="coalesced",
+                cache_hit=True,
+                cache_fresh=True,
+            )
+            return copy.deepcopy(payload), status, cache_hit, age_seconds
+        started = time.perf_counter()
+        compute_attempted = False
+        compute_slot_acquired = False
+        computed_result: tuple[SessionFilesPayload, HTTPStatus] | None = None
+        try:
+            with file_lock(path, dir_mode=0o700):
+                cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=False)
+                if cached:
+                    payload, status, _fresh, age_seconds = cached
+                    self.record_performance_sample(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        "cache-entry",
+                        trigger="compute",
+                        compute_ms=(time.perf_counter() - started) * 1000,
+                        payload=payload,
+                        cache_key=key,
+                        cache_status="hit:fresh",
+                        cache_hit=True,
+                        cache_fresh=True,
+                    )
+                    result = (payload, status, True, age_seconds)
+                    self.complete_session_files_work(key, work_record, result=result)
+                    return result
+                # Only a true cache miss enters the owner-wide queue.  Hits and
+                # followers remain cheap, while unrelated HTTP handlers never
+                # contend for these transcript/Git slots.
+                queue_started = time.perf_counter()
+                self.session_files_service.acquire_compute_slot(self.session_files_max_workers())
+                compute_slot_acquired = True
+                self.record_session_files_phase(
+                    "cold-rebuild-queue",
+                    (time.perf_counter() - queue_started) * 1000,
+                    {"cache_key_kind": self.performance_cache_key_kind(key)},
+                )
+                compute_attempted = True
+                payload, status = compute()
+                computed_result = (payload, status)
+                serialization_started = time.perf_counter()
+                if self.session_files_service.stable_generation_is_current(work_record):
+                    self.set_session_files_memory_cache(key, payload, status)
+                    self.write_session_files_disk_cache_unlocked(path, signature, payload, status, self.session_files_source_generation(key))
+                self.record_session_files_phase(
+                    "cache-serialization",
+                    (time.perf_counter() - serialization_started) * 1000,
+                    {
+                        "cache_key_kind": self.performance_cache_key_kind(key),
+                        "payload_bytes": self.performance_payload_bytes(payload),
+                        # Cumulative work counters (git spawns per verb, catalog
+                        # traversal, append bytes, untracked stat/read work) so
+                        # per-build deltas are derivable from consecutive samples.
+                        "runtime_counters": session_files.session_files_runtime_counters(),
+                    },
+                )
+                self.record_performance_sample(
+                    BACKGROUND_ROLE_SESSION_FILES,
+                    "cache-entry",
+                    trigger="compute",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                    payload=payload,
+                    cache_key=key,
+                    cache_status="miss:computed",
+                    cache_hit=False,
+                    cache_fresh=True,
+                )
+                result = (copy.deepcopy(payload), status, False, 0.0)
+                self.complete_session_files_work(key, work_record, result=result)
+                return result
+        except OSError as exc:
+            logger.warning("failed to lock session-files cache %s: %s", path, exc)
+            if compute_attempted:
+                if computed_result is None:
+                    self.complete_session_files_work(key, work_record, error=exc)
+                    raise
+                payload, status = computed_result
+                result = (copy.deepcopy(payload), status, False, 0.0)
+                self.complete_session_files_work(key, work_record, result=result)
+                return result
+            try:
+                queue_started = time.perf_counter()
+                self.session_files_service.acquire_compute_slot(self.session_files_max_workers())
+                compute_slot_acquired = True
+                self.record_session_files_phase(
+                    "cold-rebuild-queue",
+                    (time.perf_counter() - queue_started) * 1000,
+                    {"cache_key_kind": self.performance_cache_key_kind(key), "lock_fallback": True},
+                )
+                compute_attempted = True
+                payload, status = compute()
+            except Exception as compute_exc:
+                self.complete_session_files_work(key, work_record, error=compute_exc)
+                raise
+            self.set_session_files_memory_cache(key, payload, status)
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "cache-entry",
+                trigger="compute-lock-fallback",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key=key,
+                cache_status="miss:lock-fallback",
+                cache_hit=False,
+                cache_fresh=True,
+            )
+            result = (copy.deepcopy(payload), status, False, 0.0)
+            self.complete_session_files_work(key, work_record, result=result)
+            return result
+        except Exception as exc:
+            self.complete_session_files_work(key, work_record, error=exc)
+            raise
+        finally:
+            if compute_slot_acquired:
+                self.session_files_service.release_compute_slot()
+
+    def get_session_files_cache(
+        self,
+        key: tuple[Any, ...],
+        max_age_seconds: float | None = None,
+        allow_stale: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
+        started = time.perf_counter()
+        now = time.monotonic()
+        stale_cached: tuple[SessionFilesPayload, HTTPStatus, bool, float] | None = None
+        with self.session_files_service.cache_lock:
+            cached = self.session_files_service.cache.get(key)
+            if cached:
+                stored_at, value = cached
+                age_seconds = max(0.0, now - stored_at)
+                fresh = max_age_seconds is None or age_seconds <= max_age_seconds
+                payload, status = value
+                if fresh:
+                    self.record_performance_sample(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        "cache-read",
+                        trigger="memory",
+                        compute_ms=(time.perf_counter() - started) * 1000,
+                        payload=payload,
+                        cache_key=key,
+                        cache_status="hit:fresh",
+                        cache_hit=True,
+                        cache_fresh=True,
+                    )
+                    return copy.deepcopy(payload), status, True, age_seconds
+                stale_cached = (copy.deepcopy(payload), status, False, age_seconds)
+        disk_cached = self.read_session_files_disk_cache(key, max_age_seconds=max_age_seconds, allow_stale=allow_stale)
+        if disk_cached:
+            if stale_cached is None or disk_cached[3] <= stale_cached[3]:
+                self.record_performance_sample(
+                    BACKGROUND_ROLE_SESSION_FILES,
+                    "cache-read",
+                    trigger="disk",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                    payload=disk_cached[0],
+                    cache_key=key,
+                    cache_status="hit:fresh" if disk_cached[2] else "hit:stale",
+                    cache_hit=True,
+                    cache_fresh=bool(disk_cached[2]),
+                )
+                return disk_cached
+        if stale_cached is not None and allow_stale:
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "cache-read",
+                trigger="memory",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=stale_cached[0],
+                cache_key=key,
+                cache_status="hit:stale",
+                cache_hit=True,
+                cache_fresh=False,
+            )
+            return stale_cached
+        self.record_performance_sample(
+            BACKGROUND_ROLE_SESSION_FILES,
+            "cache-read",
+            trigger="miss",
+            compute_ms=(time.perf_counter() - started) * 1000,
+            cache_key=key,
+            cache_status="miss",
+            cache_hit=False,
+        )
+        return None
 
     def set_session_files_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
-        return self._session_files_coordinator.set_session_files_cache(self, key, payload, status)
+        self.set_session_files_memory_cache(key, payload, status)
+        self.write_session_files_disk_cache(key, payload, status)
 
     def clear_session_files_cache(self) -> None:
-        return self._session_files_coordinator.clear_session_files_cache(self)
+        with self.session_files_service.cache_lock:
+            self.session_files_service.cache.clear()
+            self.session_files_service.git_snapshot_records.clear()
 
     def session_files_git_identity_for_cache_key(self, cache_key: tuple[Any, ...] | None, repo: Path) -> tuple[Any, ...] | None:
-        return self._session_files_coordinator.session_files_git_identity_for_cache_key(self, cache_key, repo)
+        if not cache_key or not isinstance(cache_key[-1], tuple):
+            return None
+        canonical_repo = session_files.canonical_repository_path(repo)
+        for item in cache_key[-1]:
+            if not isinstance(item, tuple) or len(item) != 2 or str(item[0]) != canonical_repo:
+                continue
+            return item[1] if isinstance(item[1], tuple) else None
+        return None
 
     def session_files_git_snapshot_provider(self, cache_key: tuple[Any, ...] | None) -> Callable[[Path, str | None, str | None], dict[str, Any]]:
-        return self._session_files_coordinator.session_files_git_snapshot_provider(self, cache_key)
+        def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
+            return self.shared_session_files_git_snapshot(repo, repo_from, repo_to, identity=self.session_files_git_identity_for_cache_key(cache_key, repo))
+        return provider
 
-    def compute_session_files_payload_for_info( self, info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...] | None = None, ) -> SessionFilesPayload:
-        return self._session_files_coordinator.compute_session_files_payload_for_info(self, info, hours, from_ref, to_ref, repo_refs, cache_key)
+    def compute_session_files_payload_for_info(
+        self,
+        info: SessionInfo,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...] | None = None,
+    ) -> SessionFilesPayload:
+        return session_files.session_files_payload_for_info(
+            info,
+            hours=hours,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            git_snapshot_provider=self.session_files_git_snapshot_provider(cache_key),
+            phase_recorder=self.record_session_files_phase,
+        )
 
     def session_files_view_coalesce_identity(self, cache_key: tuple[Any, ...]) -> tuple[str, int]:
-        return self._session_files_coordinator.session_files_view_coalesce_identity(self, cache_key)
+        """Cross-port product identity for `session_files_view`.
+
+        The coalesce_key is the stable view signature plus the replaceable info+repo source
+        generation, so two web ports sharing one jobd socket and one disk-cache dir dedupe to ONE
+        worker execution for the same product. The numeric generation is derived from that same
+        source signature and drives jobd's generation guard, so an older completion can never
+        overwrite a newer product for the same view.
+        """
+        _path, signature = self.session_files_disk_cache_path(cache_key)
+        source_generation = self.session_files_source_generation(cache_key)
+        coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
+        generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
+        return coalesce_key, generation
 
     def session_files_jobd_source_profile(self, cache_key: tuple[Any, ...], requester: str) -> dict[str, str | int]:
-        return self._session_files_coordinator.session_files_jobd_source_profile(self, cache_key, requester)
+        """Return bounded source-change facts for jobd diagnostics, never raw cache-key contents."""
+        _path, stable_view = self.session_files_disk_cache_path(cache_key)
+        repo_generations = [item[1] for item in cache_key[-1] if isinstance(item, tuple) and len(item) == 2 and isinstance(item[1], int)]
+        return {
+            "requester": requester,
+            "stable_view": stable_view,
+            "info_signature": hashlib.sha256(self.client_event_payload_signature(cache_key[-2]).encode("utf-8")).hexdigest(),
+            "repo_signature": hashlib.sha256(self.client_event_payload_signature(cache_key[-1]).encode("utf-8")).hexdigest(),
+            "repo_dirty_generation_count": len(repo_generations),
+            "repo_dirty_generation_max": max(repo_generations, default=0),
+        }
 
     @staticmethod
     def session_files_jobd_repository_states(cache_key: tuple[Any, ...]) -> list[dict[str, object]]:
-        return SessionFilesCoordinator.session_files_jobd_repository_states(cache_key)
+        """Pass only watcher-authoritative repository generations to jobd's Git-facts cache."""
+        states = []
+        for item in cache_key[-1]:
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], int):
+                states.append({"path": session_files.canonical_repository_path(item[0]), "generation": item[1]})
+        return states
 
-    def submit_session_files_job( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[dict[str, Any], str, int]:
-        return self._session_files_coordinator.submit_session_files_job(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
+    def submit_session_files_job(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str = "freshness",
+        requester: str = "unknown",
+    ) -> tuple[dict[str, Any], str, int]:
+        """Submit one immutable session-files job and return its atomic broker receipt."""
+        coalesce_key, generation = self.session_files_view_coalesce_identity(cache_key)
+        payload = {
+            "session": session or "",
+            "infos": {name: asdict(info) for name, info in infos.items()},
+            "hours": session_files.bounded_session_files_hours(hours),
+            "from_ref": str(from_ref or ""),
+            "to_ref": str(to_ref or ""),
+            "repo_refs": repo_refs or {},
+            "include_cross_session_attribution": not bool(session),
+            "source": self.session_files_jobd_source_profile(cache_key, requester),
+            "repository_states": self.session_files_jobd_repository_states(cache_key),
+            # Serializable policy, not a lookup: the worker applies exactly this at both doors.
+            "exclusion_policy": self.session_files_exclusion_policy().as_payload(),
+        }
+        response = self.job_client.submit(
+            "session_files_view",
+            payload,
+            priority=priority,
+            generation=generation,
+            coalesce_key=coalesce_key,
+            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+        )
+        return response, coalesce_key, generation
 
-    def compute_session_files_payload_via_jobd( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str = "freshness", requester: str = "unknown", ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.compute_session_files_payload_via_jobd(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
+    def compute_session_files_payload_via_jobd(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str = "freshness",
+        requester: str = "unknown",
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        """Materialize a session-files payload in the background cache worker."""
+        response, coalesce_key, generation = self.submit_session_files_job(
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            priority=priority,
+            requester=requester,
+        )
+        if not response.get("ok"):
+            raise SessionFilesJobdUnavailable(
+                str(response.get("error") or "jobd submit rejected"),
+                response,
+            )
+        try:
+            _meta, body, state = wait_for_jobd_product(
+                self.job_client, coalesce_key, generation, SESSION_FILES_JOBD_WAIT_SECONDS
+            )
+        except JobdProductRpcUnavailable as error:
+            raise SessionFilesJobdUnavailable(str(error)) from error
+        if body is None:
+            raise SessionFilesJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+        return self.session_files_payload_from_product(body)
 
     def session_files_payload_from_product(self, body: bytes) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload_from_product(self, body)
+        data = json.loads(body.decode("utf-8"))
+        payload = data.get("payload") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            raise SessionFilesJobdUnavailable("malformed jobd session-files product")
+        status = HTTPStatus(int(data.get("status") or int(HTTPStatus.OK)))
+        return payload, status
 
     def session_files_payload_from_job(self, job: dict[str, Any]) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload_from_job(self, job)
+        result = job.get("result")
+        payload = result.get("payload") if isinstance(result, dict) else None
+        if not isinstance(payload, dict):
+            raise SessionFilesJobdUnavailable(
+                "malformed jobd session-files result",
+                {"error": "malformed jobd session-files result", "status": str(job.get("status") or "")},
+            )
+        status = HTTPStatus(int(result.get("status") or int(HTTPStatus.OK)))
+        return payload, status
 
-    def wait_for_session_files_operation_job( self, job_id: str, deadline_at: float, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.wait_for_session_files_operation_job(self, job_id, deadline_at)
+    def wait_for_session_files_operation_job(
+        self,
+        job_id: str,
+        deadline_at: float,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        """Wait only in the accepted-operation worker; HTTP returns before this loop starts."""
+        poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        while not self.jobd_operation_service.stop_event.is_set():
+            response = self.job_client.result(job_id)
+            if not response.get("ok"):
+                raise SessionFilesJobdUnavailable(
+                    str(response.get("error") or "jobd result unavailable"),
+                    response,
+                )
+            job = response.get("job")
+            if not isinstance(job, dict):
+                raise SessionFilesJobdUnavailable(
+                    "malformed jobd result response",
+                    {"error": "malformed jobd result response"},
+                )
+            producer_state = str(job.get("status") or "")
+            if producer_state == "completed":
+                return self.session_files_payload_from_job(job)
+            if producer_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                raise SessionFilesJobdUnavailable(
+                    str(job.get("error") or f"jobd producer {producer_state}"),
+                    job,
+                )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise SessionFilesJobdUnavailable(
+                    "session-files operation deadline expired",
+                    {"error": "session-files operation deadline expired", "status": "deadline_expired"},
+                )
+            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        raise SessionFilesJobdUnavailable(
+            "session-files operation completion stopped",
+            {"error": "session-files operation completion stopped", "status": "producer_abandoned"},
+        )
 
-    def complete_session_files_operation( self, operation_id: str, request_id: str, job_id: str, cache_key: tuple[Any, ...], deadline_at: float, ) -> None:
-        return self._session_files_coordinator.complete_session_files_operation(self, operation_id, request_id, job_id, cache_key, deadline_at)
+    def complete_session_files_operation(
+        self,
+        operation_id: str,
+        request_id: str,
+        job_id: str,
+        cache_key: tuple[Any, ...],
+        deadline_at: float,
+    ) -> None:
+        """Supervisor boundary for one accepted producer and its terminal delivery."""
+        try:
+            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: self.wait_for_session_files_operation_job(job_id, deadline_at),
+            )
+            terminal_payload = copy.deepcopy(payload)
+            terminal_payload["cache"] = {
+                "hit": bool(cache_hit),
+                "stale": False,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": SESSION_FILES_CACHE_SECONDS,
+            }
+            result = self.session_files_ready_result(request_id, terminal_payload)
+            self.terminalize_operation(operation_id, result, status)
+        except SessionFilesJobdUnavailable as error:
+            result = self.session_files_failure_result(
+                request_id,
+                error.failure or {"error": str(error)},
+                operation_id=operation_id,
+                operation="jobd.result",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
+        except Exception as error:
+            result = self.session_files_failure_result(
+                request_id,
+                {
+                    "error": str(error),
+                    "cause": local_service_exception_cause(error),
+                },
+                operation_id=operation_id,
+                operation="session-files.complete",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    def start_session_files_operation( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, cache_key: tuple[Any, ...], *, priority: str, requester: str, ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._session_files_coordinator.start_session_files_operation(self, session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
+    def start_session_files_operation(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str,
+        requester: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        request_id = self.new_api_request_id()
+        response, coalesce_key, generation = self.submit_session_files_job(
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            priority=priority,
+            requester=requester,
+        )
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        producer_state = str(job.get("status") or "")
+        if not response.get("ok") or not job_id or producer_state not in {"queued", "running", "completed"}:
+            failure = dict(response)
+            if not failure.get("error"):
+                failure["error"] = "jobd did not return an accepted job receipt"
+            result = self.session_files_failure_result(
+                request_id,
+                failure,
+                operation="jobd.submit",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
+            result = self.session_files_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                operation="jobd.submit",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        deadline_at = time.time() + (SESSION_FILES_JOBD_JOB_DEADLINE_MS / 1000.0)
+        try:
+            receipt = self.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route="GET /api/session-files",
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": producer_state,
+                },
+                producer={
+                    "service": "jobd",
+                    "job_id": job_id,
+                    "coalesce_key": coalesce_key,
+                    "generation": generation,
+                },
+                kind="session_files",
+                context={
+                    "session": str(session or ""),
+                    "from_ref": str(from_ref or ""),
+                    "to_ref": str(to_ref or ""),
+                    "hours": float(hours),
+                    "repo_refs": session_files.canonical_repository_refs(repo_refs),
+                },
+            )
+        except Exception:
+            reservation.release()
+            raise
+        operation_id = str(receipt["operation"]["id"])
+        submitted = self.jobd_operation_service.submit_reserved(
+            reservation,
+            self.complete_session_files_operation,
+            operation_id,
+            request_id,
+            job_id,
+            cache_key,
+            deadline_at,
+        )
+        if not submitted:
+            result = self.session_files_failure_result(
+                request_id,
+                {"error": "jobd operation completion worker could not start"},
+                operation_id=operation_id,
+                operation="session-files.start",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return result, HTTPStatus.INTERNAL_SERVER_ERROR
+        return receipt, HTTPStatus.ACCEPTED
 
-    def refresh_session_files_payload_cache( self, cache_key: tuple[Any, ...], session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        return self._session_files_coordinator.refresh_session_files_payload_cache(self, cache_key, session, infos, hours, from_ref, to_ref, repo_refs)
+    def refresh_session_files_payload_cache(
+        self,
+        cache_key: tuple[Any, ...],
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> None:
+        started = time.perf_counter()
+        refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": session or ""}, cache_key=cache_key)
+        self.log_sampled_background_refresh_event(
+            "background_refresh_started",
+            BACKGROUND_ROLE_SESSION_FILES,
+            "Session-files background refresh started",
+            refresh_details,
+            message_key="events.message.backgroundRefresh.started",
+            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+        )
+        try:
+            self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: self.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-refresh"),
+                reserved=True,
+            )
+            compute_ms = (time.perf_counter() - started) * 1000
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_SESSION_FILES,
+                "Session-files background refresh finished",
+                done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+            )
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
+        except SessionFilesJobdUnavailable as exc:
+            # jobd could not produce the product this cycle. The single-flight is already released by
+            # compute_session_files_cache_entry; nothing stale is cached and the next request retries.
+            logger.info("session-files payload refresh deferred (jobd) for %s: %s", cache_key, exc)
+        except Exception as exc:
+            logger.warning("session-files payload refresh failed for %s: %s", cache_key, exc)
+            raise
 
-    def refresh_session_files_info_cache( self, cache_key: tuple[Any, ...], info: SessionInfo, hours: float, from_ref: str | None, to_ref: str | None, repo_refs: dict[str, dict[str, str]] | None, ) -> None:
-        return self._session_files_coordinator.refresh_session_files_info_cache(self, cache_key, info, hours, from_ref, to_ref, repo_refs)
+    def refresh_session_files_info_cache(
+        self,
+        cache_key: tuple[Any, ...],
+        info: SessionInfo,
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+    ) -> None:
+        started = time.perf_counter()
+        refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_SESSION_FILES, {"session": info.session}, cache_key=cache_key)
+        self.log_sampled_background_refresh_event(
+            "background_refresh_started",
+            BACKGROUND_ROLE_SESSION_FILES,
+            "Session-files background refresh started",
+            refresh_details,
+            message_key="events.message.backgroundRefresh.started",
+            message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+        )
+        try:
+            self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: self.compute_session_files_payload_via_jobd(info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, cache_key, requester="background-info-refresh"),
+                reserved=True,
+            )
+            compute_ms = (time.perf_counter() - started) * 1000
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_SESSION_FILES,
+                "Session-files background refresh finished",
+                done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
+            )
+            self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
+        except SessionFilesJobdUnavailable as exc:
+            logger.info("session-files info refresh deferred (jobd) for %s: %s", cache_key, exc)
+        except Exception as exc:
+            logger.warning("session-files info refresh failed for %s: %s", cache_key, exc)
+            raise
 
     def start_session_files_cache_refresh(self, cache_key: tuple[Any, ...], target: Any, *args: Any) -> bool:
-        return self._session_files_coordinator.start_session_files_cache_refresh(self, cache_key, target, *args)
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            if target == self.refresh_session_files_payload_cache and len(args) >= 6:
+                session, _infos, hours, from_ref, to_ref, repo_refs = args[:6]
+                request_payload = self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs)
+            else:
+                request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
+            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
+            return False
+        _path, stable_signature = self.session_files_disk_cache_path(cache_key)
+        record = self.session_files_service.reserve_work(cache_key, stable_signature)
+        if record is None:
+            return False
+        worker = threading.Thread(target=target, args=(cache_key, *args), daemon=True)
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            self.complete_session_files_work(cache_key, record, error=exc)
+            raise
+        return True
 
     def start_requested_session_files_cache_refresh(self, payload: dict[str, Any]) -> bool:
-        return self._session_files_coordinator.start_requested_session_files_cache_refresh(self, payload)
+        session = str(payload.get("session") or "").strip()
+        scope = [session] if session else list(self.sessions)
+        infos, _errors = discover_sessions(scope)
+        if session and session not in infos:
+            return False
+        hours = session_files.bounded_session_files_hours(self.float_value(payload.get("hours"), 24.0))
+        from_ref = str(payload.get("from_ref") or "").strip() or None
+        to_ref = str(payload.get("to_ref") or "").strip() or None
+        raw_repo_refs = payload.get("repo_refs")
+        repo_refs = raw_repo_refs if isinstance(raw_repo_refs, dict) else {}
+        fallback_key = self.session_files_cache_key("payload", infos, session or None, hours, from_ref, to_ref, repo_refs)
+        cache_key = self.requested_session_files_cache_key(payload, fallback_key)
+        return self.start_session_files_cache_refresh(
+            cache_key,
+            self.refresh_session_files_payload_cache,
+            session or None,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+        )
 
-    def cached_session_files_payload_for_info( self, info: SessionInfo, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, *, wait_for_fresh: bool = True, ) -> SessionFilesPayload:
-        return self._session_files_coordinator.cached_session_files_payload_for_info(self, info, hours, from_ref, to_ref, repo_refs, wait_for_fresh=wait_for_fresh)
+    def cached_session_files_payload_for_info(
+        self,
+        info: SessionInfo,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        *,
+        wait_for_fresh: bool = True,
+    ) -> SessionFilesPayload:
+        infos = {info.session: info}
+        key = self.session_files_cache_key("payload", infos, info.session, hours, from_ref, to_ref, repo_refs)
+        cached = self.get_session_files_cache(key, max_age_seconds=SESSION_FILES_CACHE_SECONDS, allow_stale=True)
+        if cached:
+            payload, _status, fresh, _age = cached
+            if not fresh:
+                if self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                    self.start_session_files_cache_refresh(key, self.refresh_session_files_info_cache, info, hours, from_ref, to_ref, repo_refs)
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
+                    refresh_result = self.request_background_refresh(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        self.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
+                    )
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        try:
+                            payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                                key,
+                                lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
+                            )
+                        except SessionFilesJobdUnavailable:
+                            # Serve the stale bytes already read above; never resurrect inline git here.
+                            pass
+            return payload
+        if not wait_for_fresh:
+            self.start_session_files_cache_refresh(
+                key,
+                self.refresh_session_files_info_cache,
+                info,
+                hours,
+                from_ref,
+                to_ref,
+                repo_refs,
+            )
+            return {
+                "session": info.session,
+                "hours": session_files.bounded_session_files_hours(hours),
+                "files": [],
+                "repos": [],
+                "errors": [],
+                "refreshing_elsewhere": True,
+            }
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            refresh_result = self.request_background_refresh(
+                BACKGROUND_ROLE_SESSION_FILES,
+                self.session_files_refresh_request_payload(key, info.session, hours, from_ref, to_ref, repo_refs),
+            )
+            self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+            if self.background_refresh_should_fallback(refresh_result):
+                try:
+                    payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                        key,
+                        lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-follower-fallback"),
+                    )
+                    return copy.deepcopy(payload)
+                except SessionFilesJobdUnavailable:
+                    pass
+            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
+        try:
+            payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                key,
+                lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive", requester="metadata-cache-miss"),
+            )
+            return copy.deepcopy(payload)
+        except SessionFilesJobdUnavailable:
+            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
 
     def warm_start_session_files_payload_cache(self) -> None:
-        return self._session_files_coordinator.warm_start_session_files_payload_cache(self)
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, {"reason": "warm-start"})
+            return
+        sessions, _errors = discover_sessions(self.sessions)
+        for session in self.sessions:
+            info = sessions.get(session)
+            if info is not None and info.agents:
+                key = self.session_files_cache_key("payload", {session: info}, session, 24.0, None, None, None)
+                self.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
 
     def warm_start_tabber_activity_cache(self) -> None:
-        return self._session_files_coordinator.warm_start_tabber_activity_cache(self)
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warm-start"})
+            return
+        source_signature = self.tabber_activity_source_signature()
+        self.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=24.0, source_signature=source_signature)
 
-    def cached_session_files_payloads_for_infos( self, infos: dict[str, SessionInfo], hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, ) -> dict[str, SessionFilesPayload]:
-        return self._session_files_coordinator.cached_session_files_payloads_for_infos(self, infos, hours, from_ref, to_ref, repo_refs)
+    def cached_session_files_payloads_for_infos(
+        self,
+        infos: dict[str, SessionInfo],
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, SessionFilesPayload]:
+        if not infos:
+            return {}
+        if len(infos) == 1:
+            session, info = next(iter(infos.items()))
+            return {session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)}
+        if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+            return {
+                session: self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+                for session, info in infos.items()
+            }
+        payloads: dict[str, SessionFilesPayload] = {}
+        for session, info in infos.items():
+            payloads[session] = self.cached_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+        return payloads
 
-    def session_files_payload_for_infos( self, session: str | None, infos: dict[str, SessionInfo], hours: float, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", extra_errors: list[str | dict[str, Any]] | None = None, accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload_for_infos(self, session, infos, hours, from_ref, to_ref, repo_refs, force, requester, extra_errors, accepted_operation)
+    def session_files_payload_for_infos(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+        requester: str = "api-session-files",
+        extra_errors: list[str | dict[str, Any]] | None = None,
+        accepted_operation: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        started = time.perf_counter()
+        cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
+        max_age = SESSION_FILES_CACHE_SECONDS
+        cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
+        priority = "interactive" if force else "freshness"
+
+        def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
+            return self.compute_session_files_payload_via_jobd(
+                session,
+                infos,
+                hours,
+                from_ref,
+                to_ref,
+                repo_refs,
+                cache_key,
+                priority=priority,
+                requester=requester,
+            )
+
+        cache_meta: dict[str, Any]
+        if cached:
+            payload, status, fresh, age_seconds = cached
+            cache_meta = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": max_age,
+            }
+            if not fresh:
+                if self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
+                    refreshing = self.start_session_files_cache_refresh(cache_key, self.refresh_session_files_payload_cache, session, infos, hours, from_ref, to_ref, repo_refs)
+                    cache_meta["refreshing"] = refreshing
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_SESSION_FILES)
+                    refresh_result = self.request_background_refresh(
+                        BACKGROUND_ROLE_SESSION_FILES,
+                        self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
+                    )
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        try:
+                            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                            cache_meta = {
+                                "hit": cache_hit,
+                                "stale": False,
+                                "age_seconds": round(age_seconds, 3),
+                                "refresh_seconds": max_age,
+                                "fallback": True,
+                            }
+                        except SessionFilesJobdUnavailable:
+                            cache_meta["refreshing_elsewhere"] = True
+                    else:
+                        cache_meta["refreshing_elsewhere"] = True
+        else:
+            if accepted_operation:
+                payload, status = self.start_session_files_operation(
+                    session,
+                    infos,
+                    hours,
+                    from_ref,
+                    to_ref,
+                    repo_refs,
+                    cache_key,
+                    priority=priority,
+                    requester=requester,
+                )
+                cache_meta = {
+                    "hit": False,
+                    "stale": False,
+                    "refreshing_elsewhere": status == HTTPStatus.ACCEPTED,
+                }
+            else:
+                try:
+                    payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                    cache_meta = {
+                        "hit": cache_hit,
+                        "stale": False,
+                        "age_seconds": round(age_seconds, 3),
+                        "refresh_seconds": max_age,
+                        "refreshing": False,
+                    }
+                except SessionFilesJobdUnavailable as error:
+                    payload = {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": str(error), "terminal": True}
+                    status = HTTPStatus.SERVICE_UNAVAILABLE
+                    cache_meta = {"hit": False, "stale": False, "refreshing_elsewhere": False}
+        payload = copy.deepcopy(payload)
+        if status == HTTPStatus.ACCEPTED:
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "payload",
+                trigger="force" if force else "request",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key=cache_key,
+                cache_status="refreshing-elsewhere",
+                cache_hit=False,
+                cache_fresh=False,
+                details={"session": session or "", "status": int(status)},
+            )
+            return payload, status
+        if status >= HTTPStatus.BAD_REQUEST and payload.get("state") == "failed":
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "payload",
+                trigger="force" if force else "request",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key=cache_key,
+                cache_status=str(int(status)),
+                cache_hit=False,
+                cache_fresh=False,
+                details={"session": session or "", "status": int(status)},
+            )
+            return payload, status
+        structured_extra_errors = [
+            value if isinstance(value, dict) else message_descriptor("diff.warning.discovery", value, {"error": value})
+            for value in (extra_errors or [])
+        ]
+        payload["errors"] = [*structured_extra_errors, *payload.get("errors", [])]
+        payload["cache"] = cache_meta
+        self.record_performance_sample(
+            BACKGROUND_ROLE_SESSION_FILES,
+            "payload",
+            trigger="force" if force else "request",
+            compute_ms=(time.perf_counter() - started) * 1000,
+            payload=payload,
+            cache_key=cache_key,
+            cache_status="hit:stale" if cache_meta.get("hit") and cache_meta.get("stale") else ("hit:fresh" if cache_meta.get("hit") else ("refreshing-elsewhere" if cache_meta.get("refreshing_elsewhere") else "miss:computed")),
+            cache_hit=bool(cache_meta.get("hit")),
+            cache_fresh=not bool(cache_meta.get("stale")),
+            details={"session": session or "", "status": int(status)},
+        )
+        return payload, status
 
     def get_transcripts_payload_cache(self, max_age_seconds: float, allow_stale: bool = False) -> tuple[dict[str, Any], bool, float] | None:
         now = time.monotonic()
@@ -11685,32 +9498,362 @@ class TmuxWebtermApp:
         finally:
             self.finish_transcripts_payload_work(generation, current_worker)
 
-    def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]: # resolve the github.watched_prs watchlist to live PR metadata, independent of any open # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist # does not exhaust the GitHub rate limit.
-        return self._activity_cache.watched_prs_payload(self, allow_network)
+    def watched_prs_payload(self, allow_network: bool = True) -> dict[str, Any]:
+        # resolve the github.watched_prs watchlist to live PR metadata, independent of any open
+        # session's branch. The server-side SSE loop refreshes it on a fixed slow cadence so a big watchlist
+        # does not exhaust the GitHub rate limit.
+        settings = settings_payload().get("settings", {})
+        refs = settings.get("github", {}).get("watched_prs", [])
+        result = watched_pr_metadata(refs, self.metadata_cache, allow_network=allow_network)
+        # log the truncation only when the capped state CHANGES (count or watchlist), not on
+        # every poll — otherwise the event log fills with one identical entry per refresh.
+        truncated = result["truncated"]
+        signature = (truncated, tuple(str(ref) for ref in refs)) if truncated else None
+        if signature != self._watched_pr_truncated_signature:
+            self._watched_pr_truncated_signature = signature
+            if truncated:
+                self.log_event(
+                    None,
+                    "watched_pr_truncated",
+                    f"watched PR list capped: {truncated} entries beyond the limit are not polled",
+                    {"truncated": truncated},
+                    message_key="info.watched.truncated",
+                    message_params={"count": truncated},
+                )
+        return {
+            "watched_prs": result["watched_prs"],
+            "truncated": result["truncated"],
+            "invalid": result["invalid"],
+        }
 
     def tabber_activity_agents_snapshot(self, force: bool = False) -> list[dict[str, Any]]:
-        return self._activity_cache.tabber_activity_agents_snapshot(self, force)
+        if force:
+            payload = self.refresh_tabber_activity_cache()
+            agents = payload.get("agents") if isinstance(payload, dict) else []
+            return copy.deepcopy(agents) if isinstance(agents, list) else []
+        source_signature = self.tabber_activity_source_signature()
+        cached = self.get_tabber_activity_cache(self.tabber_activity_refresh_seconds(), allow_stale=True, source_signature=source_signature)
+        if cached:
+            payload, _fresh, _age_seconds = cached
+            agents = payload.get("agents") if isinstance(payload, dict) else []
+            return copy.deepcopy(agents) if isinstance(agents, list) else []
+        payload = self.refresh_tabber_activity_cache()
+        agents = payload.get("agents") if isinstance(payload, dict) else []
+        return copy.deepcopy(agents) if isinstance(agents, list) else []
 
-    def activity_session_info_payload( self, session: str, info: SessionInfo, work: dict[str, Any], files_payload: dict[str, Any], summary: dict[str, Any], recent_events: list[dict[str, Any]] | None = None, locale: str = "en", ) -> dict[str, Any]:
-        return self._activity_cache.activity_session_info_payload(self, session, info, work, files_payload, summary, recent_events, locale)
+    def activity_session_info_payload(
+        self,
+        session: str,
+        info: SessionInfo,
+        work: dict[str, Any],
+        files_payload: dict[str, Any],
+        summary: dict[str, Any],
+        recent_events: list[dict[str, Any]] | None = None,
+        locale: str = "en",
+    ) -> dict[str, Any]:
+        selected = info.selected_pane
+        agent = next((item for item in info.agents if item.transcript), info.agents[0] if info.agents else None)
+        git_data = work.get("git") if isinstance(work.get("git"), dict) else {}
+        pull_request = work.get("pull_request") if isinstance(work.get("pull_request"), dict) else None
+        rolling = self.yoagent_session_summary_record(session)
+        latest_summary = str(rolling.get("rolling_summary") or summary.get("local") or "").strip()
+        return {
+            "session": session,
+            "path": str((git_data or {}).get("root") or (git_data or {}).get("cwd") or (agent.cwd if agent else "") or (selected.current_path if selected else "")),
+            "cwd": str((agent.cwd if agent else "") or (selected.current_path if selected else "")),
+            "tmux_target": str(selected.target if selected else ""),
+            "agent": self.compact_agent_for_run_history(agent),
+            "git": git_data,
+            "pull_request": pull_request,
+            "ci": pull_request.get("checks") if isinstance(pull_request, dict) and isinstance(pull_request.get("checks"), dict) else None,
+            "linear": work.get("linear") if isinstance(work.get("linear"), list) else [],
+            "files": summary.get("files") if isinstance(summary.get("files"), dict) else {},
+            "recent_paths": build_recent_agents_payload({session: info}, [session], session_files_by_session={session: files_payload}, locale=locale),
+            "latest_summary": truncate_text(latest_summary, 1200),
+            "latest_summary_updated_ts": max(0.0, self.float_value(rolling.get("updated_ts"), 0.0)),
+            "recent_events": recent_events if recent_events is not None else self.event_log.tail(session=session, limit=5),
+            "work": work,
+        }
 
     def cached_activity_work_by_session(self) -> dict[str, dict[str, Any]]:
-        return self._activity_cache.cached_activity_work_by_session(self)
+        """Project only already-cached transcript work into one bounded statusd request."""
+
+        result: dict[str, dict[str, Any]] = {}
+        encoded_size = 2
+        # Project while the immutable cache snapshot is locked. Calling
+        # cached_transcripts_work_graph() here would deep-copy the entire canonical graph in the
+        # web request before selecting this small projection, retaining much of the CPU being moved.
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            payload = self.activity_transcript_service.transcripts_payload_cache_record.payload
+            cached_sessions = payload.get("sessions") if isinstance(payload, dict) else None
+            for session in dict.fromkeys(self.sessions):
+                cached_session = cached_sessions.get(session) if isinstance(cached_sessions, dict) else None
+                graph = cached_session.get("work_graph") if isinstance(cached_session, dict) else None
+                if not isinstance(graph, dict):
+                    continue
+                work = activity_work_summary_from_graph(graph)
+                encoded_entry = json.dumps({session: work}, ensure_ascii=False, separators=(",", ":"))[1:-1].encode("utf-8")
+                next_size = encoded_size + (1 if result else 0) + len(encoded_entry)
+                if next_size <= STATUSD_ACTIVITY_MAX_WORK_BYTES:
+                    result[session] = work
+                    encoded_size = next_size
+        return result
 
     def restore_activity_summary_web_state(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._activity_cache.restore_activity_summary_web_state(self, payload)
+        """Restore web-owned rolling-summary attachments and worker state after RPC decode."""
+
+        summaries = payload.get("sessions")
+        if isinstance(summaries, dict):
+            for session, summary in summaries.items():
+                if isinstance(session, str) and isinstance(summary, dict):
+                    self.yoagent_controller.attach_yoagent_session_summary(session, summary)
+        rolling_updated = self.yoagent_controller.latest_yoagent_session_summary_updated_ts()
+        with self.yoagent_summary_worker_lock:
+            summary_worker = self.yoagent_summary_worker_record
+            worker_state = {
+                "first_launch_started": summary_worker.first_launch_started,
+                "running": summary_worker.running,
+            }
+        daemon_state = payload.get("yoagent_summaries")
+        payload["yoagent_summaries"] = {
+            **(daemon_state if isinstance(daemon_state, dict) else {}),
+            **worker_state,
+            "updated_ts": rolling_updated,
+            "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
+        }
+        return payload
 
     def activity_summary_payload(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
-        return self._activity_cache.activity_summary_payload(self, force, locale, session_scope, hours)
+        """Decode one daemon-owned activity summary without assembling it in the web process."""
+
+        require_activity_summary_enabled()
+        normalized_locale = normalize_locale(locale)
+        normalized_scope = self.normalized_activity_session_scope(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        response, body = self.status_client.activity_summary(
+            list(dict.fromkeys(self.sessions)),
+            force=bool(force),
+            locale=normalized_locale,
+            session_scope=normalized_scope,
+            hours=bounded_hours,
+            work_by_session=self.cached_activity_work_by_session(),
+        )
+        if response.get("ok") is not True or not body:
+            raise ActivitySummaryStatusdUnavailable(response)
+        payload = validate_activity_summary(response, body)
+        return self.restore_activity_summary_web_state(payload)
 
     def activity_summary_bytes(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> tuple[bytes, HTTPStatus]:
-        return composed_owner_for(self, "_activity_cache", ActivityCache).activity_summary_bytes(self, force, locale, session_scope, hours)
+        """Return typed HTTP bytes for a completed activity summary or terminal daemon failure."""
 
-    def assemble_activity_summary_payload( self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0, work_by_session: dict[str, dict[str, Any]] | None = None, timings: dict[str, float] | None = None, ) -> dict[str, Any]:
-        return self._activity_cache.assemble_activity_summary_payload(self, force, locale, session_scope, hours, work_by_session, timings)
+        if not activity_summary_enabled():
+            metadata, body = activity_summary_disabled_response()
+            return body, HTTPStatus(int(metadata["status"]))
+        try:
+            payload = self.activity_summary_payload(force, locale, session_scope, hours)
+        except ActivitySummaryStatusdUnavailable as error:
+            failure = {
+                "status": "unavailable",
+                "error": str(error),
+                "terminal": True,
+                "upstream": error.response,
+            }
+            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.FAILED_DEPENDENCY
+        except StatusProtocolError as error:
+            failure = {
+                "status": "upgrade_required",
+                "error": str(error),
+                "terminal": True,
+            }
+            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.UPGRADE_REQUIRED
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.OK
 
-    def _activity_summary_payload_owner( self, *, force: bool, locale: str, session_names: list[str], scope: str, bounded_hours: float, sessions: dict[str, SessionInfo], errors: list[str], work_by_session: dict[str, dict[str, Any]], timings: dict[str, float] | None, ) -> dict[str, Any]:
-        return self._activity_cache._activity_summary_payload_owner(self, force=force, locale=locale, session_names=session_names, scope=scope, bounded_hours=bounded_hours, sessions=sessions, errors=errors, work_by_session=work_by_session, timings=timings)
+    def assemble_activity_summary_payload(
+        self,
+        force: bool = False,
+        locale: str = "en",
+        session_scope: Any = "configured",
+        hours: Any = 24.0,
+        work_by_session: dict[str, dict[str, Any]] | None = None,
+        timings: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the activity summary inside statusd's dedicated app instance."""
+
+        require_activity_summary_enabled()
+        started = time.perf_counter()
+        locale = normalize_locale(locale)
+        session_names, scope_errors, scope = self.activity_session_names(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        add_phase_timing(timings, "scope_ms", started)
+        started = time.perf_counter()
+        sessions, errors = discover_sessions(session_names)
+        add_phase_timing(timings, "discover_ms", started)
+        errors = [*scope_errors, *errors]
+        provided_work = work_by_session if isinstance(work_by_session, dict) else {}
+        work_signature = self.client_event_payload_signature(provided_work)
+        inflight_key = (bool(force), locale, scope, tuple(session_names), bounded_hours, work_signature)
+        service = self.activity_transcript_service
+        with service.activity_summary_lock:
+            future = service.activity_summary_futures.get(inflight_key)
+            if future is None:
+                future = Future()
+                service.activity_summary_futures[inflight_key] = future
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return copy.deepcopy(future.result())
+        try:
+            with service.activity_summary_compute_lock:
+                payload = self._activity_summary_payload_owner(
+                    force=force,
+                    locale=locale,
+                    session_names=session_names,
+                    scope=scope,
+                    bounded_hours=bounded_hours,
+                    sessions=sessions,
+                    errors=errors,
+                    work_by_session=provided_work,
+                    timings=timings,
+                )
+            future.set_result(copy.deepcopy(payload))
+            return payload
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with service.activity_summary_lock:
+                if service.activity_summary_futures.get(inflight_key) is future:
+                    service.activity_summary_futures.pop(inflight_key, None)
+
+    def _activity_summary_payload_owner(
+        self,
+        *,
+        force: bool,
+        locale: str,
+        session_names: list[str],
+        scope: str,
+        bounded_hours: float,
+        sessions: dict[str, SessionInfo],
+        errors: list[str],
+        work_by_session: dict[str, dict[str, Any]],
+        timings: dict[str, float] | None,
+    ) -> dict[str, Any]:
+        service = self.activity_transcript_service
+        started = time.perf_counter()
+        ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
+        self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
+        add_phase_timing(timings, "order_ms", started)
+        summaries: dict[str, Any] = {}
+        ordered_summaries: list[dict[str, Any]] = []
+        session_files_by_session: dict[str, SessionFilesPayload] = {}
+        transcript_views_by_path: dict[str, dict[str, Any]] = {}
+        session_info: dict[str, Any] = {}
+        started = time.perf_counter()
+        recent_events_by_session = self.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
+        add_phase_timing(timings, "events_ms", started)
+        if force:
+            with service.activity_summary_lock:
+                service.activity_summary_cache.clear()
+            self.clear_session_files_cache()
+        for session in ordered_sessions:
+            info = sessions.get(session)
+            if info is None:
+                continue
+            started = time.perf_counter()
+            provided_work = work_by_session.get(session)
+            if isinstance(provided_work, dict):
+                work = copy.deepcopy(provided_work)
+            else:
+                work_graph = self.cached_transcripts_work_graph(session)
+                if work_graph is None:
+                    work_graph = session_work_graph(info, self.metadata_cache, allow_network=False)
+                work = activity_work_summary_from_graph(work_graph)
+            add_phase_timing(timings, "work_ms", started)
+            started = time.perf_counter()
+            files_payload = self.cached_session_files_payload_for_info(
+                info,
+                hours=bounded_hours,
+                wait_for_fresh=False,
+            )
+            add_phase_timing(timings, "files_ms", started)
+            session_files_by_session[session] = files_payload
+            primary_agent = next((item for item in info.agents if item.transcript), None)
+            transcript_view: dict[str, Any] | None = None
+            started = time.perf_counter()
+            if primary_agent is not None and primary_agent.transcript:
+                view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=primary_agent)
+                if view_status == HTTPStatus.OK:
+                    transcript_view = view_payload
+                    transcript_views_by_path[str(primary_agent.transcript)] = view_payload
+            add_phase_timing(timings, "transcripts_ms", started)
+            started = time.perf_counter()
+            signature = activity_signature(info, work, files_payload)
+            cache_key = (locale, session)
+            with service.activity_summary_lock:
+                cached = service.activity_summary_cache.get(cache_key)
+            if cached and cached.get("signature") == signature:
+                summary = dict(cached["summary"])
+            else:
+                if transcript_view is None:
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale)
+                else:
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view)
+                with service.activity_summary_lock:
+                    service.activity_summary_cache[cache_key] = {"signature": signature, "summary": dict(summary)}
+            self.yoagent_controller.attach_yoagent_session_summary(session, summary)
+            add_phase_timing(timings, "summaries_ms", started)
+            summaries[session] = summary
+            ordered_summaries.append(summary)
+            started = time.perf_counter()
+            session_info[session] = self.activity_session_info_payload(
+                session,
+                info,
+                work,
+                files_payload,
+                summary,
+                recent_events=recent_events_by_session.get(session, []),
+                locale=locale,
+            )
+            add_phase_timing(timings, "session_info_ms", started)
+        with service.activity_summary_lock:
+            for cache_key in list(service.activity_summary_cache):
+                if cache_key[1] not in sessions:
+                    service.activity_summary_cache.pop(cache_key, None)
+        generated = datetime.now(timezone.utc)
+        rolling_updated = self.yoagent_controller.latest_yoagent_session_summary_updated_ts()
+        with self.yoagent_summary_worker_lock:
+            summary_worker = self.yoagent_summary_worker_record
+            summary_worker_status = {
+                "first_launch_started": summary_worker.first_launch_started,
+                "running": summary_worker.running,
+            }
+        started = time.perf_counter()
+        agents = self.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path)
+        add_phase_timing(timings, "agents_ms", started)
+        started = time.perf_counter()
+        global_summary = build_global_activity_summary(ordered_summaries, errors, locale=locale)
+        add_phase_timing(timings, "global_ms", started)
+        return {
+            "generated_at": generated.isoformat(),
+            "generated_ts": generated.timestamp(),
+            "session_order": [session for session in ordered_sessions if session in summaries],
+            "sessions": summaries,
+            "session_info": session_info,
+            "agents": agents,
+            "global": global_summary,
+            "capabilities": yoagent_capabilities_payload(locale),
+            "errors": errors,
+            "locale": locale,
+            "session_scope": scope,
+            "session_file_hours": bounded_hours,
+            "yoagent_summaries": {
+                "mode": "first_launch",
+                **summary_worker_status,
+                "updated_ts": rolling_updated,
+                "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
+            },
+        }
 
     def float_value(self, value: Any, default: float = 0.0) -> float:
         try:
@@ -12874,108 +11017,824 @@ class TmuxWebtermApp:
         return summary
 
     @staticmethod
-    def system_status_metric( value: object, *, running: bool, missing_state: str, missing_reason_code: str, missing_reason: str, ) -> dict[str, object]: # One envelope owner (`local_service_projection.measurement`), two callers: these # three process metrics and the M8 health metrics. The dict used to be built here, # which meant the health block would have been a second copy of the same shape.
-        return SystemStatusProjector.system_status_metric(value, running=running, missing_state=missing_state, missing_reason_code=missing_reason_code, missing_reason=missing_reason)
+    def system_status_metric(
+        value: object,
+        *,
+        running: bool,
+        missing_state: str,
+        missing_reason_code: str,
+        missing_reason: str,
+    ) -> dict[str, object]:
+        # One envelope owner (`local_service_projection.measurement`), two callers: these
+        # three process metrics and the M8 health metrics. The dict used to be built here,
+        # which meant the health block would have been a second copy of the same shape.
+        if running:
+            return local_service_projection.measurement(
+                value,
+                state=missing_state,
+                reason_code=missing_reason_code,
+                reason=missing_reason,
+            )
+        return local_service_projection.measurement(
+            value,
+            state="not_running",
+            reason_code="not_started",
+            reason="Service is not running",
+        )
 
-    def system_status_service( self, row: dict[str, Any], *, health: local_service_projection.RetainedHealth | None = None, ) -> dict[str, Any]:
-        if isinstance(self, type):
-            return SystemStatusProjector.system_status_service(None, self, row, health=health)
-        return system_status_projector_for(self).system_status_service(self, row, health=health)
+    def system_status_service(
+        self,
+        row: dict[str, Any],
+        *,
+        health: local_service_projection.RetainedHealth | None = None,
+    ) -> dict[str, Any]:
+        service_id = str(row.get("service") or "").strip()
+        labels = {
+            "indexd": "Quick Open index",
+            "statsd": "YO!stats",
+            "jobd": "Filesystem jobs",
+            "statusd": "Tmux status",
+            # watchd had no entry, so the System row named it "watchd" -- the raw id -- while
+            # every other service got a capability name. This label is what the System row and the
+            # Daemons roster display verbatim, so a missing entry is a user-visible defect, not a
+            # cosmetic one.
+            "watchd": "File watching",
+            "approvald": "Auto-approval",
+        }
+        pid = int(row.get("pid") or 0)
+        # A demand daemon that idle-exits becomes a zombie until the registry reaper wait()s it:
+        # `os.kill(pid, 0)` still succeeds and the service record still names it, so both `pid > 0`
+        # here and the `pid`-derived `running` inside `observed_health` would read a dead-and-unreaped
+        # child as a running-but-unhealthy service and raise a false "errored". Its `/proc` State is
+        # the truth -- `Z` means dead, which for a demand-scoped service is absent-by-design, not an
+        # outage. Reading the state distinguishes an idle-exited/zombie daemon (classified idle/absent
+        # through the demand path below) from a genuinely-running-but-unhealthy one (state R/S/D with a
+        # recorded failure, which still alarms). Only `Z` is treated as dead: a `/proc`-less host
+        # returns "" for every pid, and a fully-gone pid is already fenced to 0 by the identity read.
+        pid_zombie = pid > 0 and local_services_registry.process_state(pid) == "Z"
+        health_row = {**row, "pid": 0} if pid_zombie else row
+        pid = 0 if pid_zombie else pid
+        running = pid > 0
+        transport_reason = str(row.get("transport_reason") or "").strip()
+        last_failure = str(row.get("last_failure") or "").strip()
+        # A service that is spawned on first use is absent by design until something asks
+        # for it. Absence alone therefore cannot mean "down" -- only a recorded reason can.
+        # This used to be keyed off `healthy is not False`, but every runtime_status coerces
+        # healthy to a bool, so the idle branch was unreachable and a legitimately-absent
+        # watchd classified exactly like a broken daemon.
+        #
+        # ONE DERIVATION, TWO VOCABULARIES -- THE RECORDED DECISION
+        # ---------------------------------------------------------
+        # This panel used to decide `running`/`idle`/`issue`/`unavailable` from the row itself,
+        # in parallel with `backend_health.observer.observed_health` deciding
+        # `ready`/`starting`/`degraded`/`down` from the same row. Two classifiers, one fact:
+        # an absent jobd on a process that lost the scheduler lease read `unavailable` and
+        # `alerting` here while the topbar indicator read `starting` and stayed quiet, because
+        # only the observer knew about `absence_expected_reason`.
+        #
+        # The single owner is `observed_health`. It is the typed reducer the health contract
+        # names, it is what the retained store and the topbar indicator already consume, and it
+        # is the one that reads all five distinct absence causes. The panel consumes it here and
+        # is NOT a second copy: this method still owns only the RENDERING vocabulary -- which of
+        # its four display states, which bounded `reason_code`, and which human sentence -- so
+        # the existing System/API contract is unchanged while the decision behind it is shared.
+        # Copying `observed_health`'s branches into this file was the rejected alternative; that
+        # is a third copy, not a fix.
+        #
+        # `demand_started` is still read here, before `essential`, exactly as before: the
+        # ordering assertion in tests/test_backend_health_catalog.py pins that absence-by-design
+        # is classified before essentiality is consulted, and the sentence a demand-scoped
+        # service shows ("Starts on demand") is a different sentence from a pending pin.
+        demand_started = row.get("demand_started") is True
+        health_state, _health_reason_code = observed_health(health_row)
+        if health_state == "ready":
+            state, reason_code, reason = "running", "", ""
+        elif health_state == "starting":
+            # Not serving, and not a failure: absent by design, or a named owner in this process
+            # is still bringing it up. Neither is an alert.
+            state, reason_code = "idle", "not_started"
+            reason = "Starts on demand" if demand_started else "Starting"
+        else:
+            state = "issue" if running else "unavailable"
+            reason_code = "transport_failed" if transport_reason else "service_unavailable"
+            reason = transport_reason or last_failure or "Service did not report healthy status"
+        essential = service_id in ESSENTIAL_LOCAL_SERVICES
+        resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
+        details = {
+            key: value
+            for key, value in row.items()
+            if key not in {"service", "pid", "started_at", "uptime_seconds", "resources"}
+        }
+        return {
+            **row,
+            "id": service_id,
+            "label": labels.get(service_id, service_id),
+            "state": state,
+            "reason_code": reason_code,
+            "reason": reason,
+            "essential": essential,
+            # The one predicate the UI may key a visible outage on. Absence by design is
+            # already excluded above (it classifies as "idle"), so this stays true to the
+            # requirement -- any service that recorded a failure is shown, essential or
+            # not -- and a second copy of the rule cannot drift from this one.
+            "alerting": state in {"issue", "unavailable"},
+            "metrics": {
+                "cpu_now_percent": self.system_status_metric(
+                    resources.get("cpu_percent"),
+                    running=running,
+                    missing_state="warming",
+                    missing_reason_code="baseline_pending",
+                    missing_reason="Waiting for a second cumulative CPU sample",
+                ),
+                "rss_bytes": self.system_status_metric(
+                    resources.get("rss_bytes"),
+                    running=running,
+                    missing_state="unavailable",
+                    missing_reason_code="process_read_failed",
+                    missing_reason="The operating system did not return process memory",
+                ),
+                "uptime_seconds": self.system_status_metric(
+                    row.get("uptime_seconds"),
+                    running=running,
+                    missing_state="unavailable",
+                    missing_reason_code="start_time_unavailable",
+                    missing_reason="The service start time is unavailable",
+                ),
+            },
+            # M8. The retained observation this row could not carry before: typed state and
+            # reason, when that state started, the bounded transition history, how complete
+            # each aggregate is, and the restart/request/error/latency numbers. `metrics`
+            # above is left at exactly its three process measurements -- the panel and
+            # `tests/test_gate_panels.py:164` pin that set, and the retained numbers have a
+            # different source and a different denominator, so they are published here with
+            # their own coverage rather than smuggled into it.
+            "health": (health if health is not None else local_service_projection.RetainedHealth()).service(service_id),
+            "details": details,
+        }
 
     def stats_current_recovery_events(self, migration_status: dict[str, Any]) -> list[dict[str, str]]:
-        return system_status_projector_for(self).stats_current_recovery_events(self, migration_status)
+        issues = migration_status.get("issue_records")
+        if not isinstance(issues, (list, tuple)):
+            return []
+        database_path = self.stats_current_client.database_path
+        events: list[dict[str, str]] = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            kind = str(issue.get("kind") or "").strip()
+            if kind not in {"unreadable_current_database", "unsupported_legacy_database"}:
+                continue
+            source = Path(str(issue.get("source") or "")).name
+            if not source:
+                continue
+            events.append({
+                "subsystem": "statsd",
+                "event": kind,
+                "quarantined_artifact": source,
+                "quarantined_path": str(database_path.parent / source),
+                "destination_path": str(database_path),
+                "reason": str(issue.get("detail") or "Stats history was recovered from a damaged database")[:256],
+            })
+        return events[:16]
 
     def statsd_runtime_status(self) -> dict[str, Any]:
-        return system_status_projector_for(self).statsd_runtime_status(self)
+        """Build statsd's whole row, the same way the other five services build theirs.
+
+        Until M3 this was an inline dict literal inside `runtime_local_services()`, so
+        statsd's row shape lived in two places -- its client's projection and the composed
+        projection -- and only statsd's did. It is now one named row producer like every
+        other service, which is what lets the collector treat all six identically.
+        """
+        current_runtime = self.stats_current_runtime.status()
+        current_service = current_runtime.get("service") if isinstance(current_runtime.get("service"), dict) else {}
+        current_service = self.stats_current_client.runtime_status(current_service)
+        migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
+        build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
+        service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
+        transcript_usage = self.stats_current_transcript_usage.status()
+        token_family = current_runtime.get("families", {}).get("agent_tokens", {}) if isinstance(current_runtime.get("families"), dict) else {}
+        token_cadence = float(token_family.get("cadence_seconds") or STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS) if isinstance(token_family, dict) else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+        usage = dict(service_usage)
+        usage["transcripts"] = transcript_usage
+        usage["health"] = stats_current_usage_health(
+            service_usage,
+            transcript_usage,
+            token_cadence,
+            sampler_families=current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
+        )
+        return {
+            "service": "statsd",
+            "pid": int(current_service.get("pid") or 0),
+            "started_at": float(current_service.get("started_at") or 0.0),
+            "version": int(current_service.get("version") or 0),
+            "healthy": current_service.get("ok") is True and migration.get("state") != "failed",
+            "clients": int(current_service.get("clients") or 0),
+            "queues": current_service.get("queue") if isinstance(current_service.get("queue"), dict) else {},
+            "cache": current_service.get("warm") if isinstance(current_service.get("warm"), dict) else {},
+            "migration": migration,
+            "build": build,
+            "delta": current_service.get("delta") if isinstance(current_service.get("delta"), dict) else {},
+            "sampler_families": current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
+            "usage": usage,
+            "last_failure": str(migration.get("failure") or build.get("last_failure") or ""),
+            # The one excuse statsd may state, and only while this process is mid-flight taking
+            # the pin. `observed_health` reads it AFTER `last_failure`/`transport_reason`, so a
+            # statsd that recorded a real failure alarms whether or not the pin is pending.
+            "absence_expected_reason": STATSD_ABSENT_WHILE_PIN_PENDING if statsd_pin_pending(current_runtime) else "",
+            "resources": current_service.get("resources") if isinstance(current_service.get("resources"), dict) else {},
+        }
 
     def local_services_row_producers(self) -> dict[str, Callable[[], dict[str, Any]]]:
-        return system_status_projector_for(self).local_services_row_producers(self)
+        """The one map from service id to the callable that owns its whole row.
+
+        Resolved per collection, not cached: tests and runtime both replace client
+        objects on this app, and a producer bound once at construction would keep
+        calling the client that existed then.
+        """
+        return {
+            "indexd": self.search_indexer.runtime_status,
+            "statsd": self.statsd_runtime_status,
+            "jobd": self.job_client.runtime_status,
+            "statusd": self.status_client.runtime_status,
+            "watchd": self.watchd_runtime_status,
+            "approvald": self.approval_client.runtime_status,
+        }
 
     def local_services_recovery_entrypoints(self) -> dict[str, Callable[[], bool]]:
-        return system_status_projector_for(self).local_services_recovery_entrypoints(self)
+        """The one map from service id to that service's OWN client `retry` wrapper.
+
+        The recovery mirror of `local_services_row_producers()` above, and deliberately the same
+        shape: one owner, one map, resolved per call so a replaced client is the one retried. No
+        caller may retry a service any other way -- a per-service retry scattered across the
+        recovery path is how two callers end up with two ladders for one service.
+
+        Five of the six inventory services are here. indexd is absent because
+        `SearchIndexerClient` is not a `LocalServiceClient` and declares no retry wrapper at all;
+        that gap is the catalog's `recovery_client_entrypoint == ""` row, and
+        `tests/test_backend_health_catalog.py` derives this map's key set from it rather than
+        letting the two lists drift.
+
+        Every value below is a client wrapper that clears the latched failure through
+        `LocalServiceRegistry.retry` and then asks for a start. None of them stops, signals or
+        reclaims anything, which is what makes `LocalServiceRecoveryControl` non-destructive by
+        construction rather than by review.
+        """
+        return {
+            "statsd": self.stats_current_client.retry,
+            "jobd": self.job_client.retry,
+            "statusd": self.status_client.retry,
+            "watchd": self.watch_client.retry,
+            "approvald": self.approval_client.retry,
+        }
 
     def local_services_recovery_control(self) -> LocalServiceRecoveryControl:
-        return system_status_projector_for(self).local_services_recovery_control(self)
+        """The control the backend-health observer is constructed with (`cli.py`).
+
+        Handed the bound map method, not the map, so the control resolves clients at the moment
+        it retries. This is the only production place a recovery control is built.
+        """
+
+        return LocalServiceRecoveryControl(self.local_services_recovery_entrypoints)
 
     def local_services_recovery_events(self, rows: Mapping[str, Mapping[str, Any]]) -> list[dict[str, str]]:
-        return system_status_projector_for(self).local_services_recovery_events(self, rows)
+        """Derive the statsd recovery banner from the collected row, not a second read.
+
+        The migration status used to be captured in the projection's own body because the
+        statsd row was built there. Reading it back off the collected row keeps exactly one
+        statsd status read per collection.
+        """
+        statsd_row = rows.get("statsd") or {}
+        migration = statsd_row.get("migration")
+        return self.stats_current_recovery_events(migration if isinstance(migration, Mapping) else {})
 
     def local_services_snapshot(self) -> local_service_projection.LocalServicesSnapshot:
-        return system_status_projector_for(self).local_services_snapshot(self)
+        """Collect the one immutable local-services snapshot.
+
+        This is the single owner. `runtime_local_services()` renders it for HTTP, and the
+        `service_load` stats collector samples it; neither builds rows of its own. No call
+        below issues a start: every producer reads status or a persisted record, so a full
+        projection starts zero demand-scoped services.
+        """
+        collector = local_service_projection.LocalServicesCollector(
+            self.local_services_row_producers,
+            ledger=self.runtime_process_ledger,
+            recovery_events=self.local_services_recovery_events,
+        )
+        return collector.collect()
 
     def attach_backend_health_store(self, store: Any) -> None:
-        return system_status_projector_for(self).attach_backend_health_store(self, store)
+        """Hold this port's live retained-health store so the projection never reads its file.
+
+        RECORDED DECISION (M8) -- how a System row reaches the retained history.
+
+        The store is PUSHED in here, once, by whoever armed this port's observer
+        (`cli.start_backend_health_observer`). The HTTP request thread then reads the
+        document the observing process already holds in memory. It never opens
+        `STATE_DIR/backend-health/<port>.json`.
+
+        The rejected alternative was for the projection to construct its own store and call
+        `load()`. That is one directory `file_lock`, one open, one read and one JSON parse on
+        every `/api/system-status`, contending with the observer's own 2-second locked write,
+        to reproduce a document this process already has. It also cannot see the live
+        persistence state at all: a store that is failing to write says so only in memory
+        (`BackendHealthStore.persistence_status`), so a file reader would report a healthy
+        monitor that has not published in an hour.
+
+        The cost of the push is stated rather than hidden: `BackendHealthStore.status()`
+        round-trips the document through `json.dumps`/`json.loads`, so each
+        `/api/system-status` pays one bounded deep copy -- six resources, at most 128
+        retained transition rows each -- in CPU, with no I/O and no lock. It is taken ONCE
+        per projection, not once per row. `record()` rebinds `_document` to a freshly built
+        dict and mutates no part of the previous one, so this read needs no lock to be
+        consistent.
+
+        When nothing is attached -- any process that never armed an observer, and every unit
+        test that does not ask for one -- the projection publishes
+        `reason_code: "observer_unattached"` and null metrics. It does not render zeros.
+        """
+        self.backend_health_store = store
 
     # Set by `cli.start_backend_health_observer` once the observer exists. `None` in every process
     # and every unit test that never armed one, which the projection reports as `observer_unattached`.
     backend_health_liveness_provider: Any = None
 
     def attach_backend_health_observer(self, observer: Any) -> None:
-        return system_status_projector_for(self).attach_backend_health_observer(self, observer)
+        """Hold the observer's liveness reader beside its history store."""
+        self.backend_health_liveness_provider = observer.liveness
 
     def retained_backend_health(self) -> local_service_projection.RetainedHealth:
-        return system_status_projector_for(self).retained_backend_health(self)
+        """Collect the two in-memory retained-health inputs ONCE per projection.
+
+        Both reads are process-local: the observer's published document, and this web
+        process's own RPC ledger. Neither opens a socket, starts a service, or touches disk.
+        """
+        store = self.backend_health_store
+        document = store.status() if store is not None else {}
+        # Liveness comes from the OBSERVER, not the store: only it knows the cadence and owns the
+        # thread whose survival is the question, and it answers on the monotonic clock it
+        # schedules on rather than a wall clock that can step.
+        provider = self.backend_health_liveness_provider
+        liveness = provider() if provider is not None else {}
+        return local_service_projection.RetainedHealth(
+            document=document if isinstance(document, dict) else {},
+            liveness=liveness if isinstance(liveness, dict) else {},
+            traffic=local_service_traffic_snapshot(),
+            now=time.time(),
+            web_process_started_at=SERVER_STARTED_AT,
+        )
 
     def runtime_local_services(self) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_local_services(self)
+        """Return bounded worker diagnostics without exposing service payloads."""
+        health = self.retained_backend_health()
+        return self.local_services_snapshot().payload(
+            lambda row: self.system_status_service(row, health=health),
+            health=health,
+        )
 
     def runtime_process_ledger(self) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_process_ledger(self)
+        """Bounded identity-verified process-group ledger for System diagnostics.
+
+        Same identity source the launch preflight and overload watchdog use, so
+        restart, containment, and diagnostics always agree on which PIDs belong
+        to this port. Fields stay bounded: names, PIDs, groups, and the newest
+        overload-evidence path — never command lines or payloads.
+        """
+        table = local_services_registry.bounded_process_table()
+        port = int(getattr(self.background_owner, "port", 0) or 0) if hasattr(self, "background_owner") else 0
+        port_group = local_services_registry.tracked_port_process_group(port, common.STATE_DIR, table) if port else {}
+        service_dir = common.STATE_DIR / "services"
+        tracked_groups = local_services_registry.tracked_local_service_groups(service_dir, table)
+        service_groups = [
+            {
+                key: group[key]
+                for key in ("service", "pid", "pgid", "member_pids", "launcher_pid", "launcher_port")
+            }
+            for group in tracked_groups
+        ]
+        untracked_orphans = local_services_registry.untracked_local_service_processes(
+            service_dir,
+            table,
+            tracked_groups,
+        )
+        evidence = sorted(Path("/tmp").glob(f"yolomux-overload-{port}-*.json")) if port else []
+        return {
+            "port_group": port_group,
+            "service_groups": service_groups,
+            "untracked_orphans": untracked_orphans,
+            "last_overload_evidence": str(evidence[-1]) if evidence else "",
+        }
 
     def runtime_filesystem_batch_rows(self, metrics: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
-        return system_status_projector_for(self).runtime_filesystem_batch_rows(self, metrics, limit)
+        """Return only the safe fs-batch attribution fields from bounded perf records."""
+        rows: list[dict[str, Any]] = []
+        recent = metrics.get("recent") if isinstance(metrics, dict) else []
+        for item in recent if isinstance(recent, list) else []:
+            if not isinstance(item, dict) or item.get("role") != "http-endpoint" or item.get("surface") != "POST /api/fs/batch":
+                continue
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            if details.get("fs_batch") is not True:
+                continue
+            rows.append({
+                "time": float(item.get("time") or 0.0),
+                "compute_ms": float(item.get("compute_ms") or 0.0),
+                "payload_bytes": int(item.get("payload_bytes") or 0),
+                "batch_size": int(details.get("fs_batch_size") or 0),
+                "operations": str(details.get("fs_batch_operations") or "{}"),
+                "path_hashes": str(details.get("fs_batch_path_hashes") or "[]"),
+                "triggers": str(details.get("fs_batch_triggers") or "{}"),
+                "client_revision": str(details.get("fs_batch_client_revision") or "unknown"),
+                "client_scope": str(details.get("fs_batch_client_scope") or "legacy"),
+            })
+        return rows[-max(1, int(limit or 8)):]
 
     def runtime_control_report_payload(self) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_control_report_payload(self)
+        """Serve the control socket from in-memory endpoint evidence only.
 
-    def runtime_report_core( self, *, background_status: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_core(self, background_status=background_status, owner_control_response=owner_control_response, local_services=local_services)
+        The full System report may scan cache trees and query local services. That work can block
+        the single control-server thread precisely while diagnosing a loaded server, so the CLI
+        report uses this small in-memory projection instead.
+        """
+        status = self.background_owner.status_payload()
+        diagnostics = self.performance_diagnostics_payload()
+        metrics = diagnostics.get("perf") if isinstance(diagnostics.get("perf"), dict) else {}
+        client_events = self.client_events.snapshot()
+        chat_events = {
+            event_type: {
+                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
+                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
+            }
+            for event_type in ("chat_messages_changed", "chat_typing_changed")
+        }
+        # Keep the documented report shape without cache walks, service probes, event-log reads,
+        # or transcript scans on the single control-server thread.
+        bounded_cache = lambda path: {"path": str(path), "exists": Path(path).exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0, "truncated": True}
+        return {
+            "ok": True,
+            "state_dir": str(common.STATE_DIR),
+            "owner": {
+                "current_owner": status.get("current_owner"),
+                "status": status.get("status"),
+                "owner": bool(status.get("owner")),
+                "search_index": status.get("search_index"),
+                "debug": {},
+                "control": {"ok": True, "source": "live-owner-control"},
+            },
+            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("coalescing", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
+            "caches": {
+                "session_files": bounded_cache(SESSION_FILES_CACHE_DIR),
+                "activity": bounded_cache(TABBER_ACTIVITY_CACHE_DIR),
+                "search_index": bounded_cache(file_index.INDEX_DIR),
+            },
+            "search_index": {},
+            "local_services": {"services": [], "totals": {}, "ledger": {}, "bounded": True},
+            "top_endpoints": self.runtime_top_endpoints(diagnostics),
+            "top_background_work": self.runtime_top_background_work(diagnostics),
+            "top_event_types": [],
+            "client_events": client_events,
+            "chat": {**self.chat_service.diagnostics(), "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)), "events": chat_events},
+            "login_throttle": {**self.login_rate_limiter.diagnostics(), "edge": self.login_edge_controller.diagnostics()},
+            "largest_active_transcripts": [],
+            "transcripts_cache": {},
+            "filesystem_batch": self.runtime_filesystem_batch_rows(metrics),
+        }
 
-    def runtime_report_advanced( self, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, local_services: dict[str, Any] | None = None, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_advanced(self, background_status=background_status, owner_debug=owner_debug, owner_control_response=owner_control_response, force_transcripts=force_transcripts, local_services=local_services)
+    def runtime_report_core(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+        local_services: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The half of the report the Daemons roster SCANS: the service roster and its identity.
 
-    def runtime_report_payload( self, *, background_status: dict[str, Any] | None = None, owner_debug: dict[str, Any] | None = None, owner_control_response: dict[str, Any] | None = None, force_transcripts: bool = True, ) -> dict[str, Any]:
-        return system_status_projector_for(self).runtime_report_payload(self, background_status=background_status, owner_debug=owner_debug, owner_control_response=owner_control_response, force_transcripts=force_transcripts)
+        Split from `runtime_report_advanced` because these two halves have different demand. This
+        half is what a visible panel refreshes on its poll; the other half is what a reader opens
+        deliberately. Building them together meant transcript scans and performance folds ran on
+        every five-second poll of a panel whose Advanced section was closed.
+
+        The split is by CONSUMER, not by taste: every key here has a reader outside the Advanced
+        disclosure, and every key in the other half has either an Advanced-only reader or none.
+        """
+
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        client_events = self.client_events.snapshot()
+        chat_events = {
+            event_type: {
+                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
+                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
+            }
+            for event_type in ("chat_messages_changed", "chat_typing_changed")
+        }
+        services = local_services if isinstance(local_services, dict) else self.runtime_local_services()
+        return {
+            "ok": True,
+            "state_dir": str(common.STATE_DIR),
+            "owner": {
+                "current_owner": status.get("current_owner"),
+                "status": status.get("status"),
+                "owner": bool(status.get("owner")),
+                "search_index": status.get("search_index"),
+            },
+            "caches": {
+                "session_files": self.runtime_cache_dir_stats(SESSION_FILES_CACHE_DIR),
+                "activity": self.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
+                "search_index": self.runtime_cache_dir_stats(file_index.INDEX_DIR),
+            },
+            "search_index": (
+                owner_control_response.get("search_index_runtime")
+                if isinstance(owner_control_response, dict) and isinstance(owner_control_response.get("search_index_runtime"), dict)
+                else file_index.runtime_diagnostics()
+            ),
+            "local_services": services,
+            "client_events": client_events,
+            "chat": {
+                **self.chat_service.diagnostics(),
+                "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
+                "events": chat_events,
+            },
+            "tmux_signal_watcher": self.tmux_signal_event_watcher_status(),
+        }
+
+    def runtime_report_advanced(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_debug: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+        force_transcripts: bool = True,
+        local_services: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The half a reader consults deliberately: refresh coordination, top-N folds, transcripts.
+
+        `local_services` is INJECTED rather than defaulted away. The approvald recurring-work row
+        below is read out of the local-service roster, and a `None` default would have published a
+        row of confident zeros for a subsystem nobody measured this cycle. When the caller has
+        already collected the roster it passes it; when this half is produced on its own it pays
+        for its own collection.
+        """
+
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        # Remote control responses from older servers may still carry perf, while the current
+        # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
+        diagnostic_status = dict(status)
+        if not isinstance(diagnostic_status.get("perf"), dict):
+            diagnostic_status.update(self.performance_diagnostics_payload())
+        transcript_payload = self.transcripts_payload(force=force_transcripts)
+        services = local_services if isinstance(local_services, dict) else self.runtime_local_services()
+        return {
+            "owner": {
+                "debug": self.runtime_owner_debug_summary(owner_debug),
+                "control": self.runtime_owner_control_summary(owner_control_response),
+            },
+            "refresh": self.runtime_refresh_state(status, services),
+            "top_endpoints": self.runtime_top_endpoints(diagnostic_status),
+            "top_background_work": self.runtime_top_background_work(diagnostic_status),
+            "top_event_types": self.runtime_top_event_types(),
+            # Privacy-safe login-throttle aggregates: allowed/blocked-by-scope counts,
+            # active rows, locked accounts, decision latency — never raw usernames/IPs.
+            "login_throttle": {
+                **self.login_rate_limiter.diagnostics(),
+                "edge": self.login_edge_controller.diagnostics(),
+            },
+            "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
+            "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
+        }
+
+    def runtime_report_payload(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_debug: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+        force_transcripts: bool = True,
+    ) -> dict[str, Any]:
+        """The whole report: both halves, one local-service collection, one merge rule.
+
+        The CLI/control report and the composed system-status payload both want everything, so the
+        composition lives here once rather than as a second construction beside each caller.
+        """
+
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        local_services = self.runtime_local_services()
+        core = self.runtime_report_core(
+            background_status=status,
+            owner_control_response=owner_control_response,
+            local_services=local_services,
+        )
+        advanced = self.runtime_report_advanced(
+            background_status=status,
+            owner_debug=owner_debug,
+            owner_control_response=owner_control_response,
+            force_transcripts=force_transcripts,
+            local_services=local_services,
+        )
+        # `owner` is the one key both halves contribute to, so it is merged explicitly here rather
+        # than letting a dict splat silently drop the cheap identity fields.
+        return {**core, **advanced, "owner": {**core["owner"], **advanced["owner"]}}
 
     def system_status_server_block(self, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
-        return system_status_projector_for(self).system_status_server_block(self, sample, now=now)
+        """Publish the web process's own row through the ONE metric-envelope owner.
+
+        `local_service_projection.measurement` already publishes every local service's
+        CPU/memory/uptime as a typed envelope. This block used to be the one exception --
+        plain floats built with `float(sample.get(...) or 0.0)` -- which is why an unpushed
+        sample arrived at the panel as a finite `0` and was stamped `measured`. It is the
+        same divergent-copy defect the panel's own comments forbid, so the web process now
+        goes through the same envelope as the six services beside it: a value nobody
+        sampled is `{"state": "unavailable", "value": None, "reason_code": ...}`, and the
+        roster's Memory/CPU totals skip it exactly as they already skip every other
+        unmeasured row.
+
+        `version`, `pid` and `started_at` are NOT measurements -- they are read here, are
+        always known, and stay plain scalars.
+        """
+
+        reason_code = str(sample.get("reason_code") or STATS_SAMPLE_NOT_PUSHED_REASON_CODE)
+        reason = str(sample.get("reason") or STATS_SAMPLE_NOT_PUSHED_REASON)
+        # A sample that stopped arriving is not a current measurement. `cpu_budget` already aged
+        # its own copy of this record and said `stale`, but these envelopes carried no age at all,
+        # so a frozen sample kept rendering as `measured` at its last value forever -- the last way
+        # this panel could present something unmeasured as measured.
+        read_at = float(now if now is not None else time.time())
+        age_seconds = stats_current_host_collectors.host_cpu_sample_age_seconds(sample, read_at)
+        if sample.get("cpu_percent") is not None:
+            if age_seconds is None:
+                # A value with no push timestamp. Its currency cannot be checked, and the one
+                # thing this must not do is invent an age: `STATS_SAMPLE_STALE_REASON.format(
+                # seconds=int(age_seconds or 0))` would have printed a confident "is 0s old"
+                # about a sample whose age is exactly what is unknown.
+                reason_code = STATS_SAMPLE_UNDATED_REASON_CODE
+                reason = STATS_SAMPLE_UNDATED_REASON
+                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
+            elif stats_current_host_collectors.host_cpu_sample_is_stale(age_seconds):
+                reason_code = STATS_SAMPLE_STALE_REASON_CODE
+                reason = STATS_SAMPLE_STALE_REASON.format(seconds=int(age_seconds))
+                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
+
+        def envelope(value: object) -> dict[str, Any]:
+            return local_service_projection.measurement(
+                value, state="unavailable", reason_code=reason_code, reason=reason,
+            )
+
+        return {
+            "version": YOLOMUX_VERSION,
+            # These two fall back to a locally KNOWN truth, not to zero, which is why they
+            # keep their `or`: this process's pid and start time are never unknown here.
+            "pid": int(sample.get("pid") or os.getpid()),
+            "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
+            # Uptime is DERIVED HERE, from this process's own start time and the one moment this
+            # response describes. The comment above this line used to say exactly that while the
+            # code published `envelope(sample["uptime_seconds"])` -- a value written only when a
+            # statsd CPU push arrived. So when delivery broke, CPU and RSS correctly went
+            # `unavailable` past the stale window while uptime sat FROZEN at the last push and
+            # stayed stamped `measured`: a number that stops advancing, presented as current,
+            # precisely when the reader is looking at the panel to find out what broke. A live
+            # smoke could not see it, because a healthy push made the frozen field advance.
+            #
+            # There is no cached copy left to disagree with this one: `handle_control_request` no
+            # longer writes `uptime_seconds` into the sample, and `latest_stats_sample` no longer
+            # synthesizes one. One field, one source, and it cannot freeze because nothing outside
+            # this process feeds it.
+            "uptime_seconds": envelope(max(0.0, read_at - SERVER_STARTED_AT)),
+            "cpu_percent": envelope(sample.get("cpu_percent")),
+            "system_cpu_percent": envelope(sample.get("system_cpu_percent")),
+            "rss_bytes": envelope(sample.get("rss_bytes")),
+        }
 
     def system_status_core_payload(self) -> dict[str, Any]:
-        return system_status_projector_for(self).system_status_core_payload(self)
+        """The body the Daemons roster polls for. Produced in the background, never on a request.
+
+        This runs on the snapshot owner's thread; `/api/system-status` only reads what it
+        published. That is the whole point of the split - the panel's five-second poll used to
+        carry this entire assembly, so a server that was busy served its own diagnostics slowest.
+        """
+        # Diagnostics are a reader. Only the CPU family worker may advance the
+        # process/host baselines; otherwise a System refresh can consume the
+        # next one-second observation and leave no durable bucket for it.
+        # Assemble the SLOW runtime data FIRST, then take exactly one reading of the CPU sample
+        # and one timestamp, and render the whole response from that single moment.
+        #
+        # The old order read the sample, then did the slow work, then rendered the now-aged
+        # sample while `cpu_budget` re-read the cache and saw a newer push. One live response
+        # reported `server` stale at 5s and `cpu_budget.sample_age_seconds` 0.358 at the same
+        # time: the response manufactured its own staleness and flipped the row to an em dash
+        # for a reason that had nothing to do with statsd.
+        runtime_report = self.runtime_report_core()
+        generated_at = time.time()
+        sample = self.latest_stats_sample()
+        return {
+            **runtime_report,
+            "generated_at": generated_at,
+            "server": self.system_status_server_block(sample, now=generated_at),
+            "cpu_budget": self.server_cpu_budget_payload(now=generated_at, sample=sample),
+            # System mirrors the same canonical matrix used by the current
+            # capabilities endpoint; there is no diagnostic-only policy copy.
+            "resolution_capabilities": stats_resolution.wire_capabilities(),
+            "stats_current": self.stats_current_runtime.status(),
+            "host": collect_host_diagnostics().payload(admin=True),
+        }
 
     def system_status_advanced_payload(self) -> dict[str, Any]:
-        return system_status_projector_for(self).system_status_advanced_payload(self)
+        """The Advanced-disclosure body, produced only when somebody has asked for it.
+
+        `force_transcripts=False` for the same reason the composed payload used it: a diagnostics
+        read must not drive a transcript refresh, only report the one already cached.
+        """
+
+        return {
+            "ok": True,
+            "generated_at": time.time(),
+            **self.runtime_report_advanced(force_transcripts=False),
+        }
 
     def system_status_payload(self) -> dict[str, Any]:
-        return system_status_projector_for(self).system_status_payload(self)
+        """Both halves of the System view, composed. The CLI report and contract tests read this.
+
+        The route does NOT: it reads the published core snapshot, and the Advanced disclosure reads
+        the separately retained advanced body. This composition exists so a caller that genuinely
+        wants everything at once has one place to get it rather than a second assembly of its own.
+        """
+
+        core = self.system_status_core_payload()
+        advanced = self.system_status_advanced_payload()
+        return {
+            **core,
+            **{key: value for key, value in advanced.items() if key not in {"ok", "generated_at"}},
+            "owner": {**core["owner"], **advanced["owner"]},
+        }
 
     # ---- the background snapshot owner -------------------------------------------------------
     #
     # Set by `TmuxWebtermHTTPServer.__init__` through `start_system_status_snapshot_owner`, and
     # stopped by `server_close`. `None` in a unit test that never armed one, which the route
     # reports as an explicitly typed refusal rather than by rebuilding on the request thread.
-    client_watch_service = OwnedStateAttribute("_watch_bridge", "state")
-    session_files_service = OwnedStateAttribute("_session_files_coordinator", "state")
-    activity_transcript_service = OwnedStateAttribute("_activity_cache", "state")
-    _watched_pr_truncated_signature = OwnedStateAttribute("_activity_cache", "watched_pr_truncated_signature")
-    backend_health_store = OwnedStateAttribute("_system_status_projector", "backend_health_store")
-    backend_health_liveness_provider = OwnedStateAttribute("_system_status_projector", "backend_health_liveness_provider")
-    system_status_snapshot = OwnedStateAttribute("_system_status_projector", "snapshot")
+    system_status_snapshot: system_status_snapshot_module.SystemStatusSnapshotOwner | None = None
 
     def attach_system_status_snapshot_owner(self, owner: system_status_snapshot_module.SystemStatusSnapshotOwner) -> None:
-        return system_status_projector_for(self).attach_system_status_snapshot_owner(self, owner)
+        """Hold the ONE owner of the retained system-status bodies."""
+
+        self.system_status_snapshot = owner
 
     def start_system_status_snapshot_owner(self) -> bool:
-        return system_status_projector_for(self).start_system_status_snapshot_owner(self)
+        """Build and start the owner once. Returns False when one is already attached."""
+
+        if self.system_status_snapshot is not None:
+            return False
+        self.attach_system_status_snapshot_owner(system_status_snapshot_module.SystemStatusSnapshotOwner(
+            build_core=self.system_status_core_payload,
+            build_advanced=self.system_status_advanced_payload,
+            on_diagnostic=self.report_system_status_snapshot_failure,
+        ))
+        return self.system_status_snapshot.start()
 
     def stop_system_status_snapshot_owner(self) -> None:
-        return system_status_projector_for(self).stop_system_status_snapshot_owner(self)
+        owner = self.system_status_snapshot
+        if owner is not None:
+            owner.stop()
 
     def report_system_status_snapshot_failure(self, slot: str, error: BaseException) -> None:
-        return system_status_projector_for(self).report_system_status_snapshot_failure(self, slot, error)
+        """Record a failed snapshot build where the diagnostics reader can see it.
+
+        The slot counts its own failures, but a counter inside the producer is not propagation, so
+        the failure also lands in the server log ring the Logs panel reads.
+        """
+
+        emit_server_log(
+            "error",
+            "system-status-snapshot",
+            f"{slot} snapshot build failed: {type(error).__name__}: {error}",
+            dedupe_key=f"system-status-snapshot:{slot}",
+            dedupe_seconds=30.0,
+        )
 
     def system_status_snapshot_response(self, *, advanced: bool = False) -> tuple[bytes, Mapping[str, Any]]:
-        return system_status_projector_for(self).system_status_snapshot_response(self, advanced=advanced)
+        """The route's whole job: one read of the published body, or one typed refusal.
+
+        Returns pre-encoded bytes and their product metadata so the request thread neither
+        assembles, nor encodes, nor deep-copies the ~70 KB body it is about to write.
+        """
+
+        owner = self.system_status_snapshot
+        if owner is None:
+            # No owner armed in this process. This is a real state - a unit-test app, or a server
+            # torn down mid-request - and it is reported as one rather than silently rebuilt. It
+            # goes through the SAME refusal shape as every other unpublished read, with its own
+            # reason code, so a client has one thing to parse instead of two.
+            refusal = system_status_snapshot_module.owner_unattached_read().refusal_payload(
+                cadence_seconds=system_status_snapshot_module.SNAPSHOT_CADENCE_SECONDS,
+                deadline_seconds=system_status_snapshot_module.FRESHNESS_DEADLINE_SECONDS,
+            )
+            body = system_status_snapshot_module.encode_snapshot_body(refusal)
+            return body, common.inline_json_product_metadata(body)
+        slot = owner.advanced if advanced else owner.core
+        result = owner.read_advanced() if advanced else owner.read_core()
+        if result.snapshot is not None:
+            return result.snapshot.body, result.snapshot.product
+        body = system_status_snapshot_module.encode_snapshot_body(result.refusal_payload(
+            cadence_seconds=slot.cadence_seconds,
+            deadline_seconds=slot.deadline_seconds,
+        ))
+        return body, common.inline_json_product_metadata(body)
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
@@ -13269,71 +12128,890 @@ class TmuxWebtermApp:
                 pending.ts = time.time()
             record.condition.notify()
 
-    def tabber_activity_session_source_signature( self, info: SessionInfo, files_payload: SessionFilesPayload | dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_target: dict[str, dict[str, Any]], attention_ack_rev: int, owned_rows_for_session: dict[tuple[str, str, str], dict[str, Any]] | None = None, ) -> str:
-        return self._activity_cache.tabber_activity_session_source_signature(self, info, files_payload, activity_snapshot, preclassified_by_target, attention_ack_rev, owned_rows_for_session)
+    def tabber_activity_session_source_signature(
+        self,
+        info: SessionInfo,
+        files_payload: SessionFilesPayload | dict[str, Any],
+        activity_snapshot: dict[str, Any],
+        preclassified_by_target: dict[str, dict[str, Any]],
+        attention_ack_rev: int,
+        owned_rows_for_session: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+    ) -> str:
+        activity_rows = {
+            key: value
+            for key, value in activity_snapshot.items()
+            if key == info.session or key.startswith(f"{info.session}:")
+        }
+        pane_rows = [
+            (
+                pane.target,
+                pane.window,
+                pane.pane,
+                pane.current_path,
+                pane.command,
+                pane.process_label or "",
+                pane.pid,
+                pane.active,
+                pane.window_active,
+            )
+            for pane in info.panes
+        ]
+        screen_rows = []
+        for agent in info.agents:
+            target = str(agent.pane_target or "")
+            screen = preclassified_by_target.get(target, {})
+            state = self.agent_window_state_from_screen(screen)
+            screen_rows.append((target, state, self.agent_window_attention_signature(state, screen)))
+        # `statusd`'s owned roster row (state/attention/cooldown for statusd-classified agents,
+        # see agent_window_gathered_agents) is normally a byproduct of the same tmux screen text
+        # already folded into `screen_rows` above -- but a roster-only change (e.g. a cooldown
+        # timer advancing with no new screen capture) would otherwise be invisible here, so this
+        # session would keep reusing a stale owned row until something else changed. Folding the
+        # owned rows in directly closes that gap without keying on the GLOBAL roster revision
+        # (which would defeat per-session reuse on every unrelated session's roster tick).
+        owned_rows_signature = sorted(
+            (window, target, kind, self.stable_client_event_payload_signature(row))
+            for (_row_session, window, target, kind), row in (owned_rows_for_session or {}).items()
+        )
+        signature_payload = {
+            "info": session_info_cache_signature(info),
+            "panes": pane_rows,
+            "files": self.session_files_payload_signature(files_payload),
+            "activity": activity_rows,
+            "screens": screen_rows,
+            "attention_ack_rev": attention_ack_rev,
+            "owned": owned_rows_signature,
+        }
+        return self.stable_client_event_payload_signature(signature_payload)
 
     def tabber_activity_view_coalesce_identity(self, scope: str, bounded_hours: float, source_signature: str) -> tuple[str, int]:
-        return self._activity_cache.tabber_activity_view_coalesce_identity(self, scope, bounded_hours, source_signature)
+        """Cross-port product identity for `tabber_activity_view`, derived from the existing
+        per-refresh `source_signature` rather than a new persisted schema field, so this reuses the
+        TabberActivityCacheRecord's current reuse/staleness contract unchanged."""
+        coalesce_key = f"tabber_activity:{scope}:{bounded_hours}:{source_signature}"[:256]
+        generation = int(hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:12], 16)
+        return coalesce_key, generation
 
-    def compute_tabber_activity_rows_via_jobd( self, changed_sessions: dict[str, SessionInfo], *, discovered_sessions: dict[str, SessionInfo], session_files_by_session: dict[str, Any], activity_snapshot: dict[str, Any], preclassified_by_session: dict[str, dict[str, dict[str, Any]]], owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]], snapshot_revision: int, scope: str, bounded_hours: float, source_signature: str, locale: str = "en", ) -> dict[str, dict[str, Any]]:
-        return self._activity_cache.compute_tabber_activity_rows_via_jobd(self, changed_sessions, discovered_sessions=discovered_sessions, session_files_by_session=session_files_by_session, activity_snapshot=activity_snapshot, preclassified_by_session=preclassified_by_session, owned_agent_rows=owned_agent_rows, snapshot_revision=snapshot_revision, scope=scope, bounded_hours=bounded_hours, source_signature=source_signature, locale=locale)
+    def compute_tabber_activity_rows_via_jobd(
+        self,
+        changed_sessions: dict[str, SessionInfo],
+        *,
+        discovered_sessions: dict[str, SessionInfo],
+        session_files_by_session: dict[str, Any],
+        activity_snapshot: dict[str, Any],
+        preclassified_by_session: dict[str, dict[str, dict[str, Any]]],
+        owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]],
+        snapshot_revision: int,
+        scope: str,
+        bounded_hours: float,
+        source_signature: str,
+        locale: str = "en",
+    ) -> dict[str, dict[str, Any]]:
+        """Gather impure per-session inputs (tmux screen state, attention/cooldown, path/git) in the
+        web owner, then submit the WHOLE changed-session batch to jobd for pure assembly in one call.
+
+        All gathering happens here (a jobd spawn worker has no tmux/app-state access); the worker only
+        reconstructs SessionInfo and runs assemble_agent_window_rows/build_recent_agents_payload.
+        Raises TabberActivityJobdUnavailable (never falls back to inline assembly here) when jobd
+        cannot produce a matching product within the bounded wait; the caller decides the fallback.
+        """
+        if not changed_sessions:
+            return {}
+        sessions_payload: dict[str, Any] = {}
+        for session, info in changed_sessions.items():
+            files_payload = session_files_by_session.get(session, {})
+            transcript_views_by_path: dict[str, dict[str, Any]] = {}
+            for agent in info.agents:
+                if not agent.transcript:
+                    continue
+                view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=agent)
+                if view_status == HTTPStatus.OK:
+                    transcript_views_by_path[str(agent.transcript)] = view_payload
+            gathered_agents = self.agent_window_gathered_agents(
+                session,
+                info=info,
+                discovered_sessions=discovered_sessions,
+                activity_snapshot=activity_snapshot,
+                preclassified_by_target=preclassified_by_session.get(session),
+                files_payload=files_payload,
+                owned_rows_by_target=owned_agent_rows,
+            )
+            recent_paths_by_agent = []
+            for agent in info.agents:
+                window, _pane = session_files.agent_window_for_info(info, agent)
+                recent_paths_by_agent.append(
+                    recent_agent_paths_from_files(files_payload, agent=agent, window=window)
+                )
+            sessions_payload[session] = {
+                "info": asdict(info),
+                "gathered_agents": gathered_agents,
+                "recent_paths_by_agent": recent_paths_by_agent,
+                "transcript_views_by_path": transcript_views_by_path,
+            }
+        coalesce_key, generation = self.tabber_activity_view_coalesce_identity(scope, bounded_hours, source_signature)
+        response = self.job_client.submit(
+            "tabber_activity_view",
+            {"sessions": sessions_payload, "locale": locale, "snapshot_revision": snapshot_revision},
+            priority="freshness",
+            generation=generation,
+            coalesce_key=coalesce_key,
+            deadline_ms=TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS,
+        )
+        if not response.get("ok"):
+            raise TabberActivityJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+        try:
+            _meta, body, state = wait_for_jobd_product(
+                self.job_client, coalesce_key, generation, TABBER_ACTIVITY_JOBD_WAIT_SECONDS
+            )
+        except JobdProductRpcUnavailable as error:
+            raise TabberActivityJobdUnavailable(str(error)) from error
+        if body is None:
+            raise TabberActivityJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+        data = json.loads(body.decode("utf-8"))
+        rows = data.get("session_rows") if isinstance(data, dict) else None
+        if not isinstance(rows, dict):
+            raise TabberActivityJobdUnavailable("malformed jobd tabber-activity product")
+        return rows
 
     def build_activity_payload(self, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
-        return self._activity_cache.build_activity_payload(self, session_scope, hours)
+        session_names, scope_errors, scope = self.activity_session_names(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        sessions, errors = discover_sessions(session_names)
+        errors = [*scope_errors, *errors]
+        ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
+        agent_infos = {session: sessions[session] for session in ordered_sessions if session in sessions and sessions[session].agents}
+        session_files_by_session = self.cached_session_files_payloads_for_infos(agent_infos, hours=bounded_hours)
+        activity_snapshot = self.activity_snapshot_with_recency()
+        # Auto-approve owns prompt/screen classification.  Reuse its immutable roster rows
+        # here so activity cannot publish a contradictory state for the same observation.
+        # Do not make activity's cold path synchronously build a second roster.  At startup the
+        # roster refresh owns the first classification; until it commits, activity keeps its
+        # existing path and joins the owned revision on the next refresh.
+        roster_payload = self.status_snapshot_payload()
+        snapshot_revision, owned_agent_rows = (
+            self.agent_window_snapshot_rows_by_target(roster_payload)
+            if roster_payload is not None
+            else (0, {})
+        )
+        self.merge_shared_attention_acks()
+        with self.client_watch_service.lock:
+            attention_ack_rev = self.client_watch_service.attention_ack_rev
+        preclassified_by_session: dict[str, dict[str, dict[str, Any]]] = {}
+        session_signatures: dict[str, str] = {}
+        for session, info in agent_infos.items():
+            screens = {
+                str(agent.pane_target or ""): self.agent_window_screen_state(agent)
+                for agent in info.agents
+                if agent.pane_target
+            }
+            preclassified_by_session[session] = screens
+            owned_rows_for_session = {
+                key: row for key, row in owned_agent_rows.items() if key[0] == session
+            }
+            session_signatures[session] = self.tabber_activity_session_source_signature(
+                info,
+                session_files_by_session.get(session, {}),
+                activity_snapshot,
+                screens,
+                attention_ack_rev,
+                owned_rows_for_session,
+            )
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
+            can_reuse = record.session_scope == scope and record.session_file_hours == bounded_hours
+            previous_signatures = dict(record.session_signatures) if can_reuse else {}
+            previous_rows = copy.deepcopy(record.session_rows) if can_reuse else {}
+        session_rows: dict[str, dict[str, Any]] = {}
+        reused = 0
+        changed_sessions: dict[str, SessionInfo] = {}
+        for session, info in agent_infos.items():
+            signature = session_signatures[session]
+            previous = previous_rows.get(session)
+            if previous_signatures.get(session) == signature and isinstance(previous, dict):
+                session_rows[session] = previous
+                reused += 1
+                continue
+            changed_sessions[session] = info
+        rebuilt = 0
+        if changed_sessions:
+            try:
+                jobd_rows = self.compute_tabber_activity_rows_via_jobd(
+                    changed_sessions,
+                    discovered_sessions=sessions,
+                    session_files_by_session=session_files_by_session,
+                    activity_snapshot=activity_snapshot,
+                    preclassified_by_session=preclassified_by_session,
+                    owned_agent_rows=owned_agent_rows,
+                    snapshot_revision=snapshot_revision,
+                    scope=scope,
+                    bounded_hours=bounded_hours,
+                    source_signature=self.stable_client_event_payload_signature(sorted(session_signatures.items())),
+                )
+                for session in changed_sessions:
+                    row = jobd_rows.get(session)
+                    if isinstance(row, dict):
+                        session_rows[session] = row
+                        rebuilt += 1
+            except TabberActivityJobdUnavailable as exc:
+                logger.info("tabber activity batch refresh deferred (jobd) for %d session(s): %s", len(changed_sessions), exc)
+            # A changed session jobd could not (re)compute keeps serving its last-known-good rows
+            # (stale) rather than substituting an empty payload; a genuinely new session with no
+            # prior rows gets an explicit empty shape instead of vanishing from the response.
+            for session in changed_sessions:
+                if session in session_rows:
+                    continue
+                previous = previous_rows.get(session)
+                session_rows[session] = previous if isinstance(previous, dict) else {"agents": [], "agent_windows": []}
+        # `discover_sessions` is intentionally lightweight and can temporarily miss an agent
+        # process during tmux/client handoff.  statusd has already committed the authoritative
+        # roster for this revision, so do not publish an apparently coherent Tabber payload that
+        # erases every known window.  These rows carry status only; normal discovery still owns
+        # transcript/path enrichment as soon as it is available again.
+        for session in ordered_sessions:
+            roster_rows = [
+                copy.deepcopy(row)
+                for (row_session, _window, _target, _kind), row in owned_agent_rows.items()
+                if row_session == session
+            ]
+            existing = session_rows.get(session)
+            existing_windows = existing.get("agent_windows") if isinstance(existing, dict) else None
+            if roster_rows and not existing_windows:
+                roster_rows.sort(key=lambda row: (
+                    self.agent_window_index_key(row.get("window_index") if row.get("window_index") is not None else row.get("window")),
+                    str(row.get("pane_target") or ""),
+                    str(row.get("kind") or ""),
+                ))
+                session_rows[session] = {
+                    "agents": self.status_roster_recent_agent_rows(session, roster_rows),
+                    "agent_windows": roster_rows,
+                }
+        agents = [
+            agent
+            for session in ordered_sessions
+            for agent in session_rows.get(session, {}).get("agents", [])
+            if isinstance(agent, dict)
+        ]
+        agent_windows = {
+            session: copy.deepcopy(session_rows[session].get("agent_windows", []))
+            for session in ordered_sessions
+            if session in session_rows
+        }
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
+            record.session_scope = scope
+            record.session_file_hours = bounded_hours
+            record.session_signatures = dict(session_signatures)
+            record.session_rows = copy.deepcopy(session_rows)
+        self.record_performance_sample(
+            BACKGROUND_ROLE_TABBER_ACTIVITY,
+            "row-refresh",
+            trigger="build",
+            count=rebuilt,
+            cache_key={"kind": "tabber-activity"},
+            cache_status="reused" if rebuilt == 0 else "partial" if reused else "rebuilt",
+            details={"rebuilt": rebuilt, "reused": reused, "removed": len(set(previous_rows) - set(session_rows))},
+        )
+        return {
+            "activity": activity_snapshot,
+            "agents": agents,
+            "agent_windows": agent_windows,
+            "errors": errors,
+            "session_scope": scope,
+            "session_file_hours": bounded_hours,
+            "agent_window_snapshot_revision": snapshot_revision,
+        }
 
-    def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str: # Acknowledgements change agent-window visibility without changing the process or # transcript identity below. Fold the durable revision into this cache key so every # server stops serving an earlier unacknowledged Tabber snapshot immediately.
-        return self._activity_cache.tabber_activity_source_signature(self, session_scope)
+    def tabber_activity_source_signature(self, session_scope: Any = "configured") -> str:
+        # Acknowledgements change agent-window visibility without changing the process or
+        # transcript identity below. Fold the durable revision into this cache key so every
+        # server stops serving an earlier unacknowledged Tabber snapshot immediately.
+        self.merge_shared_attention_acks()
+        with self.client_watch_service.lock:
+            attention_ack_rev = self.client_watch_service.attention_ack_rev
+        session_names, _scope_errors, scope = self.activity_session_names(session_scope)
+        sessions, _errors = discover_sessions(session_names)
+        tmux_signature = self.stable_client_event_payload_signature(
+            self.tmux_signal_signature_payload(self.tmux_signal_snapshot())
+        )
+        rows = []
+        for session in sorted(session_names):
+            info = sessions.get(session)
+            if info is None:
+                rows.append((session, None))
+                continue
+            selected_path = info.selected_pane.current_path if info.selected_pane and info.selected_pane.current_path else ""
+            rows.append((
+                session,
+                selected_path,
+                tuple((agent.kind or "", agent.cwd or "", agent.transcript or "", agent.session_id or "") for agent in info.agents),
+                tuple(
+                    (
+                        pane.target,
+                        pane.window,
+                        pane.pane,
+                        pane.current_path,
+                        pane.process_label or "",
+                        pane.pid,
+                        pane.active,
+                        pane.window_active,
+                    )
+                    for pane in info.panes
+                ),
+            ))
+        key_text = self.client_event_payload_signature(
+            {
+                "scope": scope,
+                "sessions": rows,
+                "attention_ack_rev": attention_ack_rev,
+                "tmux_signature": tmux_signature,
+            }
+        )
+        return hashlib.sha256(key_text.encode("utf-8")).hexdigest()
 
-    def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]: # A source signature fences freshness inside the record; it must not become # part of the filename. Statusd revisions can legitimately advance while a # Tabber refresh is in flight, and the old design left one durable file per # short-lived signature, then made followers see an empty cache miss.
-        return self._activity_cache.tabber_activity_cache_disk_path(self, hours, source_signature)
+    def tabber_activity_cache_disk_path(self, hours: float, source_signature: str = "") -> tuple[Path, str]:
+        # A source signature fences freshness inside the record; it must not become
+        # part of the filename. Statusd revisions can legitimately advance while a
+        # Tabber refresh is in flight, and the old design left one durable file per
+        # short-lived signature, then made followers see an empty cache miss.
+        del source_signature
+        key_text = json.dumps(
+            {
+                "kind": "tabber-activity",
+                "hours": session_files.bounded_session_files_hours(hours),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
+        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.json", signature
 
     def tabber_activity_cache_manifest_path(self, signature: str) -> Path:
-        return self._activity_cache.tabber_activity_cache_manifest_path(self, signature)
+        return TABBER_ACTIVITY_CACHE_DIR / f"{signature}.manifest.json"
 
-    def read_tabber_activity_disk_cache( self, hours: float, max_age_seconds: float | None = None, allow_stale: bool = True, source_signature: str = "", allow_source_mismatch: bool = False, ) -> tuple[dict[str, Any], bool, float] | None:
-        return self._activity_cache.read_tabber_activity_disk_cache(self, hours, max_age_seconds, allow_stale, source_signature, allow_source_mismatch)
-
-    def tabber_published_cache(self):
-        return self._activity_cache.tabber_published_cache(self)
+    def read_tabber_activity_disk_cache(
+        self,
+        hours: float,
+        max_age_seconds: float | None = None,
+        allow_stale: bool = True,
+        source_signature: str = "",
+        allow_source_mismatch: bool = False,
+    ) -> tuple[dict[str, Any], bool, float] | None:
+        path, signature = self.tabber_activity_cache_disk_path(hours, source_signature)
+        record = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            return None
+        if record.get("version") != TABBER_ACTIVITY_CACHE_VERSION or record.get("signature") != signature:
+            return None
+        source_matches = str(record.get("source_signature") or "") == source_signature
+        if not source_matches and not allow_source_mismatch:
+            return None
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
+        manifest_path = self.tabber_activity_cache_manifest_path(signature)
+        manifest = read_json_file(manifest_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        try:
+            stored_at_wall = float(record.get("stored_at", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if isinstance(manifest, dict) and manifest.get("version") == TABBER_ACTIVITY_CACHE_VERSION and manifest.get("signature") == signature and manifest.get("payload_signature") == payload_signature and (allow_source_mismatch or str(manifest.get("source_signature") or "") == source_signature):
+            try:
+                stored_at_wall = float(manifest.get("stored_at", stored_at_wall))
+            except (TypeError, ValueError):
+                pass
+        cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+        if cached_hours != session_files.bounded_session_files_hours(hours):
+            return None
+        age_seconds = max(0.0, time.time() - stored_at_wall)
+        fresh = source_matches and (max_age_seconds is None or age_seconds <= max_age_seconds)
+        if not fresh and not allow_stale:
+            return None
+        self.set_tabber_activity_cache(payload, stored_at=time.monotonic() - age_seconds, write_disk=False, source_signature=source_signature)
+        return copy.deepcopy(payload), fresh, age_seconds
 
     def write_tabber_activity_disk_cache_unlocked(self, path: Path, signature: str, payload: dict[str, Any], source_signature: str) -> None:
-        return self._activity_cache.write_tabber_activity_disk_cache_unlocked(self, path, signature, payload, source_signature)
+        payload_signature = self.session_files_payload_signature(payload)
+        payload_changed = True
+        existing = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if isinstance(existing, dict) and existing.get("version") == TABBER_ACTIVITY_CACHE_VERSION and existing.get("signature") == signature:
+            existing_payload = existing.get("payload")
+            existing_payload_signature = str(existing.get("payload_signature") or "")
+            if not existing_payload_signature and isinstance(existing_payload, dict):
+                existing_payload_signature = self.session_files_payload_signature(existing_payload)
+            payload_changed = existing_payload_signature != payload_signature
+        stored_at = time.time()
+        record = {
+            "version": TABBER_ACTIVITY_CACHE_VERSION,
+            "signature": signature,
+            "source_signature": source_signature,
+            "stored_at": stored_at,
+            "payload_signature": payload_signature,
+            "payload": payload,
+        }
+        if payload_changed:
+            atomic_write_text(path, json.dumps(record, sort_keys=True, separators=(",", ":")), mode=0o600)
+        manifest = {
+            "version": TABBER_ACTIVITY_CACHE_VERSION,
+            "signature": signature,
+            "source_signature": source_signature,
+            "stored_at": stored_at,
+            "payload_signature": payload_signature,
+            "payload_changed": payload_changed,
+            "owner": self.background_owner.status_payload().get("generation", {}),
+            "refresh_status": "ready",
+            "last_error": "",
+        }
+        atomic_write_text(self.tabber_activity_cache_manifest_path(signature), json.dumps(manifest, sort_keys=True, separators=(",", ":")), mode=0o600)
 
     def write_tabber_activity_disk_cache(self, payload: dict[str, Any], source_signature: str = "") -> None:
-        return self._activity_cache.write_tabber_activity_disk_cache(self, payload, source_signature)
+        if not source_signature:
+            source_signature = self.tabber_activity_source_signature()
+        hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+        path, signature = self.tabber_activity_cache_disk_path(hours, source_signature)
+        try:
+            with file_lock(path, dir_mode=0o700):
+                self.write_tabber_activity_disk_cache_unlocked(path, signature, payload, source_signature)
+        except OSError as exc:
+            logger.warning("failed to write tabber activity cache %s: %s", path, exc)
 
     def set_tabber_activity_cache(self, payload: dict[str, Any], stored_at: float | None = None, write_disk: bool = True, source_signature: str = "") -> None:
-        return self._activity_cache.set_tabber_activity_cache(self, payload, stored_at, write_disk, source_signature)
+        if write_disk and not source_signature:
+            source_signature = self.tabber_activity_source_signature()
+        with self.activity_transcript_service.tabber_cache_lock:
+            self.activity_transcript_service.tabber_cache_record.stored_at = time.monotonic() if stored_at is None else stored_at
+            self.activity_transcript_service.tabber_cache_record.payload = copy.deepcopy(payload)
+            self.activity_transcript_service.tabber_cache_record.source_signature = source_signature
+        if write_disk:
+            self.write_tabber_activity_disk_cache(payload, source_signature=source_signature)
 
-    def get_tabber_activity_cache( self, max_age_seconds: float, allow_stale: bool = True, hours: float | None = None, source_signature: str = "", allow_source_mismatch: bool = False, ) -> tuple[dict[str, Any], bool, float] | None:
-        return self._activity_cache.get_tabber_activity_cache(self, max_age_seconds, allow_stale, hours, source_signature, allow_source_mismatch)
+    def get_tabber_activity_cache(
+        self,
+        max_age_seconds: float,
+        allow_stale: bool = True,
+        hours: float | None = None,
+        source_signature: str = "",
+        allow_source_mismatch: bool = False,
+    ) -> tuple[dict[str, Any], bool, float] | None:
+        started = time.perf_counter()
+        now = time.monotonic()
+        bounded_hours = session_files.bounded_session_files_hours(24.0 if hours is None else hours)
+        stale_cached: tuple[dict[str, Any], bool, float] | None = None
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
+            if record.stored_at is not None and record.payload is not None:
+                stored_at = record.stored_at
+                payload = record.payload
+                cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+                source_matches = not source_signature or record.source_signature == source_signature
+                if cached_hours == bounded_hours and (source_matches or allow_source_mismatch):
+                    age_seconds = max(0.0, now - stored_at)
+                    fresh = source_matches and age_seconds <= max_age_seconds
+                    if fresh:
+                        self.record_performance_sample(
+                            BACKGROUND_ROLE_TABBER_ACTIVITY,
+                            "cache-read",
+                            trigger="memory",
+                            compute_ms=(time.perf_counter() - started) * 1000,
+                            payload=payload,
+                            cache_key={"kind": "tabber-activity"},
+                            cache_status="hit:fresh",
+                            cache_hit=True,
+                            cache_fresh=True,
+                        )
+                        return copy.deepcopy(payload), True, age_seconds
+                    stale_cached = (copy.deepcopy(payload), False, age_seconds)
+        disk_cached = self.read_tabber_activity_disk_cache(
+            bounded_hours,
+            max_age_seconds=max_age_seconds,
+            allow_stale=allow_stale,
+            source_signature=source_signature,
+            allow_source_mismatch=allow_source_mismatch,
+        )
+        if disk_cached and (stale_cached is None or disk_cached[2] <= stale_cached[2]):
+            self.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "cache-read",
+                trigger="disk",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=disk_cached[0],
+                cache_key={"kind": "tabber-activity"},
+                cache_status="hit:fresh" if disk_cached[1] else "hit:stale",
+                cache_hit=True,
+                cache_fresh=bool(disk_cached[1]),
+            )
+            return disk_cached
+        if stale_cached is not None and allow_stale:
+            self.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "cache-read",
+                trigger="memory",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=stale_cached[0],
+                cache_key={"kind": "tabber-activity"},
+                cache_status="hit:stale",
+                cache_hit=True,
+                cache_fresh=False,
+            )
+            return stale_cached
+        self.record_performance_sample(
+            BACKGROUND_ROLE_TABBER_ACTIVITY,
+            "cache-read",
+            trigger="miss",
+            compute_ms=(time.perf_counter() - started) * 1000,
+            cache_key={"kind": "tabber-activity"},
+            cache_status="miss",
+            cache_hit=False,
+        )
+        return None
 
     def refresh_tabber_activity_cache(self, hours: Any = 24.0) -> dict[str, Any]:
-        return self._activity_cache.refresh_tabber_activity_cache(self, hours)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        source_signature = self.tabber_activity_source_signature()
+        inflight_key = (bounded_hours, source_signature)
+        with self.activity_transcript_service.tabber_cache_lock:
+            future = self.activity_transcript_service.tabber_cache_record.inflight_by_key.get(inflight_key)
+            if future is None:
+                future = Future()
+                self.activity_transcript_service.tabber_cache_record.inflight_by_key[inflight_key] = future
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            payload = future.result()
+            self.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "refresh",
+                trigger="single-flight",
+                compute_ms=0,
+                payload=payload,
+                cache_key={"kind": "tabber-activity"},
+                cache_status="coalesced",
+                cache_hit=True,
+                cache_fresh=True,
+            )
+            return copy.deepcopy(payload)
+        try:
+            payload = self.refresh_tabber_activity_cache_owner(bounded_hours, source_signature)
+            future.set_result(copy.deepcopy(payload))
+            return payload
+        except Exception as exc:
+            future.set_exception(exc)
+            raise
+        finally:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.inflight_by_key.get(inflight_key) is future:
+                    self.activity_transcript_service.tabber_cache_record.inflight_by_key.pop(inflight_key, None)
 
     def refresh_tabber_activity_cache_owner(self, bounded_hours: float, source_signature: str) -> dict[str, Any]:
-        return self._activity_cache.refresh_tabber_activity_cache_owner(self, bounded_hours, source_signature)
+        started = time.perf_counter()
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "refresh"})
+            cached = self.get_tabber_activity_cache(float("inf"), allow_stale=True, hours=bounded_hours, source_signature=source_signature)
+            if cached:
+                payload, _fresh, _age = cached
+                self.record_performance_sample(
+                    BACKGROUND_ROLE_TABBER_ACTIVITY,
+                    "refresh",
+                    trigger="follower-cache",
+                    compute_ms=(time.perf_counter() - started) * 1000,
+                    payload=payload,
+                    cache_key={"kind": "tabber-activity"},
+                    cache_status="hit:follower",
+                    cache_hit=True,
+                )
+                return payload
+            payload = {"activity": {}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": bounded_hours}
+            self.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "refresh",
+                trigger="follower-empty",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key={"kind": "tabber-activity"},
+                cache_status="refreshing-elsewhere",
+                cache_hit=False,
+            )
+            return payload
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
+            current_payload = copy.deepcopy(record.payload) if record.payload is not None else None
+            current_signature = record.source_signature
+        if current_payload is not None and current_signature == source_signature:
+            self.record_performance_sample(
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "refresh",
+                trigger="owner",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=current_payload,
+                cache_key={"kind": "tabber-activity"},
+                cache_status="hit:unchanged",
+                cache_hit=True,
+                cache_fresh=True,
+            )
+            return current_payload
+        payload = self.build_activity_payload(hours=bounded_hours)
+        self.set_tabber_activity_cache(payload, source_signature=source_signature)
+        self.record_performance_sample(
+            BACKGROUND_ROLE_TABBER_ACTIVITY,
+            "refresh",
+            trigger="owner",
+            compute_ms=(time.perf_counter() - started) * 1000,
+            payload=payload,
+            cache_key={"kind": "tabber-activity"},
+            cache_status="computed",
+            cache_hit=False,
+            cache_fresh=True,
+        )
+        return payload
 
     def publish_tabber_activity_refresh_if_changed(self, *, compute_ms: float) -> bool:
-        return self._activity_cache.publish_tabber_activity_refresh_if_changed(self, compute_ms=compute_ms)
+        """Notify demanded Tabber clients after a newly readable cache generation.
+
+        The source signature is an internal cache identity, while the client-event
+        broker owns the monotonic delivery revision.  Comparing it under the cache
+        lock avoids turning the warmer's unchanged reconciliation into an SSE wakeup.
+        """
+        with self.activity_transcript_service.tabber_cache_lock:
+            record = self.activity_transcript_service.tabber_cache_record
+            source_signature = record.source_signature
+            if record.payload is None or not source_signature or source_signature == record.published_source_signature:
+                return False
+            record.published_source_signature = source_signature
+        self.publish_background_refresh_done(
+            BACKGROUND_ROLE_TABBER_ACTIVITY,
+            {"compute_ms": compute_ms, "cache_changed": True},
+        )
+        return True
 
     def run_tabber_activity_cache_refresh(self, worker: threading.Thread) -> None:
-        return self._activity_cache.run_tabber_activity_cache_refresh(self, worker)
+        try:
+            started = time.perf_counter()
+            refresh_details = self.background_refresh_event_details(BACKGROUND_ROLE_TABBER_ACTIVITY, {"cache_key_kind": "tabber-activity"}, cache_key={"kind": "tabber-activity"})
+            self.log_sampled_background_refresh_event(
+                "background_refresh_started",
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "Tabber activity background refresh started",
+                refresh_details,
+                message_key="events.message.backgroundRefresh.started",
+                message_params={"target": message_descriptor("tabber.title", "Tabber")},
+            )
+            self.refresh_tabber_activity_cache()
+            compute_ms = (time.perf_counter() - started) * 1000
+            done_details = dict(refresh_details)
+            done_details["compute_ms"] = round(compute_ms, 3)
+            self.log_sampled_background_refresh_event(
+                "background_refresh_done",
+                BACKGROUND_ROLE_TABBER_ACTIVITY,
+                "Tabber activity background refresh finished",
+                done_details,
+                message_key="events.message.backgroundRefresh.finished",
+                message_params={"target": message_descriptor("tabber.title", "Tabber")},
+            )
+            self.publish_tabber_activity_refresh_if_changed(compute_ms=compute_ms)
+        finally:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.refresh_worker is worker:
+                    self.activity_transcript_service.tabber_cache_record.refresh_worker = None
 
     def start_tabber_activity_cache_refresh(self) -> bool:
-        return self._activity_cache.start_tabber_activity_cache_refresh(self)
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "async-refresh"})
+            return False
+        with self.activity_transcript_service.tabber_cache_lock:
+            if self.activity_transcript_service.tabber_cache_record.refresh_worker is not None:
+                return False
+            worker: threading.Thread
+
+            def run_refresh() -> None:
+                self.run_tabber_activity_cache_refresh(worker)
+
+            worker = threading.Thread(target=run_refresh, name="tabber-activity-refresh", daemon=True)
+            self.activity_transcript_service.tabber_cache_record.refresh_worker = worker
+        def rollback() -> None:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_cache_record.refresh_worker is worker:
+                    self.activity_transcript_service.tabber_cache_record.refresh_worker = None
+
+        common.start_thread_with_rollback(worker, rollback)
+        return True
 
     def start_tabber_activity_cache_warmer(self) -> bool:
-        return composed_owner_for(self, "_activity_cache", ActivityCache).start_tabber_activity_cache_warmer(self)
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "warmer"})
+            return False
+        with self.activity_transcript_service.tabber_cache_lock:
+            current = self.activity_transcript_service.tabber_warmer_record
+            if current.running and current.thread is not None and current.thread.is_alive():
+                return False
+            record = TabberActivityWarmerRecord(running=True, consumer_until=current.consumer_until, refresh_due_at=current.refresh_due_at, refresh_triggers=set(current.refresh_triggers))
+            worker = threading.Thread(target=self.tabber_activity_cache_warmer_loop, args=(record,), name="tabber-activity-cache", daemon=True)
+            record.thread = worker
+            self.activity_transcript_service.tabber_warmer_record = record
+
+            def rollback() -> None:
+                # tabber_cache_lock is already held by this caller; clear the just-published thread
+                # in place. capture_thread_owners reads tabber_warmer_record.thread under this same
+                # lock and stop_tabber_warmer joins it, so publication and start must be atomic.
+                if self.activity_transcript_service.tabber_warmer_record is record and record.thread is worker:
+                    record.thread = None
+                    record.running = False
+
+            # Start under the lock so a teardown capturing tabber_warmer_record.thread in the gap
+            # cannot observe or join a published-but-unstarted warmer thread.
+            common.start_thread_with_rollback(worker, rollback)
+        return True
 
     def tabber_activity_cache_warmer_loop(self, record: TabberActivityWarmerRecord) -> None:
-        return composed_owner_for(self, "_activity_cache", ActivityCache).tabber_activity_cache_warmer_loop(self, record)
+        try:
+            while True:
+                with self.activity_transcript_service.tabber_cache_lock:
+                    if self.activity_transcript_service.tabber_warmer_record is not record or not record.running:
+                        return
+                if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                    return
+                with self.activity_transcript_service.tabber_cache_lock:
+                    due_at = record.refresh_due_at
+                if due_at <= 0.0:
+                    if not self.tabber_activity_has_recent_consumer():
+                        self.record_performance_sample(
+                            BACKGROUND_ROLE_TABBER_ACTIVITY,
+                            "warmer",
+                            trigger="idle",
+                            cache_key={"kind": "tabber-activity"},
+                            cache_status="skipped:no-consumer",
+                        )
+                    record.wake.clear()
+                    record.wake.wait()
+                    continue
+                remaining = max(0.0, due_at - time.monotonic())
+                if remaining:
+                    record.wake.clear()
+                    record.wake.wait(remaining)
+                    continue
+                started = time.monotonic()
+                try:
+                    with self.activity_transcript_service.tabber_cache_lock:
+                        if record.refresh_due_at != due_at:
+                            continue
+                        record.refresh_due_at = 0.0
+                        record.refresh_triggers.clear()
+                    if self.tabber_activity_has_recent_consumer():
+                        self.refresh_tabber_activity_cache()
+                        self.publish_tabber_activity_refresh_if_changed(compute_ms=(time.monotonic() - started) * 1000)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self.log_event(
+                        None,
+                        "client_event_watch_error",
+                        f"Tabber activity cache refresh failed: {exc}",
+                        {"diagnostic": str(exc)},
+                        message_key="events.message.tabberActivity.refreshFailed",
+                    )
+        finally:
+            with self.activity_transcript_service.tabber_cache_lock:
+                if self.activity_transcript_service.tabber_warmer_record is record:
+                    record.running = False
 
     def empty_tabber_activity_payload(self, bounded_hours: float, refresh_seconds: float, **cache: Any) -> dict[str, Any]:
-        return self._activity_cache.empty_tabber_activity_payload(self, bounded_hours, refresh_seconds, **cache)
+        return {
+            "activity": {},
+            "agents": [],
+            "agent_windows": {},
+            "errors": [],
+            "session_scope": "configured",
+            "session_file_hours": bounded_hours,
+            "cache": {
+                "hit": False,
+                "stale": True,
+                "age_seconds": None,
+                "refresh_seconds": refresh_seconds,
+                **cache,
+            },
+        }
 
     def activity_payload(self, hours: Any = 24.0, visible: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._activity_cache.activity_payload(self, hours, visible)
+        visible_consumer = self.mark_tabber_activity_consumer(visible)
+        refresh_seconds = self.tabber_activity_refresh_seconds()
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        source_signature = self.tabber_activity_source_signature()
+        cached = self.get_tabber_activity_cache(refresh_seconds, allow_stale=True, hours=bounded_hours, source_signature=source_signature)
+        if cached is None:
+            # A new source generation must never blank a visible Tabber. Reuse the
+            # last readable generation as explicitly stale while one owner refreshes.
+            cached = self.get_tabber_activity_cache(
+                refresh_seconds,
+                allow_stale=True,
+                hours=bounded_hours,
+                source_signature=source_signature,
+                allow_source_mismatch=True,
+            )
+        if cached:
+            payload, fresh, age_seconds = cached
+            cached_hours = session_files.bounded_session_files_hours(self.float_value(payload.get("session_file_hours"), 24.0))
+            if cached_hours != bounded_hours:
+                payload = self.build_activity_payload(hours=bounded_hours)
+                self.set_tabber_activity_cache(payload, source_signature=source_signature)
+                payload = copy.deepcopy(payload)
+                payload["cache"] = {
+                    "hit": False,
+                    "stale": False,
+                    "age_seconds": 0,
+                    "refresh_seconds": refresh_seconds,
+                    "refreshing": False,
+                }
+                return payload, HTTPStatus.OK
+            payload["cache"] = {
+                "hit": True,
+                "stale": not fresh,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": refresh_seconds,
+            }
+            if not fresh:
+                if not visible_consumer:
+                    payload["cache"]["refreshing"] = False
+                    payload["cache"]["idle_no_consumer"] = True
+                elif self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+                    payload["cache"]["refreshing"] = self.start_tabber_activity_cache_refresh()
+                else:
+                    self.record_background_follower_stale_read(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload-stale"})
+                    self.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+                    if self.background_refresh_should_fallback(refresh_result):
+                        payload = self.build_activity_payload(hours=bounded_hours)
+                        self.set_tabber_activity_cache(payload, source_signature=source_signature)
+                        payload = copy.deepcopy(payload)
+                        payload["cache"] = {
+                            "hit": False,
+                            "stale": False,
+                            "age_seconds": 0,
+                            "refresh_seconds": refresh_seconds,
+                            "fallback": True,
+                        }
+                    else:
+                        payload["cache"]["refreshing_elsewhere"] = True
+            return payload, HTTPStatus.OK
+        if not visible_consumer:
+            return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, idle_no_consumer=True), HTTPStatus.OK
+        if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
+            refresh_result = self.request_background_refresh(BACKGROUND_ROLE_TABBER_ACTIVITY, {"reason": "activity-payload"})
+            self.record_background_avoided_recompute(BACKGROUND_ROLE_TABBER_ACTIVITY)
+            if self.background_refresh_should_fallback(refresh_result):
+                payload = self.build_activity_payload(hours=bounded_hours)
+                self.set_tabber_activity_cache(payload, source_signature=source_signature)
+                payload = copy.deepcopy(payload)
+                payload["cache"] = {
+                    "hit": False,
+                    "stale": False,
+                    "age_seconds": 0,
+                    "refresh_seconds": refresh_seconds,
+                    "fallback": True,
+                }
+                return payload, HTTPStatus.OK
+            return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing_elsewhere=True), HTTPStatus.OK
+        refreshing = self.start_tabber_activity_cache_refresh()
+        return self.empty_tabber_activity_payload(bounded_hours, refresh_seconds, refreshing=refreshing), HTTPStatus.OK
 
     def run_history_store_for_app(self) -> RunHistoryStore:
         store = getattr(self, "run_history_store", None)
@@ -13451,14 +13129,143 @@ class TmuxWebtermApp:
         issues = [message_fields("message", "searchHistory.error.discovery", error, {"error": error}) for error in [*refresh_errors, *errors]]
         return {"session": session or "", "runs": rows, "errors": issues}, HTTPStatus.OK
 
-    def session_files_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, requester: str = "api-session-files", accepted_operation: bool = False, ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return self._session_files_coordinator.session_files_payload(self, session, hours, from_ref, to_ref, repo_refs, force, requester, accepted_operation)
+    def session_files_payload(
+        self,
+        session: str | None = None,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+        requester: str = "api-session-files",
+        accepted_operation: bool = False,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
+        if session and session not in self.sessions:
+            diagnostic = f"unknown session: {session}"
+            return {"session": session, **user_message_payload("status.sessionEnded", diagnostic, session=session)}, HTTPStatus.NOT_FOUND
+        scope = [session] if session else self.sessions
+        infos, errors = discover_sessions(scope)
+        return self.session_files_payload_for_infos(
+            session,
+            infos,
+            hours,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            force=force,
+            requester=requester,
+            extra_errors=[*refresh_errors, *errors],
+            accepted_operation=accepted_operation,
+        )
 
-    def session_files_http_payload( self, session: str | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._session_files_coordinator.session_files_http_payload(self, session, hours, from_ref, to_ref, repo_refs, force)
+    def session_files_http_payload(
+        self,
+        session: str | None = None,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        payload, status = self.session_files_payload(
+            session,
+            hours,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            force=force,
+            accepted_operation=True,
+        )
+        if payload.get("state") in {"queued", "failed"}:
+            return payload, status
+        request_id = self.new_api_request_id()
+        if status < HTTPStatus.BAD_REQUEST:
+            return self.session_files_ready_result(request_id, payload), status
+        descriptor = payload.get("user_message") if isinstance(payload.get("user_message"), dict) else {}
+        message = str(descriptor.get("fallback") or payload.get("error") or "session-files request failed")
+        return common.error_payload(
+            message,
+            message_key=str(descriptor.get("key") or "common.requestFailed"),
+            message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
+            canonical=True,
+            code="session_files_request_failed",
+            origin="server.http",
+            retryable=False,
+            details={"session": str(session or ""), "status": int(status)},
+            stack=[{
+                "component": "server.http",
+                "operation": "GET /api/session-files",
+                "code": "session_files_request_failed",
+            }],
+            request_id=request_id,
+        ), status
 
-    def session_files_batch_payload( self, sessions: list[str] | None = None, hours: float = 24.0, from_ref: str | None = None, to_ref: str | None = None, repo_refs: dict[str, dict[str, str]] | None = None, force: bool = False, ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._session_files_coordinator.session_files_batch_payload(self, sessions, hours, from_ref, to_ref, repo_refs, force)
+    def session_files_batch_payload(
+        self,
+        sessions: list[str] | None = None,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        refresh_errors = self.refresh_sessions()
+        requested: list[str] = []
+        seen: set[str] = set()
+        for raw_session in sessions or self.sessions:
+            session = str(raw_session or "").strip()
+            if not session or session in seen:
+                continue
+            seen.add(session)
+            requested.append(session)
+        invalid = [session for session in requested if session not in self.sessions]
+        valid = [session for session in requested if session in self.sessions]
+        infos, errors = discover_sessions(valid)
+        payloads: dict[str, SessionFilesPayload] = {}
+        statuses: dict[str, int] = {}
+        batch_infos: dict[str, SessionInfo] = {}
+        for session in requested:
+            if session in invalid:
+                diagnostic = f"unknown session: {session}"
+                payloads[session] = {"session": session, "errors": [], **user_message_payload("status.sessionEnded", diagnostic, session=session)}
+                statuses[session] = int(HTTPStatus.NOT_FOUND)
+                continue
+            info = infos.get(session)
+            if info is None:
+                diagnostic = f"session unavailable: {session}"
+                payloads[session] = {"session": session, "errors": [], **user_message_payload("diff.error.sessionUnavailable", diagnostic, session=session)}
+                statuses[session] = int(HTTPStatus.NOT_FOUND)
+                continue
+            batch_infos[session] = info
+
+        def load_session_payload(name: str, info: SessionInfo) -> tuple[SessionFilesPayload, HTTPStatus]:
+            return self.session_files_payload_for_infos(
+                name,
+                {name: info},
+                hours,
+                from_ref=from_ref,
+                to_ref=to_ref,
+                repo_refs=repo_refs,
+                force=force,
+                requester="api-session-files-batch",
+            )
+
+        if len(batch_infos) == 1:
+            session, info = next(iter(batch_infos.items()))
+            payload, status = load_session_payload(session, info)
+            payloads[session] = payload
+            statuses[session] = int(status)
+        elif batch_infos:
+            for session, info in batch_infos.items():
+                payload, status = load_session_payload(session, info)
+                payloads[session] = payload
+                statuses[session] = int(status)
+        return {
+            "sessions": payloads,
+            "statuses": statuses,
+            "errors": [*refresh_errors, *errors],
+        }, HTTPStatus.OK
 
     def client_event(self, event: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
         session = event.get("session")
@@ -14578,56 +14385,35 @@ class TmuxWebtermApp:
     def wait_for_jobd_operation_job(self, job_id: str, deadline_at: float) -> dict[str, Any]:
         """Wait in the bounded completion service, never in an HTTP handler."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
-        transient_polls = 0
-        last_transient: dict[str, Any] = {}
-        polling_capabilities = local_service_polling_capabilities(self.job_client)
-        with deferred_transport_errors(self.job_client) as deferred_transport:
-            while not self.jobd_operation_service.stop_event.is_set():
-                response = self.job_client.result(job_id)
-                job = response.get("job") if isinstance(response.get("job"), dict) else {}
-                state = str(job.get("status") or "")
-                if response.get("ok") is not True:
-                    failure = dict(response)
-                    if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                        raise JobdOperationUnavailable(
-                            str(failure.get("error") or "jobd result unavailable"),
-                            failure,
-                        )
-                    transient_polls += 1
-                    last_transient = failure
-                elif not job:
-                    raise JobdOperationUnavailable(
-                        "malformed jobd result response",
-                        {"error": "malformed jobd result response", "status": "malformed_result"},
-                    )
-                elif state == "completed":
-                    return job
-                elif state in {"failed", "cancelled", "superseded", "timed_out"}:
-                    raise JobdOperationUnavailable(
-                        str(job.get("error") or f"jobd producer {state}"),
-                        dict(job),
-                    )
-                remaining = deadline_at - time.time()
-                if remaining <= 0:
-                    if deferred_transport is not None:
-                        deferred_transport.publish()
-                    raise JobdOperationUnavailable(
-                        "jobd result deadline expired",
-                        {
-                            "error": "jobd result deadline expired",
-                            "status": "deadline_expired",
-                            "transient_polls": transient_polls,
-                            "last_transient_error": str(last_transient.get("error") or ""),
-                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                        },
-                        code="deadline_expired",
-                        status=HTTPStatus.GATEWAY_TIMEOUT,
-                    )
-                self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
-                poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        while not self.jobd_operation_service.stop_event.is_set():
+            response = self.job_client.result(job_id)
+            job = response.get("job") if isinstance(response.get("job"), dict) else {}
+            state = str(job.get("status") or "")
+            if response.get("ok") is not True or not job:
+                raise JobdOperationUnavailable(
+                    str(response.get("error") or "jobd result unavailable"),
+                    dict(response),
+                )
+            if state == "completed":
+                return job
+            if state in {"failed", "cancelled", "superseded", "timed_out"}:
+                raise JobdOperationUnavailable(
+                    str(job.get("error") or f"jobd producer {state}"),
+                    dict(job),
+                )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise JobdOperationUnavailable(
+                    "jobd product deadline expired",
+                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    code="deadline_expired",
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                )
+            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
         raise JobdOperationUnavailable(
-            "jobd result completion stopped",
-            {"error": "jobd result completion stopped", "status": "producer_abandoned"},
+            "jobd product completion stopped",
+            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
             code="producer_abandoned",
         )
 
@@ -14640,104 +14426,55 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         """Read a potentially large accepted result through jobd's binary product frame."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
-        transient_polls = 0
-        last_transient: dict[str, Any] = {}
-        polling_capabilities = local_service_polling_capabilities(self.job_client)
-        with deferred_transport_errors(self.job_client) as deferred_transport:
-            while not self.jobd_operation_service.stop_event.is_set():
-                if cancel_event is not None and cancel_event.is_set():
+        while not self.jobd_operation_service.stop_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                raise JobdOperationUnavailable(
+                    "jobd product completion cancelled",
+                    {"error": "jobd product completion cancelled", "status": "producer_abandoned"},
+                    code="producer_abandoned",
+                )
+            metadata, body = self.job_client.product(producer.product_key)
+            state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
+            if not isinstance(metadata, dict) or metadata.get("ok") is not True:
+                raise JobdOperationUnavailable(
+                    str(metadata.get("error") or "jobd product unavailable") if isinstance(metadata, dict) else "jobd product unavailable",
+                    dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"},
+                )
+            if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation:
+                try:
+                    product = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise JobdOperationUnavailable(
-                        "jobd product completion cancelled",
-                        {"error": "jobd product completion cancelled", "status": "producer_abandoned"},
-                        code="producer_abandoned",
-                    )
-                metadata, body = self.job_client.product(producer.product_key)
-                state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
-                if not isinstance(metadata, dict) or metadata.get("ok") is not True:
-                    failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
-                    if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                        raise JobdOperationUnavailable(
-                            str(failure.get("error") or "jobd product unavailable"),
-                            failure,
-                        )
-                    transient_polls += 1
-                    last_transient = failure
-                    remaining = deadline_at - time.time()
-                    if remaining <= 0:
-                        if deferred_transport is not None:
-                            deferred_transport.publish()
-                        raise JobdOperationUnavailable(
-                            "jobd product deadline expired",
-                            {
-                                "error": "jobd product deadline expired",
-                                "status": "deadline_expired",
-                                "transient_polls": transient_polls,
-                                "last_transient_error": str(last_transient.get("error") or ""),
-                                "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                            },
-                            code="deadline_expired",
-                            status=HTTPStatus.GATEWAY_TIMEOUT,
-                        )
-                    wait_event = cancel_event or self.jobd_operation_service.stop_event
-                    wait_event.wait(min(poll_seconds, remaining))
-                    poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
-                    continue
-                if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation:
-                    try:
-                        product = json.loads(body.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                        raise JobdOperationUnavailable(
-                            "malformed completed jobd product",
-                            {"error": str(error), "status": "malformed_product"},
-                        ) from error
-                    if not isinstance(product, dict):
-                        raise JobdOperationUnavailable(
-                            "malformed completed jobd product",
-                            {"error": "malformed completed jobd product", "status": "malformed_product"},
-                        )
-                    return product
-                if state == "none" and metadata.get("inflight") is not True:
-                    response = self.job_client.result(producer.job_id)
-                    job = response.get("job") if isinstance(response.get("job"), dict) else {}
-                    job_state = str(job.get("status") or "")
-                    if response.get("ok") is not True:
-                        failure = dict(response)
-                        if not local_service_failure_is_transient(failure, capabilities=polling_capabilities):
-                            raise JobdOperationUnavailable(
-                                str(failure.get("error") or "jobd result unavailable"),
-                                failure,
-                            )
-                        transient_polls += 1
-                        last_transient = failure
-                    elif not job:
-                        raise JobdOperationUnavailable(
-                            "malformed jobd result response",
-                            {"error": "malformed jobd result response", "status": "malformed_result"},
-                        )
-                    elif job_state in {"failed", "cancelled", "superseded", "timed_out"}:
-                        raise JobdOperationUnavailable(
-                            str(job.get("error") or f"jobd producer {job_state}"),
-                            dict(job),
-                        )
-                remaining = deadline_at - time.time()
-                if remaining <= 0:
-                    if deferred_transport is not None:
-                        deferred_transport.publish()
+                        "malformed completed jobd product",
+                        {"error": str(error), "status": "malformed_product"},
+                    ) from error
+                if not isinstance(product, dict):
                     raise JobdOperationUnavailable(
-                        "jobd product deadline expired",
-                        {
-                            "error": "jobd product deadline expired",
-                            "status": "deadline_expired",
-                            "transient_polls": transient_polls,
-                            "last_transient_error": str(last_transient.get("error") or ""),
-                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                        },
-                        code="deadline_expired",
-                        status=HTTPStatus.GATEWAY_TIMEOUT,
+                        "malformed completed jobd product",
+                        {"error": "malformed completed jobd product", "status": "malformed_product"},
                     )
-                wait_event = cancel_event or self.jobd_operation_service.stop_event
-                wait_event.wait(min(poll_seconds, remaining))
-                poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+                return product
+            if state == "none" and metadata.get("inflight") is not True:
+                response = self.job_client.result(producer.job_id)
+                job = response.get("job") if isinstance(response.get("job"), dict) else {}
+                job_state = str(job.get("status") or "")
+                if response.get("ok") is not True or job_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                    failure = dict(job) if job else dict(response)
+                    raise JobdOperationUnavailable(
+                        str(failure.get("error") or f"jobd producer {job_state or 'unavailable'}"),
+                        failure,
+                    )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise JobdOperationUnavailable(
+                    "jobd product deadline expired",
+                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    code="deadline_expired",
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                )
+            wait_event = cancel_event or self.jobd_operation_service.stop_event
+            wait_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
         raise JobdOperationUnavailable(
             "jobd product completion stopped",
             {"error": "jobd product completion stopped", "status": "producer_abandoned"},

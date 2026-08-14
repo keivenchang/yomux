@@ -16,7 +16,6 @@ import sys
 import threading
 import uuid
 from dataclasses import dataclass
-from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -37,13 +36,13 @@ from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
+from ..host_identity import process_identity_snapshot
 from ..host_identity import recorded_start_identity
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request
 from .rpc import safe_socket_path
 from .runtime import redact_local_service_text
-from .protocol_types import Clock
 
 
 LOCAL_SERVICE_REGISTRY_VERSION = 2
@@ -77,6 +76,43 @@ def record_transport_teardown(exception_type: str = "unknown") -> None:
         _TRANSPORT_TEARDOWNS_BY_EXCEPTION[normalized_type] = (
             _TRANSPORT_TEARDOWNS_BY_EXCEPTION.get(normalized_type, 0) + 1
         )
+
+
+def read_process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
+    """Return cumulative CPU seconds and RSS bytes for one local process."""
+
+    if pid <= 0:
+        return None
+    if platform.system() == "Linux":
+        try:
+            stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+            statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+            cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
+            rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        except (IndexError, OSError, ValueError):
+            return None
+        return (cpu_seconds, rss_bytes)
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=,time=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    fields = str(completed.stdout or "").split()
+    if len(fields) < 2:
+        return None
+    try:
+        rss_bytes = int(fields[0]) * 1024
+    except ValueError:
+        return None
+    cpu_seconds = parse_ps_cpu_seconds(fields[1])
+    if cpu_seconds is None:
+        return None
+    return (cpu_seconds, rss_bytes)
 
 
 def transport_diagnostics() -> dict[str, Any]:
@@ -150,85 +186,41 @@ class SpawnOwnershipProof:
     disproven_occupants: tuple[tuple[int, str], ...] = ()
 
 
-@dataclass
-class StartupFailureState:
-    """Mutable startup/backoff episode state owned as one lifecycle record."""
-
-    failures: int = 0
-    next_start_at: float = 0.0
-    start_exit_count: int = 0
-    last_exit_code: int | None = None
-    failure_reason: str = ""
-    record_refusal_reason: str = ""
-    terminal_failure: bool = False
-
-    def reset(self) -> None:
-        self.failures = 0
-        self.next_start_at = 0.0
-        self.start_exit_count = 0
-        self.last_exit_code = None
-        self.failure_reason = ""
-        self.record_refusal_reason = ""
-        self.terminal_failure = False
-
-
-@dataclass
-class HealthProbeCache:
-    """Short-lived proof that a recent local RPC reached the expected daemon."""
-
-    healthy_until: float = 0.0
-
-    def note_success(self, now: float) -> None:
-        self.healthy_until = now + LOCAL_SERVICE_HEALTH_CACHE_SECONDS
-
-    def invalidate(self) -> None:
-        self.healthy_until = 0.0
-
-    def is_recent(self, now: float) -> bool:
-        return now < self.healthy_until
-
-
-@dataclass
-class ChildOwnershipState:
-    """In-process ownership and reaping state for one service generation."""
-
-    process: subprocess.Popen[Any] | None = None
-    spawn_ownership: SpawnProcessOwnership | None = None
-    adopted_reaper_pid: int = 0
-    adopted_reaper_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
-    reaper_threads: set[threading.Thread] = field(default_factory=set, repr=False, compare=False)
-    reaper_threads_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
-
-
 class ProcessTableUnavailable(RuntimeError):
     """The launch preflight cannot establish process identity safely."""
 
 
+def inherited_python_path(environ: dict[str, str]) -> str:
+    """Keep service imports attached to the interpreter even when callers replace HOME."""
+
+    candidates = [*str(environ.get("PYTHONPATH") or "").split(os.pathsep), *map(str, sys.path)]
+    return os.pathsep.join(dict.fromkeys(path for path in candidates if path))
+
+
 def process_start_time(pid: int) -> int:
-    """Return Linux /proc stat field 22, or zero where identity is unavailable."""
-    try:
-        raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
-        _prefix, separator, tail = raw.rpartition(")")
-        if not separator:
-            return 0
-        fields = tail.split()
-        # ``tail`` begins at field 3 (state), so field 22 is index 19. Splitting
-        # only after the final ')' preserves comm values containing spaces/parens.
-        return max(0, int(fields[19]))
-    except (IndexError, OSError, ValueError):
-        return 0
+    """Return the platform's numeric process-birth counter, or zero if unavailable."""
+    return process_start_ticks(process_start_identity(pid)) or 0
 
 
 def process_state(pid: int) -> str:
-    """Return Linux /proc stat field 3, preserving zombie identity as non-serving."""
-    try:
-        raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
-        _prefix, separator, tail = raw.rpartition(")")
-        if not separator:
-            return ""
-        return str(tail.split()[0] if tail.split() else "")
-    except (OSError, ValueError):
+    """Return the native process state, preserving zombies as non-serving."""
+    snapshot = process_identity_snapshot(pid)
+    if snapshot is not None:
+        return snapshot.state
+    if platform.system() != "Darwin":
         return ""
+    try:
+        completed = subprocess.run(
+            ("ps", "-o", "state=", "-p", str(int(pid))),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    state = str(completed.stdout or "").strip()
+    return state[0] if completed.returncode == 0 and state else ""
 
 
 def process_spawn_generation(
@@ -347,12 +339,19 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             pid, ppid, pgid, session_id = int(fields[0]), int(fields[1]), int(fields[2]), int(fields[3])
         except ValueError:
             continue
+        if platform.system() == "Darwin" and session_id <= 0:
+            try:
+                session_id = os.getsid(pid)
+            except OSError:
+                continue
         cpu_seconds = parse_ps_cpu_seconds(fields[4])
         if cpu_seconds is None:
             continue
-        if process_state(pid) == "Z":
+        snapshot = process_identity_snapshot(pid)
+        if snapshot is not None and snapshot.state == "Z":
             continue
-        start_time = process_start_time(pid)
+        start_identity = snapshot.start_identity if snapshot is not None else ""
+        start_time = process_start_ticks(start_identity) or 0
         table[pid] = ProcessTableEntry(
             ppid,
             pgid,
@@ -360,7 +359,7 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             fields[5] if len(fields) > 5 else "",
             start_time,
             session_id,
-            f"proc:{start_time}" if start_time > 0 else "",
+            start_identity,
         )
     if require_complete and not table:
         raise ProcessTableUnavailable("process_table_read_failed")
@@ -391,7 +390,9 @@ def process_record_diagnostic(
 
     def table_start_identity(pid: int) -> str | None:
         entry = table.get(pid)
-        return f"proc:{entry.start_time}" if entry is not None and entry.start_time > 0 else None
+        if entry is None:
+            return None
+        return entry.start_identity or (f"proc:{entry.start_time}" if entry.start_time > 0 else None)
 
     return is_current_local_process(
         record,
@@ -810,7 +811,7 @@ class LocalServiceRegistry:
         service_dir: Path | None = None,
         host_identity: HostIdentity | None = None,
         popen: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
-        clock: Clock = monotonic_clock,
+        clock: Callable[[], float] = monotonic_clock,
         sleep: Callable[[float], None] = sleep_clock,
     ):
         self.state_dir = Path(state_dir).expanduser()
@@ -823,110 +824,27 @@ class LocalServiceRegistry:
         self.sleep = sleep
         self.lock = threading.Lock()
         self._starts_sealed = threading.Event()
-        self._child_ownership = ChildOwnershipState()
+        self.process: subprocess.Popen[Any] | None = None
         # A generation that adopted a healthy daemon over its socket holds no Popen for it,
         # so nothing would wait() it when it idle-exits and it would linger as a zombie. This
         # names the one adopted child a reaper thread is currently parked on; guarded by its
         # own lock so arming from inside `self.lock` (the file-locked start path) cannot
         # deadlock against the reaper's own record retirement.
-        self._startup_failure = StartupFailureState()
-        self._health_probe_cache = HealthProbeCache()
+        self._adopted_reaper_pid = 0
+        self._adopted_reaper_lock = threading.Lock()
+        self.spawn_ownership: SpawnProcessOwnership | None = None
+        self.failures = 0
+        self.next_start_at = 0.0
+        self._healthy_until = 0.0
         self._last_resource_sample: tuple[float, float] | None = None
         self._last_resource_group_sample: tuple[tuple[int, ...], float, float] | None = None
         self._upgrade_required: dict[str, Any] | None = None
+        self._start_exit_count = 0
+        self._last_exit_code: int | None = None
+        self._failure_reason = ""
+        self._record_refusal_reason = ""
+        self._terminal_failure = False
         self._process_diagnostic: dict[str, Any] = {}
-
-    @property
-    def failures(self) -> int:
-        return self._startup_failure.failures
-
-    @failures.setter
-    def failures(self, value: int) -> None:
-        self._startup_failure.failures = value
-
-    @property
-    def next_start_at(self) -> float:
-        return self._startup_failure.next_start_at
-
-    @next_start_at.setter
-    def next_start_at(self, value: float) -> None:
-        self._startup_failure.next_start_at = value
-
-    @property
-    def _start_exit_count(self) -> int:
-        return self._startup_failure.start_exit_count
-
-    @_start_exit_count.setter
-    def _start_exit_count(self, value: int) -> None:
-        self._startup_failure.start_exit_count = value
-
-    @property
-    def _last_exit_code(self) -> int | None:
-        return self._startup_failure.last_exit_code
-
-    @_last_exit_code.setter
-    def _last_exit_code(self, value: int | None) -> None:
-        self._startup_failure.last_exit_code = value
-
-    @property
-    def _failure_reason(self) -> str:
-        return self._startup_failure.failure_reason
-
-    @_failure_reason.setter
-    def _failure_reason(self, value: str) -> None:
-        self._startup_failure.failure_reason = value
-
-    @property
-    def _record_refusal_reason(self) -> str:
-        return self._startup_failure.record_refusal_reason
-
-    @_record_refusal_reason.setter
-    def _record_refusal_reason(self, value: str) -> None:
-        self._startup_failure.record_refusal_reason = value
-
-    @property
-    def _terminal_failure(self) -> bool:
-        return self._startup_failure.terminal_failure
-
-    @_terminal_failure.setter
-    def _terminal_failure(self, value: bool) -> None:
-        self._startup_failure.terminal_failure = value
-
-    @property
-    def _healthy_until(self) -> float:
-        return self._health_probe_cache.healthy_until
-
-    @_healthy_until.setter
-    def _healthy_until(self, value: float) -> None:
-        self._health_probe_cache.healthy_until = value
-
-    @property
-    def process(self) -> subprocess.Popen[Any] | None:
-        return self._child_ownership.process
-
-    @process.setter
-    def process(self, value: subprocess.Popen[Any] | None) -> None:
-        self._child_ownership.process = value
-
-    @property
-    def spawn_ownership(self) -> SpawnProcessOwnership | None:
-        return self._child_ownership.spawn_ownership
-
-    @spawn_ownership.setter
-    def spawn_ownership(self, value: SpawnProcessOwnership | None) -> None:
-        self._child_ownership.spawn_ownership = value
-
-    @property
-    def _adopted_reaper_pid(self) -> int:
-        return self._child_ownership.adopted_reaper_pid
-
-    @_adopted_reaper_pid.setter
-    def _adopted_reaper_pid(self, value: int) -> None:
-        self._child_ownership.adopted_reaper_pid = value
-
-    @property
-    def _adopted_reaper_lock(self) -> threading.Lock:
-        return self._child_ownership.adopted_reaper_lock
 
     @property
     def service_dir(self) -> Path:
@@ -1199,17 +1117,17 @@ class LocalServiceRegistry:
 
     def note_rpc_success(self) -> None:
         """Cache recent transport health to avoid ping/status fan-out per action."""
-        self._health_probe_cache.note_success(self.clock())
+        self._healthy_until = self.clock() + LOCAL_SERVICE_HEALTH_CACHE_SECONDS
 
     def note_rpc_failure(self, exception_type: str = "unknown") -> None:
         record_transport_teardown(exception_type)
         self.invalidate_rpc_health()
 
     def invalidate_rpc_health(self) -> None:
-        self._health_probe_cache.invalidate()
+        self._healthy_until = 0.0
 
     def recently_healthy(self) -> bool:
-        return self._health_probe_cache.is_recent(self.clock())
+        return self.clock() < self._healthy_until
 
     def _record_from_status(self, status: dict[str, Any]) -> dict[str, Any]:
         pid = int(status.get("pid") or 0)
@@ -1388,7 +1306,12 @@ class LocalServiceRegistry:
         """Clear a latched startup or version-fence failure for one retry."""
         with self.lock:
             self._upgrade_required = None
-            self._startup_failure.reset()
+            self.failures = 0
+            self.next_start_at = 0.0
+            self._start_exit_count = 0
+            self._last_exit_code = None
+            self._failure_reason = ""
+            self._terminal_failure = False
             self._process_diagnostic = {}
 
     def starts_allowed(self) -> bool:
@@ -1430,6 +1353,7 @@ class LocalServiceRegistry:
         # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOLOMUX_FS_ROOTS` here.
         spawn_environ = dict(os.environ)
         spawn_environ[LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation_marker
+        spawn_environ["PYTHONPATH"] = inherited_python_path(spawn_environ)
         try:
             with self.stderr_path.open("wb") as output:
                 process = self.popen(
@@ -1535,15 +1459,14 @@ class LocalServiceRegistry:
         members_tuple = tuple(sorted(members))
         disproven_tuple = tuple(sorted(disproven))
         if members_tuple:
-            ownership = SpawnProcessOwnership(
+            self.spawn_ownership = SpawnProcessOwnership(
                 leader_pid=ownership.leader_pid,
                 process_group=ownership.process_group,
                 session_id=ownership.session_id,
                 generation_marker=ownership.generation_marker,
                 member_identities=members_tuple,
             )
-            self.spawn_ownership = ownership
-        return SpawnOwnershipProof(ownership, group_exists, members_tuple, disproven_tuple)
+        return SpawnOwnershipProof(self.spawn_ownership, group_exists, members_tuple, disproven_tuple)
 
     def refresh_spawn_ownership(self) -> SpawnProcessOwnership | None:
         """Retain members while the leader matches or its exact spawned session survives."""
@@ -1583,15 +1506,12 @@ class LocalServiceRegistry:
 
     def _start_child_reaper(self, process: subprocess.Popen[Any]) -> None:
         """Reap an idle service at exit instead of deferring it to its next caller."""
-        thread = threading.Thread(
+        threading.Thread(
             target=self._reap_exited_child,
             args=(process,),
             name=f"{self.spec.name}-reaper",
             daemon=True,
-        )
-        with self._child_ownership.reaper_threads_lock:
-            self._child_ownership.reaper_threads.add(thread)
-        thread.start()
+        ).start()
 
     def _reap_adopted_child(self, pid: int) -> None:
         """Wait for one adopted demand daemon to exit and reap it, then retire its record.
@@ -1647,39 +1567,12 @@ class LocalServiceRegistry:
             if self._adopted_reaper_pid == pid:
                 return
             self._adopted_reaper_pid = pid
-        thread = threading.Thread(
+        threading.Thread(
             target=self._reap_adopted_child,
             args=(pid,),
             name=f"{self.spec.name}-adopted-reaper",
             daemon=True,
-        )
-        with self._child_ownership.reaper_threads_lock:
-            self._child_ownership.reaper_threads.add(thread)
-        thread.start()
-
-    def settle_reaper_threads(self, timeout: float = 3.0) -> None:
-        """Join every reaper this registry started after replacement starts are sealed."""
-
-        deadline = monotonic_clock() + max(0.0, float(timeout))
-        while True:
-            with self._child_ownership.reaper_threads_lock:
-                threads = tuple(self._child_ownership.reaper_threads)
-            if not threads:
-                return
-            for thread in threads:
-                if thread is threading.current_thread():
-                    continue
-                thread.join(timeout=max(0.0, deadline - monotonic_clock()))
-            with self._child_ownership.reaper_threads_lock:
-                self._child_ownership.reaper_threads.difference_update(
-                    thread for thread in threads if not thread.is_alive()
-                )
-                surviving = tuple(self._child_ownership.reaper_threads)
-            if not surviving:
-                return
-            if monotonic_clock() >= deadline:
-                names = tuple(sorted(thread.name for thread in surviving))
-                raise RuntimeError(f"{self.spec.name} reaper threads did not settle: {names}")
+        ).start()
 
     def ensure_started(self) -> bool:
         if not self.starts_allowed():
@@ -1798,7 +1691,12 @@ class LocalServiceRegistry:
     def _accept_started_child(self, process: subprocess.Popen[Any]) -> bool:
         """Record one proven-healthy startup and clear every failure latch. One owner."""
 
-        self._startup_failure.reset()
+        self.failures = 0
+        self.next_start_at = 0.0
+        self._start_exit_count = 0
+        self._last_exit_code = None
+        self._failure_reason = ""
+        self._terminal_failure = False
         self.refresh_spawn_ownership()
         self._start_child_reaper(process)
         return True
@@ -2022,41 +1920,12 @@ class LocalServiceRegistry:
                 pid, ppid, rss_kib = (int(fields[0]), int(fields[1]), int(fields[2]))
             except ValueError:
                 continue
-            parsed_cpu_seconds = parse_ps_cpu_seconds(fields[3])
-            if pid not in pids or parsed_cpu_seconds is None or (pid != parent_pid and ppid != parent_pid):
+            cpu_seconds = parse_ps_cpu_seconds(fields[3])
+            if pid not in pids or cpu_seconds is None or (pid != parent_pid and ppid != parent_pid):
                 continue
-            readings[pid] = (parsed_cpu_seconds, rss_kib * 1024)
+            readings[pid] = (cpu_seconds, rss_kib * 1024)
         return readings if parent_pid in readings else {}
 
     def _read_process_cpu_seconds_and_rss(self, pid: int) -> tuple[float, int] | None:
         """Return (cumulative CPU seconds, RSS bytes) for an existing pid."""
-        if platform.system() == "Linux":
-            try:
-                stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-                statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-                cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-                rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-            except (IndexError, OSError, ValueError):
-                return None
-            return (cpu_seconds, rss_bytes)
-        try:
-            completed = subprocess.run(
-                ["ps", "-o", "rss=,time=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return None
-        fields = str(getattr(completed, "stdout", "") or "").split()
-        if len(fields) < 2:
-            return None
-        try:
-            rss_bytes = int(fields[0]) * 1024
-        except ValueError:
-            return None
-        parsed_cpu_seconds = parse_ps_cpu_seconds(fields[1])
-        if parsed_cpu_seconds is None:
-            return None
-        return (parsed_cpu_seconds, rss_bytes)
+        return read_process_cpu_seconds_and_rss(pid)

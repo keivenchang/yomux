@@ -12,7 +12,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
 from http import HTTPStatus
 from http.client import HTTPConnection
 from pathlib import Path
@@ -52,12 +51,6 @@ TERMINAL_PRESSURE_CHUNK_BYTES = 4096
 TERMINAL_PRESSURE_INTERVAL_SECONDS = 0.02
 TERMINAL_PRESSURE_WARMUP_BYTES = 64 * 1024
 TERMINAL_PRESSURE_SAMPLING_MIN_BYTES = 128 * 1024
-
-
-@dataclass(frozen=True)
-class TerminalOutputPressure:
-    session: str
-    duration_seconds: float
 
 
 def _rename_harness_available() -> bool:
@@ -190,32 +183,6 @@ def _start_terminal_output_pressure(runtime, session: str, *, duration_seconds: 
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def _establish_terminal_output_pressure(
-    browser,
-    runtime,
-    session: str,
-    *,
-    duration_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS,
-) -> TerminalOutputPressure:
-    """Prove the pressure producer reaches xterm before a measured or throttled phase starts."""
-
-    browser.execute_script("clearClientPerfCounters();")
-    _start_terminal_output_pressure(runtime, session, duration_seconds=duration_seconds)
-    pressure_ready = browser.execute_async_script(
-        """
-        const minimumBytes = arguments[0];
-        const done = arguments[arguments.length - 1];
-        window.__yolomuxTestWaitFor(() => {
-          const counter = Object.fromEntries(clientPerfSummary().map(item => [item.name, item])).xtermWrite;
-          return Number(counter?.bytes || 0) >= minimumBytes;
-        }, {timeoutMs: 8000, description: 'terminal output pressure reaches xterm'}).then(() => done(true), error => done({error: String(error)}));
-        """,
-        TERMINAL_PRESSURE_WARMUP_BYTES,
-    )
-    assert pressure_ready is True, pressure_ready
-    return TerminalOutputPressure(session=session, duration_seconds=duration_seconds)
-
-
 def _client_perf_counter(driver, name: str) -> dict[str, object]:
     return driver.execute_script(
         "return Object.fromEntries(clientPerfSummary().map(counter => [counter.name, counter]))[arguments[0]] || null;",
@@ -296,7 +263,6 @@ def _keystroke_round(
     sample_count: int,
     pressure: bool,
     pressure_seconds: float = TERMINAL_PRESSURE_DURATION_SECONDS,
-    established_pressure: TerminalOutputPressure | None = None,
     after_key: Callable[[int], None] | None = None,
 ) -> dict[str, object]:
     """Type ``sample_count`` native keys once and return every delivery and wall-latency observation.
@@ -306,18 +272,21 @@ def _keystroke_round(
     a contract cannot hold in one place and silently vanish in another.
     """
 
-    if pressure:
-        if established_pressure is None:
-            established_pressure = _establish_terminal_output_pressure(
-                browser,
-                runtime,
-                session,
-                duration_seconds=pressure_seconds,
-            )
-        assert established_pressure.session == session, established_pressure
-    else:
-        assert established_pressure is None, established_pressure
     browser.execute_script("clearClientPerfCounters();")
+    if pressure:
+        _start_terminal_output_pressure(runtime, session, duration_seconds=pressure_seconds)
+        pressure_ready = browser.execute_async_script(
+            """
+            const minimumBytes = arguments[0];
+            const done = arguments[arguments.length - 1];
+            window.__yolomuxTestWaitFor(() => {
+              const counter = Object.fromEntries(clientPerfSummary().map(item => [item.name, item])).xtermWrite;
+              return Number(counter?.bytes || 0) >= minimumBytes;
+            }, {timeoutMs: 8000, description: 'terminal output pressure reaches xterm'}).then(() => done(true), error => done({error: String(error)}));
+            """,
+            TERMINAL_PRESSURE_WARMUP_BYTES,
+        )
+        assert pressure_ready is True, pressure_ready
     xterm_bytes_before = _counter_total(_client_perf_counter(browser, "xtermWrite"), "bytes")
     counts: list[int] = []
     samples: list[float] = []
@@ -448,12 +417,6 @@ def test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(br
     """
 
     session = _focus_gate_terminal(browser, gate_live_server)
-    established_pressure = _establish_terminal_output_pressure(
-        browser,
-        gate_live_server,
-        session,
-        duration_seconds=KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS,
-    )
     browser.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": KEYSTROKE_SLOWDOWN_CONTROL_RATE})
     try:
         observed = _keystroke_round(
@@ -464,44 +427,11 @@ def test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(br
             sample_count=KEYSTROKE_SLOWDOWN_CONTROL_SAMPLE_COUNT,
             pressure=True,
             pressure_seconds=KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS,
-            established_pressure=established_pressure,
         )
     finally:
         browser.execute_cdp_cmd("Emulation.setCPUThrottlingRate", {"rate": 1})
     print(f"S1 delivery under CPU slowdown: {_keystroke_summary(observed)}")
     _assert_keystroke_delivery_complete(observed)
-
-
-def test_s1_cpu_slowdown_starts_only_after_pressure_is_established(monkeypatch):
-    """The parallel completeness control must not throttle its pressure-readiness prerequisite."""
-
-    calls: list[object] = []
-    pressure = TerminalOutputPressure(session="fixture-session", duration_seconds=45.0)
-
-    class Browser:
-        def execute_cdp_cmd(self, command, payload):
-            calls.append((command, payload))
-
-    def establish(_browser, _runtime, session, *, duration_seconds):
-        calls.append(("establish", session, duration_seconds))
-        return pressure
-
-    def sample(_browser, _runtime, session, **options):
-        calls.append(("sample", session, options["established_pressure"]))
-        return _complete_delivery_observation(KEYSTROKE_SLOWDOWN_CONTROL_SAMPLE_COUNT)
-
-    monkeypatch.setattr(sys.modules[__name__], "_focus_gate_terminal", lambda _browser, _runtime: pressure.session)
-    monkeypatch.setattr(sys.modules[__name__], "_establish_terminal_output_pressure", establish)
-    monkeypatch.setattr(sys.modules[__name__], "_keystroke_round", sample)
-
-    test_s1_keystroke_delivery_survives_a_deterministic_renderer_cpu_slowdown(Browser(), object())
-
-    assert calls == [
-        ("establish", pressure.session, KEYSTROKE_SLOWDOWN_CONTROL_PRESSURE_SECONDS),
-        ("Emulation.setCPUThrottlingRate", {"rate": KEYSTROKE_SLOWDOWN_CONTROL_RATE}),
-        ("sample", pressure.session, pressure),
-        ("Emulation.setCPUThrottlingRate", {"rate": 1}),
-    ]
 
 
 def _certified_latency_statistic(cpu_qualified: bool) -> str:

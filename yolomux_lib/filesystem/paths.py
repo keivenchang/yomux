@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextvars
+import fcntl
 import hashlib
 import json
 import os
 import stat
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -22,6 +24,8 @@ MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
 FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
 DEFAULT_FS_ROOTS = ("/",)
+DARWIN_F_GETPATH = 50
+DARWIN_PATH_BUFFER_BYTES = 1024
 SECRET_DIR_COMPONENTS = frozenset({
     ".ssh",
     ".gnupg",
@@ -547,6 +551,14 @@ class SafePathHandle:
         os.close(self.descriptor)
 
     def descriptor_path(self) -> Path:
+        if sys.platform == "darwin":
+            try:
+                raw_path = fcntl.fcntl(self.descriptor, DARWIN_F_GETPATH, b"\0" * DARWIN_PATH_BUFFER_BYTES)
+                decoded_path = raw_path.split(b"\0", 1)[0].decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                decoded_path = ""
+            if decoded_path:
+                return Path(decoded_path)
         for root in (Path("/proc/self/fd"), Path("/dev/fd")):
             candidate = root / str(self.descriptor)
             if candidate.exists():

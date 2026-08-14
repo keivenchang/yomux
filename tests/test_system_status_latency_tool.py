@@ -21,9 +21,9 @@ def test_probe_fails_zero_or_multiple_listeners(monkeypatch, tmp_path):
 def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
     output = tmp_path / "out.json"
     monkeypatch.setattr(probe, "listener_pids", lambda _port: [123])
-    monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_ticks": 1, "cwd": "/repo", "sha": "a" * 40})
+    monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40})
     monkeypatch.setattr(probe, "process_environment", lambda _pid: {"YOLOMUX_CONFIG_DIR": str(tmp_path)})
-    monkeypatch.setattr(probe, "config_dir_from_process", lambda _env: tmp_path)
+    monkeypatch.setattr(probe, "config_dir_from_process", lambda _env, _port: tmp_path)
     monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port: "cookie")
     values = [5.0] * 197 + [25.0, 25.5, 26.0]
     markers = iter(f"capture-{index:032x}" for index in range(probe.SAMPLES))
@@ -54,11 +54,8 @@ def test_config_root_rejects_auth_root_escape(tmp_path):
 
 
 def test_process_identity_rejects_missing_sha(monkeypatch, tmp_path):
-    proc = tmp_path / "123"
-    proc.mkdir()
-    (proc / "stat").write_text("123 (probe) " + " ".join(["S"] + ["0"] * 18 + ["99"] + ["0"] * 5))
-    (proc / "cwd").symlink_to(tmp_path)
-    monkeypatch.setattr(probe, "Path", lambda value: Path(str(value).replace("/proc/123", str(proc))))
+    monkeypatch.setattr(probe, "process_start_identity", lambda _pid: "proc:99")
+    monkeypatch.setattr(probe, "process_cwd", lambda _pid: str(tmp_path))
     monkeypatch.setattr(probe.subprocess, "run", lambda *args, **kwargs: probe.subprocess.CompletedProcess(args[0], 1, "", "not git"))
     try:
         probe.process_identity(123)

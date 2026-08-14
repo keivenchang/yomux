@@ -24,7 +24,6 @@ from types import MappingProxyType
 from yolomux_lib import common
 from yolomux_lib.control import send_yolomux_control_request
 from yolomux_lib.local_services.rpc import safe_socket_path
-from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yolomux_lib.local_services.runtime import acquire_client_lease, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import run_local_rpc_service
 from yolomux_lib.settings import stats_prune_local_time
@@ -121,8 +120,6 @@ CONTROL_FIELDS = {
     "usage_atom_backfill": FENCE_FIELDS | {"state", "sources", "missing", "scan"},
     "delta": FENCE_FIELDS | protocol.DELTA_REQUEST_FIELDS,
 }
-STATS_COMMAND_ACTIONS = frozenset((*CONTROL_FIELDS, "append", "snapshot"))
-STATS_COMMAND_ROUTER = LocalServiceCommandRouter({action: f"_handle_{action}" for action in STATS_COMMAND_ACTIONS})
 COVERAGE_FAMILIES = frozenset(spec.coverage_family for spec in families.CURRENT_FAMILIES)
 BUILD_ERRORS = (OSError, sqlite3.Error, storage.StatsCurrentError, materializer.MaterializationError,
                 protocol.ProtocolValidationError, TypeError, ValueError)
@@ -3326,228 +3323,6 @@ class StatsCurrentService:
         }), binary)
 
     def _snapshot(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
-        return StatsSnapshotProjector._snapshot(self, request)
-
-    def _snapshot_body_with_backfill_status(self, body: bytes) -> bytes:
-        status = self._usage_atom_backfill
-        if status is None:
-            return body
-        payload = json.loads(body)
-        if not isinstance(payload, dict):
-            raise ValueError("cached snapshot body must be an object")
-        payload["usage_atom_backfill"] = status
-        return self.encoder(payload)
-
-    def _set_usage_atom_backfill_status(self, request: Mapping[str, object]) -> dict[str, object]:
-        data = _object(request, "usage_atom_backfill request", CONTROL_FIELDS["usage_atom_backfill"])
-        state = str(data["state"])
-        sources = data["sources"]
-        missing = data["missing"]
-        scan = data["scan"]
-        if state not in {"pending", "complete"} or isinstance(sources, bool) or isinstance(missing, bool) or not isinstance(sources, int) or not isinstance(missing, int) or sources < 0 or missing < 0 or missing > sources:
-            raise ValueError("invalid usage_atom_backfill status")
-        if not isinstance(scan, dict):
-            raise ValueError("invalid usage_atom_backfill scan")
-        expected = {"files_read", "records_parsed", "atoms_emitted", "atoms_accepted", "atoms_rejected", "rejection_reasons"}
-        if set(scan) != expected or any(isinstance(scan[name], bool) or not isinstance(scan[name], int) or scan[name] < 0 for name in expected - {"rejection_reasons"}):
-            raise ValueError("invalid usage_atom_backfill scan")
-        reasons = scan["rejection_reasons"]
-        if not isinstance(reasons, dict) or any(not isinstance(reason, str) or not reason or isinstance(count, bool) or not isinstance(count, int) or count <= 0 for reason, count in reasons.items()):
-            raise ValueError("invalid usage_atom_backfill rejection reasons")
-        if scan["atoms_accepted"] + scan["atoms_rejected"] != scan["atoms_emitted"] or sum(reasons.values()) != scan["atoms_rejected"]:
-            raise ValueError("invalid usage_atom_backfill atom counts")
-        self._usage_atom_backfill = {"state": state, "sources": sources, "missing": missing, "scan": dict(scan)}
-        return {"ok": True}
-
-    def _delta(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
-        return StatsDeltaProjector._delta(self, request)
-
-    def _status(self) -> dict[str, object]:
-        return StatsStatusProjector._status(self)
-
-    def handle_with_binary(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        if (request.get("protocol_version"), request.get("schema_generation")) != (
-            storage.MIN_WRITER_PROTOCOL, storage.SCHEMA_VERSION,
-        ):
-            self._rejected_old += 1
-            return protocol.upgrade_required_response(
-                storage.MIN_WRITER_PROTOCOL, storage.SCHEMA_VERSION, str(storage.MIN_WRITER_BUILD),
-            ), b""
-        action = request.get("action")
-        try:
-            if action in CONTROL_FIELDS:
-                _object(request, f"{action} request", CONTROL_FIELDS[action])
-            response = STATS_COMMAND_ROUTER.dispatch(self, str(action), request, _request_binary)
-            return response if response is not None else (protocol.unsupported_response(f"unsupported stats action {action!r}"), b"")
-        except protocol.UnsupportedRequest as error:
-            return error.response, b""
-        except REQUEST_ERRORS as error:
-            return protocol.unsupported_response(str(error)), b""
-
-    def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return {"ok": True, "version": storage.MIN_WRITER_PROTOCOL, "schema_generation": storage.SCHEMA_VERSION, "build": storage.MIN_WRITER_BUILD, "code_revision": revision.CURRENT_CODE_REVISION, "pid": os.getpid(), "started_at": self.started_at}, b""
-
-    def _handle_status(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._status(), b""
-
-    def _handle_browser_profiles(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        if self.writer is None:
-            raise storage.StatsCurrentError("stats store is not open")
-        items = self.writer.recent_browser_profiles(MAX_BROWSER_PROFILES)
-        return {"ok": True, "profiles": {"retained": len(items), "maximum": MAX_BROWSER_PROFILES, "items": items, "queue_ms": _browser_queue_summary(items)}, "observation_status": {key: value for key, value in self._browser_observation_status().items() if key != "ok"}}, b""
-
-    def _handle_lease(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return acquire_client_lease(self.leases, request["client_pid"], request["lease_id"]), b""
-
-    def _handle_collector_context(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._set_collector_context(request), b""
-
-    def _handle_release(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return release_client_lease(self.leases, request["lease_id"]), b""
-
-    def _handle_usage_atom_backfill(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._set_usage_atom_backfill_status(request), b""
-
-    def _handle_browser_upload(self, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._browser_upload(request, body), b""
-
-    def _handle_append(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._append(request), b""
-
-    def _handle_snapshot(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._snapshot(request)
-
-    def _handle_delta(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return self._delta(request)
-
-    def _on_client(self) -> None:
-        # Deliberately does NOT prune. Retention cleanup is nightly maintenance,
-        # and running it here would charge one unlucky browser request the whole
-        # delete while the observer's next sample waits on the same writer lock.
-        self.last_client_at = self.monotonic()
-
-    def _resolved_prune_time(self) -> prune_schedule.PruneTime:
-        """Re-read the preference so a change takes effect without a restart."""
-
-        try:
-            configured = self._prune_time_reader()
-        except OSError as error:
-            # The preference is unreadable, not absent. Keep cleaning up on the
-            # default schedule and name the failure in status; a cleanup that
-            # stops because a file could not be read is invisible until the disk
-            # is full.
-            self._prune_preference_error = type(error).__name__[:64]
-            return prune_schedule.resolve_local_time(prune_schedule.DEFAULT_PRUNE_LOCAL_TIME)
-        self._prune_preference_error = ""
-        return prune_schedule.resolve_local_time(configured)
-
-    def _prune_if_due(self) -> bool:
-        """Run the once-a-night retention prune when the last one is still owed.
-
-        This is the ONLY pruner. It runs on the listener's accept-timeout idle
-        hook, never on a request, and asks the schedule at most once per
-        PRUNE_CHECK_SECONDS.
-        """
-
-        now_monotonic = self.monotonic()
-        if now_monotonic < self._next_prune_check_at or self.writer is None:
-            return False
-        self._next_prune_check_at = now_monotonic + PRUNE_CHECK_SECONDS
-        self._prune_time = self._resolved_prune_time()
-        now = self.clock()
-        # prune_schedule owns the rule; the daemon must not re-spell it.
-        if not prune_schedule.is_due(now, self._last_pruned_at, self._prune_time):
-            return False
-        due_at = prune_schedule.most_recent_occurrence(now, self._prune_time)
-        started = self.monotonic()
-        with self.work_lock:
-            previous_source_generation = self._latest_source_generation
-            # One timestamp decides due-ness, the cutoff, and what is persisted,
-            # so the three can never disagree.
-            result = self.writer.prune(now=now)
-            self._latest_source_generation = max(
-                self._latest_source_generation,
-                result.source_generation,
-            )
-            if result.source_generation > previous_source_generation:
-                self._last_source_commit_at = self.clock()
-            # A no-change prune schedules NO build at all: rebuilding an unchanged
-            # generation burned ~18.6s of near-100% CPU every five minutes for zero
-            # new information. When pruning DID remove/clip rows, every removed fact
-            # is older than the retention cutoff, so the only serving cells that can
-            # still contain it are the ones straddling the cutoff — mark exactly
-            # those dirty (the incremental builder safely skips any that fall
-            # outside a layer's window) instead of requesting a full rebuild.
-            if (
-                result.observations_deleted
-                or result.coverage_epochs_deleted
-                or result.coverage_epochs_clipped
-                or result.usage_atoms_deleted
-                or result.unavailable_spans_deleted
-                or result.unavailable_spans_clipped
-            ):
-                cutoff = now - storage.RETENTION_SECONDS
-                cutoff_dirty = {
-                    materializer.DirtyCell(
-                        resolution, math.floor(cutoff / resolution) * resolution
-                    )
-                    for resolution in stats_resolution.RESOLUTION_CHOICES
-                }
-                self._pending_dirty.update(cutoff_dirty)
-                self._stage_ring_cells_locked(cutoff_dirty, result.source_generation)
-        self._prunes += 1
-        self._last_prune_at = self.clock()
-        self._last_prune_seconds = max(0.0, self.monotonic() - started)
-        self._last_prune_due_at = due_at
-        # The store persisted this same instant, so a restart reads back one
-        # answer rather than two that can disagree.
-        self._last_pruned_at = now
-        self.work_event.set()
-        return True
-
-    def _idle(self) -> bool:
-        self._prune_if_due()
-        reap_dead_client_leases(self.leases)
-        # Compaction owns its own quiet-gate and max-defer cap, so it is offered
-        # every idle tick rather than only when the service is fully idle: a busy
-        # box's cap could never fire if the offer were behind the idle gate. Prune
-        # runs first so the rewrite reclaims the free-list retention just released.
-        self._vacuum_if_due_while_idle()
-        with self.work_lock:
-            pending = (
-                self._pending_full
-                or bool(self._pending_dirty)
-                or self._pending_coverage_refresh
-                or bool(self._pending_ring_dirty)
-            )
-        idle = (
-            not self.leases
-            and not self._building
-            and not pending
-            and self.monotonic() - self.last_client_at >= self.idle_seconds
-        )
-        return idle
-
-    def run(self) -> int:
-        return run_local_rpc_service(
-            socket_path=self.socket_path,
-            lock_path=self.lock_path,
-            service_name=SERVICE_NAME,
-            stop_event=self.stop_event,
-            handle=self.handle_with_binary,
-            on_idle=self._idle,
-            on_client=self._on_client,
-            on_start=self._start,
-            on_shutdown=self._close,
-        )
-
-
-
-
-class StatsSnapshotProjector:
-    """Named projection owner retaining the StatsCurrentService context contract."""
-
-    def _snapshot(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
         started = self.monotonic()
         self._snapshot_requests += 1
         try:
@@ -3663,9 +3438,36 @@ class StatsSnapshotProjector:
         finally:
             self._record_request_latency("snapshot", started)
 
+    def _snapshot_body_with_backfill_status(self, body: bytes) -> bytes:
+        status = self._usage_atom_backfill
+        if status is None:
+            return body
+        payload = json.loads(body)
+        if not isinstance(payload, dict):
+            raise ValueError("cached snapshot body must be an object")
+        payload["usage_atom_backfill"] = status
+        return self.encoder(payload)
 
-class StatsDeltaProjector:
-    """Named projection owner retaining the StatsCurrentService context contract."""
+    def _set_usage_atom_backfill_status(self, request: Mapping[str, object]) -> dict[str, object]:
+        data = _object(request, "usage_atom_backfill request", CONTROL_FIELDS["usage_atom_backfill"])
+        state = str(data["state"])
+        sources = data["sources"]
+        missing = data["missing"]
+        scan = data["scan"]
+        if state not in {"pending", "complete"} or isinstance(sources, bool) or isinstance(missing, bool) or not isinstance(sources, int) or not isinstance(missing, int) or sources < 0 or missing < 0 or missing > sources:
+            raise ValueError("invalid usage_atom_backfill status")
+        if not isinstance(scan, dict):
+            raise ValueError("invalid usage_atom_backfill scan")
+        expected = {"files_read", "records_parsed", "atoms_emitted", "atoms_accepted", "atoms_rejected", "rejection_reasons"}
+        if set(scan) != expected or any(isinstance(scan[name], bool) or not isinstance(scan[name], int) or scan[name] < 0 for name in expected - {"rejection_reasons"}):
+            raise ValueError("invalid usage_atom_backfill scan")
+        reasons = scan["rejection_reasons"]
+        if not isinstance(reasons, dict) or any(not isinstance(reason, str) or not reason or isinstance(count, bool) or not isinstance(count, int) or count <= 0 for reason, count in reasons.items()):
+            raise ValueError("invalid usage_atom_backfill rejection reasons")
+        if scan["atoms_accepted"] + scan["atoms_rejected"] != scan["atoms_emitted"] or sum(reasons.values()) != scan["atoms_rejected"]:
+            raise ValueError("invalid usage_atom_backfill atom counts")
+        self._usage_atom_backfill = {"state": state, "sources": sources, "missing": missing, "scan": dict(scan)}
+        return {"ok": True}
 
     def _delta(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
         started = self.monotonic()
@@ -3795,10 +3597,6 @@ class StatsDeltaProjector:
             return finish(entry.metadata, entry.binary, "hit")
         finally:
             self._record_request_latency("delta", started)
-
-
-class StatsStatusProjector:
-    """Named projection owner retaining the StatsCurrentService context contract."""
 
     def _status(self) -> dict[str, object]:
         with self.work_lock:
@@ -4126,6 +3924,194 @@ class StatsStatusProjector:
                 },
             },
         }
+
+    def handle_with_binary(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
+        if (request.get("protocol_version"), request.get("schema_generation")) != (
+            storage.MIN_WRITER_PROTOCOL, storage.SCHEMA_VERSION,
+        ):
+            self._rejected_old += 1
+            return protocol.upgrade_required_response(
+                storage.MIN_WRITER_PROTOCOL, storage.SCHEMA_VERSION, str(storage.MIN_WRITER_BUILD),
+            ), b""
+        action = request.get("action")
+        try:
+            if action in CONTROL_FIELDS:
+                _object(request, f"{action} request", CONTROL_FIELDS[action])
+            if action == "ping":
+                return {
+                    "ok": True,
+                    "version": storage.MIN_WRITER_PROTOCOL,
+                    "schema_generation": storage.SCHEMA_VERSION,
+                    "build": storage.MIN_WRITER_BUILD,
+                    "code_revision": revision.CURRENT_CODE_REVISION,
+                    "pid": os.getpid(),
+                    "started_at": self.started_at,
+                }, b""
+            if action == "status":
+                return self._status(), b""
+            if action == "browser_profiles":
+                if self.writer is None:
+                    raise storage.StatsCurrentError("stats store is not open")
+                items = self.writer.recent_browser_profiles(MAX_BROWSER_PROFILES)
+                return {
+                    "ok": True,
+                    "profiles": {
+                        "retained": len(items),
+                        "maximum": MAX_BROWSER_PROFILES,
+                        "items": items,
+                        "queue_ms": _browser_queue_summary(items),
+                    },
+                    "observation_status": {
+                        key: value for key, value in self._browser_observation_status().items()
+                        if key != "ok"
+                    },
+                }, b""
+            if action == "lease":
+                return acquire_client_lease(
+                    self.leases,
+                    request["client_pid"],
+                    request["lease_id"],
+                ), b""
+            if action == "collector_context":
+                return self._set_collector_context(request), b""
+            if action == "release":
+                return release_client_lease(self.leases, request["lease_id"]), b""
+            if action == "usage_atom_backfill":
+                return self._set_usage_atom_backfill_status(request), b""
+            if action == "browser_upload":
+                return self._browser_upload(request, _request_binary), b""
+            if action == "append":
+                return self._append(request), b""
+            if action == "snapshot":
+                return self._snapshot(request)
+            if action == "delta":
+                return self._delta(request)
+            return protocol.unsupported_response(f"unsupported stats action {action!r}"), b""
+        except protocol.UnsupportedRequest as error:
+            return error.response, b""
+        except REQUEST_ERRORS as error:
+            return protocol.unsupported_response(str(error)), b""
+
+    def _on_client(self) -> None:
+        # Deliberately does NOT prune. Retention cleanup is nightly maintenance,
+        # and running it here would charge one unlucky browser request the whole
+        # delete while the observer's next sample waits on the same writer lock.
+        self.last_client_at = self.monotonic()
+
+    def _resolved_prune_time(self) -> prune_schedule.PruneTime:
+        """Re-read the preference so a change takes effect without a restart."""
+
+        try:
+            configured = self._prune_time_reader()
+        except OSError as error:
+            # The preference is unreadable, not absent. Keep cleaning up on the
+            # default schedule and name the failure in status; a cleanup that
+            # stops because a file could not be read is invisible until the disk
+            # is full.
+            self._prune_preference_error = type(error).__name__[:64]
+            return prune_schedule.resolve_local_time(prune_schedule.DEFAULT_PRUNE_LOCAL_TIME)
+        self._prune_preference_error = ""
+        return prune_schedule.resolve_local_time(configured)
+
+    def _prune_if_due(self) -> bool:
+        """Run the once-a-night retention prune when the last one is still owed.
+
+        This is the ONLY pruner. It runs on the listener's accept-timeout idle
+        hook, never on a request, and asks the schedule at most once per
+        PRUNE_CHECK_SECONDS.
+        """
+
+        now_monotonic = self.monotonic()
+        if now_monotonic < self._next_prune_check_at or self.writer is None:
+            return False
+        self._next_prune_check_at = now_monotonic + PRUNE_CHECK_SECONDS
+        self._prune_time = self._resolved_prune_time()
+        now = self.clock()
+        # prune_schedule owns the rule; the daemon must not re-spell it.
+        if not prune_schedule.is_due(now, self._last_pruned_at, self._prune_time):
+            return False
+        due_at = prune_schedule.most_recent_occurrence(now, self._prune_time)
+        started = self.monotonic()
+        with self.work_lock:
+            previous_source_generation = self._latest_source_generation
+            # One timestamp decides due-ness, the cutoff, and what is persisted,
+            # so the three can never disagree.
+            result = self.writer.prune(now=now)
+            self._latest_source_generation = max(
+                self._latest_source_generation,
+                result.source_generation,
+            )
+            if result.source_generation > previous_source_generation:
+                self._last_source_commit_at = self.clock()
+            # A no-change prune schedules NO build at all: rebuilding an unchanged
+            # generation burned ~18.6s of near-100% CPU every five minutes for zero
+            # new information. When pruning DID remove/clip rows, every removed fact
+            # is older than the retention cutoff, so the only serving cells that can
+            # still contain it are the ones straddling the cutoff — mark exactly
+            # those dirty (the incremental builder safely skips any that fall
+            # outside a layer's window) instead of requesting a full rebuild.
+            if (
+                result.observations_deleted
+                or result.coverage_epochs_deleted
+                or result.coverage_epochs_clipped
+                or result.usage_atoms_deleted
+                or result.unavailable_spans_deleted
+                or result.unavailable_spans_clipped
+            ):
+                cutoff = now - storage.RETENTION_SECONDS
+                cutoff_dirty = {
+                    materializer.DirtyCell(
+                        resolution, math.floor(cutoff / resolution) * resolution
+                    )
+                    for resolution in stats_resolution.RESOLUTION_CHOICES
+                }
+                self._pending_dirty.update(cutoff_dirty)
+                self._stage_ring_cells_locked(cutoff_dirty, result.source_generation)
+        self._prunes += 1
+        self._last_prune_at = self.clock()
+        self._last_prune_seconds = max(0.0, self.monotonic() - started)
+        self._last_prune_due_at = due_at
+        # The store persisted this same instant, so a restart reads back one
+        # answer rather than two that can disagree.
+        self._last_pruned_at = now
+        self.work_event.set()
+        return True
+
+    def _idle(self) -> bool:
+        self._prune_if_due()
+        reap_dead_client_leases(self.leases)
+        # Compaction owns its own quiet-gate and max-defer cap, so it is offered
+        # every idle tick rather than only when the service is fully idle: a busy
+        # box's cap could never fire if the offer were behind the idle gate. Prune
+        # runs first so the rewrite reclaims the free-list retention just released.
+        self._vacuum_if_due_while_idle()
+        with self.work_lock:
+            pending = (
+                self._pending_full
+                or bool(self._pending_dirty)
+                or self._pending_coverage_refresh
+                or bool(self._pending_ring_dirty)
+            )
+        idle = (
+            not self.leases
+            and not self._building
+            and not pending
+            and self.monotonic() - self.last_client_at >= self.idle_seconds
+        )
+        return idle
+
+    def run(self) -> int:
+        return run_local_rpc_service(
+            socket_path=self.socket_path,
+            lock_path=self.lock_path,
+            service_name=SERVICE_NAME,
+            stop_event=self.stop_event,
+            handle=self.handle_with_binary,
+            on_idle=self._idle,
+            on_client=self._on_client,
+            on_start=self._start,
+            on_shutdown=self._close,
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

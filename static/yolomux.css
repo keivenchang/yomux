@@ -53,9 +53,6 @@
   --text-muted-strong: #8b95a5;
   --line: #303948;
   --tree-indent-line: rgba(148, 163, 184, 0.45);
-  --changes-tree-row-hover-bg: var(--active-control-soft-bg);
-  --changes-tree-indent-line: rgba(148, 163, 184, 0.50);
-  --changes-tree-icon-text: #a7c7ff;
   --info-pane-bg: var(--surface-ink);
   --info-tree-border: #65758b;
   --info-tree-line: rgb(180 196 218 / 0.42);
@@ -732,12 +729,21 @@
   --30-preferences-changes-preferences-setting-advisory-fg-25: var(--text);
   --30-preferences-changes-preferences-setting-advisory-bg-26: var(--panel2);
   --30-preferences-changes-preferences-setting-advisory-border-27: var(--line);
+  --30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28: var(--active-control-soft-bg);
   --30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29: color-mix(in srgb, var(--panel2) 76%, transparent);
+  --30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: rgba(148, 163, 184, 0.50);
   --30-preferences-changes-file-explorer-changes-panel-changes-path-text-31: var(--muted);
+  --30-preferences-changes-file-explorer-changes-panel-changes-icon-text-32: #a7c7ff;
+  --30-preferences-changes-changes-toolbar-changes-row-hover-bg-33: var(--active-control-soft-bg);
   --30-preferences-changes-changes-toolbar-changes-folder-bg-34: color-mix(in srgb, var(--panel2) 76%, transparent);
+  --30-preferences-changes-changes-toolbar-changes-indent-line-35: rgba(148, 163, 184, 0.50);
   --30-preferences-changes-changes-toolbar-changes-path-text-36: var(--muted);
+  --30-preferences-changes-changes-toolbar-changes-icon-text-37: #a7c7ff;
+  --30-preferences-changes-changes-repo-group-changes-row-hover-bg-38: var(--active-control-soft-bg);
   --30-preferences-changes-changes-repo-group-changes-folder-bg-39: color-mix(in srgb, var(--panel2) 76%, transparent);
+  --30-preferences-changes-changes-repo-group-changes-indent-line-40: rgba(148, 163, 184, 0.50);
   --30-preferences-changes-changes-repo-group-changes-path-text-41: var(--muted);
+  --30-preferences-changes-changes-repo-group-changes-icon-text-42: #a7c7ff;
   --30-preferences-changes-changes-diff-add-fg-43: #78dd6f;
   --30-preferences-changes-changes-diff-remove-fg-44: var(--bad);
   --30-preferences-changes-command-palette-dialog-bg-45: var(--overlay-surface);
@@ -955,9 +961,6 @@ body.theme-light {
   --pr-number-chip-bg: #2b3242;
   --sep-muted: #8c96a3;
   --divider: var(--lt-line);
-  --changes-tree-row-hover-bg: rgba(31, 111, 235, 0.08);
-  --changes-tree-indent-line: var(--tree-indent-line);
-  --changes-tree-icon-text: var(--menu-accent);
   --accent-lime: #2f7d20;
   /* light-theme defaults for the active accent (Green). The picker (applyActiveColor) overrides
      these per preset; supplied (not derived) so Green stays the exact current light values. */
@@ -1262,12 +1265,21 @@ body.theme-light {
   --30-preferences-changes-preferences-setting-advisory-fg-25: var(--good);
   --30-preferences-changes-preferences-setting-advisory-bg-26: var(--panel);
   --30-preferences-changes-preferences-setting-advisory-border-27: color-mix(in srgb, var(--good) 46%, var(--line));
+  --30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28: rgba(31, 111, 235, 0.08);
   --30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29: var(--lt-panel);
+  --30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);
   --30-preferences-changes-file-explorer-changes-panel-changes-path-text-31: var(--lt-muted);
+  --30-preferences-changes-file-explorer-changes-panel-changes-icon-text-32: var(--menu-accent);
+  --30-preferences-changes-changes-toolbar-changes-row-hover-bg-33: rgba(31, 111, 235, 0.08);
   --30-preferences-changes-changes-toolbar-changes-folder-bg-34: var(--lt-panel);
+  --30-preferences-changes-changes-toolbar-changes-indent-line-35: var(--tree-indent-line);
   --30-preferences-changes-changes-toolbar-changes-path-text-36: var(--lt-muted);
+  --30-preferences-changes-changes-toolbar-changes-icon-text-37: var(--menu-accent);
+  --30-preferences-changes-changes-repo-group-changes-row-hover-bg-38: rgba(31, 111, 235, 0.08);
   --30-preferences-changes-changes-repo-group-changes-folder-bg-39: var(--lt-panel);
+  --30-preferences-changes-changes-repo-group-changes-indent-line-40: var(--tree-indent-line);
   --30-preferences-changes-changes-repo-group-changes-path-text-41: var(--lt-muted);
+  --30-preferences-changes-changes-repo-group-changes-icon-text-42: var(--menu-accent);
   --30-preferences-changes-changes-diff-add-fg-43: var(--success-text-strong);
   --30-preferences-changes-changes-diff-remove-fg-44: var(--danger-strong-hover);
   --30-preferences-changes-command-palette-dialog-bg-45: var(--panel);
@@ -6720,11 +6732,11 @@ body :is(
   font-size: var(--ui-font-size-sm);
 
 
-  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-row-hover-bg: var(--30-preferences-changes-changes-toolbar-changes-row-hover-bg-33);
   --changes-folder-bg: var(--30-preferences-changes-changes-toolbar-changes-folder-bg-34);
-  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-indent-line: var(--30-preferences-changes-changes-toolbar-changes-indent-line-35);
   --changes-path-text: var(--30-preferences-changes-changes-toolbar-changes-path-text-36);
-  --changes-icon-text: var(--changes-tree-icon-text);
+  --changes-icon-text: var(--30-preferences-changes-changes-toolbar-changes-icon-text-37);
 }
 .file-explorer-changes-panel:hover > .changes-toolbar,
 .file-explorer-changes-panel:focus-within > .changes-toolbar {
@@ -6950,11 +6962,11 @@ body :is(
   overflow: hidden;
 
 
-  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-row-hover-bg: var(--30-preferences-changes-changes-repo-group-changes-row-hover-bg-38);
   --changes-folder-bg: var(--30-preferences-changes-changes-repo-group-changes-folder-bg-39);
-  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-indent-line: var(--30-preferences-changes-changes-repo-group-changes-indent-line-40);
   --changes-path-text: var(--30-preferences-changes-changes-repo-group-changes-path-text-41);
-  --changes-icon-text: var(--changes-tree-icon-text);
+  --changes-icon-text: var(--30-preferences-changes-changes-repo-group-changes-icon-text-42);
 }
 .changes-repo-head {
   width: 100%;
@@ -7948,11 +7960,11 @@ body :is(
 }
 body .file-explorer-changes-panel {
 
-  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-row-hover-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28);
   --changes-folder-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29);
-  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-indent-line: var(--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30);
   --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
-  --changes-icon-text: var(--changes-tree-icon-text);
+  --changes-icon-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-icon-text-32);
 }
 .grid {
   position: relative;
@@ -15978,13 +15990,13 @@ body.resizing-file-explorer-changes {
   box-shadow: var(--pane-resizer-hover-shadow);
 }
 .file-explorer-changes-panel {
-  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
+  --changes-row-hover-bg: var(--active-control-soft-bg);
   --changes-folder-bg: color-mix(in srgb, var(--panel2) 76%, transparent);
-  --changes-indent-line: var(--changes-tree-indent-line);
+  --changes-indent-line: rgba(148, 163, 184, 0.50);
   --changes-repo-head-bg: var(--pane-bar-bg, var(--panel2));
   --changes-folder-text: var(--accent-gold);
   --changes-path-text: var(--muted);
-  --changes-icon-text: var(--changes-tree-icon-text);
+  --changes-icon-text: #a7c7ff;
   --pane-bar-bg: var(--panel2);
   flex: 1 1 auto;
   min-height: 0;

@@ -246,7 +246,6 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
                 panelConnected: panel.isConnected === true,
                 apiHasMergeView: Boolean(window.YOLOmuxCodeMirror?.MergeView),
                 apiHasUnifiedMergeView: Boolean(window.YOLOmuxCodeMirror?.unifiedMergeView),
-                plainFallback: panel._cmPlainFallback === true,
                 statusText: panel.querySelector('.file-editor-status-message')?.textContent || '',
                 request: window.__readmeDiffRequest || '',
                 errors: window.__readmeDiffErrors,
@@ -267,9 +266,13 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     assert metrics["finalMode"] == "diff", json.dumps(metrics, sort_keys=True)
     assert metrics["finalTextLength"] == metrics["expectedTextLength"], metrics
     assert metrics["deletedRows"] > 0, metrics
-    assert metrics["plainFallback"] is False, metrics
     assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
     assert metrics["errors"] == [], metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="CodeMirror diff language parser failed; retrying plain diff editor",
+        correlation="TypeError: Cannot read properties of undefined (reading 'parser')",
+    )
 
 
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):

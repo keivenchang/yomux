@@ -1,7 +1,5 @@
 # YO!share Mirroring Architecture
 
-> **STATUS 2026-08-12: HISTORICAL. YO!share is not a supported feature and is being deleted from the product in 0.7.5** (`DOIT.075.2.yoshare-removal.md`, decision `NO_BUILD`). Nothing below describes shipped, supported behavior, and the "current" framing in the next paragraph is stale. This spec is retained as discovery evidence for the removal and is deleted by that queue.
-
 This spec defines the current YO!share mirroring model and the migration path away from the old semantic mirror. The goal is not just fewer bugs; it is removing the recurring class where the host and viewer run separate renderers and slowly drift apart.
 
 ## Decision

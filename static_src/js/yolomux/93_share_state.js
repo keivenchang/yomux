@@ -371,11 +371,12 @@ function shareReplaySendUiMessage(message = {}) {
 }
 
 function shareReplayResetKeyframeRequestBackoff() {
-  shareReplayState.resetKeyframeRequest();
+  shareReplayKeyframeInFlight = false;
+  shareReplayKeyframeBackoffMs = 0;
 }
 
 function shareReplayNextKeyframeRequestBackoff() {
-  const previous = shareReplayState.keyframeRequestSnapshot().backoffMs;
+  const previous = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
   if (!previous) return shareReplayKeyframeRequestInitialBackoffMs;
   return Math.min(shareReplayKeyframeRequestMaxBackoffMs, Math.round(previous * 1.7));
 }
@@ -383,10 +384,11 @@ function shareReplayNextKeyframeRequestBackoff() {
 function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
   const now = Date.now();
   shareReplayRecordLastReplayError(reason, detail);
-  let keyframeRequest = shareReplayState.keyframeRequestSnapshot();
-  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, keyframeRequest.inFlight ? keyframeRequest.backoffMs : 0);
-  if (keyframeRequest.lastAt > 0 && now - keyframeRequest.lastAt < requestFloorMs) {
-    shareReplayState.suppressKeyframeRequest();
+  const activeBackoffMs = Math.max(0, Math.round(Number(shareReplayKeyframeBackoffMs) || 0));
+  const lastRequestAt = Math.max(0, Math.round(Number(shareReplayKeyframeLastRequestAt) || 0));
+  const requestFloorMs = Math.max(shareReplayKeyframeRequestMinIntervalMs, shareReplayKeyframeInFlight ? activeBackoffMs : 0);
+  if (lastRequestAt > 0 && now - lastRequestAt < requestFloorMs) {
+    shareReplayKeyframeRequestSuppressedCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestSuppressedCount) || 0)) + 1;
     void shareUploadDebugProfile('share-keyframe-request-suppressed', {
       reason: String(reason || 'replay-error'),
       detail,
@@ -394,14 +396,16 @@ function shareReplayRequestKeyframe(reason = 'replay-error', detail = {}) {
     });
     return false;
   }
-  shareReplayState.beginKeyframeRequest(now, shareReplayNextKeyframeRequestBackoff());
-  keyframeRequest = shareReplayState.keyframeRequestSnapshot();
+  shareReplayKeyframeRequestCount = Math.max(0, Math.round(Number(shareReplayKeyframeRequestCount) || 0)) + 1;
+  shareReplayKeyframeLastRequestAt = now;
+  shareReplayKeyframeBackoffMs = shareReplayNextKeyframeRequestBackoff();
+  shareReplayKeyframeInFlight = true;
   const payload = {
     reason: String(reason || 'replay-error'),
     error: String(detail.error || '').slice(0, 500),
     digest: String(detail.digest || ''),
-    backoffMs: keyframeRequest.backoffMs,
-    suppressed: keyframeRequest.suppressed,
+    backoffMs: shareReplayKeyframeBackoffMs,
+    suppressed: shareReplayKeyframeRequestSuppressedCount,
   };
   for (const key of ['epoch', 'sequence', 'baseSequence', 'currentEpoch', 'lastSequence']) {
     const value = Number(detail[key]);

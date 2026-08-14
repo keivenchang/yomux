@@ -441,11 +441,11 @@ def test_a7_7_the_control_opens_the_system_view_from_a_real_click(browser, tmp_p
         """
         const done = arguments[arguments.length - 1];
         window.__yolomuxTestWaitFor(
-          () => debugRuntimeState.subTab === 'system'
+          () => jsDebugSubTab === 'system'
             && Array.from(document.querySelectorAll('[data-js-debug-subview="system"]')).some(view => !view.hidden),
           {timeoutMs: 10000, description: 'backend health details opens the System view'},
         ).then(() => done({
-          subTab: debugRuntimeState.subTab,
+          subTab: jsDebugSubTab,
           visibleSystemViews: Array.from(document.querySelectorAll('[data-js-debug-subview="system"]'))
             .filter(view => !view.hidden).length,
         })).catch(error => done({error: String(error)}));

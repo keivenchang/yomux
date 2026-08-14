@@ -5,61 +5,7 @@
 import threading
 
 from yolomux_lib import app as app_module
-from yolomux_lib.infra.state_services import JobdOperationService, SessionFilesService
-
-
-def test_session_files_service_owns_worker_until_target_returns_and_stop_joins_it():
-    class App:
-        def __init__(self):
-            self._session_files_coordinator = app_module.SessionFilesCoordinator(self)
-
-        @staticmethod
-        def background_can_run(_role):
-            return True
-
-        @staticmethod
-        def session_files_disk_cache_path(_key):
-            return None, "owned-worker-signature"
-
-    app = App()
-    coordinator = app._session_files_coordinator
-    service = coordinator.state
-    key = ("payload", "owned-worker")
-    worker_started = threading.Event()
-    release_worker = threading.Event()
-    stop_returned = threading.Event()
-    late_work = threading.Event()
-
-    def target(cache_key):
-        worker_started.set()
-        assert release_worker.wait(timeout=2)
-        if stop_returned.is_set():
-            late_work.set()
-        record = service.work_records[cache_key]
-        service.finish_work(key, record)
-
-    assert coordinator.start_session_files_cache_refresh(app, key, target) is True
-    assert worker_started.wait(timeout=1)
-    assert service.wait_for_idle(timeout=0.01) is False
-
-    def stop_service():
-        coordinator.stop()
-        stop_returned.set()
-
-    stopper = threading.Thread(target=stop_service, name="session-files-stop-regression")
-    stopper.start()
-    assert service.accepting_work is False
-    returned_before_worker_finished = stop_returned.wait(timeout=0.1)
-    release_worker.set()
-    stopper.join(timeout=2)
-
-    assert not stopper.is_alive()
-    assert returned_before_worker_finished is False
-    assert late_work.is_set() is False
-    assert service.wait_for_idle(timeout=0) is True
-    assert service.work_records == {}
-    assert service.reserve_work(("payload", "late"), "late-signature") is None
-    coordinator.stop()
+from yolomux_lib.infra.state_services import JobdOperationService
 
 
 def test_jobd_operation_service_wait_for_idle_keeps_completion_service_running():

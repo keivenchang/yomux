@@ -1075,7 +1075,7 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
     : splitNode(direction, newNode, root, splitPct));
-  const pointerReleaseMutation = dockviewLayoutActive() && runtimeState.layoutMutationSnapshot().pending > 0;
+  const pointerReleaseMutation = dockviewLayoutActive() && pendingLayoutMutationGeneration > 0;
   applyLayoutSlots(next, {
     focusSession: session,
     prune: false,
@@ -2238,7 +2238,7 @@ function replaceSessionMetadata(oldSession, newSession) {
   }
 }
 
-function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, options = {}) {
+function replaceTmuxSessionInClient(oldSession, newSession, nextSessions) {
   clearPendingTmuxSession(oldSession);
   markPendingTmuxSession(newSession);
   const next = normalizedSessionOrder(nextSessions) || sessions.map(item => item === oldSession ? newSession : item);
@@ -2249,11 +2249,7 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, option
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {
-    focusSession: newSession,
-    prune: false,
-    completionGeneration: options.completionGeneration,
-  });
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {focusSession: newSession, prune: false});
   renderUploadResult(newSession);
 }
 
@@ -2355,12 +2351,8 @@ async function renameTmuxSession(session, proposedName) {
       () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
       async payload => {
         const renamed = payload.new_session || newName;
-        const layoutGeneration = beginLayoutMutationCompletion();
-        replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
-        await Promise.all([
-          waitForLayoutMutationCompletion(layoutGeneration),
-          ensureTerminalRunning(renamed),
-        ]);
+        replaceTmuxSessionInClient(session, renamed, payload.sessions);
+        await ensureTerminalRunning(renamed);
       },
     );
     if (!mutation.committed) return false;

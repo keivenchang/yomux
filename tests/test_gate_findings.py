@@ -15,8 +15,7 @@ from tests.browser_helpers.browser_layout import start_isolated_browser_share_ap
 from tests.browser_helpers.browser_layout import stop_browser_share_server
 from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
-from tests.helpers.browser_scenarios import assert_terminal_wheel_observation
-from tests.helpers.browser_scenarios import terminal_wheel_observation
+from tests.test_browser_layout import test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmux as _assert_n1_wheel_routes
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yolomux_lib.settings import default_settings
@@ -27,7 +26,7 @@ from yolomux_lib.settings import write_settings_file
 @pytest.mark.browser
 def test_n1_alternate_screen_wheel_scroll_reaches_the_terminal(browser, tmp_path):
     """An alternate-screen Claude pane routes wheel lines into xterm rather than losing upward scroll."""
-    assert_terminal_wheel_observation(terminal_wheel_observation(browser, tmp_path))
+    _assert_n1_wheel_routes(browser, tmp_path)
 
 
 @pytest.mark.browser

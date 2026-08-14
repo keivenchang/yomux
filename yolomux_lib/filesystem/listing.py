@@ -72,9 +72,31 @@ def _repo_marker_is_real(marker_path: Path, marker: str) -> bool:
     return False
 
 
-def _directory_is_repo(path: Path) -> bool:
+def _directory_is_repo(path: Path, *, directory_descriptor: int | None = None) -> bool:
     for marker in REPO_MARKERS:
         try:
+            if directory_descriptor is not None:
+                marker_stat = os.stat(marker, dir_fd=directory_descriptor, follow_symlinks=False)
+                if marker == ".git":
+                    if stat.S_ISREG(marker_stat.st_mode):
+                        return True
+                    if stat.S_ISDIR(marker_stat.st_mode):
+                        os.stat(".git/HEAD", dir_fd=directory_descriptor, follow_symlinks=False)
+                        return True
+                    continue
+                required_children = {
+                    ".hg": ("requires", "store"),
+                    ".svn": ("wc.db", "entries"),
+                    ".jj": ("repo", "working_copy"),
+                }.get(marker, ())
+                if stat.S_ISDIR(marker_stat.st_mode):
+                    for required_child in required_children:
+                        try:
+                            os.stat(f"{marker}/{required_child}", dir_fd=directory_descriptor, follow_symlinks=False)
+                            return True
+                        except OSError:
+                            continue
+                continue
             if _repo_marker_is_real(path / marker, marker):
                 return True
         except OSError:
@@ -95,6 +117,7 @@ def _entry_info(
     symlink_target_pinned: bool = False,
     entry_stat: os.stat_result | None = None,
     inspection_path: Path | None = None,
+    inspection_descriptor: int | None = None,
     include_repo_info: bool = True,
 ) -> dict[str, Any]:
     started = _timing_started(performance_details)
@@ -152,7 +175,7 @@ def _entry_info(
     if kind == "dir":
         started = _timing_started(performance_details)
         repo_path = inspection_path or resolved or path
-        info["is_repo"] = _directory_is_repo(repo_path)
+        info["is_repo"] = _directory_is_repo(repo_path, directory_descriptor=inspection_descriptor)
         _record_elapsed(performance_details, "repo_probe_ms", started)
         if info["is_repo"] and include_repo_info:
             repo_key = resolved if resolved is not None else paths._normalized_scope_path(path)
@@ -263,10 +286,14 @@ def _visible_directory_names(
     try:
         requested_parent = requested_path or path
         resolved_parent = paths._normalized_scope_path(path)
-        directory_descriptor = os.open(
-            path,
-            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-        )
+        descriptor_parent = path.parent
+        if descriptor_parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
+            directory_descriptor = os.dup(int(path.name))
+        else:
+            directory_descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
     finally:
         _record_elapsed(performance_details, "scan_resolve_ms", started)
     started = _timing_started(performance_details)
@@ -314,7 +341,10 @@ def _visible_directory_names(
                             entry_stat = os.fstat(link_fd)
                             target_text = os.readlink("", dir_fd=link_fd)
                         except OSError:
-                            target_text = None
+                            try:
+                                target_text = os.readlink(name, dir_fd=directory_descriptor)
+                            except OSError:
+                                target_text = None
                         finally:
                             if link_fd is not None:
                                 os.close(link_fd)
@@ -374,6 +404,7 @@ def _visible_directory_names(
                                     symlink_target_pinned=is_symlink,
                                     entry_stat=entry_stat if is_symlink else child_handle.stat_result,
                                     inspection_path=child_handle.descriptor_path(),
+                                    inspection_descriptor=child_handle.descriptor,
                                     include_repo_info=include_repo_info,
                                 )
                             finally:

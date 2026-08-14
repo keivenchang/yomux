@@ -27,15 +27,12 @@ from __future__ import annotations
 import ast
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
-from tests.helpers.backend_health_scenarios import BackendHealthHarness as Harness
-from tests.helpers.backend_health_scenarios import FakeService
-from tests.helpers.clock import FakeClock
 
 from yolomux_lib import app as app_module
 from yolomux_lib import cli as cli_module
@@ -84,6 +81,145 @@ PORT = 7799
 START_PRIMITIVE_ATTRIBUTES = frozenset({"ensure_started", "acquire_lease"})
 
 
+class FakeClock:
+    """One injected clock. Advances only when a test says so."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.value = float(start)
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> float:
+        self.value += float(seconds)
+        return self.value
+
+
+class RefusingRegistry:
+    """A registry stand-in that fails loudly if anything tries to start a service."""
+
+    def __init__(self) -> None:
+        self.status_calls = 0
+
+    def ensure_started(self) -> bool:
+        raise AssertionError("the health observer must never start a demand-scoped service")
+
+    def acquire_lease(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the health observer must never lease a demand-scoped service")
+
+    def status(self) -> dict[str, Any]:
+        self.status_calls += 1
+        return {"healthy": True}
+
+
+class FakeService:
+    """One service's row producer, shaped like the real `runtime_status` rows."""
+
+    def __init__(self, name: str, *, pid: int = 100, demand_started: bool = True) -> None:
+        self.name = name
+        self.registry = RefusingRegistry()
+        self.calls = 0
+        self.error: BaseException | None = None
+        self.gate: threading.Event | None = None
+        self.traffic_classes: list[str] = []
+        self.row: dict[str, Any] = {
+            "service": name,
+            "pid": pid,
+            "started_at": 10.0,
+            "healthy": True,
+            "last_failure": "",
+            "demand_started": demand_started,
+            "resources": {"cpu_percent": 1.0, "rss_bytes": 2048},
+        }
+
+    def runtime_status(self) -> dict[str, Any]:
+        self.calls += 1
+        # Every real producer reaches its service through the registry's status read. Calling it
+        # here is what makes RefusingRegistry.ensure_started a live tripwire rather than decoration.
+        self.registry.status()
+        # Deliberately a NON-probe method name. `status` and `ping` are classified as probe
+        # traffic by name, so asserting on those would pass with the probe scope removed and
+        # prove nothing. A producer whose service call is named anything else is attributed
+        # only by `local_service_probe_scope`, which is the belt this test is holding.
+        self.traffic_classes.append(local_service_traffic_class("query"))
+        if self.gate is not None:
+            self.gate.wait(timeout=5.0)
+        if self.error is not None:
+            raise self.error
+        return dict(self.row)
+
+    def down(self, reason: str = "worker exited") -> None:
+        self.row["pid"] = 0
+        self.row["last_failure"] = reason
+
+    def absent(self) -> None:
+        self.row["pid"] = 0
+        self.row["last_failure"] = ""
+
+    def up(self) -> None:
+        self.row["pid"] = 100
+        self.row["healthy"] = True
+        self.row["last_failure"] = ""
+
+
+class Harness:
+    """The observer plus everything injected into it, so a test can drive one cycle at a time."""
+
+    def __init__(self, tmp_path: Path, **kwargs: Any) -> None:
+        self.services = {name: FakeService(name) for name in LOCAL_SERVICE_INVENTORY}
+        self.published: list[tuple[str, dict[str, Any]]] = []
+        self.monotonic = FakeClock(500.0)
+        self.wall = FakeClock(1_000_000.0)
+        self.waits: list[float] = []
+        self.wake_result = False
+        self.store = BackendHealthStore(PORT, state_dir=tmp_path, clock=self.wall)
+        self.observer = BackendHealthObserver(
+            row_producers=self.row_producers,
+            store=self.store,
+            publish=self.publish,
+            label_source=lambda service: f"label:{service}",
+            monotonic=self.monotonic,
+            wall_clock=self.wall,
+            wait=self.wait,
+            identity_source=lambda pid: f"proc:{pid}" if pid > 0 else "",
+            **kwargs,
+        )
+
+    def row_producers(self) -> dict[str, Any]:
+        return {name: service.runtime_status for name, service in self.services.items()}
+
+    def publish(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self.published.append((event_type, payload))
+        return {"type": event_type, "payload": payload}
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        self.monotonic.advance(timeout)
+        return self.wake_result
+
+    def arm_pool(self) -> None:
+        """Give the observer its bounded probe pool without starting the loop thread.
+
+        A started loop would race the cycle a test drives by hand; `stop()` retires the pool
+        either way, so the teardown proof is the same.
+        """
+        self.observer._executor = ThreadPoolExecutor(
+            max_workers=len(LOCAL_SERVICE_INVENTORY),
+            thread_name_prefix=f"{BACKEND_HEALTH_OBSERVER_THREAD_PREFIX}-probe",
+        )
+        self.observer._monotonic = time.monotonic
+
+    def cycle(self, count: int = 1):
+        result = None
+        for _ in range(count):
+            self.wall.advance(BACKEND_HEALTH_OBSERVE_SECONDS)
+            result = self.observer.observe_once()
+        return result
+
+    def states(self) -> dict[str, str]:
+        return {name: state for name, (state, _) in self.observer._accepted.items()}
+
+
 @pytest.fixture
 def harness(tmp_path: Path) -> Harness:
     reset_local_service_traffic()
@@ -91,15 +227,6 @@ def harness(tmp_path: Path) -> Harness:
     yield built
     built.observer.stop()
     reset_local_service_traffic()
-
-
-def test_shared_fake_clock_rejects_unmeasurable_values_but_allows_wall_clock_corrections():
-    clock = FakeClock(10.0)
-    assert clock.advance(-2.0) == 8.0
-    with pytest.raises(ValueError, match="finite"):
-        clock.advance(float("nan"))
-    with pytest.raises(ValueError, match="finite"):
-        FakeClock(float("inf"))
 
 
 # -- the reducer -------------------------------------------------------------------------
@@ -1095,6 +1222,11 @@ def test_cli_starts_the_observer_after_the_port_lease_and_stops_it_before_client
     # The election's outcome is discarded at the call site, so nothing in `main` can branch on
     # it. A `won = app.start_background_owner(...)` would be the first step toward gating.
     assert isinstance(election.statement, ast.Expr), ast.dump(election.statement)
+
+    behavioural_proof = "def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning("
+    app_tests = (REPO_ROOT / "tests" / "test_app.py").read_text(encoding="utf-8")
+    assert behavioural_proof in app_tests, "the behavioural proof this test defers to is gone"
+
 
 # -- helpers -----------------------------------------------------------------------------
 

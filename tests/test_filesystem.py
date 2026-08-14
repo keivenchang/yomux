@@ -1,8 +1,10 @@
-import json
+import fcntl
 import inspect
 import itertools
+import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -17,13 +19,27 @@ from yolomux_lib.filesystem import io_ops as filesystem_io
 from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.filesystem import git_ops
-from yolomux_lib.search import bfs_index
 from yolomux_lib.workspace import metadata
 
 from _git_helpers import git, init_repo
 
 
 def _open_descriptors_beneath(root: Path) -> dict[str, str]:
+    if sys.platform == "darwin":
+        descriptors = {}
+        for descriptor in range(256):
+            try:
+                raw_path = fcntl.fcntl(
+                    descriptor,
+                    filesystem_paths.DARWIN_F_GETPATH,
+                    b"\0" * filesystem_paths.DARWIN_PATH_BUFFER_BYTES,
+                )
+                target = Path(raw_path.split(b"\0", 1)[0].decode("utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if target == root or target.is_relative_to(root):
+                descriptors[str(descriptor)] = str(target)
+        return descriptors
     descriptor_root = next(path for path in (Path("/proc/self/fd"), Path("/dev/fd")) if path.exists())
     descriptors = {}
     for descriptor in descriptor_root.iterdir():
@@ -63,10 +79,10 @@ def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
 
 
 def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog, tmp_path):
-    caplog.set_level("INFO", logger=filesystem_search.__name__)
     project = tmp_path / "project"
     project.mkdir()
-    # Register the project as the ONE candidate root so the shared prefilter covers `safe`; with no root
+    # reindex only marks paths for EXISTING index roots. Register the project as the ONE
+    # candidate root so the shared prefilter has a covering root for `safe`; with no root
     # configured there is genuinely nothing to reindex and the prefilter correctly returns [].
     monkeypatch.setattr(filesystem_search.file_index, "_iter_candidate_index_roots", lambda: [project])
     # A secret sibling OUTSIDE every index root: no candidate root covers it, so the shared
@@ -74,7 +90,7 @@ def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypat
     secret = str(tmp_path / ".azure" / "token")
     # A change UNDER the index root whose parent no longer exists: admitted by the prefilter
     # (inside the root, not excluded) but unindexable at authorization time (parent gone -> 404).
-    # It must be skipped with exactly ONE deduplicated diagnostic and never abort the batch.
+    # It must be skipped with exactly ONE deduplicated warning, and never abort the batch.
     vanished = str(project / "gone" / "app.py")
     safe = str(project / "app.py")
     dirty = []
@@ -95,8 +111,8 @@ def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypat
     assert dirty == [Path(safe), Path(safe)]
     # The out-of-root secret is dropped by the prefilter without any log spam.
     assert not any("token" in message for message in caplog.messages)
-    # A disappearing path is diagnostic, not a release-blocking warning.
-    assert [record.levelname for record in caplog.records if vanished in record.message] == ["INFO"]
+    # The unindexable in-root path is warned about exactly once across both batches.
+    assert sum(vanished in message for message in caplog.messages) == 1
 
 
 def test_list_directory_returns_entries(tmp_path):
@@ -124,6 +140,29 @@ def test_list_directory_returns_entries(tmp_path):
     assert "is_repo" not in names["file.txt"]
     assert names["file.txt"]["size"] == len("hello")
     assert names["big.dat"]["kind"] == "file"
+
+
+def test_visible_directory_scan_duplicates_pinned_dev_fd_on_macos(tmp_path, monkeypatch):
+    (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
+    descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    real_open = os.open
+
+    def guarded_open(path, *args, **kwargs):
+        assert Path(path).parent != Path("/dev/fd")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    try:
+        names, truncated = filesystem.listing._visible_directory_names(
+            Path("/dev/fd") / str(descriptor),
+            requested_path=tmp_path,
+            include_repo_info=False,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert names == ["hello.txt"]
+    assert truncated is False
 
 
 def test_listing_reuses_parent_canonicalization_for_ordinary_children(monkeypatch, tmp_path):
@@ -1272,10 +1311,10 @@ def test_list_directory_bounds_slow_repo_enrichment_without_dropping_repo_row(tm
     started = time.perf_counter()
     entries = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}
     assert time.perf_counter() - started < 0.25
-    assert entries["a-slow"]["is_repo"] is True
-    assert "repo" in entries["a-slow"]
-    assert entries["z-fast"]["is_repo"] is True
-    assert entries["z-fast"]["repo_info_deferred"] is True
+    repo_rows = [entries["a-slow"], entries["z-fast"]]
+    assert all(entry["is_repo"] is True for entry in repo_rows)
+    assert sum("repo" in entry for entry in repo_rows) == 1
+    assert sum(entry.get("repo_info_deferred") is True for entry in repo_rows) == 1
 
 
 def test_list_directory_allows_root_by_default(monkeypatch):
@@ -1829,78 +1868,6 @@ def test_search_files_canonicalizes_symlink_root(tmp_path):
     assert payload["root_realpath"] == os.path.realpath(real_root)
     assert [item["path"] for item in payload["files"]] == [str(real_root / "DIS-2218.md")]
     assert payload["files"][0]["realpath"] == os.path.realpath(real_root / "DIS-2218.md")
-
-
-def test_search_files_does_not_serve_startup_metadata_before_first_directory_publish(monkeypatch, tmp_path):
-    root = tmp_path / "notes"
-    root.mkdir()
-    target = root / "DIS-2218.md"
-    target.write_text("# notes\n", encoding="utf-8")
-    file_index = filesystem_search.file_index
-    file_index.clear_memory_indexes()
-    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
-    startup_claimed = threading.Event()
-    release_build = threading.Event()
-
-    def held_runner(build_root, skip_dirs, **options):
-        build = bfs_index.ProgressiveBuild(
-            build_root,
-            skip_dirs,
-            exclude_path=options.get("exclude_path"),
-            exclude_signature=options.get("exclude_signature", ""),
-            generation=options["generation"],
-            operation=options.get("operation", ""),
-            tombstone_identity=options.get("tombstone_identity"),
-        )
-        with build:
-            assert build.enqueue_startup()
-            startup_claimed.set()
-            assert release_build.wait(10)
-            build.run()
-        return True
-
-    real_search_disk_index = file_index.search_disk_index
-
-    def search_after_startup_claim(*args, **kwargs):
-        assert startup_claimed.wait(10)
-        return real_search_disk_index(*args, **kwargs)
-
-    monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", held_runner)
-    monkeypatch.setattr(file_index, "search_disk_index", search_after_startup_claim)
-    try:
-        payload = filesystem.search_files(str(root), "DIS-2218", 20, recursive=True)
-        assert [item["path"] for item in payload["files"]] == [str(target)]
-        assert payload["files"][0]["realpath"] == str(target)
-        policy = filesystem_search._search_index_policy(root)
-        startup_metadata = file_index._authoritative_store_metadata(root)
-        assert startup_metadata is not None
-        assert file_index._row_serving_snapshot_metadata(startup_metadata) is False
-        assert file_index._load_disk(root, policy["skip_dirs"], policy["exclude_signature"]) is None
-    finally:
-        release_build.set()
-        with file_index._REGISTRY_LOCK:
-            index = file_index._REGISTRY[str(root)]
-        assert index.completion.wait(10)
-
-    def live_walk_forbidden(*_args, **_kwargs):
-        raise AssertionError("a published layer-one snapshot must own the search result")
-
-    monkeypatch.setattr(filesystem_search, "_search_full_tree", live_walk_forbidden)
-    published = filesystem.search_files(str(root), "DIS-2218", 20, recursive=True)
-    assert [item["path"] for item in published["files"]] == [str(target)]
-    assert published["index_state"] == "ready"
-    try:
-        policy = filesystem_search._search_index_policy(root)
-        published_metadata = file_index._raw_snapshot_metadata(
-            root,
-            policy["skip_dirs"],
-            policy["exclude_signature"],
-        )
-        assert published_metadata is not None
-        assert file_index._row_serving_snapshot_metadata(published_metadata) is True
-        assert file_index._load_disk(root, policy["skip_dirs"], policy["exclude_signature"]) is not None
-    finally:
-        file_index.clear_memory_indexes()
 
 
 def test_search_files_ranks_exact_filename_above_large_generated_sibling(tmp_path):

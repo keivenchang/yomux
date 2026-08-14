@@ -13,7 +13,6 @@ import signal
 import subprocess
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -24,8 +23,6 @@ from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
 from tools import static_build
 from tools import test_catalog
-from tools import test_plan
-from tools import pytest_catalog_plugin
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
@@ -136,8 +133,6 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert static_lane.steps == (
         check.Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
         check.Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
-        check.Step("architecture budgets", ["python3", "tools/architecture_budgets.py"]),
-        check.Step("local-service type gate", ["python3", "tools/check_local_service_types.py"]),
     )
     pytest_lane = next(lane for lane in lanes if lane.name == "pytest")
     # The default pytest lane runs the full suite EXCEPT node_bridge and e2e: test_node_suite.py shells
@@ -262,261 +257,6 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "boot",
         "-q",
     ]
-
-    assert test_catalog.focused_phase_target_args("nonbrowser") == [
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-    ]
-
-
-def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
-    check = load_check_module()
-    built = check.lanes()
-    assert [(lane.name, lane.label, lane.default) for lane in built] == [
-        (spec.name, spec.label, spec.default) for spec in test_plan.LANE_SPECS
-    ]
-    browser_spec = test_plan.lane_spec("pytest-browser")
-    assert browser_spec.prerequisites == ("pytest-boot",)
-    assert browser_spec.phases == ("boot", "browser", "golden")
-    assert browser_spec.worker_class == "pytest-mixed"
-    assert test_plan.lane_spec("pytest-browser-behavior").focused_alias_of == "pytest-browser"
-    assert test_plan.resolved_lane_step_ids(browser_spec) == (
-        "pytest-boot",
-        "pytest-browser",
-        "pytest-browser-golden",
-    )
-    browser = next(lane for lane in built if lane.name == "pytest-browser")
-    boot = next(lane for lane in built if lane.name == "pytest-boot")
-    behavior = next(lane for lane in built if lane.name == "pytest-browser-behavior")
-    assert browser.steps[0] is boot.steps[0]
-    assert behavior.steps[0] is browser.steps[1]
-
-    default_step_owners = {}
-    for spec in test_plan.LANE_SPECS:
-        if not spec.default:
-            continue
-        for step_id in test_plan.resolved_lane_step_ids(spec):
-            assert step_id not in default_step_owners, (
-                step_id,
-                default_step_owners.get(step_id),
-                spec.name,
-            )
-            default_step_owners[step_id] = spec.name
-
-
-def test_lane_spec_prerequisite_cycle_fails_closed(monkeypatch):
-    cyclic = (
-        test_plan.LaneSpec("first", "first", (), prerequisites=("second",)),
-        test_plan.LaneSpec("second", "second", (), prerequisites=("first",)),
-    )
-    monkeypatch.setattr(test_plan, "LANE_SPECS", cyclic)
-    with pytest.raises(ValueError, match="prerequisite cycle"):
-        test_plan.resolved_lane_step_ids(cyclic[0])
-
-
-def test_lane_registry_references_are_typed_total_and_fail_closed(monkeypatch):
-    check = load_check_module()
-    catalog = check.step_catalog()
-    original_specs = test_plan.LANE_SPECS
-    assert set(catalog) == set(test_plan.StepId)
-    test_plan.validate_lane_specs(catalog)
-
-    missing = dict(catalog)
-    missing.pop(test_plan.StepId.WHITESPACE)
-    with pytest.raises(ValueError, match="missing executable step IDs: whitespace"):
-        test_plan.validate_lane_specs(missing)
-
-    with pytest.raises(ValueError, match="duplicate step ID in executable catalog"):
-        test_plan.validate_lane_specs([*catalog, test_plan.StepId.WHITESPACE])
-
-    with pytest.raises(ValueError, match="extra executable step IDs: invented"):
-        test_plan.validate_lane_specs([*catalog, "invented"])
-
-    duplicated = (*test_plan.LANE_SPECS, test_plan.LaneSpec("second-whitespace", "second", (test_plan.StepId.WHITESPACE,)))
-    monkeypatch.setattr(test_plan, "LANE_SPECS", duplicated)
-    with pytest.raises(ValueError, match="duplicate step ID whitespace"):
-        test_plan.validate_lane_specs(catalog)
-
-    unknown_step = (test_plan.LaneSpec("unknown", "unknown", ("invented",)),)
-    monkeypatch.setattr(test_plan, "LANE_SPECS", unknown_step)
-    with pytest.raises(ValueError, match="unknown step ID in lane unknown"):
-        test_plan.validate_lane_specs(catalog)
-
-    drifted = tuple(
-        replace(spec, phases=("browser",)) if spec.name == "pytest" else spec
-        for spec in original_specs
-    )
-    monkeypatch.setattr(test_plan, "LANE_SPECS", drifted)
-    with pytest.raises(ValueError, match="test phase drift in lane pytest"):
-        test_plan.validate_lane_specs(catalog)
-
-
-@pytest.mark.parametrize(
-    "name, marker_expression",
-    (
-        ("unit", "not socket and not browser and not node_bridge"),
-        ("socket", "socket and not browser"),
-    ),
-)
-def test_focused_alias_collection_matches_phase_catalog_in_exact_order_and_markers(tmp_path, name, marker_expression):
-    check = load_check_module()
-    lane_args = next(lane for lane in check.lanes() if lane.name == f"pytest-{name}").steps[0].args
-    historical_args = [
-        "python3",
-        "-m",
-        "pytest",
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-        "-m",
-        marker_expression,
-        "-q",
-    ]
-    assert lane_args == historical_args
-    catalog_files = check.pytest_files("nonbrowser")
-    assert test_catalog.focused_phase_target_args("nonbrowser") == [
-        "tests",
-        "--ignore=tests/test_browser_layout.py",
-    ]
-    focused_owner_order = [
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in sorted((REPO_ROOT / "tests").rglob("test_*.py"))
-        if path != REPO_ROOT / "tests/test_browser_layout.py"
-        and "nonbrowser" in test_catalog.file_phases(path)
-    ]
-    assert focused_owner_order == catalog_files
-
-    test_root = tmp_path / "tests"
-    nested = test_root / "nested"
-    nested.mkdir(parents=True)
-    (nested / "test_owner.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.owner\n\n"
-        "def test_first(): pass\n\n"
-        "@pytest.mark.socket\n"
-        "def test_socket(): pass\n",
-        encoding="utf-8",
-    )
-    (test_root / "test_peer.py").write_text(
-        "import pytest\n\n"
-        "@pytest.mark.slow\n"
-        "def test_last(): pass\n",
-        encoding="utf-8",
-    )
-    (test_root / "test_browser_layout.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.browser\n\n"
-        "def test_browser_only(): pass\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "pytest.ini").write_text(
-        "[pytest]\nmarkers =\n    browser: browser\n    node_bridge: node bridge\n    owner: owner\n    slow: slow\n    socket: socket\n",
-        encoding="utf-8",
-    )
-    phase_files = discover_pytest_phase_files(test_root, repo_root=tmp_path)["nonbrowser"]
-
-    def collect(label, targets):
-        destination = tmp_path / f"{name}-{label}.json"
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            value for value in (str(REPO_ROOT), env.get("PYTHONPATH", "")) if value
-        )
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "--collect-only",
-                "-q",
-                "-p",
-                "tools.pytest_catalog_plugin",
-                f"--yolomux-catalog-output={destination}",
-                *targets,
-                "-m",
-                marker_expression,
-            ],
-            cwd=tmp_path,
-            env=env,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        return json.loads(destination.read_text(encoding="utf-8"))
-
-    focused_rows = collect("focused", ("tests", "--ignore=tests/test_browser_layout.py"))
-    phase_rows = collect("phase", phase_files)
-    assert focused_rows == phase_rows
-
-
-def test_browser_capability_preflight_names_missing_dependency_browser_and_driver(monkeypatch, tmp_path):
-    check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, "host-only test"))
-    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: None)
-    assert check.browser_capability_preflight().component == "dependency"
-
-    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
-    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(check.shutil, "which", lambda _name: None)
-    monkeypatch.setattr(check.Path, "is_file", lambda _path: False)
-    assert check.browser_capability_preflight().component == "browser"
-
-    browser = tmp_path / "chrome"
-    browser.write_text("", encoding="utf-8")
-    monkeypatch.undo()
-    monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
-    monkeypatch.setattr(
-        check.shutil,
-        "which",
-        lambda name: str(browser) if name == "google-chrome" else None,
-    )
-    assert check.browser_capability_preflight().component == "driver"
-
-
-def test_browser_capability_preflight_runs_in_the_container_execution_environment(monkeypatch):
-    check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
-    completed = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout=check.BrowserCapabilityDiagnostic(True, "ready", "container capabilities").json_text() + "\n",
-        stderr="",
-    )
-    monkeypatch.setattr(check.subprocess, "run", lambda *args, **kwargs: completed)
-
-    diagnostic = check.browser_capability_preflight()
-
-    assert diagnostic == check.BrowserCapabilityDiagnostic(True, "ready", "container capabilities")
-
-
-def test_browser_capability_preflight_reports_container_probe_failure(monkeypatch):
-    check = load_check_module()
-    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (True, "docker"))
-    completed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="docker probe failed\n")
-    monkeypatch.setattr(check.subprocess, "run", lambda *args, **kwargs: completed)
-
-    diagnostic = check.browser_capability_preflight()
-
-    assert diagnostic.component == "environment"
-    assert diagnostic.detail == "isolated test environment probe failed: docker probe failed"
-
-
-def test_requested_browser_lane_preflight_refuses_before_any_step(monkeypatch, capsys):
-    check = load_check_module()
-    monkeypatch.setattr(
-        check,
-        "browser_capability_preflight",
-        lambda: check.BrowserCapabilityDiagnostic(False, "driver", "missing exact driver"),
-    )
-    monkeypatch.setattr(check, "run_parallel", lambda _lanes: pytest.fail("lane must not start"))
-    assert check.main(["--lane", "pytest-browser", "--no-tool-guard"]) == check.EXIT_LANE_FAILED
-    assert "BROWSER PREFLIGHT FAILED [driver]: missing exact driver" in capsys.readouterr().err
-
-
-def test_catalog_and_collection_share_filename_marker_owner():
-    assert test_catalog.automatic_test_markers is test_plan.automatic_test_markers
-    assert test_catalog.PHASE_MARKER_PRECEDENCE is test_plan.PHASE_MARKER_PRECEDENCE
-    assert test_plan.automatic_test_markers("test_browser_new.py") == ("browser", "socket")
-    assert test_plan.automatic_test_markers("test_new.py") == ()
 
 
 def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
@@ -656,19 +396,25 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
-        check=False,
+        check=True,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
     collection_rows = json.loads(output_path.read_text(encoding="utf-8"))
     collected = {row["nodeid"] for row in collection_rows}
     collected_base = {nodeid.split("[", 1)[0] for nodeid in collected}
     missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected_base]
     assert missing == []
     check = load_check_module()
+    expected_phase_by_marker = (
+        ("node_bridge", "node_bridge"),
+        ("e2e", "e2e"),
+        ("visual_golden", "golden"),
+        ("boot", "boot"),
+        ("browser", "browser"),
+    )
     catalog_files = {phase: set(paths) for phase, paths in check.PYTEST_PHASE_FILES.items()}
     phase_rows = {phase: [] for phase in catalog_files}
     for row in collection_rows:
-        phase = test_plan.phase_for_markers(set(row["markers"]))
+        phase = next((candidate for marker, candidate in expected_phase_by_marker if marker in row["markers"]), "nonbrowser")
         phase_rows[phase].append(row["nodeid"])
     ownership_errors = []
     for phase, nodeids in phase_rows.items():
@@ -678,9 +424,6 @@ def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
                 ownership_errors.append(f"{nodeid} belongs to {phase}, but {path} is absent from its catalog")
     assert ownership_errors == []
     assert set().union(*map(set, phase_rows.values())) == collected
-    for phase, rows in phase_rows.items():
-        owner_order = list(dict.fromkeys(nodeid.split("::", 1)[0] for nodeid in rows))
-        assert owner_order == check.pytest_files(phase)
 
 
 def test_pytest_catalog_discovers_new_files_and_mixed_phases(tmp_path):
@@ -708,42 +451,6 @@ def test_pytest_catalog_discovers_new_files_and_mixed_phases(tmp_path):
     assert "tests/test_new_contract.py" in catalog["e2e"]
     assert "tests/test_browser_new_surface.py" in catalog["browser"]
     assert "tests/test_browser_new_surface.py" not in catalog["nonbrowser"]
-
-
-def test_pytest_catalog_ignores_marker_values_inside_parametrize_arguments(tmp_path):
-    test_root = tmp_path / "tests"
-    test_root.mkdir()
-    path = test_root / "test_marker_values.py"
-    path.write_text(
-        "import pytest\n\n"
-        "@pytest.mark.parametrize('marker', [pytest.mark.browser.mark, pytest.mark.no_browser.mark])\n"
-        "def test_marker_value(marker): pass\n",
-        encoding="utf-8",
-    )
-
-    assert test_catalog.test_definitions(path, repo_root=tmp_path) == (
-        ("tests/test_marker_values.py::test_marker_value", "nonbrowser"),
-    )
-    assert discover_pytest_phase_files(test_root, repo_root=tmp_path)["browser"] == ()
-
-
-def test_phase_catalog_and_runtime_share_slowest_first_owner_order(tmp_path):
-    test_root = tmp_path / "tests"
-    test_root.mkdir()
-    for name, body in {
-        "test_browser_share.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_generated_share_link_mirrors_interactive_ui_surface_matrix(): pass\ndef test_after(): pass\n",
-        "test_browser_dockview.py": "import pytest\npytestmark = pytest.mark.browser\ndef test_dockview_wrapped_tab_rows_share_one_control_reserved_flex_grid(): pass\ndef test_differ_reopen_keeps_dragged_file_tab_home(): pass\n",
-        "test_plain.py": "def test_plain(): pass\n",
-    }.items():
-        (test_root / name).write_text(body, encoding="utf-8")
-
-    catalog = discover_pytest_phase_files(test_root, repo_root=tmp_path)
-
-    assert catalog["browser"] == (
-        "tests/test_browser_share.py",
-        "tests/test_browser_dockview.py",
-    )
-    assert catalog["nonbrowser"] == ("tests/test_plain.py",)
 
 
 def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():

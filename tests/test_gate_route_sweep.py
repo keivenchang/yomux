@@ -34,7 +34,6 @@ from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import wait_for_fixture_http_quiescence
-from tests.helpers.http_routes import login_cookie as _login_cookie
 from tests.browser_helpers.browser_console import validate_server_log_ring_payload
 from tests.browser_helpers.browser_console import validate_server_log_ring_transition
 from tests.tmux_runtime import run_isolated_tmux
@@ -85,6 +84,34 @@ def _registry_routes() -> tuple[http_routes.Route, ...]:
     assert len({(route.method, route.path) for route in routes}) == len(routes)
     assert server_module.route_for_request is http_routes.route_for_request
     return routes
+
+
+def _login_cookie(runtime: GateLiveServer, credentials: GateAuthCredentials) -> str:
+    body = urlencode({
+        "username": credentials.username,
+        "password": credentials.password,
+        "next": "/api/ping",
+    }).encode("utf-8")
+    connection = HTTPConnection("127.0.0.1", runtime.port, timeout=8)
+    try:
+        connection.request(
+            "POST",
+            "/login",
+            body=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(body)),
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        response.read()
+        cookies = [value for name, value in response.getheaders() if name.lower() == "set-cookie"]
+    finally:
+        connection.close()
+    assert response.status == 303, response.status
+    cookie = next(value.split(";", 1)[0] for value in cookies if "yolomux_auth_" in value and "Max-Age=0" not in value)
+    return cookie
 
 
 def _json_body(value: Any) -> bytes:

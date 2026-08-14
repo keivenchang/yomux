@@ -1982,7 +1982,7 @@ function pollHarness({advancedOpen = false, responses = {}} = {}) {
     intervals: [],
     cleared: [],
     renders: 0,
-    debugRuntimeState: {subTab: 'system'},
+    jsDebugSubTab: 'system',
     jsDebugStatsPanelVisible: () => true,
     userMessageText: error => String(error?.message || error),
     refreshDebugSystemViews: () => { sandbox.renders += 1; },

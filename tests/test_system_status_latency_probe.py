@@ -60,7 +60,7 @@ from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 # One authenticated-fixture login helper, not a third copy of the same form post.
-from tests.helpers.http_routes import login_cookie as _login_cookie
+from tests.test_gate_route_sweep import _login_cookie
 
 
 MEASURE_ENV = "YOLOMUX_MEASURE_SYSTEM_STATUS"

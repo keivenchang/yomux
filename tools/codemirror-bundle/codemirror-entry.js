@@ -50,7 +50,6 @@ import {
 import {
   HighlightStyle,
   LanguageDescription,
-  LanguageSupport,
   StreamLanguage,
   bracketMatching,
   defaultHighlightStyle,
@@ -105,7 +104,6 @@ window.YOLOmuxCodeMirror = {
   json,
   keymap,
   LanguageDescription,
-  LanguageSupport,
   lineNumbers,
   markdown,
   MergeView,

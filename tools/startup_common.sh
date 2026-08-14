@@ -17,8 +17,10 @@ yolomux_port_listener_pids() {
     return
   fi
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
-    return
+    # lsof exits 1 when the query has no matches. That is a valid empty listener set,
+    # not evidence that the scanner is unavailable.
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true
+    return 0
   fi
   printf 'need ss or lsof to find the listener for port %s\n' "$port" >&2
   return 2

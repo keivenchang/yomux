@@ -459,7 +459,19 @@ def chrome_renderer_cpu_snapshot(chromedriver_pid: int) -> dict[str, object]:
         try:
             command = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
         except OSError:
-            continue
+            try:
+                completed = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "command="],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=2.0,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if completed.returncode != 0:
+                continue
+            command = completed.stdout
         if "--type=renderer" not in command:
             continue
         elapsed = process_cpu_seconds(pid)

@@ -33,8 +33,6 @@ from typing import Any
 
 import pytest
 
-from tests.helpers.clock import FakeClock
-
 from yolomux_lib import local_service_projection
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLE_FAILING
 from yolomux_lib.backend_health.observer import BACKEND_HEALTH_CYCLES_STALLED
@@ -51,6 +49,17 @@ from yolomux_lib.backend_health.store import ResourceObservation
 from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 
 PORT = 17999
+
+
+class FakeClock:
+    def __init__(self, start: float) -> None:
+        self.value = float(start)
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += float(seconds)
 
 
 class SteadyService:

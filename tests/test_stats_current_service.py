@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType
+from types import SimpleNamespace
 
 import pytest
 
@@ -1856,6 +1857,27 @@ def test_the_first_cpu_sample_reports_absence_because_it_had_no_baseline():
     assert isinstance(second["cpu_percent"], float)
     assert isinstance(second["system_cpu_percent"], float)
     assert second["rss_bytes"] > 0
+
+
+def test_darwin_cpu_sampler_uses_platform_readers(monkeypatch):
+    process_readings = iter([(10.0, 4096), (10.25, 8192)])
+    system_readings = iter([(1000.0, 250.0), (1100.0, 280.0)])
+    monotonic_readings = iter([20.0, 21.0])
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors, "read_process_cpu_seconds_and_rss", lambda _pid: next(process_readings))
+    monkeypatch.setattr(host_collectors, "_darwin_system_times", lambda: next(system_readings))
+    monkeypatch.setattr(host_collectors, "time", SimpleNamespace(time=time.time, monotonic=lambda: next(monotonic_readings)))
+    sampler = host_collectors.CpuSampler()
+
+    first = sampler.sample(123)
+    second = sampler.sample(123)
+
+    assert first["cpu_percent"] is None
+    assert first["system_cpu_percent"] is None
+    assert first["rss_bytes"] == 4096
+    assert second["cpu_percent"] == 25.0
+    assert second["system_cpu_percent"] == 30.0
+    assert second["rss_bytes"] == 8192
 
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="CpuSampler differences /proc readings")

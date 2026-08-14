@@ -6,9 +6,6 @@ import json
 import os
 import signal
 
-from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
-from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
-from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.local_services import preflight as preflight_module
 from yolomux_lib.local_services.preflight import preflight_port
@@ -27,17 +24,23 @@ def _table(rows):
 
 
 def _process_record(pid, start_time=None):
-    return FixtureProcessRecordBuilder(pid=pid, process_start_ticks=start_time).build()
+    ticks = pid + 1000 if start_time is None else start_time
+    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{ticks}")
 
 
 def _lease(tmp_path, port=18991, pid=400, pgid=400, host_id=None, *, include_identity=True, start_time=None):
-    return FixtureLeaseRecordBuilder(
-        pid=pid,
-        pgid=pgid,
-        port=port,
-        process_start_ticks=start_time,
-        include_identity=include_identity,
-    ).write(tmp_path, host_id=host_id or "")
+    lease_dir = tmp_path / "server-leases"
+    if host_id:
+        lease_dir /= host_id
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    lease_path = lease_dir / f"{port}.lock"
+    record = {"pid": pid, "pgid": pgid, "port": port}
+    if include_identity:
+        record = {**_process_record(pid, start_time), **record}
+    lease_path.write_text(
+        json.dumps(record), encoding="utf-8"
+    )
+    return lease_path
 
 
 def _service_record(tmp_path, *, service, pid, socket_path, launcher_pid, launcher_port, protocol_version=1):
@@ -45,16 +48,14 @@ def _service_record(tmp_path, *, service, pid, socket_path, launcher_pid, launch
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / f"{service}.service.json").write_text(
         json.dumps(
-            FixtureLocalServiceRecordBuilder(
-                service=service,
-                socket_path=socket_path,
-                pid=pid,
-                fields={
-                    "launcher_pid": launcher_pid,
-                    "launcher_port": launcher_port,
-                    "protocol_version": protocol_version,
-                },
-            ).build()
+            {
+                **_process_record(pid),
+                "service": service,
+                "socket": str(socket_path),
+                "launcher_pid": launcher_pid,
+                "launcher_port": launcher_port,
+                "protocol_version": protocol_version,
+            }
         ),
         encoding="utf-8",
     )
@@ -117,12 +118,12 @@ def test_preflight_fails_closed_for_an_old_lease_without_member_identity(tmp_pat
 
 
 def test_preflight_refuses_launch_when_an_exact_stale_orphan_cannot_be_reaped(tmp_path):
-    FixtureLeaseRecordBuilder(
-        pid=400,
-        pgid=400,
-        port=18991,
-        members=({"pid": 410, "start_time": 1000},),
-    ).write(tmp_path)
+    _lease(tmp_path)
+    lease_path = tmp_path / "server-leases" / "18991.lock"
+    lease_path.write_text(
+        json.dumps({**_process_record(400), "pgid": 400, "port": 18991, "members": [{"pid": 410, "start_time": 1000}]}),
+        encoding="utf-8",
+    )
     table = {410: ProcessTableEntry(1, 400, 1.0, "tmux -C attach-session -t x", 1000)}
     kills = []
 
@@ -151,12 +152,12 @@ def test_preflight_refuses_launch_when_an_exact_stale_orphan_cannot_be_reaped(tm
 
 
 def test_preflight_refuses_launch_when_stale_orphan_reconciliation_cannot_be_verified(tmp_path):
-    FixtureLeaseRecordBuilder(
-        pid=400,
-        pgid=400,
-        port=18991,
-        members=({"pid": 410, "start_time": 1000},),
-    ).write(tmp_path)
+    _lease(tmp_path)
+    lease_path = tmp_path / "server-leases" / "18991.lock"
+    lease_path.write_text(
+        json.dumps({**_process_record(400), "pgid": 400, "port": 18991, "members": [{"pid": 410, "start_time": 1000}]}),
+        encoding="utf-8",
+    )
     table = {410: ProcessTableEntry(1, 400, 1.0, "tmux -C attach-session -t x", 1000)}
 
     result = preflight_port(
@@ -180,12 +181,12 @@ def test_preflight_refuses_launch_when_stale_orphan_reconciliation_cannot_be_ver
 
 def test_preflight_does_not_reap_a_reused_pid_with_a_different_start_time(tmp_path):
     """A numeric PID/PGID match cannot outlive the member's recorded start tick."""
-    FixtureLeaseRecordBuilder(
-        pid=400,
-        pgid=400,
-        port=18991,
-        members=({"pid": 410, "start_time": 1000},),
-    ).write(tmp_path)
+    _lease(tmp_path)
+    lease_path = tmp_path / "server-leases" / "18991.lock"
+    lease_path.write_text(
+        json.dumps({**_process_record(400), "pgid": 400, "port": 18991, "members": [{"pid": 410, "start_time": 1000}]}),
+        encoding="utf-8",
+    )
     table = {410: ProcessTableEntry(1, 400, 1.0, "foreign-daemon --serve", 1001)}
     kills = []
 

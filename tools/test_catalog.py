@@ -14,40 +14,32 @@ import ast
 from pathlib import Path
 from typing import Final
 
-from tools.test_plan import automatic_test_markers
-from tools.test_plan import PHASE_MARKER_PRECEDENCE
-from tools.test_plan import phase_for_markers
-from tools.test_plan import TEST_PHASE_NAMES
-from tools.test_plan import TEST_PHASE_SPECS
-from tools.test_plan import test_node_sort_key
-
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_ROOT = REPO_ROOT / "tests"
-def _pytest_marker_name(node: ast.AST) -> str | None:
-    value = node.func if isinstance(node, ast.Call) else node
-    if not isinstance(value, ast.Attribute):
-        return None
-    mark = value.value
-    if (
-        isinstance(mark, ast.Attribute)
-        and mark.attr == "mark"
-        and isinstance(mark.value, ast.Name)
-        and mark.value.id == "pytest"
-    ):
-        return value.attr
-    return None
+PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = (
+    ("node_bridge", "node_bridge"),
+    ("e2e", "e2e"),
+    ("visual_golden", "golden"),
+    ("boot", "boot"),
+    ("browser", "browser"),
+)
 
 
 def _pytest_markers(node: ast.AST) -> set[str]:
-    """Return markers applied by this expression, excluding marker-valued arguments."""
-
-    marker = _pytest_marker_name(node)
-    if marker is not None:
-        return {marker}
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return set().union(*(_pytest_markers(element) for element in node.elts), set())
-    return set()
+    markers: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Attribute):
+            continue
+        value = child.value
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "mark"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "pytest"
+        ):
+            markers.add(child.attr)
+    return markers
 
 
 def _assigned_pytest_markers(body: list[ast.stmt]) -> set[str]:
@@ -69,33 +61,28 @@ def _decorator_markers(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassD
     return markers
 
 
-def test_definitions(path: Path, *, repo_root: Path = REPO_ROOT) -> tuple[tuple[str, str], ...]:
-    """Return static node IDs and phases in pytest's definition order."""
-
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    automatic = set(automatic_test_markers(path))
-    module_markers = _assigned_pytest_markers(tree.body)
-    relative = path.relative_to(repo_root).as_posix()
-    definitions: list[tuple[str, str]] = []
-
-    def visit(body: list[ast.stmt], inherited: set[str], parents: tuple[str, ...] = ()) -> None:
-        for statement in body:
-            if isinstance(statement, ast.ClassDef):
-                class_markers = inherited | _decorator_markers(statement) | _assigned_pytest_markers(statement.body)
-                visit(statement.body, class_markers, (*parents, statement.name))
-            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)) and statement.name.startswith("test_"):
-                nodeid = "::".join((relative, *parents, statement.name))
-                phase = phase_for_markers(automatic | inherited | _decorator_markers(statement))
-                definitions.append((nodeid, phase))
-
-    visit(tree.body, module_markers)
-    return tuple(definitions)
+def _phase_for_markers(markers: set[str]) -> str:
+    return next((phase for marker, phase in PHASE_MARKER_PRECEDENCE if marker in markers), "nonbrowser")
 
 
 def file_phases(path: Path) -> set[str]:
     """Return every check lane phase containing a statically defined test in path."""
 
-    return {phase for _nodeid, phase in test_definitions(path)}
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    automatic = {"browser", "socket"} if path.name.startswith("test_browser_") else set()
+    module_markers = _assigned_pytest_markers(tree.body)
+    phases: set[str] = set()
+
+    def visit(body: list[ast.stmt], inherited: set[str]) -> None:
+        for statement in body:
+            if isinstance(statement, ast.ClassDef):
+                class_markers = inherited | _decorator_markers(statement) | _assigned_pytest_markers(statement.body)
+                visit(statement.body, class_markers)
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)) and statement.name.startswith("test_"):
+                phases.add(_phase_for_markers(automatic | inherited | _decorator_markers(statement)))
+
+    visit(tree.body, module_markers)
+    return phases
 
 
 def discover_pytest_phase_files(
@@ -105,20 +92,10 @@ def discover_pytest_phase_files(
 ) -> dict[str, tuple[str, ...]]:
     """Derive phase file ownership from every Python test under test_root."""
 
-    definitions: list[tuple[str, str, str]] = []
+    phase_files = {phase: [] for phase in ("nonbrowser", "boot", "browser", "golden", "e2e", "node_bridge")}
     for path in sorted(test_root.rglob("test_*.py")):
         relative = path.relative_to(repo_root).as_posix()
-        definitions.extend(
-            (nodeid, phase, relative)
-            for nodeid, phase in test_definitions(path, repo_root=repo_root)
-        )
-    ordered = sorted(
-        enumerate(definitions),
-        key=lambda pair: test_node_sort_key(pair[1][0], pair[0]),
-    )
-    phase_files = {phase: [] for phase in TEST_PHASE_NAMES}
-    for _index, (_nodeid, phase, relative) in ordered:
-        if relative not in phase_files[phase]:
+        for phase in file_phases(path):
             phase_files[phase].append(relative)
     return {phase: tuple(paths) for phase, paths in phase_files.items()}
 
@@ -160,29 +137,6 @@ def discover_node_layout_files() -> tuple[str, ...]:
 
 
 NODE_LAYOUT_FILES: Final[tuple[str, ...]] = discover_node_layout_files()
-# Non-shard JavaScript modules which directly own test scenarios invoked by a
-# registered shard. Keeping them explicit makes architecture budgets recursive
-# without mistaking generic DOM helpers for assertion owners.
-NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
-    "tests/browser_helpers/editor_preview_suite.js",
-)
-
-# Python helper modules which own cohesive assertion families while their thin
-# collecting facades retain the historical pytest node IDs. These are explicit
-# because pytest collection alone cannot discover a non-test-named owner.
-PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
-    "tests/subsystems/app_darwin_memory.py",
-    "tests/subsystems/browser_harness_lifecycle.py",
-    "tests/subsystems/stats_24h_http.py",
-)
-
-def focused_phase_target_args(phase: str) -> list[str]:
-    """Return catalog-owned focused targets, or the canonical phase files."""
-
-    if phase not in PYTEST_PHASE_FILES:
-        raise KeyError(phase)
-    spec = next(spec for spec in TEST_PHASE_SPECS if spec.name == phase)
-    return list(spec.focused_target_args or PYTEST_PHASE_FILES[phase])
 
 
 def pytest_files(phase: str) -> list[str]:

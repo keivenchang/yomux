@@ -969,21 +969,422 @@ class ShareTerminalUpstream:
             terminate_process_group(process)
 
 
-class _HandlerAdapter:
-    """Composition seam that keeps request state owned by the HTTP handler."""
+class Handler(AuthMixin, BaseHTTPRequestHandler):
+    server: "TmuxWebtermHTTPServer"
+    protocol_version = "HTTP/1.1"
+    _route_response: Any = None
+    _route_response_written = False
+    _api_request_id = ""
 
-    def __init__(self, handler: Any) -> None:
-        object.__setattr__(self, "_handler", handler)
+    def handle_one_request(self) -> None:
+        # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive requests. Route
+        # handlers attach optional timing/details while building a response, so clear them at the
+        # request boundary instead of letting a homepage sample become a later API sample.
+        self._http_response_compute_ms = None
+        self._http_response_performance_details = None
+        self._http_request_started_at = time.perf_counter()
+        self._http_request_line_read_at = None
+        self._http_request_parse_completed_at = None
+        self._http_request_dispatch_started_at = None
+        self._route_response = None
+        self._route_response_written = False
+        self._api_request_id = ""
+        super().handle_one_request()
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._handler, name)
+    def dispatch_route_response(self, route: Any, operation: Callable[[], None]) -> None:
+        """Run one registered route under the response boundary declared by its registry entry."""
+        self._route_response = route
+        self._route_response_written = False
+        try:
+            operation()
+        except Exception as error:
+            if self._route_response_written or route.protocol not in {RESPONSE_JSON, RESPONSE_JSON_BATCH}:
+                raise
+            cause = local_service_exception_cause(error)
+            root = {
+                "component": "server.http",
+                "operation": f"{route.method} {route.path}",
+                "code": "internal_error",
+                **cause,
+            }
+            self.write_api_response(
+                error_payload(
+                    "request failed",
+                    message_key="common.requestFailed",
+                    canonical=True,
+                    code="internal_error",
+                    origin="server.http",
+                    retryable=False,
+                    details={"exception_type": type(error).__name__},
+                    stack=[root],
+                    request_id=self.api_request_id(),
+                ),
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            self._route_response = None
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        setattr(self._handler, name, value)
+    def parse_request(self) -> bool:
+        """Mark BaseHTTPRequestHandler's request-line and header boundary for timing."""
+        self._http_request_line_read_at = time.perf_counter()
+        try:
+            return super().parse_request()
+        finally:
+            self._http_request_parse_completed_at = time.perf_counter()
 
+    def setup(self) -> None:
+        preparer = getattr(self.server, "prepare_request_socket", None)
+        if callable(preparer):
+            self.request = preparer(self.request)
+        self._request_is_https = isinstance(self.request, ssl.SSLSocket)
+        super().setup()
 
-class FilesystemHttpAdapter(_HandlerAdapter):
-    """Composed owner for FilesystemHttpAdapter."""
+    def log_message(self, fmt: str, *args: Any) -> None:
+        message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
+        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
+
+    def request_line_capture(self) -> tuple[bytes, bool]:
+        """Return the raw request line and whether the complete line was already buffered.
+
+        BaseHTTPRequestHandler reads 65,537 bytes before it emits a 414.  The remainder is
+        usually already buffered for a browser request, so consume through its newline only when
+        it is immediately available.  Never wait for more client input just to diagnose an error.
+        """
+        captured = bytearray(bytes(getattr(self, "raw_requestline", b"") or b""))
+        if captured.endswith(b"\n"):
+            return bytes(captured), True
+        request_file = getattr(self, "rfile", None)
+        peek = getattr(request_file, "peek", None)
+        readline = getattr(request_file, "readline", None)
+        if not callable(peek) or not callable(readline) or len(captured) >= HTTP_REQUEST_LINE_CAPTURE_LIMIT:
+            return bytes(captured), False
+        connection = getattr(self, "connection", None)
+        gettimeout = getattr(connection, "gettimeout", None)
+        setblocking = getattr(connection, "setblocking", None)
+        settimeout = getattr(connection, "settimeout", None)
+        timeout = gettimeout() if callable(gettimeout) else None
+        try:
+            if callable(setblocking):
+                setblocking(False)
+            buffered = bytes(peek(HTTP_REQUEST_LINE_CAPTURE_LIMIT - len(captured)))
+        except (BlockingIOError, OSError, ValueError):
+            return bytes(captured), False
+        finally:
+            if callable(settimeout):
+                settimeout(timeout)
+        newline = buffered.find(b"\n")
+        if newline < 0:
+            return bytes(captured), False
+        try:
+            captured.extend(readline(newline + 1))
+        except (OSError, ValueError):
+            return bytes(captured), False
+        return bytes(captured), captured.endswith(b"\n")
+
+    def log_request_uri_too_long(self) -> None:
+        """Write the framing evidence for a 414 without changing its HTTP outcome."""
+        raw_line, complete = self.request_line_capture()
+        line = raw_line.rstrip(b"\r\n").decode("latin-1")
+        candidate_method = line.split(" ", 1)[0]
+        method = candidate_method if re.fullmatch(r"[A-Z]+", candidate_method) else "invalid"
+        address = self.client_address if isinstance(self.client_address, tuple) else ()
+        client = f"{address[0]}:{address[1]}" if len(address) > 1 else str(address[0]) if address else "unknown"
+        connection = getattr(self, "connection", None)
+        try:
+            local = connection.getsockname() if connection is not None else None
+        except OSError:
+            local = None
+        try:
+            descriptor = connection.fileno() if connection is not None else None
+        except OSError:
+            descriptor = None
+        self.log_error(
+            "request-line-capture %s",
+            json.dumps({
+                "status": HTTPStatus.REQUEST_URI_TOO_LONG.value,
+                "client": client,
+                "connection": {"local": local, "fd": descriptor},
+                "method": method,
+                "request_line": line,
+                "request_line_complete": complete,
+                "request_line_bytes": len(raw_line),
+            }, ensure_ascii=True, separators=(",", ":")),
+        )
+
+    def send_error(self, code: int | HTTPStatus, message: str | None = None, explain: str | None = None) -> None:
+        if int(code) == HTTPStatus.REQUEST_URI_TOO_LONG:
+            self.log_request_uri_too_long()
+        super().send_error(code, message, explain)
+
+    def send_response(self, code: int | HTTPStatus, message: str | None = None) -> None:
+        """Mark the response committed for every JSON and non-JSON protocol family."""
+        self._route_response_written = True
+        super().send_response(code, message)
+
+    def http_endpoint_metric_key(self) -> str:
+        method = str(getattr(self, "command", "") or "GET").upper()
+        try:
+            path = urlparse(str(getattr(self, "path", "") or "/")).path or "/"
+        except ValueError:
+            path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
+        return f"{method} {path}"[:120]
+
+    def measurement_marker(self) -> str:
+        """Return only a validated capture marker; callers must not retain it verbatim."""
+        headers = getattr(self, "headers", {})
+        marker = str(headers.get("X-YOLOmux-Measurement") or "") if hasattr(headers, "get") else ""
+        if marker.startswith("capture-") and len(marker) == 40 and all(char in "0123456789abcdef" for char in marker[8:]):
+            return marker
+        return ""
+
+    def measurement_scope(self) -> str:
+        """Return a generic in-memory scope without retaining a browser marker."""
+        return "capture" if self.measurement_marker() else ""
+
+    def measurement_request_id(self) -> str:
+        """Return an opaque, bounded join key for one validated capture request."""
+        marker = self.measurement_marker()
+        return hashlib.sha256(marker.encode("ascii")).hexdigest()[:16] if marker else ""
+
+    def measurement_connection_id(self) -> str:
+        """Return a capture-scoped opaque join key for this request's TCP peer."""
+        marker = self.measurement_marker()
+        address = self.client_address if isinstance(self.client_address, tuple) else ()
+        peer_port = address[1] if len(address) > 1 else None
+        if not marker or not isinstance(peer_port, int):
+            return ""
+        return hashlib.sha256(f"{marker}:{peer_port}".encode("ascii")).hexdigest()[:16]
+
+    def record_http_response_bytes(
+        self,
+        status: HTTPStatus | int,
+        body_bytes: int,
+        content_type: str = "",
+        performance_details: dict[str, Any] | None = None,
+    ) -> None:
+        app = getattr(getattr(self, "server", None), "app", None)
+        recorder = getattr(app, "record_performance_sample", None)
+        if not callable(recorder):
+            return
+        status_code = int(status)
+        endpoint = self.http_endpoint_metric_key()
+        details = {
+            "status": status_code,
+            "method": endpoint.split(" ", 1)[0],
+            "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
+            "content_type": content_type_base(content_type),
+        }
+        if str(details["path"]).startswith("/api/"):
+            details["request_id"] = self.api_request_id()
+        measurement_scope = self.measurement_scope()
+        if measurement_scope:
+            details["measurement_scope"] = measurement_scope
+            # The browser keeps the raw capture marker; metrics retain only this opaque digest so
+            # a slow request can be joined to that click without exposing a browser identifier.
+            details["measurement_request_id"] = self.measurement_request_id()
+            details["measurement_connection_id"] = self.measurement_connection_id()
+        request_started = getattr(self, "_http_request_started_at", None)
+        request_line_read_at = getattr(self, "_http_request_line_read_at", None)
+        request_parse_completed_at = getattr(self, "_http_request_parse_completed_at", None)
+        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
+        response_started = time.perf_counter()
+        if isinstance(request_started, (int, float)):
+            details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
+        if isinstance(request_started, (int, float)) and isinstance(request_line_read_at, (int, float)):
+            # For HTTP/1.1 keep-alives this includes the idle wait before the browser sends the
+            # next request line. It is deliberately separate from server-side parsing or routing.
+            details["request_line_wait_ms"] = round(max(0.0, (request_line_read_at - request_started) * 1000), 3)
+        if isinstance(request_line_read_at, (int, float)) and isinstance(request_parse_completed_at, (int, float)):
+            details["request_header_parse_ms"] = round(max(0.0, (request_parse_completed_at - request_line_read_at) * 1000), 3)
+        if isinstance(request_parse_completed_at, (int, float)) and isinstance(dispatch_started, (int, float)):
+            details["request_parse_to_route_ms"] = round(max(0.0, (dispatch_started - request_parse_completed_at) * 1000), 3)
+        if isinstance(request_started, (int, float)) and isinstance(dispatch_started, (int, float)):
+            # Keep the aggregate for existing consumers. The stage fields above distinguish an
+            # HTTP/1.1 request-line wait from parsing and actual route entry.
+            details["accept_to_route_ms"] = round(max(0.0, (dispatch_started - request_started) * 1000), 3)
+        extra_details = getattr(self, "_http_response_performance_details", None)
+        if isinstance(extra_details, dict):
+            details.update(extra_details)
+        if isinstance(performance_details, dict):
+            details.update(performance_details)
+        recorder(
+            "http-endpoint",
+            endpoint,
+            trigger=endpoint,
+            compute_ms=getattr(self, "_http_response_compute_ms", None) if getattr(self, "_http_response_compute_ms", None) is not None else (
+                max(0.0, (response_started - dispatch_started) * 1000) if isinstance(dispatch_started, (int, float)) else None
+            ),
+            payload_bytes=max(0, int(body_bytes or 0)),
+            cache_key={"kind": endpoint},
+            cache_status=str(status_code),
+            owner_role="server",
+            count=1,
+            details=details,
+        )
+
+    def plaintext_share_scope_allowed(self, parsed: Any) -> bool:
+        if not getattr(self.server, "tls_context", None) or self.request_is_https():
+            return True
+        path = str(parsed.path or "")
+        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), path)
+        if route is None or route.share_access == SHARE_ACCESS_NONE:
+            return False
+
+        def http_share_token_allowed() -> bool:
+            verifier = getattr(self.server.app, "verify_share_token", None)
+            record = verifier(self.share_token_text()) if callable(verifier) else None
+            return bool(record and record.get("http_allowed"))
+
+        if route.path == "/share/*":
+            short_id = path.removeprefix("/share/").strip("/")
+            finder = getattr(self.server.app, "share_record_for_short_id", None)
+            record = finder(short_id) if short_id and "/" not in short_id and callable(finder) else None
+            return bool(record and record.get("http_allowed"))
+        if route.path == "/static/*":
+            checker = getattr(self.server.app, "http_allowed_share_is_active", None)
+            return bool(checker()) if callable(checker) else False
+        return http_share_token_allowed()
+
+    def redirect_plaintext_to_https_if_needed(self, parsed: Any) -> bool:
+        if not getattr(self.server, "tls_context", None) or self.request_is_https() or self.plaintext_share_scope_allowed(parsed):
+            return False
+        host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
+        if not host or "\r" in host or "\n" in host:
+            host = self.server.server_name_with_port()
+        location = f"https://{host}{self.path or '/'}"
+        body = https_redirect_body(location, resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
+        self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+        self.send_header("Location", location)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, len(body), "text/plain; charset=utf-8")
+        else:
+            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, 0, "text/plain; charset=utf-8")
+        self.close_connection = True
+        return True
+
+    def do_GET(self) -> None:
+        dispatch_http_route(self, "GET")
+
+    def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not record:
+            return None
+        mode = str(record.get("mode") or "ro")
+        if not self.request_is_https():
+            mode = "ro"
+        max_viewers = int(record.get("max_viewers") or 0)
+        viewers = int(record.get("viewers") or 0)
+        sessions = self.share_record_sessions_for_handler(record)
+        session = sessions[0] if sessions else str(record.get("session") or "")
+        host_dims = {
+            current: {
+                "rows": self.server.host_pty_dimensions_for_session(current)[0],
+                "cols": self.server.host_pty_dimensions_for_session(current)[1],
+            }
+            for current in sessions
+        }
+        rows, cols = self.server.host_pty_dimensions_for_session(session)
+        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
+        return {
+            "view": True,
+            "id": str(record.get("short_id") or ""),
+            "session": session,
+            "sessions": sessions,
+            "mode": mode,
+            "readOnly": mode != "rw",
+            "scheme": "https" if self.request_is_https() else "http",
+            "expiresAt": float(record.get("expires_at") or 0.0),
+            "createdBy": str(record.get("created_by") or ""),
+            "maxViewers": max_viewers,
+            "viewers": viewers,
+            "debugProfile": bool(record.get("debug_profile")),
+            "hostDims": {"rows": rows, "cols": cols},
+            "hostDimsBySession": host_dims,
+            "layout": str(record.get("layout") or ""),
+            "tabs": str(record.get("tabs") or ""),
+            "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
+            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
+            "appearance": ui_state.get("appearance") if isinstance(ui_state.get("appearance"), dict) else {},
+            "uiState": ui_state,
+            "tokenInFragment": True,
+        }
+
+    def share_record_at_viewer_cap(self, record: dict[str, Any]) -> bool:
+        max_viewers = int(record.get("max_viewers") or 0)
+        viewers = int(record.get("viewers") or 0)
+        return max_viewers > 0 and viewers >= max_viewers
+
+    def share_record_sessions_for_handler(self, record: dict[str, Any]) -> list[str]:
+        session_reader = getattr(self.server.app, "share_record_sessions", None)
+        if callable(session_reader):
+            raw_sessions = session_reader(record)
+        elif isinstance(record.get("sessions"), list):
+            raw_sessions = record.get("sessions")
+        else:
+            raw_sessions = [record.get("session")]
+        result: list[str] = []
+        for raw_session in raw_sessions or []:
+            session = str(raw_session or "").strip()
+            if session and session not in result:
+                result.append(session)
+        return result
+
+    def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+        verifier = getattr(self.server.app, "verify_share_token", None)
+        record = verifier(str(token or "")) if callable(verifier) else None
+        if not isinstance(record, dict):
+            return None
+        if str(record.get("mode") or "ro") != "rw" or not self.request_is_https():
+            return None
+        return normalize_share_input_intent_payload(payload, self.share_record_sessions_for_handler(record))
+
+    def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
+        intent = str(payload.get("intent") or "")
+        if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
+            upstream_getter = getattr(self.server, "share_terminal_upstream", None)
+            if not callable(upstream_getter):
+                return False
+            upstream = upstream_getter(str(token or ""), str(payload.get("session") or ""))
+            data = json.dumps({"type": "input", "data": str(payload.get("data") or "")}).encode("utf-8")
+            return bool(upstream.write_input(data))
+        if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
+            scroller = getattr(self.server.app, "tmux_scroll", None)
+            if not callable(scroller):
+                return False
+            scroller(str(payload.get("session") or ""), str(payload.get("direction") or ""), int(payload.get("lines") or 0))
+            return True
+        return False
+
+    def handle_share_shell(self, parsed: Any) -> bool:
+        short_id = parsed.path.removeprefix("/share/").strip("/")
+        if not short_id or "/" in short_id:
+            return False
+        finder = getattr(self.server.app, "share_record_for_short_id", None)
+        record = finder(short_id) if callable(finder) else None
+        if not record:
+            return False
+        if self.share_record_at_viewer_cap(record):
+            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
+            return True
+        sessions = self.share_record_sessions_for_handler(record)
+        if not sessions:
+            return False
+        self.write_html(html_page(
+            sessions,
+            "readonly",
+            dev=getattr(self.server, 'dev', False),
+            dangerously_yolo=self.server.app.dangerously_yolo,
+            share=self.share_bootstrap_payload(record),
+            accept_language=self.headers.get("Accept-Language", ""),
+            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
+        ))
+        return True
 
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1116,6 +1517,38 @@ class FilesystemHttpAdapter(_HandlerAdapter):
             self.write_product_bytes(response.body, response.product)
             return
         self.write_json(response.payload, status=response.status)
+
+    def handle_preview_popout_placeholder(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = qs.get("path", [""])[0]
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "common.preview")))
+        body = f"""<!doctype html>
+<html {html_lang_dir_attrs(locale)}>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+</head>
+<body></body>
+</html>"""
+        self.write_html(body)
+
+    def handle_pane_popout_placeholder(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_item = qs.get("item", [""])[0]
+        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+        title = html.escape(server_string(locale, "pane.popout.title", name=raw_item or server_string(locale, "app.documentTitle")))
+        body = f"""<!doctype html>
+<html {html_lang_dir_attrs(locale)}>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+</head>
+<body></body>
+</html>"""
+        self.write_html(body)
 
     def read_request_body(
         self,
@@ -1314,199 +1747,16 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         raw_path = payload.get("path", "")
         self.submit_filesystem_operation("POST /api/fs/mkdir", "mkdir", raw_path)
 
-    def handle_fs_batch(self, parsed: Any) -> None:
-        del parsed
-        started = time.perf_counter()
-        payload = self.read_json_body(64 * 1024)
-        body_read_ms = (time.perf_counter() - started) * 1000
-        if payload is None:
-            return
-        # filesystem.validated_batch_requests is the one owner of what a batch may contain, and
-        # the app owns the one typed rejection built from it.  Re-checking the same two rules here
-        # is how the handler and the app payload used to disagree about the failure shape.
-        try:
-            summary = filesystem.filesystem_batch_request_summary(payload)
-        except ValueError as error:
-            self.write_json(
-                self.server.app.fs_batch_invalid_request_result(payload, error),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        operation_started = time.perf_counter()
-        response, status = self.server.app.fs_batch_http_payload(
-            payload,
-            shared_sessions=self.share_sessions(),
-        )
-        operation_ms = max(0.0, (time.perf_counter() - operation_started) * 1000)
-        self._http_response_compute_ms = max(0.0, (time.perf_counter() - started) * 1000)
-        self._http_response_performance_details = {
-            "fs_batch": True,
-            "fs_batch_offloaded": True,
-            "fs_batch_size": summary["batch_size"],
-            "fs_batch_body_read_ms": round(body_read_ms, 3),
-            "fs_batch_operation_ms": round(operation_ms, 3),
-            "fs_batch_list_ms": 0.0,
-            "fs_batch_info_ms": 0.0,
-            "fs_batch_operations": json.dumps(summary["operations"], sort_keys=True),
-            "fs_batch_path_hashes": json.dumps(summary["path_fingerprints"]),
-            "fs_batch_triggers": json.dumps(summary["triggers"], sort_keys=True),
-            "fs_batch_client_revision": summary["client_revision"],
-            "fs_batch_client_scope": summary["client_scope"],
-        }
-        self.write_json(response, status=status)
+    def do_POST(self) -> None:
+        dispatch_http_route(self, "POST")
 
-    def file_transfer_max_bytes(self) -> int:
-        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
-        if callable(getter):
-            return int(getter())
-        getter = getattr(self.server.app, "upload_max_bytes", None)
-        if callable(getter):
-            return int(getter())
-        return UPLOAD_MAX_BYTES
-
-    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
-        upload_max_bytes = self.file_transfer_max_bytes()
-        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
-        if error is not None:
-            return {**error, "session": session}, status
-        try:
-            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
-        except ValueError as exc:
-            return error_payload(
-                "invalid upload data",
-                message_key="upload.error.invalidMultipart",
-                diagnostic=exc,
-                session=session,
-                status=HTTPStatus.BAD_REQUEST,
-            ), HTTPStatus.BAD_REQUEST
-        auth_username = self.auth_identity().username
-        if editor_path or base_dir:
-            return self.server.app.upload_editor_files(
-                files,
-                editor_path=editor_path,
-                base_dir=base_dir,
-                auth_username=auth_username,
-                session=session or "editor",
-            )
-        return self.server.app.upload_files(session, files, auth_username=auth_username)
-
-class ShareHttpAdapter(_HandlerAdapter):
-    """Composed owner for ShareHttpAdapter."""
-
-    def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
-        if not record:
-            return None
-        mode = str(record.get("mode") or "ro")
-        if not self.request_is_https():
-            mode = "ro"
-        max_viewers = int(record.get("max_viewers") or 0)
-        viewers = int(record.get("viewers") or 0)
-        sessions = self.share_record_sessions_for_handler(record)
-        session = sessions[0] if sessions else str(record.get("session") or "")
-        host_dims = {
-            current: {
-                "rows": self.server.host_pty_dimensions_for_session(current)[0],
-                "cols": self.server.host_pty_dimensions_for_session(current)[1],
-            }
-            for current in sessions
-        }
-        rows, cols = self.server.host_pty_dimensions_for_session(session)
-        ui_state = record.get("ui_state") if isinstance(record.get("ui_state"), dict) else {}
-        return {
-            "view": True,
-            "id": str(record.get("short_id") or ""),
-            "session": session,
-            "sessions": sessions,
-            "mode": mode,
-            "readOnly": mode != "rw",
-            "scheme": "https" if self.request_is_https() else "http",
-            "expiresAt": float(record.get("expires_at") or 0.0),
-            "createdBy": str(record.get("created_by") or ""),
-            "maxViewers": max_viewers,
-            "viewers": viewers,
-            "debugProfile": bool(record.get("debug_profile")),
-            "hostDims": {"rows": rows, "cols": cols},
-            "hostDimsBySession": host_dims,
-            "layout": str(record.get("layout") or ""),
-            "tabs": str(record.get("tabs") or ""),
-            "finder": record.get("finder") if isinstance(record.get("finder"), dict) else {},
-            "viewport": ui_state.get("viewport") if isinstance(ui_state.get("viewport"), dict) else {},
-            "appearance": ui_state.get("appearance") if isinstance(ui_state.get("appearance"), dict) else {},
-            "uiState": ui_state,
-            "tokenInFragment": True,
-        }
-
-    def share_record_at_viewer_cap(self, record: dict[str, Any]) -> bool:
-        max_viewers = int(record.get("max_viewers") or 0)
-        viewers = int(record.get("viewers") or 0)
-        return max_viewers > 0 and viewers >= max_viewers
-
-    def share_record_sessions_for_handler(self, record: dict[str, Any]) -> list[str]:
-        session_reader = getattr(self.server.app, "share_record_sessions", None)
-        if callable(session_reader):
-            raw_sessions = session_reader(record)
-        elif isinstance(record.get("sessions"), list):
-            raw_sessions = record.get("sessions")
-        else:
-            raw_sessions = [record.get("session")]
-        result: list[str] = []
-        for raw_session in raw_sessions or []:
-            session = str(raw_session or "").strip()
-            if session and session not in result:
-                result.append(session)
-        return result
-
-    def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        verifier = getattr(self.server.app, "verify_share_token", None)
-        record = verifier(str(token or "")) if callable(verifier) else None
-        if not isinstance(record, dict):
-            return None
-        if str(record.get("mode") or "ro") != "rw" or not self.request_is_https():
-            return None
-        return normalize_share_input_intent_payload(payload, self.share_record_sessions_for_handler(record))
-
-    def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
-        intent = str(payload.get("intent") or "")
-        if intent in {SHARE_INPUT_INTENT_TERMINAL_INPUT, SHARE_INPUT_INTENT_TERMINAL_PASTE}:
-            upstream_getter = getattr(self.server, "share_terminal_upstream", None)
-            if not callable(upstream_getter):
-                return False
-            upstream = upstream_getter(str(token or ""), str(payload.get("session") or ""))
-            data = json.dumps({"type": "input", "data": str(payload.get("data") or "")}).encode("utf-8")
-            return bool(upstream.write_input(data))
-        if intent == SHARE_INPUT_INTENT_TERMINAL_SCROLL:
-            scroller = getattr(self.server.app, "tmux_scroll", None)
-            if not callable(scroller):
-                return False
-            scroller(str(payload.get("session") or ""), str(payload.get("direction") or ""), int(payload.get("lines") or 0))
-            return True
-        return False
-
-    def handle_share_shell(self, parsed: Any) -> bool:
-        short_id = parsed.path.removeprefix("/share/").strip("/")
-        if not short_id or "/" in short_id:
-            return False
-        finder = getattr(self.server.app, "share_record_for_short_id", None)
-        record = finder(short_id) if callable(finder) else None
-        if not record:
-            return False
-        if self.share_record_at_viewer_cap(record):
-            locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-            self.write_text(server_string(locale, "share.error.viewerLimitReached") + "\n", status=HTTPStatus.FORBIDDEN)
-            return True
-        sessions = self.share_record_sessions_for_handler(record)
-        if not sessions:
-            return False
-        self.write_html(html_page(
-            sessions,
-            "readonly",
-            dev=getattr(self.server, 'dev', False),
-            dangerously_yolo=self.server.app.dangerously_yolo,
-            share=self.share_bootstrap_payload(record),
-            accept_language=self.headers.get("Accept-Language", ""),
-            recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
-        ))
-        return True
+    def request_base_url(self, scheme: str | None = None) -> str:
+        host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
+        if not host or "\r" in host or "\n" in host:
+            host = self.server.server_name_with_port()
+        scheme_text = str(scheme or "").strip().lower()
+        url_scheme = scheme_text if scheme_text in {"http", "https"} else "https" if self.request_is_https() else "http"
+        return f"{url_scheme}://{host}"
 
     def share_scoped_activity_result(self, result: tuple[dict[str, Any], HTTPStatus]) -> tuple[dict[str, Any], HTTPStatus]:
         allowed = set(self.share_sessions())
@@ -1568,8 +1818,695 @@ class ShareHttpAdapter(_HandlerAdapter):
             tls_available=self.server.tls_context is not None,
         )
 
-class ApiResponseWriter(_HandlerAdapter):
-    """Composed owner for ApiResponseWriter."""
+    def handle_fs_batch(self, parsed: Any) -> None:
+        del parsed
+        started = time.perf_counter()
+        payload = self.read_json_body(64 * 1024)
+        body_read_ms = (time.perf_counter() - started) * 1000
+        if payload is None:
+            return
+        # filesystem.validated_batch_requests is the one owner of what a batch may contain, and
+        # the app owns the one typed rejection built from it.  Re-checking the same two rules here
+        # is how the handler and the app payload used to disagree about the failure shape.
+        try:
+            summary = filesystem.filesystem_batch_request_summary(payload)
+        except ValueError as error:
+            self.write_json(
+                self.server.app.fs_batch_invalid_request_result(payload, error),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        operation_started = time.perf_counter()
+        response, status = self.server.app.fs_batch_http_payload(
+            payload,
+            shared_sessions=self.share_sessions(),
+        )
+        operation_ms = max(0.0, (time.perf_counter() - operation_started) * 1000)
+        self._http_response_compute_ms = max(0.0, (time.perf_counter() - started) * 1000)
+        self._http_response_performance_details = {
+            "fs_batch": True,
+            "fs_batch_offloaded": True,
+            "fs_batch_size": summary["batch_size"],
+            "fs_batch_body_read_ms": round(body_read_ms, 3),
+            "fs_batch_operation_ms": round(operation_ms, 3),
+            "fs_batch_list_ms": 0.0,
+            "fs_batch_info_ms": 0.0,
+            "fs_batch_operations": json.dumps(summary["operations"], sort_keys=True),
+            "fs_batch_path_hashes": json.dumps(summary["path_fingerprints"]),
+            "fs_batch_triggers": json.dumps(summary["triggers"], sort_keys=True),
+            "fs_batch_client_revision": summary["client_revision"],
+            "fs_batch_client_scope": summary["client_scope"],
+        }
+        self.write_json(response, status=status)
+
+    def read_urlencoded_form(self) -> dict[str, list[str]]:
+        body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
+        if error is not None:
+            self.close_connection = True
+            return {}
+        return parse_qs((body or b"").decode("utf-8", errors="replace"), keep_blank_values=True)
+
+    def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
+        body, error, status = Handler.read_request_body(self, 64 * 1024, too_large_message="event is too large")
+        if error is not None:
+            return error, status
+        try:
+            event = json.loads((body or b"").decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            return error_payload(
+                "invalid JSON",
+                message_key="request.error.invalidJson",
+                diagnostic=exc,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
+        if not isinstance(event, dict):
+            return error_payload(
+                "event must be an object",
+                message_key="request.error.object",
+                message_params={"field": "event"},
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
+        return self.server.app.client_event(event)
+
+    def file_transfer_max_bytes(self) -> int:
+        getter = getattr(self.server.app, "file_transfer_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        getter = getattr(self.server.app, "upload_max_bytes", None)
+        if callable(getter):
+            return int(getter())
+        return UPLOAD_MAX_BYTES
+
+    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
+        upload_max_bytes = self.file_transfer_max_bytes()
+        body, error, status = Handler.read_request_body(self, upload_max_bytes, too_large_message=f"upload is too large; limit is {upload_max_bytes} bytes")
+        if error is not None:
+            return {**error, "session": session}, status
+        try:
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body or b"", max_part_bytes=upload_max_bytes)
+        except ValueError as exc:
+            return error_payload(
+                "invalid upload data",
+                message_key="upload.error.invalidMultipart",
+                diagnostic=exc,
+                session=session,
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
+        auth_username = self.auth_identity().username
+        if editor_path or base_dir:
+            return self.server.app.upload_editor_files(
+                files,
+                editor_path=editor_path,
+                base_dir=base_dir,
+                auth_username=auth_username,
+                session=session or "editor",
+            )
+        return self.server.app.upload_files(session, files, auth_username=auth_username)
+
+    def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        if self.redirect_plaintext_to_https_if_needed(parsed):
+            return
+        if parsed.path.startswith("/static/"):
+            asset = parsed.path.removeprefix("/static/")
+            content_type = static_content_type(asset)
+            if content_type:
+                self.write_static_head(asset, content_type)
+                return
+        if not self.require_auth():
+            return
+        if parsed.path == "/":
+            sessions = self.server.app.sessions
+            data = html_page(
+                sessions,
+                self.auth_identity().role,
+                dev=getattr(self.server, 'dev', False),
+                dangerously_yolo=self.server.app.dangerously_yolo,
+                accept_language=self.headers.get("Accept-Language", ""),
+                auth_username=self.auth_identity().username,
+                recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
+            ).encode("utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_auth_cookie_if_needed()
+            self.end_headers()
+            self.record_http_response_bytes(HTTPStatus.OK, 0, "text/html; charset=utf-8")
+            return
+        self.send_response(HTTPStatus.NOT_FOUND)
+        self.end_headers()
+        self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
+
+    def dev_bundle_signature(self) -> str:
+        return yolomux_dev_bundle_revision()
+
+    def stream_dev_reload(self, client_bundle_revision: str = "") -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        last = self.dev_bundle_signature()
+        try:
+            self.write_sse_json("ready", {"signature": last})
+            # Old clients did not identify their bundle. Treat that as stale once, so the reload
+            # listener already present in the old bundle repairs it after a server restart.
+            if str(client_bundle_revision or "") != last:
+                self.write_sse_json("reload", {"signature": last})
+            while True:
+                time.sleep(DEV_RELOAD_POLL_SECONDS)
+                current = self.dev_bundle_signature()
+                if current != last:
+                    last = current
+                    self.write_sse_json("reload", {"signature": current})
+        except OSError:
+            return
+
+    def client_event_peer_disconnected(self) -> bool:
+        """Detect a client read-side close even while SSE writes still succeed."""
+        connection = self.connection
+        try:
+            readable, _, exceptional = select.select([connection], [], [connection], 0)
+        except (OSError, ValueError):
+            return True
+        if exceptional:
+            return True
+        if not readable:
+            return False
+        previous_timeout = connection.gettimeout()
+        try:
+            connection.setblocking(False)
+            flags = 0 if isinstance(connection, ssl.SSLSocket) else socket.MSG_PEEK
+            return connection.recv(1, flags) == b""
+        except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
+            return False
+        except OSError:
+            return True
+        finally:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    def stream_client_events(
+        self,
+        channels: str = "",
+        client_id: str = "",
+        operation_id: str = "",
+        replay_operation_ids: tuple[str, ...] = (),
+    ) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        subscriber_id, _subscriber_queue = self.server.app.client_events.subscribe(
+            channels=channels or None,
+            client_id=client_id,
+        )
+        if hasattr(self.server.app, "start_client_event_watcher"):
+            self.server.app.start_client_event_watcher()
+        if hasattr(self.server.app, "wake_client_event_watcher"):
+            self.server.app.wake_client_event_watcher()
+        demanded_operation_ids = {value for value in (operation_id, *replay_operation_ids) if value}
+
+        def write_operation_terminal(event_payload: dict[str, Any]) -> None:
+            self.write_sse_json("operation_terminal", {
+                "type": "operation_terminal",
+                "time": time.time(),
+                "payload": event_payload,
+            })
+
+        try:
+            client_event_snapshot = self.server.app.client_events.ready_snapshot(subscriber_id)
+            self.write_sse_json("ready", {
+                "time": time.time(),
+                "epoch": client_event_snapshot["epoch"],
+                "resource_revisions": client_event_snapshot["resource_revisions"],
+            })
+            if operation_id and hasattr(self.server.app, "operation_replay_payload"):
+                replay = self.server.app.operation_replay_payload(operation_id)
+                if isinstance(replay, dict):
+                    write_operation_terminal(replay)
+            if hasattr(self.server.app, "operation_replay_payload"):
+                for replay_operation_id in replay_operation_ids:
+                    if replay_operation_id == operation_id:
+                        continue
+                    replay = self.server.app.operation_replay_payload(replay_operation_id)
+                    if isinstance(replay, dict):
+                        write_operation_terminal(replay)
+            next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
+            while True:
+                try:
+                    event = self.server.app.client_events.next_event(
+                        subscriber_id,
+                        timeout=min(
+                            CLIENT_EVENT_DISCONNECT_POLL_SECONDS,
+                            max(0.0, next_heartbeat_at - time.monotonic()),
+                        ),
+                    )
+                except queue.Empty:
+                    event = None
+                if self.client_event_peer_disconnected():
+                    return
+                if time.monotonic() >= next_heartbeat_at:
+                    if hasattr(self.server.app, "touch_client_watch_descriptor"):
+                        self.server.app.touch_client_watch_descriptor(client_id)
+                    self.write_sse_json("ping", {"time": time.time()})
+                    self.server.app.client_events.record_heartbeat()
+                    next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
+                if event is None:
+                    continue
+                if str(event.get("type") or "") == "operation_terminal":
+                    event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    event_operation = event_payload.get("operation") if isinstance(event_payload.get("operation"), dict) else {}
+                    if str(event_operation.get("id") or "") not in demanded_operation_ids:
+                        continue
+                    write_operation_terminal(event_payload)
+                    continue
+                if operation_id:
+                    continue
+                self.write_sse_json(str(event.get("type") or "event"), event)
+        except OSError:
+            return
+        finally:
+            self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "client_event_subscriber_disconnected"):
+                self.server.app.client_event_subscriber_disconnected(client_id)
+            if hasattr(self.server.app, "wake_client_event_watcher"):
+                self.server.app.wake_client_event_watcher()
+            if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
+                self.server.app.stop_client_event_watcher_if_idle()
+
+    def stream_stats_current_delta(
+        self,
+        raw_query: str,
+        *,
+        authenticated_username: str,
+    ) -> None:
+        try:
+            cursor = stats_current_http.parse_http_delta_query(raw_query)
+        except stats_current_protocol.UnsupportedRequest as error:
+            self.write_json(error.response, status=HTTPStatus.BAD_REQUEST)
+            return
+        result = self.server.app.stats_current_http.delta_stream(
+            raw_query,
+            authenticated_username=authenticated_username,
+        )
+        # EventSource does not expose a non-200 response body to its listeners.
+        # A stale initial cursor is a normal repair terminal, so carry it over the
+        # established SSE channel just as we do for a cursor that goes stale after
+        # the stream is open. Otherwise the browser receives only a generic error
+        # and cannot discharge the pending range selection with the typed reason.
+        if result.status == HTTPStatus.CONFLICT:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_auth_cookie_if_needed()
+            self.end_headers()
+            self.write_sse_json("repair", result.metadata)
+            return
+        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+            self.write_json(
+                result.metadata,
+                status=result.status,
+            )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        cache_generation = cursor.after_cache_generation
+        revision_number = cursor.after_revision
+        cadence_seconds = stats_current_protocol.live_cadence_seconds(
+            cursor.resolution_seconds
+        )
+        next_deadline = time.monotonic() + cadence_seconds
+        try:
+            while True:
+                if result.status == HTTPStatus.OK:
+                    self.write_sse_bytes("delta", result.body)
+                    cache_generation = int(result.metadata["cache_generation"])
+                    revision_number = int(result.metadata["revision"])
+                elif result.status == HTTPStatus.NOT_MODIFIED:
+                    payload = result.metadata
+                    cache_generation = int(
+                        payload.get("cache_generation") or cache_generation
+                    )
+                    self.write_sse_json("ready", {
+                        "cache_generation": cache_generation,
+                        "revision": revision_number,
+                    })
+                if self.server.persistent_request_stop.wait(
+                    max(0.0, next_deadline - time.monotonic())
+                ):
+                    return
+                now = time.monotonic()
+                while next_deadline <= now:
+                    next_deadline += cadence_seconds
+                query = urlencode({
+                    "range_seconds": cursor.range_seconds,
+                    "resolution_seconds": cursor.resolution_seconds,
+                    "client_id": cursor.client_id,
+                    "after_cache_generation": cache_generation,
+                    "after_revision": revision_number,
+                })
+                result = self.server.app.stats_current_http.delta_stream(
+                    query,
+                    authenticated_username=authenticated_username,
+                )
+                if result.status == HTTPStatus.CONFLICT:
+                    self.write_sse_json("repair", result.metadata)
+                    return
+                if result.status not in {
+                    HTTPStatus.OK,
+                    HTTPStatus.NOT_MODIFIED,
+                    HTTPStatus.ACCEPTED,
+                }:
+                    self.write_sse_json("unavailable", result.metadata)
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            return
+
+    def stream_context_items(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        session = str(query_one(qs, "session", "") or "")
+        messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
+        payload, status = self.server.app.context_items(session, message_limit, accept_pending=False)
+        if status != HTTPStatus.OK:
+            self.write_json(payload, status=status)
+            return
+        path_text = payload.get("path")
+        items = payload.get("items")
+        if not isinstance(path_text, str) or not isinstance(items, list):
+            diagnostic = "missing transcript items"
+            self.write_json(
+                {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return
+
+        path = Path(path_text)
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+
+        try:
+            self.write_sse_json(
+                "reset",
+                {
+                    "session": session,
+                    "path": str(path),
+                    "items": items,
+                    "pending": bool(payload.get("pending")),
+                    "stale": bool(payload.get("stale")),
+                    "agent": payload.get("agent"),
+                    "errors": payload.get("errors", []),
+                },
+            )
+            self.follow_transcript_file(path)
+        except OSError:
+            return
+
+    def stream_codex_summary(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        session = str(query_one(qs, "session", "") or "")
+        summary_settings = self.server.app.summary_settings()
+        default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
+        lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        unknown = self.server.app.require_known_session(session)
+        if unknown:
+            payload, status = unknown
+            self.write_json(payload, status=status)
+            return
+        availability_error = self.codex_summary_availability_error(summary_settings)
+        if availability_error:
+            self.write_json(availability_error, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+
+        payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
+        if status != HTTPStatus.OK:
+            self.write_json(payload, status=status)
+            return
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str):
+            diagnostic = "missing Codex prompt"
+            self.write_json(
+                {"session": session, **user_message_payload("summary.error.missingPrompt", diagnostic)},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+
+        meta = {key: value for key, value in payload.items() if key != "prompt"}
+        meta["summary_model"] = summary_settings["codex_model"]
+        meta["summary_effort"] = summary_settings["codex_effort"]
+        meta["summary_service_tier"] = summary_settings["codex_service_tier"]
+        self.server.app.log_event(
+            session,
+            "summary_started",
+            "AI summary started",
+            {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
+            message_key="events.message.summary.started",
+        )
+        try:
+            self.write_sse_json("meta", meta)
+            self.run_codex_summary(prompt, summary_settings)
+            self.server.app.log_event(
+                session,
+                "summary_finished",
+                "AI summary finished",
+                {"model": summary_settings["codex_model"]},
+                message_key="events.message.summary.finished",
+            )
+        except OSError:
+            self.server.app.log_event(
+                session,
+                "summary_disconnected",
+                "AI summary stream disconnected",
+                {},
+                message_key="events.message.summary.disconnected",
+            )
+            return
+
+    def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
+        provider = str(summary_settings.get("backend") or "").strip().lower()
+        if provider != "codex":
+            diagnostic = "AI summary provider is disabled"
+            return {
+                **user_message_payload("summary.error.providerDisabled", diagnostic),
+                "provider": provider or "disabled",
+            }
+        status = agent_auth_status()
+        codex_status = status.get("codex") if isinstance(status, dict) else {}
+        codex_status = codex_status if isinstance(codex_status, dict) else {}
+        if not codex_status.get("installed"):
+            diagnostic = "Codex summary provider is unavailable because the codex CLI is not on PATH"
+            return {
+                **user_message_payload("summary.error.codexUnavailable", diagnostic),
+                "provider": "codex",
+                "login_command": AGENT_LOGIN_COMMANDS["codex"],
+            }
+        if not codex_status.get("logged_in"):
+            command = AGENT_LOGIN_COMMANDS["codex"]
+            diagnostic = f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{command}`."
+            return {
+                **user_message_payload("summary.error.codexLoginRequired", diagnostic, command=command),
+                "provider": "codex",
+                "login_command": command,
+            }
+        return None
+
+    def run_codex_summary(self, prompt: str, summary_settings: dict[str, Any]) -> None:
+        repo_root = PROJECT_ROOT
+        args = codex_exec_argv(
+            ephemeral=True,
+            model=str(summary_settings.get("codex_model") or "").strip() or None,
+            effort=str(summary_settings.get("codex_effort") or "").strip() or None,
+            service_tier=str(summary_settings.get("codex_service_tier") or "").strip() or None,
+        )
+        env = codex_runtime_env()
+        process: subprocess.Popen[bytes] | None = None
+        previous_usage_context = getattr(self, "_codex_summary_usage_context", None)
+        self._codex_summary_usage_context = {
+            "model": str(summary_settings.get("codex_model") or "").strip(),
+            "effort": str(summary_settings.get("codex_effort") or "").strip() or "unknown",
+            "service_tier": str(summary_settings.get("codex_service_tier") or "").strip() or "default",
+        }
+        try:
+            process = subprocess.Popen(
+                args,
+                cwd=str(repo_root),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
+            record_owned_process_group(process)
+            if process.stdin is None or process.stdout is None:
+                diagnostic = "failed to open Codex pipes"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.openPipes", diagnostic))
+                return
+            process.stdin.write(prompt.encode("utf-8"))
+            process.stdin.close()
+            self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
+        except OSError as exc:
+            diagnostic = str(exc)
+            self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
+        finally:
+            if previous_usage_context is None:
+                self.__dict__.pop("_codex_summary_usage_context", None)
+            else:
+                self._codex_summary_usage_context = previous_usage_context
+            if process is not None:
+                terminate_process_group(process)
+
+    def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
+        if process.stdout is None:
+            diagnostic = "missing Codex stdout"
+            self.write_sse_json("summary_error", user_message_payload("summary.error.missingStdout", diagnostic))
+            return
+        fd = process.stdout.fileno()
+        buffer = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        last_ping = time.monotonic()
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            timeout = float(SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS)
+        deadline = time.monotonic() + max(1.0, timeout)
+        while True:
+            now = time.monotonic()
+            if now > deadline:
+                diagnostic = "Codex summary timed out"
+                self.write_sse_json("summary_error", user_message_payload("summary.error.timedOut", diagnostic))
+                return
+            running = process.poll() is None
+            timeout = 0.2 if running else 0.0
+            readable, _, _ = select.select([fd], [], [], timeout)
+            if readable:
+                chunk = os.read(fd, 4096)
+                if chunk:
+                    buffer += decoder.decode(chunk)
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        self.write_codex_summary_line(line)
+                    continue
+                if not running:
+                    break
+            if running:
+                if now - last_ping >= 5:
+                    self.write_sse_json("ping", {"time": time.strftime("%Y-%m-%d %H:%M:%S %Z")})
+                    last_ping = now
+                continue
+            if not readable:
+                break
+
+        buffer += decoder.decode(b"", final=True)
+        if buffer.strip():
+            self.write_codex_summary_line(buffer)
+        return_code = process.wait(timeout=1.0)
+        self.write_sse_json("done", {"return_code": return_code})
+
+    def write_codex_summary_line(self, line: str) -> None:
+        stripped = line.strip()
+        if not stripped:
+            return
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            self.write_sse_json("log", {"text": stripped})
+            return
+        event_kind = codex_event_kind(event)
+        if event_kind == "log":
+            self.write_sse_json("log", {"text": str(event.get("type") or "").replace(".", " ")})
+            return
+        if event_kind == "completed":
+            self.record_codex_summary_usage(event)
+            return
+        if event_kind == "error":
+            diagnostic = json.dumps(event, ensure_ascii=False)
+            self.write_sse_json("summary_error", user_message_payload("summary.stream.failed", diagnostic))
+            return
+
+        text = codex_event_text(event)
+        if text:
+            self.write_sse_json("delta", {"text": text})
+
+    def record_codex_summary_usage(self, event: dict[str, Any]) -> None:
+        """Submit only direct structured completion usage, never summary text."""
+        context = getattr(self, "_codex_summary_usage_context", None)
+        if not isinstance(context, dict):
+            return
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        if not usage:
+            response = event.get("response") if isinstance(event.get("response"), dict) else {}
+            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        if not usage:
+            return
+        event_identity = str(event.get("id") or event.get("turn_id") or event.get("turnId") or "summary")
+        digest = hashlib.sha256(json.dumps(usage, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+        try:
+            self.server.app.record_owned_usage_atoms(
+                provider="openai",
+                model=str(context.get("model") or ""),
+                usage=usage,
+                source="AI Summary",
+                event_id=f"ai-summary:{event_identity}:{digest}",
+                effort=str(context.get("effort") or "unknown"),
+                service_tier=str(context.get("service_tier") or "default"),
+                endpoint="codex-exec",
+            )
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            # Cost telemetry must not turn a successfully generated summary
+            # into a failed user-visible summary response.
+            return
+
+    def follow_transcript_file(self, path: Path) -> None:
+        last_ping = time.monotonic()
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(0, os.SEEK_END)
+            while True:
+                line = handle.readline()
+                if line:
+                    items = transcript_items_from_raw_line(line)
+                    if items:
+                        self.write_sse_json("items", {"items": items})
+                    continue
+                now = time.monotonic()
+                if now - last_ping >= 15:
+                    self.write_sse_json("ping", {"time": time.strftime("%Y-%m-%d %H:%M:%S %Z")})
+                    last_ping = now
+                time.sleep(0.2)
 
     def write_sse_json(self, event: str, value: Any) -> None:
         data = json.dumps(value, ensure_ascii=False)
@@ -2260,1205 +3197,6 @@ class ApiResponseWriter(_HandlerAdapter):
         self.end_headers()
         self.wfile.write(data)
         self.record_http_response_bytes(status, len(data), "text/plain; charset=utf-8")
-
-
-class Handler(AuthMixin, BaseHTTPRequestHandler):
-    @property
-    def filesystem_http_adapter(self) -> FilesystemHttpAdapter:
-        adapter = self.__dict__.get("_filesystem_http_adapter")
-        if adapter is None:
-            adapter = FilesystemHttpAdapter(self)
-            object.__setattr__(self, "_filesystem_http_adapter", adapter)
-        return adapter
-
-    @property
-    def share_http_adapter(self) -> ShareHttpAdapter:
-        adapter = self.__dict__.get("_share_http_adapter")
-        if adapter is None:
-            adapter = ShareHttpAdapter(self)
-            object.__setattr__(self, "_share_http_adapter", adapter)
-        return adapter
-
-    @property
-    def api_response_writer(self) -> ApiResponseWriter:
-        adapter = self.__dict__.get("_api_response_writer")
-        if adapter is None:
-            adapter = ApiResponseWriter(self)
-            object.__setattr__(self, "_api_response_writer", adapter)
-        return adapter
-
-    server: "TmuxWebtermHTTPServer"
-    protocol_version = "HTTP/1.1"
-    _route_response: Any = None
-    _route_response_written = False
-    _api_request_id = ""
-
-    def handle_one_request(self) -> None:
-        # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive requests. Route
-        # handlers attach optional timing/details while building a response, so clear them at the
-        # request boundary instead of letting a homepage sample become a later API sample.
-        self._http_response_compute_ms = None
-        self._http_response_performance_details = None
-        self._http_request_started_at = time.perf_counter()
-        self._http_request_line_read_at = None
-        self._http_request_parse_completed_at = None
-        self._http_request_dispatch_started_at = None
-        self._route_response = None
-        self._route_response_written = False
-        self._api_request_id = ""
-        super().handle_one_request()
-
-    def dispatch_route_response(self, route: Any, operation: Callable[[], None]) -> None:
-        """Run one registered route under the response boundary declared by its registry entry."""
-        self._route_response = route
-        self._route_response_written = False
-        try:
-            operation()
-        except Exception as error:
-            if self._route_response_written or route.protocol not in {RESPONSE_JSON, RESPONSE_JSON_BATCH}:
-                raise
-            cause = local_service_exception_cause(error)
-            root = {
-                "component": "server.http",
-                "operation": f"{route.method} {route.path}",
-                "code": "internal_error",
-                **cause,
-            }
-            self.write_api_response(
-                error_payload(
-                    "request failed",
-                    message_key="common.requestFailed",
-                    canonical=True,
-                    code="internal_error",
-                    origin="server.http",
-                    retryable=False,
-                    details={"exception_type": type(error).__name__},
-                    stack=[root],
-                    request_id=self.api_request_id(),
-                ),
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        finally:
-            self._route_response = None
-
-    def parse_request(self) -> bool:
-        """Mark BaseHTTPRequestHandler's request-line and header boundary for timing."""
-        self._http_request_line_read_at = time.perf_counter()
-        try:
-            return super().parse_request()
-        finally:
-            self._http_request_parse_completed_at = time.perf_counter()
-
-    def setup(self) -> None:
-        preparer = getattr(self.server, "prepare_request_socket", None)
-        if callable(preparer):
-            self.request = preparer(self.request)
-        self._request_is_https = isinstance(self.request, ssl.SSLSocket)
-        super().setup()
-
-    def log_message(self, fmt: str, *args: Any) -> None:
-        message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
-        sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
-
-    def request_line_capture(self) -> tuple[bytes, bool]:
-        """Return the raw request line and whether the complete line was already buffered.
-
-        BaseHTTPRequestHandler reads 65,537 bytes before it emits a 414.  The remainder is
-        usually already buffered for a browser request, so consume through its newline only when
-        it is immediately available.  Never wait for more client input just to diagnose an error.
-        """
-        captured = bytearray(bytes(getattr(self, "raw_requestline", b"") or b""))
-        if captured.endswith(b"\n"):
-            return bytes(captured), True
-        request_file = getattr(self, "rfile", None)
-        peek = getattr(request_file, "peek", None)
-        readline = getattr(request_file, "readline", None)
-        if not callable(peek) or not callable(readline) or len(captured) >= HTTP_REQUEST_LINE_CAPTURE_LIMIT:
-            return bytes(captured), False
-        connection = getattr(self, "connection", None)
-        gettimeout = getattr(connection, "gettimeout", None)
-        setblocking = getattr(connection, "setblocking", None)
-        settimeout = getattr(connection, "settimeout", None)
-        timeout = gettimeout() if callable(gettimeout) else None
-        try:
-            if callable(setblocking):
-                setblocking(False)
-            buffered = bytes(peek(HTTP_REQUEST_LINE_CAPTURE_LIMIT - len(captured)))
-        except (BlockingIOError, OSError, ValueError):
-            return bytes(captured), False
-        finally:
-            if callable(settimeout):
-                settimeout(timeout)
-        newline = buffered.find(b"\n")
-        if newline < 0:
-            return bytes(captured), False
-        try:
-            captured.extend(readline(newline + 1))
-        except (OSError, ValueError):
-            return bytes(captured), False
-        return bytes(captured), captured.endswith(b"\n")
-
-    def log_request_uri_too_long(self) -> None:
-        """Write the framing evidence for a 414 without changing its HTTP outcome."""
-        raw_line, complete = self.request_line_capture()
-        line = raw_line.rstrip(b"\r\n").decode("latin-1")
-        candidate_method = line.split(" ", 1)[0]
-        method = candidate_method if re.fullmatch(r"[A-Z]+", candidate_method) else "invalid"
-        address = self.client_address if isinstance(self.client_address, tuple) else ()
-        client = f"{address[0]}:{address[1]}" if len(address) > 1 else str(address[0]) if address else "unknown"
-        connection = getattr(self, "connection", None)
-        try:
-            local = connection.getsockname() if connection is not None else None
-        except OSError:
-            local = None
-        try:
-            descriptor = connection.fileno() if connection is not None else None
-        except OSError:
-            descriptor = None
-        self.log_error(
-            "request-line-capture %s",
-            json.dumps({
-                "status": HTTPStatus.REQUEST_URI_TOO_LONG.value,
-                "client": client,
-                "connection": {"local": local, "fd": descriptor},
-                "method": method,
-                "request_line": line,
-                "request_line_complete": complete,
-                "request_line_bytes": len(raw_line),
-            }, ensure_ascii=True, separators=(",", ":")),
-        )
-
-    def send_error(self, code: int | HTTPStatus, message: str | None = None, explain: str | None = None) -> None:
-        if int(code) == HTTPStatus.REQUEST_URI_TOO_LONG:
-            self.log_request_uri_too_long()
-        super().send_error(code, message, explain)
-
-    def send_response(self, code: int | HTTPStatus, message: str | None = None) -> None:
-        """Mark the response committed for every JSON and non-JSON protocol family."""
-        self._route_response_written = True
-        super().send_response(code, message)
-
-    def http_endpoint_metric_key(self) -> str:
-        method = str(getattr(self, "command", "") or "GET").upper()
-        try:
-            path = urlparse(str(getattr(self, "path", "") or "/")).path or "/"
-        except ValueError:
-            path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
-        return f"{method} {path}"[:120]
-
-    def measurement_marker(self) -> str:
-        """Return only a validated capture marker; callers must not retain it verbatim."""
-        headers = getattr(self, "headers", {})
-        marker = str(headers.get("X-YOLOmux-Measurement") or "") if hasattr(headers, "get") else ""
-        if marker.startswith("capture-") and len(marker) == 40 and all(char in "0123456789abcdef" for char in marker[8:]):
-            return marker
-        return ""
-
-    def measurement_scope(self) -> str:
-        """Return a generic in-memory scope without retaining a browser marker."""
-        return "capture" if self.measurement_marker() else ""
-
-    def measurement_request_id(self) -> str:
-        """Return an opaque, bounded join key for one validated capture request."""
-        marker = self.measurement_marker()
-        return hashlib.sha256(marker.encode("ascii")).hexdigest()[:16] if marker else ""
-
-    def measurement_connection_id(self) -> str:
-        """Return a capture-scoped opaque join key for this request's TCP peer."""
-        marker = self.measurement_marker()
-        address = self.client_address if isinstance(self.client_address, tuple) else ()
-        peer_port = address[1] if len(address) > 1 else None
-        if not marker or not isinstance(peer_port, int):
-            return ""
-        return hashlib.sha256(f"{marker}:{peer_port}".encode("ascii")).hexdigest()[:16]
-
-    def record_http_response_bytes(
-        self,
-        status: HTTPStatus | int,
-        body_bytes: int,
-        content_type: str = "",
-        performance_details: dict[str, Any] | None = None,
-    ) -> None:
-        app = getattr(getattr(self, "server", None), "app", None)
-        recorder = getattr(app, "record_performance_sample", None)
-        if not callable(recorder):
-            return
-        status_code = int(status)
-        endpoint = self.http_endpoint_metric_key()
-        details = {
-            "status": status_code,
-            "method": endpoint.split(" ", 1)[0],
-            "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
-            "content_type": content_type_base(content_type),
-        }
-        if str(details["path"]).startswith("/api/"):
-            details["request_id"] = self.api_request_id()
-        measurement_scope = self.measurement_scope()
-        if measurement_scope:
-            details["measurement_scope"] = measurement_scope
-            # The browser keeps the raw capture marker; metrics retain only this opaque digest so
-            # a slow request can be joined to that click without exposing a browser identifier.
-            details["measurement_request_id"] = self.measurement_request_id()
-            details["measurement_connection_id"] = self.measurement_connection_id()
-        request_started = getattr(self, "_http_request_started_at", None)
-        request_line_read_at = getattr(self, "_http_request_line_read_at", None)
-        request_parse_completed_at = getattr(self, "_http_request_parse_completed_at", None)
-        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
-        response_started = time.perf_counter()
-        if isinstance(request_started, (int, float)):
-            details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
-        if isinstance(request_started, (int, float)) and isinstance(request_line_read_at, (int, float)):
-            # For HTTP/1.1 keep-alives this includes the idle wait before the browser sends the
-            # next request line. It is deliberately separate from server-side parsing or routing.
-            details["request_line_wait_ms"] = round(max(0.0, (request_line_read_at - request_started) * 1000), 3)
-        if isinstance(request_line_read_at, (int, float)) and isinstance(request_parse_completed_at, (int, float)):
-            details["request_header_parse_ms"] = round(max(0.0, (request_parse_completed_at - request_line_read_at) * 1000), 3)
-        if isinstance(request_parse_completed_at, (int, float)) and isinstance(dispatch_started, (int, float)):
-            details["request_parse_to_route_ms"] = round(max(0.0, (dispatch_started - request_parse_completed_at) * 1000), 3)
-        if isinstance(request_started, (int, float)) and isinstance(dispatch_started, (int, float)):
-            # Keep the aggregate for existing consumers. The stage fields above distinguish an
-            # HTTP/1.1 request-line wait from parsing and actual route entry.
-            details["accept_to_route_ms"] = round(max(0.0, (dispatch_started - request_started) * 1000), 3)
-        extra_details = getattr(self, "_http_response_performance_details", None)
-        if isinstance(extra_details, dict):
-            details.update(extra_details)
-        if isinstance(performance_details, dict):
-            details.update(performance_details)
-        recorder(
-            "http-endpoint",
-            endpoint,
-            trigger=endpoint,
-            compute_ms=getattr(self, "_http_response_compute_ms", None) if getattr(self, "_http_response_compute_ms", None) is not None else (
-                max(0.0, (response_started - dispatch_started) * 1000) if isinstance(dispatch_started, (int, float)) else None
-            ),
-            payload_bytes=max(0, int(body_bytes or 0)),
-            cache_key={"kind": endpoint},
-            cache_status=str(status_code),
-            owner_role="server",
-            count=1,
-            details=details,
-        )
-
-    def plaintext_share_scope_allowed(self, parsed: Any) -> bool:
-        if not getattr(self.server, "tls_context", None) or self.request_is_https():
-            return True
-        path = str(parsed.path or "")
-        route = route_for_request(str(getattr(self, "command", "GET") or "GET"), path)
-        if route is None or route.share_access == SHARE_ACCESS_NONE:
-            return False
-
-        def http_share_token_allowed() -> bool:
-            verifier = getattr(self.server.app, "verify_share_token", None)
-            record = verifier(self.share_token_text()) if callable(verifier) else None
-            return bool(record and record.get("http_allowed"))
-
-        if route.path == "/share/*":
-            short_id = path.removeprefix("/share/").strip("/")
-            finder = getattr(self.server.app, "share_record_for_short_id", None)
-            record = finder(short_id) if short_id and "/" not in short_id and callable(finder) else None
-            return bool(record and record.get("http_allowed"))
-        if route.path == "/static/*":
-            checker = getattr(self.server.app, "http_allowed_share_is_active", None)
-            return bool(checker()) if callable(checker) else False
-        return http_share_token_allowed()
-
-    def redirect_plaintext_to_https_if_needed(self, parsed: Any) -> bool:
-        if not getattr(self.server, "tls_context", None) or self.request_is_https() or self.plaintext_share_scope_allowed(parsed):
-            return False
-        host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
-        if not host or "\r" in host or "\n" in host:
-            host = self.server.server_name_with_port()
-        location = f"https://{host}{self.path or '/'}"
-        body = https_redirect_body(location, resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", "")))
-        self.send_response(HTTPStatus.PERMANENT_REDIRECT)
-        self.send_header("Location", location)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(body)
-            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, len(body), "text/plain; charset=utf-8")
-        else:
-            self.record_http_response_bytes(HTTPStatus.PERMANENT_REDIRECT, 0, "text/plain; charset=utf-8")
-        self.close_connection = True
-        return True
-
-    def do_GET(self) -> None:
-        dispatch_http_route(self, "GET")
-
-    def share_bootstrap_payload(self, record: dict[str, Any] | None) -> dict[str, Any] | None:
-        # ShareHttpAdapter retains host_pty_dimensions_for_session(session) and
-        # "hostDims": {"rows": rows, "cols": cols} in the bootstrap path.
-        return ShareHttpAdapter.share_bootstrap_payload(self, record)
-
-    def share_record_at_viewer_cap(self, record: dict[str, Any]) -> bool:
-        return ShareHttpAdapter.share_record_at_viewer_cap(self, record)
-
-    def share_record_sessions_for_handler(self, record: dict[str, Any]) -> list[str]:
-        return ShareHttpAdapter.share_record_sessions_for_handler(self, record)
-
-    def normalize_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        return ShareHttpAdapter.normalize_share_input_intent_for_handler(self, token, payload)
-
-    def apply_share_input_intent_for_handler(self, token: str, payload: dict[str, Any]) -> bool:
-        return ShareHttpAdapter.apply_share_input_intent_for_handler(self, token, payload)
-
-    def handle_share_shell(self, parsed: Any) -> bool:
-        return ShareHttpAdapter.handle_share_shell(self, parsed)
-
-    def handle_fs_list(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_list(self, parsed)
-
-    def handle_fs_search(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_search(self, parsed)
-
-    def handle_fs_index_status(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_index_status(self, parsed)
-
-    def handle_fs_read(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_read(self, parsed)
-
-    def handle_fs_info(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_info(self, parsed)
-
-    def handle_fs_diff(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_diff(self, parsed)
-
-    def handle_blame(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_blame(self, parsed)
-
-    def submit_filesystem_operation(
-        self,
-        route: str,
-        operation: str,
-        raw_path: str,
-        args: dict[str, Any] | None = None,
-        *,
-        reload_yolo_rules: bool = False,
-    ) -> None:
-        return FilesystemHttpAdapter.submit_filesystem_operation(self, route, operation, raw_path, args, reload_yolo_rules=reload_yolo_rules)
-
-    def handle_fs_raw(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_raw(self, parsed)
-
-    def handle_fs_zip(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_zip(self, parsed)
-
-    def handle_fs_count(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_count(self, parsed)
-
-    def handle_fs_html_preview(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_html_preview(self, parsed)
-
-    def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
-        return FilesystemHttpAdapter.submit_filesystem_relay(self, route, operation, raw_path, args)
-
-    def handle_preview_popout_placeholder(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_path = qs.get("path", [""])[0]
-        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        title = html.escape(server_string(locale, "preview.popout.title", name=Path(raw_path).name or server_string(locale, "common.preview")))
-        body = f"""<!doctype html>
-<html {html_lang_dir_attrs(locale)}>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-</head>
-<body></body>
-</html>"""
-        self.write_html(body)
-
-    def handle_pane_popout_placeholder(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        raw_item = qs.get("item", [""])[0]
-        locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        title = html.escape(server_string(locale, "pane.popout.title", name=raw_item or server_string(locale, "app.documentTitle")))
-        body = f"""<!doctype html>
-<html {html_lang_dir_attrs(locale)}>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-</head>
-<body></body>
-</html>"""
-        self.write_html(body)
-
-    def read_request_body(
-        self,
-        max_length: int,
-        *,
-        allow_empty: bool = False,
-        allow_missing: bool = False,
-        missing_message: str = "missing Content-Length",
-        invalid_message: str = "invalid Content-Length",
-        empty_message: str = "invalid Content-Length",
-        too_large_message: str = "content too large",
-        missing_status: HTTPStatus = HTTPStatus.LENGTH_REQUIRED,
-        invalid_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        empty_status: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        too_large_status: HTTPStatus = HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-        close_on_too_large: bool = True,
-    ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
-        return FilesystemHttpAdapter.read_request_body(self, max_length, allow_empty=allow_empty, allow_missing=allow_missing, missing_message=missing_message, invalid_message=invalid_message, empty_message=empty_message, too_large_message=too_large_message, missing_status=missing_status, invalid_status=invalid_status, empty_status=empty_status, too_large_status=too_large_status, close_on_too_large=close_on_too_large)
-
-    def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
-        # FilesystemHttpAdapter.read_json_body routes through read_request_body on this facade.
-        return FilesystemHttpAdapter.read_json_body(self, max_length, allow_empty=allow_empty, allow_missing=allow_missing)
-
-    def handle_fs_write(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_write(self, parsed)
-
-    def handle_fs_delete(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_delete(self, parsed)
-
-    def handle_fs_unindex(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_unindex(self, parsed)
-
-    def handle_fs_rename(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_rename(self, parsed)
-
-    def handle_fs_mkdir(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_mkdir(self, parsed)
-
-    def do_POST(self) -> None:
-        dispatch_http_route(self, "POST")
-
-    def request_base_url(self, scheme: str | None = None) -> str:
-        host = str(self.headers.get("Host") or self.server.server_name_with_port()).strip()
-        if not host or "\r" in host or "\n" in host:
-            host = self.server.server_name_with_port()
-        scheme_text = str(scheme or "").strip().lower()
-        url_scheme = scheme_text if scheme_text in {"http", "https"} else "https" if self.request_is_https() else "http"
-        return f"{url_scheme}://{host}"
-
-    def share_scoped_activity_result(self, result: tuple[dict[str, Any], HTTPStatus]) -> tuple[dict[str, Any], HTTPStatus]:
-        return ShareHttpAdapter.share_scoped_activity_result(self, result)
-
-    def share_scoped_session_metadata_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return ShareHttpAdapter.share_scoped_session_metadata_payload(self, payload)
-
-    def share_scoped_transcripts_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return ShareHttpAdapter.share_scoped_transcripts_payload(self, payload)
-
-    def handle_share_create(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        return ShareHttpAdapter.handle_share_create(self, payload)
-
-    def handle_fs_batch(self, parsed: Any) -> None:
-        return FilesystemHttpAdapter.handle_fs_batch(self, parsed)
-
-    def read_urlencoded_form(self) -> dict[str, list[str]]:
-        body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
-        if error is not None:
-            self.close_connection = True
-            return {}
-        return parse_qs((body or b"").decode("utf-8", errors="replace"), keep_blank_values=True)
-
-    def handle_client_event(self) -> tuple[dict[str, Any], HTTPStatus]:
-        body, error, status = Handler.read_request_body(self, 64 * 1024, too_large_message="event is too large")
-        if error is not None:
-            return error, status
-        try:
-            event = json.loads((body or b"").decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            return error_payload(
-                "invalid JSON",
-                message_key="request.error.invalidJson",
-                diagnostic=exc,
-                status=HTTPStatus.BAD_REQUEST,
-            ), HTTPStatus.BAD_REQUEST
-        if not isinstance(event, dict):
-            return error_payload(
-                "event must be an object",
-                message_key="request.error.object",
-                message_params={"field": "event"},
-                status=HTTPStatus.BAD_REQUEST,
-            ), HTTPStatus.BAD_REQUEST
-        return self.server.app.client_event(event)
-
-    def file_transfer_max_bytes(self) -> int:
-        return FilesystemHttpAdapter.file_transfer_max_bytes(self)
-
-    def handle_upload(self, session: str, *, editor_path: str = "", base_dir: str = "") -> tuple[dict[str, Any], HTTPStatus]:
-        # FilesystemHttpAdapter.handle_upload routes through read_request_body on this facade.
-        return FilesystemHttpAdapter.handle_upload(self, session, editor_path=editor_path, base_dir=base_dir)
-
-    def do_HEAD(self) -> None:
-        parsed = urlparse(self.path)
-        if self.redirect_plaintext_to_https_if_needed(parsed):
-            return
-        if parsed.path.startswith("/static/"):
-            asset = parsed.path.removeprefix("/static/")
-            content_type = static_content_type(asset)
-            if content_type:
-                self.write_static_head(asset, content_type)
-                return
-        if not self.require_auth():
-            return
-        if parsed.path == "/":
-            sessions = self.server.app.sessions
-            data = html_page(
-                sessions,
-                self.auth_identity().role,
-                dev=getattr(self.server, 'dev', False),
-                dangerously_yolo=self.server.app.dangerously_yolo,
-                accept_language=self.headers.get("Accept-Language", ""),
-                auth_username=self.auth_identity().username,
-                recent_sessions=self.server.app.tmux_recency_ordered_sessions(sessions),
-            ).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_auth_cookie_if_needed()
-            self.end_headers()
-            self.record_http_response_bytes(HTTPStatus.OK, 0, "text/html; charset=utf-8")
-            return
-        self.send_response(HTTPStatus.NOT_FOUND)
-        self.end_headers()
-        self.record_http_response_bytes(HTTPStatus.NOT_FOUND, 0)
-
-    def dev_bundle_signature(self) -> str:
-        return yolomux_dev_bundle_revision()
-
-    def stream_dev_reload(self, client_bundle_revision: str = "") -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-        last = self.dev_bundle_signature()
-        try:
-            self.write_sse_json("ready", {"signature": last})
-            # Old clients did not identify their bundle. Treat that as stale once, so the reload
-            # listener already present in the old bundle repairs it after a server restart.
-            if str(client_bundle_revision or "") != last:
-                self.write_sse_json("reload", {"signature": last})
-            while True:
-                time.sleep(DEV_RELOAD_POLL_SECONDS)
-                current = self.dev_bundle_signature()
-                if current != last:
-                    last = current
-                    self.write_sse_json("reload", {"signature": current})
-        except OSError:
-            return
-
-    def client_event_peer_disconnected(self) -> bool:
-        """Detect a client read-side close even while SSE writes still succeed."""
-        connection = self.connection
-        try:
-            readable, _, exceptional = select.select([connection], [], [connection], 0)
-        except (OSError, ValueError):
-            return True
-        if exceptional:
-            return True
-        if not readable:
-            return False
-        previous_timeout = connection.gettimeout()
-        try:
-            connection.setblocking(False)
-            flags = 0 if isinstance(connection, ssl.SSLSocket) else socket.MSG_PEEK
-            return connection.recv(1, flags) == b""
-        except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
-            return False
-        except OSError:
-            return True
-        finally:
-            try:
-                connection.settimeout(previous_timeout)
-            except OSError:
-                pass
-
-    def stream_client_events(
-        self,
-        channels: str = "",
-        client_id: str = "",
-        operation_id: str = "",
-        replay_operation_ids: tuple[str, ...] = (),
-    ) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-        subscriber_id, _subscriber_queue = self.server.app.client_events.subscribe(
-            channels=channels or None,
-            client_id=client_id,
-        )
-        if hasattr(self.server.app, "start_client_event_watcher"):
-            self.server.app.start_client_event_watcher()
-        if hasattr(self.server.app, "wake_client_event_watcher"):
-            self.server.app.wake_client_event_watcher()
-        demanded_operation_ids = {value for value in (operation_id, *replay_operation_ids) if value}
-
-        def write_operation_terminal(event_payload: dict[str, Any]) -> None:
-            self.write_sse_json("operation_terminal", {
-                "type": "operation_terminal",
-                "time": time.time(),
-                "payload": event_payload,
-            })
-
-        try:
-            client_event_snapshot = self.server.app.client_events.ready_snapshot(subscriber_id)
-            self.write_sse_json("ready", {
-                "time": time.time(),
-                "epoch": client_event_snapshot["epoch"],
-                "resource_revisions": client_event_snapshot["resource_revisions"],
-            })
-            if operation_id and hasattr(self.server.app, "operation_replay_payload"):
-                replay = self.server.app.operation_replay_payload(operation_id)
-                if isinstance(replay, dict):
-                    write_operation_terminal(replay)
-            if hasattr(self.server.app, "operation_replay_payload"):
-                for replay_operation_id in replay_operation_ids:
-                    if replay_operation_id == operation_id:
-                        continue
-                    replay = self.server.app.operation_replay_payload(replay_operation_id)
-                    if isinstance(replay, dict):
-                        write_operation_terminal(replay)
-            next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
-            while True:
-                try:
-                    event = self.server.app.client_events.next_event(
-                        subscriber_id,
-                        timeout=min(
-                            CLIENT_EVENT_DISCONNECT_POLL_SECONDS,
-                            max(0.0, next_heartbeat_at - time.monotonic()),
-                        ),
-                    )
-                except queue.Empty:
-                    event = None
-                if self.client_event_peer_disconnected():
-                    return
-                if time.monotonic() >= next_heartbeat_at:
-                    if hasattr(self.server.app, "touch_client_watch_descriptor"):
-                        self.server.app.touch_client_watch_descriptor(client_id)
-                    self.write_sse_json("ping", {"time": time.time()})
-                    self.server.app.client_events.record_heartbeat()
-                    next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
-                if event is None:
-                    continue
-                if str(event.get("type") or "") == "operation_terminal":
-                    event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-                    event_operation = event_payload.get("operation") if isinstance(event_payload.get("operation"), dict) else {}
-                    if str(event_operation.get("id") or "") not in demanded_operation_ids:
-                        continue
-                    write_operation_terminal(event_payload)
-                    continue
-                if operation_id:
-                    continue
-                self.write_sse_json(str(event.get("type") or "event"), event)
-        except OSError:
-            return
-        finally:
-            self.server.app.client_events.unsubscribe(subscriber_id)
-            if hasattr(self.server.app, "client_event_subscriber_disconnected"):
-                self.server.app.client_event_subscriber_disconnected(client_id)
-            if hasattr(self.server.app, "wake_client_event_watcher"):
-                self.server.app.wake_client_event_watcher()
-            if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
-                self.server.app.stop_client_event_watcher_if_idle()
-
-    def stream_stats_current_delta(
-        self,
-        raw_query: str,
-        *,
-        authenticated_username: str,
-    ) -> None:
-        try:
-            cursor = stats_current_http.parse_http_delta_query(raw_query)
-        except stats_current_protocol.UnsupportedRequest as error:
-            self.write_json(error.response, status=HTTPStatus.BAD_REQUEST)
-            return
-        result = self.server.app.stats_current_http.delta_stream(
-            raw_query,
-            authenticated_username=authenticated_username,
-        )
-        # EventSource does not expose a non-200 response body to its listeners.
-        # A stale initial cursor is a normal repair terminal, so carry it over the
-        # established SSE channel just as we do for a cursor that goes stale after
-        # the stream is open. Otherwise the browser receives only a generic error
-        # and cannot discharge the pending range selection with the typed reason.
-        if result.status == HTTPStatus.CONFLICT:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            self.send_auth_cookie_if_needed()
-            self.end_headers()
-            self.write_sse_json("repair", result.metadata)
-            return
-        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
-            self.write_json(
-                result.metadata,
-                status=result.status,
-            )
-            return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-        cache_generation = cursor.after_cache_generation
-        revision_number = cursor.after_revision
-        cadence_seconds = stats_current_protocol.live_cadence_seconds(
-            cursor.resolution_seconds
-        )
-        next_deadline = time.monotonic() + cadence_seconds
-        try:
-            while True:
-                if result.status == HTTPStatus.OK:
-                    self.write_sse_bytes("delta", result.body)
-                    cache_generation = int(result.metadata["cache_generation"])
-                    revision_number = int(result.metadata["revision"])
-                elif result.status == HTTPStatus.NOT_MODIFIED:
-                    payload = result.metadata
-                    cache_generation = int(
-                        payload.get("cache_generation") or cache_generation
-                    )
-                    self.write_sse_json("ready", {
-                        "cache_generation": cache_generation,
-                        "revision": revision_number,
-                    })
-                if self.server.persistent_request_stop.wait(
-                    max(0.0, next_deadline - time.monotonic())
-                ):
-                    return
-                now = time.monotonic()
-                while next_deadline <= now:
-                    next_deadline += cadence_seconds
-                query = urlencode({
-                    "range_seconds": cursor.range_seconds,
-                    "resolution_seconds": cursor.resolution_seconds,
-                    "client_id": cursor.client_id,
-                    "after_cache_generation": cache_generation,
-                    "after_revision": revision_number,
-                })
-                result = self.server.app.stats_current_http.delta_stream(
-                    query,
-                    authenticated_username=authenticated_username,
-                )
-                if result.status == HTTPStatus.CONFLICT:
-                    self.write_sse_json("repair", result.metadata)
-                    return
-                if result.status not in {
-                    HTTPStatus.OK,
-                    HTTPStatus.NOT_MODIFIED,
-                    HTTPStatus.ACCEPTED,
-                }:
-                    self.write_sse_json("unavailable", result.metadata)
-                    return
-        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
-            return
-
-    def stream_context_items(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        session = str(query_one(qs, "session", "") or "")
-        messages, error = parse_query_int(qs, "messages", 40, max_value=MAX_COMPACT_TRANSCRIPT_ITEMS)
-        if error:
-            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
-            return
-        message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
-        payload, status = self.server.app.context_items(session, message_limit, accept_pending=False)
-        if status != HTTPStatus.OK:
-            self.write_json(payload, status=status)
-            return
-        path_text = payload.get("path")
-        items = payload.get("items")
-        if not isinstance(path_text, str) or not isinstance(items, list):
-            diagnostic = "missing transcript items"
-            self.write_json(
-                {"session": session, **user_message_payload("transcript.error.missingText", diagnostic)},
-                status=HTTPStatus.NOT_FOUND,
-            )
-            return
-
-        path = Path(path_text)
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-
-        try:
-            self.write_sse_json(
-                "reset",
-                {
-                    "session": session,
-                    "path": str(path),
-                    "items": items,
-                    "pending": bool(payload.get("pending")),
-                    "stale": bool(payload.get("stale")),
-                    "agent": payload.get("agent"),
-                    "errors": payload.get("errors", []),
-                },
-            )
-            self.follow_transcript_file(path)
-        except OSError:
-            return
-
-    def stream_codex_summary(self, parsed: Any) -> None:
-        qs = parse_qs(parsed.query)
-        session = str(query_one(qs, "session", "") or "")
-        summary_settings = self.server.app.summary_settings()
-        default_lookback = int(summary_settings.get("lookback_seconds") or SUMMARY_DEFAULT_LOOKBACK_SECONDS)
-        lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
-        if error:
-            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
-            return
-        unknown = self.server.app.require_known_session(session)
-        if unknown:
-            payload, status = unknown
-            self.write_json(payload, status=status)
-            return
-        availability_error = self.codex_summary_availability_error(summary_settings)
-        if availability_error:
-            self.write_json(availability_error, status=HTTPStatus.SERVICE_UNAVAILABLE)
-            return
-
-        payload, status = self.server.app.codex_summary_prompt(session, lookback_seconds)
-        if status != HTTPStatus.OK:
-            self.write_json(payload, status=status)
-            return
-        prompt = payload.get("prompt")
-        if not isinstance(prompt, str):
-            diagnostic = "missing Codex prompt"
-            self.write_json(
-                {"session": session, **user_message_payload("summary.error.missingPrompt", diagnostic)},
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            return
-
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_auth_cookie_if_needed()
-        self.end_headers()
-
-        meta = {key: value for key, value in payload.items() if key != "prompt"}
-        meta["summary_model"] = summary_settings["codex_model"]
-        meta["summary_effort"] = summary_settings["codex_effort"]
-        meta["summary_service_tier"] = summary_settings["codex_service_tier"]
-        self.server.app.log_event(
-            session,
-            "summary_started",
-            "AI summary started",
-            {"lookback_seconds": lookback_seconds, "model": summary_settings["codex_model"]},
-            message_key="events.message.summary.started",
-        )
-        try:
-            self.write_sse_json("meta", meta)
-            self.run_codex_summary(prompt, summary_settings)
-            self.server.app.log_event(
-                session,
-                "summary_finished",
-                "AI summary finished",
-                {"model": summary_settings["codex_model"]},
-                message_key="events.message.summary.finished",
-            )
-        except OSError:
-            self.server.app.log_event(
-                session,
-                "summary_disconnected",
-                "AI summary stream disconnected",
-                {},
-                message_key="events.message.summary.disconnected",
-            )
-            return
-
-    def codex_summary_availability_error(self, summary_settings: dict[str, Any]) -> dict[str, Any] | None:
-        provider = str(summary_settings.get("backend") or "").strip().lower()
-        if provider != "codex":
-            diagnostic = "AI summary provider is disabled"
-            return {
-                **user_message_payload("summary.error.providerDisabled", diagnostic),
-                "provider": provider or "disabled",
-            }
-        status = agent_auth_status()
-        codex_status = status.get("codex") if isinstance(status, dict) else {}
-        codex_status = codex_status if isinstance(codex_status, dict) else {}
-        if not codex_status.get("installed"):
-            diagnostic = "Codex summary provider is unavailable because the codex CLI is not on PATH"
-            return {
-                **user_message_payload("summary.error.codexUnavailable", diagnostic),
-                "provider": "codex",
-                "login_command": AGENT_LOGIN_COMMANDS["codex"],
-            }
-        if not codex_status.get("logged_in"):
-            command = AGENT_LOGIN_COMMANDS["codex"]
-            diagnostic = f"Codex summary provider is unavailable because the codex CLI is not logged in. Run `{command}`."
-            return {
-                **user_message_payload("summary.error.codexLoginRequired", diagnostic, command=command),
-                "provider": "codex",
-                "login_command": command,
-            }
-        return None
-
-    def run_codex_summary(self, prompt: str, summary_settings: dict[str, Any]) -> None:
-        repo_root = PROJECT_ROOT
-        args = codex_exec_argv(
-            ephemeral=True,
-            model=str(summary_settings.get("codex_model") or "").strip() or None,
-            effort=str(summary_settings.get("codex_effort") or "").strip() or None,
-            service_tier=str(summary_settings.get("codex_service_tier") or "").strip() or None,
-        )
-        env = codex_runtime_env()
-        process: subprocess.Popen[bytes] | None = None
-        previous_usage_context = getattr(self, "_codex_summary_usage_context", None)
-        self._codex_summary_usage_context = {
-            "model": str(summary_settings.get("codex_model") or "").strip(),
-            "effort": str(summary_settings.get("codex_effort") or "").strip() or "unknown",
-            "service_tier": str(summary_settings.get("codex_service_tier") or "").strip() or "default",
-        }
-        try:
-            process = subprocess.Popen(
-                args,
-                cwd=str(repo_root),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                start_new_session=True,
-            )
-            record_owned_process_group(process)
-            if process.stdin is None or process.stdout is None:
-                diagnostic = "failed to open Codex pipes"
-                self.write_sse_json("summary_error", user_message_payload("summary.error.openPipes", diagnostic))
-                return
-            process.stdin.write(prompt.encode("utf-8"))
-            process.stdin.close()
-            self.stream_codex_process(process, timeout_seconds=summary_settings.get("timeout_seconds"))
-        except OSError as exc:
-            diagnostic = str(exc)
-            self.write_sse_json("summary_error", user_message_payload("summary.error.runtime", diagnostic, error=diagnostic))
-        finally:
-            if previous_usage_context is None:
-                self.__dict__.pop("_codex_summary_usage_context", None)
-            else:
-                self._codex_summary_usage_context = previous_usage_context
-            if process is not None:
-                terminate_process_group(process)
-
-    def stream_codex_process(self, process: subprocess.Popen[bytes], timeout_seconds: Any = SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS) -> None:
-        if process.stdout is None:
-            diagnostic = "missing Codex stdout"
-            self.write_sse_json("summary_error", user_message_payload("summary.error.missingStdout", diagnostic))
-            return
-        fd = process.stdout.fileno()
-        buffer = ""
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        last_ping = time.monotonic()
-        try:
-            timeout = float(timeout_seconds)
-        except (TypeError, ValueError):
-            timeout = float(SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS)
-        deadline = time.monotonic() + max(1.0, timeout)
-        while True:
-            now = time.monotonic()
-            if now > deadline:
-                diagnostic = "Codex summary timed out"
-                self.write_sse_json("summary_error", user_message_payload("summary.error.timedOut", diagnostic))
-                return
-            running = process.poll() is None
-            timeout = 0.2 if running else 0.0
-            readable, _, _ = select.select([fd], [], [], timeout)
-            if readable:
-                chunk = os.read(fd, 4096)
-                if chunk:
-                    buffer += decoder.decode(chunk)
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        self.write_codex_summary_line(line)
-                    continue
-                if not running:
-                    break
-            if running:
-                if now - last_ping >= 5:
-                    self.write_sse_json("ping", {"time": time.strftime("%Y-%m-%d %H:%M:%S %Z")})
-                    last_ping = now
-                continue
-            if not readable:
-                break
-
-        buffer += decoder.decode(b"", final=True)
-        if buffer.strip():
-            self.write_codex_summary_line(buffer)
-        return_code = process.wait(timeout=1.0)
-        self.write_sse_json("done", {"return_code": return_code})
-
-    def write_codex_summary_line(self, line: str) -> None:
-        stripped = line.strip()
-        if not stripped:
-            return
-        try:
-            event = json.loads(stripped)
-        except json.JSONDecodeError:
-            self.write_sse_json("log", {"text": stripped})
-            return
-        event_kind = codex_event_kind(event)
-        if event_kind == "log":
-            self.write_sse_json("log", {"text": str(event.get("type") or "").replace(".", " ")})
-            return
-        if event_kind == "completed":
-            self.record_codex_summary_usage(event)
-            return
-        if event_kind == "error":
-            diagnostic = json.dumps(event, ensure_ascii=False)
-            self.write_sse_json("summary_error", user_message_payload("summary.stream.failed", diagnostic))
-            return
-
-        text = codex_event_text(event)
-        if text:
-            self.write_sse_json("delta", {"text": text})
-
-    def record_codex_summary_usage(self, event: dict[str, Any]) -> None:
-        """Submit only direct structured completion usage, never summary text."""
-        context = getattr(self, "_codex_summary_usage_context", None)
-        if not isinstance(context, dict):
-            return
-        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-        if not usage:
-            response = event.get("response") if isinstance(event.get("response"), dict) else {}
-            usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
-        if not usage:
-            return
-        event_identity = str(event.get("id") or event.get("turn_id") or event.get("turnId") or "summary")
-        digest = hashlib.sha256(json.dumps(usage, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
-        try:
-            self.server.app.record_owned_usage_atoms(
-                provider="openai",
-                model=str(context.get("model") or ""),
-                usage=usage,
-                source="AI Summary",
-                event_id=f"ai-summary:{event_identity}:{digest}",
-                effort=str(context.get("effort") or "unknown"),
-                service_tier=str(context.get("service_tier") or "default"),
-                endpoint="codex-exec",
-            )
-        except (AttributeError, OSError, RuntimeError, ValueError):
-            # Cost telemetry must not turn a successfully generated summary
-            # into a failed user-visible summary response.
-            return
-
-    def follow_transcript_file(self, path: Path) -> None:
-        last_ping = time.monotonic()
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            handle.seek(0, os.SEEK_END)
-            while True:
-                line = handle.readline()
-                if line:
-                    items = transcript_items_from_raw_line(line)
-                    if items:
-                        self.write_sse_json("items", {"items": items})
-                    continue
-                now = time.monotonic()
-                if now - last_ping >= 15:
-                    self.write_sse_json("ping", {"time": time.strftime("%Y-%m-%d %H:%M:%S %Z")})
-                    last_ping = now
-                time.sleep(0.2)
-
-    def write_sse_json(self, event: str, value: Any) -> None:
-        return ApiResponseWriter.write_sse_json(self, event, value)
-
-    def write_sse_bytes(self, event: str, value: bytes) -> None:
-        return ApiResponseWriter.write_sse_bytes(self, event, value)
-
-    def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        return ApiResponseWriter.write_html(self, body, status)
-
-    def write_redirect(self, location: str, status: HTTPStatus = HTTPStatus.SEE_OTHER, clear_auth: bool = False) -> None:
-        return ApiResponseWriter.write_redirect(self, location, status, clear_auth)
-
-    def write_static_asset(self, asset: str, content_type: str) -> None:
-        return ApiResponseWriter.write_static_asset(self, asset, content_type)
-
-    def write_static_head(self, asset: str, content_type: str) -> None:
-        return ApiResponseWriter.write_static_head(self, asset, content_type)
-
-    def api_request_id(self) -> str:
-        return ApiResponseWriter.api_request_id(self)
-
-    def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        return ApiResponseWriter.write_json(self, value, status)
-
-    def write_json_bytes(self, data: bytes, status: HTTPStatus = HTTPStatus.OK, *, json_encode_ms: float = 0.0) -> None:
-        return ApiResponseWriter.write_json_bytes(self, data, status, json_encode_ms=json_encode_ms)
-
-    def write_product_bytes(
-        self,
-        data: bytes,
-        product: ProductMetadata,
-        *,
-        promise: tuple[str, int] | None = None,
-    ) -> None:
-        return ApiResponseWriter.write_product_bytes(self, data, product, promise=promise)
-
-    def write_api_response(
-        self,
-        value: Any,
-        status: HTTPStatus = HTTPStatus.OK,
-        *,
-        json_bytes: bool = False,
-        product_metadata: ProductMetadata | None = None,
-        product_promise: tuple[str, int] | None = None,
-        json_encode_ms: float = 0.0,
-    ) -> None:
-        return ApiResponseWriter.write_api_response(self, value, status, json_bytes=json_bytes, product_metadata=product_metadata, product_promise=product_promise, json_encode_ms=json_encode_ms)
-
-    def _write_bodyless_api_response(self, status: HTTPStatus) -> None:
-        return ApiResponseWriter._write_bodyless_api_response(self, status)
-
-    def _write_json_representation(
-        self,
-        data: bytes,
-        status: HTTPStatus = HTTPStatus.OK,
-        *,
-        json_encode_ms: float = 0.0,
-        product_metadata: ProductMetadata | None = None,
-    ) -> None:
-        return ApiResponseWriter._write_json_representation(self, data, status, json_encode_ms=json_encode_ms, product_metadata=product_metadata)
-
-    def _write_product_representation(
-        self,
-        data: bytes,
-        *,
-        status: HTTPStatus,
-        content_type: str,
-        disposition: str,
-        filename: str,
-        json_encode_ms: float = 0.0,
-        product_metadata: ProductMetadata | None = None,
-    ) -> None:
-        return ApiResponseWriter._write_product_representation(self, data, status=status, content_type=content_type, disposition=disposition, filename=filename, json_encode_ms=json_encode_ms, product_metadata=product_metadata)
-
-    def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
-        return ApiResponseWriter.write_app_result(self, result)
-
-    def write_validated_int_result(self, qs: dict, name: str, default: int, max_value: int, make_result) -> None:
-        return ApiResponseWriter.write_validated_int_result(self, qs, name, default, max_value, make_result)
-
-    def write_validated_float_result(self, qs: dict, name: str, default: float, max_value: float, make_result) -> None:
-        return ApiResponseWriter.write_validated_float_result(self, qs, name, default, max_value, make_result)
-
-    def write_int_query_app_result(self, parsed: Any, name: str, default: int, max_value: int, make_result) -> None:
-        return ApiResponseWriter.write_int_query_app_result(self, parsed, name, default, max_value, make_result)
-
-    def write_text(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
-        return ApiResponseWriter.write_text(self, body, status)
 
     def websocket(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)

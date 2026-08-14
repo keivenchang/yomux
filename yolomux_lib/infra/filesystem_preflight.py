@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
+import subprocess
+import sys
 import threading
 import warnings
 from dataclasses import dataclass
@@ -17,6 +20,7 @@ NETWORK_FILESYSTEM_ESCAPE_HATCH = "YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOT
 _CLASSIFICATION_CACHE: dict[tuple[Path, Path], "FilesystemClassification"] = {}
 _CACHE_MOUNTINFO_SIGNATURE: tuple[int, int] | None = None
 _CACHE_LOCK = threading.Lock()
+LINUX_MOUNTINFO_PATH = Path("/proc/self/mountinfo")
 
 
 @dataclass(frozen=True)
@@ -46,13 +50,52 @@ def clear_filesystem_classification_cache() -> None:
         _CACHE_MOUNTINFO_SIGNATURE = None
 
 
-def classify_filesystem(path: Path, mountinfo_path: Path = Path("/proc/self/mountinfo")) -> FilesystemClassification:
-    """Classify a Linux mount using its longest matching mountinfo path."""
+def _classification(target: Path, filesystem_type: str) -> FilesystemClassification:
+    normalized = filesystem_type.strip().lower()
+    is_network = normalized in NETWORK_FILESYSTEM_TYPES or normalized.startswith("fuse")
+    return FilesystemClassification(target, normalized or "unknown", is_network, is_network or normalized in LOCAL_FILESYSTEM_TYPES)
+
+
+def _classify_darwin_filesystem(
+    target: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> FilesystemClassification:
+    try:
+        completed = runner(("mount",), capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return FilesystemClassification(target, "unknown", False, False)
+    if completed.returncode != 0:
+        return FilesystemClassification(target, "unknown", False, False)
+    matches: list[tuple[int, str]] = []
+    for line in str(completed.stdout or "").splitlines():
+        match = re.match(r"^.+ on (.+) \(([^,()]+)(?:,.*)?\)$", line)
+        if match is None:
+            continue
+        mount = Path(match.group(1).replace("\\040", " "))
+        try:
+            target.relative_to(mount)
+        except ValueError:
+            continue
+        matches.append((len(str(mount)), match.group(2)))
+    return _classification(target, max(matches)[1]) if matches else FilesystemClassification(target, "unknown", False, False)
+
+
+def classify_filesystem(
+    path: Path,
+    mountinfo_path: Path = LINUX_MOUNTINFO_PATH,
+    *,
+    platform_name: str = sys.platform,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> FilesystemClassification:
+    """Classify a Linux mountinfo path or a macOS mount filesystem type."""
     target = _existing_ancestor(Path(path))
     try:
         stat = mountinfo_path.stat()
         signature = (stat.st_mtime_ns, stat.st_size)
     except OSError:
+        if platform_name.casefold() == "darwin" and mountinfo_path == LINUX_MOUNTINFO_PATH:
+            return _classify_darwin_filesystem(target, runner=runner)
         return FilesystemClassification(target, "unknown", False, False)
     global _CACHE_MOUNTINFO_SIGNATURE
     key = (target, mountinfo_path)
@@ -83,9 +126,7 @@ def classify_filesystem(path: Path, mountinfo_path: Path = Path("/proc/self/moun
     if not matches:
         result = FilesystemClassification(target, "unknown", False, False)
     else:
-        filesystem_type = max(matches)[1]
-        is_network = filesystem_type in NETWORK_FILESYSTEM_TYPES or filesystem_type.startswith("fuse")
-        result = FilesystemClassification(target, filesystem_type, is_network, is_network or filesystem_type in LOCAL_FILESYSTEM_TYPES)
+        result = _classification(target, max(matches)[1])
     with _CACHE_LOCK:
         _CLASSIFICATION_CACHE[key] = result
     return result

@@ -27,7 +27,6 @@ from tools.static_build import lint_identical_theme_restatements
 from tools.static_build import lint_css_structure
 from tools.static_build import lint_code_syntax_color_ownership
 from tools.static_build import lint_raw_standard_border_radii
-from tools.static_build import lint_custom_border_radius_classifications
 from tools.static_build import lint_raw_standard_font_sizes
 from tools.static_build import lint_raw_standard_spacing
 from tools.static_build import lint_raw_standard_motion_durations
@@ -579,10 +578,10 @@ def test_dialog_capacities_have_one_content_relative_token_owner():
 
 
 def test_scroll_restoration_browser_checks_wait_for_observable_state():
-    tree = ast.parse(repo_path("tests/test_browser_layout.py").read_text(encoding="utf-8"))
-    timeout_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ((isinstance(node.func, ast.Name) and node.func.id == "setTimeout") or (isinstance(node.func, ast.Attribute) and node.func.attr == "setTimeout"))]
-    assert timeout_calls == []
-    source = ast.unparse(tree)
+    source = repo_path("tests/test_browser_layout.py").read_text(encoding="utf-8")
+
+    assert "setTimeout(resolve, 140)" not in source
+    assert "setTimeout(resolve, 120)" not in source
     for description in (
         "file editor scroll restoration",
         "Dockview file editor scroll restoration",
@@ -862,7 +861,6 @@ def test_shared_ui_ownership_map_and_agent_reuse_protocol_remain_routable():
 def test_panel_frame_builder_owns_the_shared_panel_chrome():
     owner = repo_path("static_src/js/yolomux/78_panel_shell.js").read_text(encoding="utf-8")
     assert "function panelFrameHtml(" in owner
-    assert "function createFramedPanel(" in owner
     assert "panel-toast-stack" in owner
     assert "pane-tabs\" role=\"tablist\"" in owner
     for path in (
@@ -876,20 +874,8 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
     ):
         source = repo_path(path).read_text(encoding="utf-8")
         if path != "static_src/js/yolomux/78_panel_shell.js":
-            assert "createFramedPanel({" in source
+            assert "panelFrameHtml({" in source
             assert '<div class="panel-head' not in source
-
-
-def test_frontend_orchestration_facade_partials_load_before_their_owners():
-    parts = sb.ASSETS["yolomux.js"]
-    debug_facade = "static_src/js/yolomux/84_debug_runtime_facade.js"
-    debug_owner = "static_src/js/yolomux/85_debug_panel.js"
-    terminal_facade = "static_src/js/yolomux/98_terminal_runtime_facade.js"
-    terminal_owner = "static_src/js/yolomux/99_terminal_boot.js"
-    assert parts.count(debug_facade) == parts.count(debug_owner) == 1
-    assert parts.count(terminal_facade) == parts.count(terminal_owner) == 1
-    assert parts.index(debug_facade) < parts.index(debug_owner)
-    assert parts.index(terminal_facade) < parts.index(terminal_owner)
 
 
 def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, tmp_path):
@@ -906,7 +892,7 @@ def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, 
 
 
 def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch, tmp_path):
-    terminal = tmp_path / "98_terminal_runtime_facade.js"
+    terminal = tmp_path / "99_terminal_boot.js"
     terminal.write_text(
         "function paneFrameControlsHtml() {\n"
         "  return '<button type=\"button\">x</button>';\n"
@@ -914,14 +900,14 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
         encoding="utf-8",
     )
     monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
-        "98_terminal_runtime_facade.js": (("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),),
+        "99_terminal_boot.js": (("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),),
     })
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
 
     errors = sb.lint_shared_ui_ownership()
 
-    assert "98_terminal_runtime_facade.js: shared pane-frame controls owner is missing 'toolbarButtonHtml('" in errors
-    assert "static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
+    assert "99_terminal_boot.js: shared pane-frame controls owner is missing 'toolbarButtonHtml('" in errors
+    assert "static_src/js/yolomux/99_terminal_boot.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
 
 
 def test_shared_ui_ownership_lint_rejects_parallel_share_connection_maps(monkeypatch, tmp_path):
@@ -1038,26 +1024,6 @@ def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properti
 
 def test_standard_border_radius_lint_tree_is_clean():
     assert lint_raw_standard_border_radii() == []
-    assert lint_custom_border_radius_classifications() == []
-
-
-def test_custom_border_radius_lint_rejects_unclassified_and_stale_entries(monkeypatch, tmp_path):
-    component = tmp_path / "component.css"
-    component.write_text(".known { border-radius: 5px; }\n.new { border-radius: 7px; }\n", encoding="utf-8")
-    monkeypatch.setitem(sb.ASSETS, "yolomux.css", ["component.css"])
-    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / path)
-    monkeypatch.setattr(
-        sb,
-        "CUSTOM_BORDER_RADIUS_CLASSIFICATIONS",
-        {
-            "component.css:.known:5px": "known component geometry",
-            "component.css:.retired:7px": "retired component geometry",
-        },
-    )
-    assert lint_custom_border_radius_classifications() == [
-        "unclassified custom border radius component.css:.new:7px; classify its semantic role or move a demonstrated shared tier to a token",
-        "stale custom border radius classification component.css:.retired:7px; remove the retired inventory entry",
-    ]
 
 
 def test_standard_border_radius_lint_rejects_single_compound_and_logical_copies(monkeypatch, tmp_path):

@@ -11,13 +11,7 @@ import time
 import uuid
 
 import pytest
-
-from tests.helpers.mock_agents import case_command_name
-from tests.helpers.mock_agents import PROMPT_CORPUS
-from tests.helpers.mock_agents import root_inventory_cases
-from tests.helpers.mock_agents import short_tmux_socket_path
-from tests.helpers.mock_agents import tmux_cmd
-from tests.helpers.mock_agents import wait_for_mockcase_render
+import yaml
 
 from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
@@ -35,12 +29,42 @@ VISUAL_TMUX_SESSION_PREFIX = "test-mock-visual"
 UNIX_SOCKET_SAFE_PATH_BYTES = 100
 
 
+def load_structured_fixture(path):
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def fixture_path(inventory_path, file_name):
+    if inventory_path.parent.name == "captures":
+        return inventory_path.parent / file_name
+    return PROMPT_CORPUS_DIR / file_name
+
+
+def fixture_visible_text(path):
+    data = load_structured_fixture(path)
+    return str(data.get("raw_capture") or data.get("visible_text") or "")
+
+
+def root_inventory_cases():
+    inventory_path = PROMPT_CORPUS_DIR / "inventory.yaml"
+    inventory = load_structured_fixture(inventory_path)
+    cases = []
+    for item in inventory["fixtures"]:
+        path = fixture_path(inventory_path, item["file"])
+        cases.append({"inventory": item, "data": load_structured_fixture(path), "path": path, "text": fixture_visible_text(path)})
+    return cases
+
+
 def promoted_capture_cases():
     inventory_path = PROMPT_CORPUS_DIR / "captures" / "inventory.yaml"
-    return PROMPT_CORPUS.cases(
-        inventory_path,
-        include=lambda _item, data: "expected_promoted" in data,
-    )
+    inventory = load_structured_fixture(inventory_path)
+    cases = []
+    for item in inventory["fixtures"]:
+        path = fixture_path(inventory_path, item["file"])
+        data = load_structured_fixture(path)
+        if "expected_promoted" not in data:
+            continue
+        cases.append({"inventory": item, "data": data, "path": path, "text": fixture_visible_text(path)})
+    return cases
 
 
 def case_agent(case):
@@ -53,6 +77,64 @@ def case_agent(case):
     if "claude" in name:
         return "claude"
     return "codex"
+
+
+def case_command_name(case):
+    data = case["data"]
+    inventory = case["inventory"]
+    case_name = str(data.get("case_name") or inventory.get("case_name") or inventory.get("scenario") or case["path"].stem)
+    agent = str(data.get("agent") or inventory.get("expected", {}).get("agent") or "")
+    if agent in {"claude", "codex"}:
+        return f"{agent}_{case_name}"
+    return case_name
+
+
+def tmux_cmd(tmux_binary, socket_path, *args, timeout=8):
+    return subprocess.run([tmux_binary, "-S", str(socket_path), *args], capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def short_tmux_socket_path(prefix):
+    socket_base = Path(tempfile.mkdtemp(prefix=f"{prefix}-{os.getpid()}-", dir="/tmp"))
+    return socket_base / "s"
+
+
+def capture(tmux_binary, socket_path, session):
+    return tmux_cmd(tmux_binary, socket_path, "capture-pane", "-p", "-t", f"{session}:").stdout or ""
+
+
+def visible_needles(text):
+    lines = [line.strip()[:80] for line in str(text or "").splitlines() if line.strip()]
+    needles = []
+    for line in lines:
+        if line in {"❯", "›", ">"}:
+            continue
+        if re.fullmatch(r"[─━╌╍▔╭╮╰╯│ ]+", line):
+            continue
+        if line.startswith(("│", "╭", "╰", "▐", "▝", "▘", "gpt-5.5 ", "Opus ", "Tip: ", "⏵⏵ ", "▶▶ ", "⏸ ")):
+            continue
+        if line.startswith(("⚠ Safe mode:", "Restart without --safe-mode")):
+            continue
+        if line in {'› Implement {feature}', '› Write tests for @filename', '› Explain this codebase', '❯ Try "fix typecheck errors"'}:
+            continue
+        if len(line) < 8:
+            continue
+        needles.append(line)
+    return list(dict.fromkeys(needles))
+
+
+def wait_for_mockcase_render(tmux_binary, socket_path, session, expected_text, timeout=10):
+    needles = visible_needles(expected_text)
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        last = capture(tmux_binary, socket_path, session)
+        if needles:
+            if any(needle in last for needle in needles):
+                return True, last
+        elif all(prompt not in last for prompt in ("Implement {feature}", "Write tests for @filename", "Explain this codebase", 'Try "fix typecheck errors"')):
+            return True, last
+        time.sleep(0.2)
+    return False, last
 
 
 def classify_mockcase_until(target, expected_screen_key, *, timeout=3, expected_composer_key=None, **kwargs):
