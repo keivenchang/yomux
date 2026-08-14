@@ -1,0 +1,8 @@
+# Pane popouts
+
+- Completed and removed `DOIT.popout_any_tab.md`. Preview-capable file editors, YO!info, and YO!stats now use one shared detached pane-popout host with a same-origin `/pane-popout` shell, shared stylesheet/theme-variable copying, shared pane-header button ownership, snapshot refresh hooks, and close/unload cleanup. The old file-preview popout now reuses the shared registry namespace instead of owning a parallel map. Phase 1 intentionally keeps terminal/transcript and interactive panes disabled with explicit logged reasons until they have live PTY/WebSocket or command-bridge designs. Focused verification: `python3 tools/static_build.py`, `node --check static/yolomux.js`, `node tests/editor_preview.test.js`, and `python3 -m pytest tests/test_login_auth.py::test_pane_popout_placeholder_route_returns_same_origin_shell tests/test_server_query.py::test_http_route_registry_groups_dispatch_and_keeps_verbs_thin -q`.
+- Completed and removed `DOIT.tab_rightclick_popout.md`. Tab right-click menus now expose `Pop out` for popout-capable tabs through the same `paneCanPopout(item)` gate and `openPanePopout(item)` opener used by the pane-header button; unsupported live terminal tabs omit the row. Dockview tabs, pane tabs, and Tabber rows inherit the behavior through the shared `showTabContextMenu()` owner, and `tab.popout` is present in every source locale catalog. Focused verification: `node tests/share_theme.test.js`, `node tests/editor_preview.test.js`, `python3 tools/static_build.py --check`, and the full `python3 tools/check.py`.
+
+---
+
+Completed 2026-06-28. Extracted from the 2026-06-28 daily log.

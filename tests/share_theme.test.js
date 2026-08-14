@@ -187,7 +187,7 @@ async function runShareThemeSuite() {
     api.setFileExplorerModeForTest('diff');
     changesHtml = api.fileExplorerChangesPanelHtml();
     assert.ok(changesHtml.includes('/repo/app'));
-    const repoHeadStart = changesHtml.indexOf('class="changes-repo-head"');
+    const repoHeadStart = changesHtml.indexOf('changes-repo-head');
     const repoHead = changesHtml.slice(repoHeadStart, changesHtml.indexOf('</button>', repoHeadStart));
     assert.ok(/changes-repo-caret[\s\S]*changes-repo-title[^>]*>\/repo\/app<[\s\S]*changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+10<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>3<\/span>/.test(repoHead), 'repo disclosure header shows repo name, tracked +added, -removed, and file count');
     assert.equal(/Behind|Ahead/.test(repoHead), false, 'ahead/behind stays out of the repo disclosure header');
@@ -906,7 +906,7 @@ async function runShareThemeSuite() {
     // C15/C6: the redundant global "N files changed in '1'" summary and global comparison line are gone;
     // each repo owns its own compact comparison line instead.
     const compactFinderPanel = api.fileExplorerChangesPanelHtml({view: 'finder'});
-    const compactHeadStart = compactFinderPanel.indexOf('class="changes-repo-head"');
+    const compactHeadStart = compactFinderPanel.indexOf('changes-repo-head');
     const compactRepoHead = compactFinderPanel.slice(compactHeadStart, compactFinderPanel.indexOf('</button>', compactHeadStart));
     assert.ok(/changes-repo-totals[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*changes-repo-count[^>]*>2<\/span>/.test(compactRepoHead), 'Finder Modified-files repo header shows the repo aggregate totals');
     assert.equal(compactFinderPanel.includes('files changed in'), false, 'C15: the compact header drops the redundant file-count/session summary');
@@ -1151,9 +1151,9 @@ async function runShareThemeSuite() {
     // #46: Modified-files rows match the Finder file tree — the row uses the file-explorer font size and
     // the filename carries no semibold/bold weight (regular, not big bold white).
     assert.equal(changedFilesCss.includes('.changes-file-row'), false, '#46: modified-file rows use shared Finder file-tree rows, not standalone changes-file-row CSS');
-    assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)/.test(changedFilesCss), 'Differ/Finder changes trees use a brighter dark-mode guide line');
+    assert.ok(/:root\s*\{[\s\S]*--changes-tree-row-hover-bg:\s*var\(--active-control-soft-bg\)[\s\S]*--changes-tree-indent-line:\s*rgba\(148,\s*163,\s*184,\s*0\.50\)[\s\S]*--changes-tree-icon-text:\s*#a7c7ff/.test(changedFilesCss), 'all Changes trees share the exact dark row-hover, indent-guide, and icon paints');
     assert.ok(/\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'Differ/Finder changes repo headers read the same pane bar background as the Sort toolbar');
-    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);') && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'light-mode Differ/Finder changes tree guide stays subdued while repo headers share the pane bar token');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--changes-tree-row-hover-bg:\s*rgba\(31,\s*111,\s*235,\s*0\.08\)[\s\S]*--changes-tree-indent-line:\s*var\(--tree-indent-line\)[\s\S]*--changes-tree-icon-text:\s*var\(--menu-accent\)/.test(changedFilesCss) && /\.file-explorer-changes-panel\s*\{[\s\S]*--changes-repo-head-bg:\s*var\(--pane-bar-bg,\s*var\(--panel2\)\)/.test(changedFilesCss), 'all Changes trees share the exact light paints while repo-header geometry remains unchanged');
     assert.ok(/\.ui-disclosure-triangle,[\s\S]*\.info-tree-group summary::before,[\s\S]*\.yoagent-message-details summary::before\s*\{[\s\S]*--disclosure-triangle-box-size:\s*1\.333333em[\s\S]*--disclosure-triangle-font-size:\s*100%[\s\S]*inline-size:\s*var\(--disclosure-triangle-box-size\)[\s\S]*color:\s*var\(--disclosure-triangle-collapsed-color\)[\s\S]*font-size:\s*var\(--disclosure-triangle-font-size\)/.test(changedFilesCss), 'all disclosure chevrons share the same scaled muted collapsed parent style');
     assert.ok(/\.ui-disclosure-triangle\[data-disclosure-expanded="true"\],[\s\S]*\.info-tree-group\[open\]\s*>\s*summary::before,[\s\S]*\.yoagent-message-details\[open\] summary::before\s*\{[\s\S]*color:\s*var\(--disclosure-triangle-expanded-color\)[\s\S]*transform:\s*rotate\(90deg\)/.test(changedFilesCss), 'expanded disclosure chevrons use the shared active color and rotate down');
     assert.ok(/\.changes-repo-caret\s*\{[\s\S]*margin-inline-end:\s*var\(--space-2\)/.test(changedFilesCss), 'Differ/Finder repo disclosure caret uses the shared disclosure triangle size instead of a bespoke larger width/font');
@@ -1178,7 +1178,8 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesCss.includes('@container (max-width: 520px)'), 'Finder modified-files header wraps before narrow pane widths overlap');
     assert.ok(changedFilesCss.includes('grid-template-areas:'), 'Finder modified-files narrow header uses explicit row areas');
     assert.ok(changedFilesCss.includes('--50-terminal-file-tree-file-explorer-path-bg-95: rgba(255, 255, 255, 0.58);'), 'light theme explicitly restyles the Finder tree through shared tokens');
-    assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);'), 'light theme explicitly restyles Finder modified-files through shared tokens');
+    assert.ok(changedFilesCss.includes('--changes-indent-line: var(--changes-tree-indent-line);'), 'each Changes tree consumes the shared component indent token');
+    assert.equal(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30:'), false, 'retired per-selector Changes indent paint owner is absent');
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
     assert.ok(/\.file-explorer-refresh-cluster::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder Reload control paints the same visible refresh icon (scoped to its own class after the header row swap)');
@@ -1208,6 +1209,29 @@ async function runShareThemeSuite() {
     assert.equal(api.fileExplorerLabel(), 'File Explorer');
     assert.ok(filesTab.includes('File Explorer'));
     appSource = fs.readFileSync('static/yolomux.js', 'utf8');
+    const parseOverviewStops = gradient => {
+      const stops = [];
+      const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
+      let match = pattern.exec(String(gradient || ''));
+      while (match) {
+        stops.push({
+          color: match[1].toLowerCase(),
+          startText: match[2],
+          endText: match[3],
+          start: Number.parseFloat(match[2]),
+          end: Number.parseFloat(match[3]),
+        });
+        match = pattern.exec(String(gradient || ''));
+      }
+      return stops;
+    };
+    changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
+    assertNoOverviewStopOverlap = stops => {
+      for (let index = 1; index < stops.length; index += 1) {
+        assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
+      }
+    };
+    makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
     assert.ok(appSource.includes("const editorViewModes = new Set(['edit', 'preview', 'split', 'diff'])"), 'file editor registers diff as a real view mode');
     assert.ok(appSource.includes('new api.MergeView'), 'wide diff mode uses CodeMirror MergeView');
     assert.ok(appSource.includes('api.unifiedMergeView'), 'narrow diff mode uses CodeMirror unified merge view');
@@ -1266,28 +1290,6 @@ async function runShareThemeSuite() {
     // ...and the neutral viewport indicator still REBUILDS when a fold expands/collapses (geometry/height change).
     assert.ok(/function codeMirrorDiffOverviewListener[\s\S]*?update\.geometryChanged \|\| update\.heightChanged[\s\S]*?scheduleDiffOverviewRebuild/.test(appSource), 'B3: a CM updateListener rebuilds the overview on geometry/fold change');
     assert.ok(/panel\._diffOverviewCtx = \{container, state, currentText, original\}/.test(appSource), 'B3: the overview build stores its context so the fold-rebuild can recompute from live geometry');
-    const parseOverviewStops = gradient => {
-      const stops = [];
-      const pattern = /(#[0-9a-f]{6}|transparent)\s+([0-9.]+)%\s+([0-9.]+)%/gi;
-      let match = pattern.exec(String(gradient || ''));
-      while (match) {
-        stops.push({
-          color: match[1].toLowerCase(),
-          startText: match[2],
-          endText: match[3],
-          start: Number.parseFloat(match[2]),
-          end: Number.parseFloat(match[3]),
-        });
-        match = pattern.exec(String(gradient || ''));
-      }
-      return stops;
-    };
-    changedOverviewStops = gradient => parseOverviewStops(gradient).filter(stop => stop.color !== 'transparent');
-    assertNoOverviewStopOverlap = stops => {
-      for (let index = 1; index < stops.length; index += 1) {
-        assert.equal(stops[index - 1].end <= stops[index].start, true, 'adjacent diff overview stops never overlap');
-      }
-    };
     const positionedDiff = [
       'diff --git a/a.txt b/a.txt',
       '--- a/a.txt',
@@ -1368,7 +1370,6 @@ async function runShareThemeSuite() {
     ], 'large replacement gradient allocates the green band CodeMirror paints, not only literal raw additions');
     assert.equal(largeStops[0].endText, largeStops[1].startText, 'large replacement red and green bands share one boundary and never overlap');
     assertNoOverviewStopOverlap(largeStops);
-    makeOverviewFixtureLines = (count, label) => Array.from({length: count}, (_, index) => `${label} ${String(index + 1).padStart(3, '0')}`);
   });
 
   test('cross-surface host state 08: Screenshot #48 repro shape from: git diff 521bbfd 05f22a8 --...', () => {
@@ -3173,6 +3174,8 @@ async function runShareThemeSuite() {
   });
 
   test('cross-surface host state 17: File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is', () => {
+    const facadeSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.match(facadeSource, /class ShareReplayState[\s\S]*acceptSequence\(epoch, sequence\)[\s\S]*recordDroppedFrame\(\)[\s\S]*recordStaleFrame\(\)[\s\S]*beginKeyframeRequest\(now, backoffMs\)/, 'replay sequence and repair commands share one state facade');
     // File/View/Tabs/Help menu labels localize; tmux (a tool name) stays as-is.
     const zhHantMenu = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
     api.i18nSetCatalogForTest('zh-Hant', zhHantMenu);
@@ -3455,7 +3458,8 @@ async function runShareThemeSuite() {
       assert.ok(/async function uploadFiles\(session, fileList, options = \{\}\)[\s\S]*refreshTerminalAfterUpload\(session\)/.test(shareSource), 'upload completion forces a terminal repaint after path insertion/toast rendering');
       assert.ok(/function refreshTerminalAfterUpload\(session\)[\s\S]*scheduleFit\(session\)[\s\S]*refreshTerminal\(session\)[\s\S]*requestAnimationFrame/.test(shareSource), 'upload repaint uses the shared fit and xterm refresh helpers');
       assert.ok(/async function resyncShareViewerUiState\(\)[\s\S]*now - lastStartedAt < shareGeometryResyncMinIntervalMs[\s\S]*shareGeometryResyncLastStartedAt = now[\s\S]*terminalDims:\s*payload\?\.terminalDims \|\| uiState\.terminalDims \|\| \[\]/.test(shareSource), 'DOIT.69: geometry drift resync also re-pins host terminal dimensions and is rate-limited');
-      assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*requestFloorMs = Math\.max\(shareReplayKeyframeRequestMinIntervalMs[\s\S]*now - lastRequestAt < requestFloorMs[\s\S]*shareReplayKeyframeRequestSuppressedCount/.test(shareSource), 'YO!share replay keyframe repair requests share the five-second floor');
+      assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*requestFloorMs = Math\.max\(shareReplayKeyframeRequestMinIntervalMs[\s\S]*now - keyframeRequest\.lastAt < requestFloorMs[\s\S]*shareReplayState\.suppressKeyframeRequest\(\)/.test(shareSource), 'YO!share replay keyframe repair requests share the five-second floor');
+      assert.ok(/function shareReplayRequestKeyframe\(reason = 'replay-error', detail = \{\}\)[\s\S]*shareReplayState\.beginKeyframeRequest\(now, shareReplayNextKeyframeRequestBackoff\(\)\)[\s\S]*shareReplaySendUiMessage/.test(shareSource), 'replay repair state advances before the existing keyframe request is published');
       assert.ok(/function shareReplayDeltaSequenceStatus\(message = \{\}\)[\s\S]*epoch < currentEpoch \|\| sequence <= lastSequence[\s\S]*reason: 'stale'/.test(shareSource), 'DOM deltas from older epochs or already-applied sequences are stale, not viewer-behind gaps');
       assert.ok(/function shareReplayDeltaCanApplyBestEffort\(sequenceStatus = \{\}\)[\s\S]*sequenceStatus\.reason !== 'gap'[\s\S]*epoch === currentEpoch[\s\S]*sequence > lastSequence/.test(shareSource), 'YO!share replay gaps keep applying same-epoch incremental updates while complete DOM replay is throttled');
       assert.ok(/function shareNextMirrorFrameMetadata\(type, options = \{\}\)[\s\S]*shareMirrorFrameTypeIsDomReplayContent\(type\)[\s\S]*shareNextDomReplayFrameMetadata/.test(shareSource), 'YO!share DOM replay frames use a sequence stream independent from semantic mirror frames');
@@ -4651,8 +4655,9 @@ async function runShareThemeSuite() {
     assert.ok(finderSyncBody.includes('(explicit || !fileExplorerSyncPlanAlreadyApplied(syncPlan))'), '#automatic Finder Sync skips a repeated already-applied plan');
     const openFileExplorerAtStart = source.indexOf('async function openFileExplorerAt(');
     const openFileExplorerAtEnd = source.indexOf('function resetFileExplorerAppliedSyncPlan(', openFileExplorerAtStart);
-    assert.ok(source.includes('let fileExplorerOpenGeneration = 0;'), 'Finder root opens have a dedicated generation for async race cancellation');
-    assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = \+\+fileExplorerOpenGeneration;[\s\S]*const openStillCurrent = \(\) => openGeneration === fileExplorerOpenGeneration;[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
+    const facadeSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
+    assert.ok(facadeSource.includes('class FileWorkspaceState'), 'Finder root opens have a dedicated state owner for async race cancellation');
+    assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = fileWorkspaceState\.beginOpen\(\);[\s\S]*const openStillCurrent = \(\) => fileWorkspaceState\.openIsCurrent\(openGeneration\);[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
     assert.ok(source.slice(openFileExplorerAtStart, openFileExplorerAtEnd).includes("if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});"), 'completed manual Finder opens cancel pending sync without invalidating their own open generation');
     assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*setFileExplorerSelectionPin\(options\.manualSelection === true\);[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
     assert.equal(source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab(')).includes('openFileExplorerAt('), false, 'cache-first Finder Sync never tears down the root through the manual-open transaction');
@@ -4670,7 +4675,7 @@ async function runShareThemeSuite() {
     assert.equal(finderCandidatesBody.includes('focusedTerminal'), false, 'Finder candidates do not read passive focusedTerminal');
     assert.equal(finderCandidatesBody.includes('lastFocusedTmuxSession'), false, 'Finder candidates do not read passive lastFocusedTmuxSession');
     assert.ok(/function setFileExplorerManualRootMode\(\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*setFileExplorerRootMode\('fixed', \{sync: false, persist: true\}\)/.test(source), 'manual Finder scope buttons cancel pending Sync and leave Sync mode explicitly');
-    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileExplorerInteractionGeneration \+= 1;[\s\S]*if \(options\.invalidateOpen !== false\) fileExplorerOpenGeneration \+= 1;[\s\S]*fileExplorerSyncState.generation \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
+    assert.ok(/function cancelPendingFileExplorerActiveSync\(options = \{\}\) \{[\s\S]*fileWorkspaceState\.invalidateInteraction\(\{invalidateOpen: options\.invalidateOpen !== false\}\);[\s\S]*fileExplorerSyncState\.generation \+= 1;/.test(source), 'manual Finder actions invalidate stale root opens and stale tree expansion work');
     assert.ok(source.includes('const opened = await openFileExplorerManualRoot(target);'), 'Finder typed path opens are manual and disable Sync');
     assert.ok(source.includes("if (entry.kind === 'dir') openFileExplorerManualRoot(fullPath);"), 'Finder root navigation by double-click is manual and disables Sync');
     assert.ok(source.includes('fileExplorerSyncManualCollapsedPaths'), 'Finder Sync tracks manually collapsed auto-expanded paths');

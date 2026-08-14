@@ -26,7 +26,7 @@ from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.test_gate_route_sweep import _login_cookie
+from tests.helpers.http_routes import login_cookie as _login_cookie
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -286,7 +286,9 @@ def test_exactly_one_owner_constructs_the_retained_system_status_body():
         f"{path.relative_to(REPO_ROOT)}:{number}"
         for path in sources
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if "attach_system_status_snapshot_owner(" in line and "def " not in line
+        if "attach_system_status_snapshot_owner(" in line
+        and "def " not in line
+        and "system_status_projector_for(self)." not in line
     ]
     assert len(attachments) == 1, f"expected one attachment site, found {attachments}"
 

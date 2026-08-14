@@ -7,6 +7,19 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Iterable
+
+
+def collection_rows(items: Iterable[object]) -> list[dict[str, object]]:
+    """Project an ordered pytest collection into its stable semantic ledger."""
+
+    return [
+        {
+            "nodeid": item.nodeid,
+            "markers": sorted(marker.name for marker in item.iter_markers()),
+        }
+        for item in items
+    ]
 
 
 def pytest_addoption(parser):
@@ -17,8 +30,5 @@ def pytest_collection_finish(session):
     destination = session.config.getoption("yolomux_catalog_output")
     if not destination:
         return
-    rows = [
-        {"nodeid": item.nodeid, "markers": sorted(marker.name for marker in item.iter_markers())}
-        for item in session.items
-    ]
+    rows = collection_rows(session.items)
     Path(destination).write_text(json.dumps(rows, sort_keys=True), encoding="utf-8")

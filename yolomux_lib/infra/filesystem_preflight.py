@@ -90,12 +90,12 @@ def classify_filesystem(
 ) -> FilesystemClassification:
     """Classify a Linux mountinfo path or a macOS mount filesystem type."""
     target = _existing_ancestor(Path(path))
+    if platform_name.casefold() == "darwin" and mountinfo_path == LINUX_MOUNTINFO_PATH:
+        return _classify_darwin_filesystem(target, runner=runner)
     try:
         stat = mountinfo_path.stat()
         signature = (stat.st_mtime_ns, stat.st_size)
     except OSError:
-        if platform_name.casefold() == "darwin" and mountinfo_path == LINUX_MOUNTINFO_PATH:
-            return _classify_darwin_filesystem(target, runner=runner)
         return FilesystemClassification(target, "unknown", False, False)
     global _CACHE_MOUNTINFO_SIGNATURE
     key = (target, mountinfo_path)

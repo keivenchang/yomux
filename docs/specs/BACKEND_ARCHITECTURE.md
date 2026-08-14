@@ -1,6 +1,6 @@
 # Backend Architecture
 
-Companion documents: [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) for how backend work is verified, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for owner inventory and runbooks, and [`../DONE.md`](../DONE.md) for migration history.
+Companion documents: [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) for how backend work is verified, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for owner inventory and runbooks, and [`../DONE/`](../DONE/README.md) for migration history.
 
 > **ABANDONED (2026-08-09): the `storaged` / `daemon` two-daemon fold below was never built and is not the target architecture.** Everything from "Naming Decision" through "Non-Blocking Storaged Request Contract" describes a two-process consolidation (`yolomux-storaged` + `yolomux-daemon`) that this codebase does not implement and is not executing. It is retained as a rejected design proposal, not as current or planned behavior. The shipped backend keeps the six separately-launched local services (`indexd`, `statsd`, `jobd`, `statusd`, `watchd`, `approvald`), and the daemon-monitor queue's Rejected Shortcuts forbid reintroducing the `storaged`/`daemon`/`SUBSYSTEM_SPECS` names — a test pins their absence (`tests/test_gate_panels.py`). Reason it was abandoned: the fold added no observability the per-service model lacked, would have churned the entire launcher, registry, and process-ledger surface, and the actually-shipped work (real per-service metrics, the backend-health observer, the system-status snapshot owner) delivered the goal without consolidating processes. Read the next section for what exists; treat the rest as history.
 
@@ -18,11 +18,22 @@ The backend that actually runs is six separately-launched local service processe
 
 - `BackendHealthObserver` (`yolomux_lib/backend_health/observer.py:754`) runs one sampling loop that probes the six services and records their state. It runs at `BACKEND_HEALTH_OBSERVE_SECONDS = 2.0` with a `BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS = 0.5` per-probe bound (`observer.py:147-148`). It uses an injected clock and wake event, not sleeps, and starts zero demand-scoped services during a full observation cycle.
 - It is started after the port lease and stopped before backend clients close, in `cli.start_backend_health_observer` (`yolomux_lib/cli.py:457-529`), and attached to the app via `attach_backend_health_observer` / `attach_backend_health_store` (`yolomux_lib/app.py:11202`). The observer runs *inside* the web process, which is why the web process's own process metrics are reported `web_process_not_observed` rather than fabricated.
-- History is retained per leased web port by `BackendHealthStore` (`yolomux_lib/backend_health/store.py:633`), the one owner of `STATE_DIR/backend-health/<port>.json`, written under the port lease with an explicit schema version, observer epoch, monotonic revision, per-resource state, bounded cumulative counters, and at most 128 transition rows per resource. Non-default ports derive their state root under `/tmp`, so this history survives service and web restarts (measured advancing across a real restart) but not a reboot or tmp sweep — an accept-or-relocate decision tracked in `DOIT.p0.v0.7.2.md` F3.
+- History is retained per leased web port by `BackendHealthStore` (`yolomux_lib/backend_health/store.py:633`), the one owner of `STATE_DIR/backend-health/<port>.json`, written under the port lease with an explicit schema version, observer epoch, monotonic revision, per-resource state, bounded cumulative counters, and at most 128 transition rows per resource. Non-default ports derive their state root under `/tmp`, so this history survives service and web restarts (measured advancing across a real restart) but not a reboot or tmp sweep — an accept-or-relocate decision tracked in the 0.7.2 queue (removed at land; see `docs/DONE/2026-08/`) F3.
 
 ### The system-status snapshot owner
 
 - `/api/system-status` is served from a background-published immutable snapshot, not built on the request thread. The route reads pre-encoded bytes via `system_status_snapshot_response` (`yolomux_lib/app.py:11688`; route at `yolomux_lib/http_routes.py:685`, advanced variant at `:693`), and the background owner is started and stopped with the server through `start_system_status_snapshot_owner` / `stop_system_status_snapshot_owner` (`yolomux_lib/app.py:11656,11668`; wired in `yolomux_lib/server.py:3696,3705`). Before the first snapshot or past its freshness deadline the route returns a typed unavailable/stale result, never a synchronous rebuild. (This background owner landed in 0.7.2; `v0.7.1` still built the payload on the request thread — see [`../releases/v0.7.1-evidence.md`](../releases/v0.7.1-evidence.md).)
+
+### Current extension paths
+
+| Change | Extend this owner | Required proof |
+| --- | --- | --- |
+| Local-service action | Add one named handler to that service's `LocalServiceCommandRouter`; use `CommonDaemonActions` only when response semantics are identical. | Extend the service request matrix and `tests/test_local_service_command_router.py`; preserve validation-before-dispatch, binary framing, error vocabulary, lease/lock behavior, and the fixed action inventory. |
+| Local-service runtime field | Add the field once to `LocalServiceRuntimeRow` and its shared projection in `yolomux_lib/local_service_projection.py`; a service adapter supplies only its domain value. | Run runtime-row and backend-health projection coverage plus the architecture budget; projection must never demand-start a service. |
+| HTTP route or adapter method | Register route metadata in `yolomux_lib/http_routes.py`, then place filesystem, share, or response-framing work in `FilesystemHttpAdapter`, `ShareHttpAdapter`, or `ApiResponseWriter`; keep only an exact-signature `Handler` forwarder while compatibility requires it. | Compare the full route catalog plus auth, role, body-limit, share-scope, headers, framing, commit-before-write, and error behavior. |
+| Application domain behavior | Extend `WatchBridge`, `SessionFilesCoordinator`, `ActivityCache`, or `SystemStatusProjector` when the behavior belongs there. A genuinely new domain receives one composed owner with its state, locks, worker teardown, and narrow callbacks, while `TmuxWebtermApp` retains explicit forwarding signatures. | Characterize payload bytes and callback/lock/side-effect order; test start, stop, replacement, stale completion, failure, and shutdown; negative-search parallel facade state. |
+
+The accepted shape is explicit composition behind stable facades. Rejected alternatives are a big-bang app split, mixins, and a generic service locator: each hides ownership or moves methods without moving the mutable state and teardown that make the boundary real. The six processes remain separate; a consolidated `storaged`/`daemon` topology, an ORM, a second cache, and SQL in response projectors would replace visible bounded owners with larger hidden ones and are not current direction.
 
 ---
 
@@ -467,7 +478,7 @@ The package tree mirrors the runtime names but does not imply more processes. `d
 - Agent tokens, Model tokens, and Cost stay synchronized, and their recurring work produces no periodic CPU spike in a web PID.
 - Existing UI/API behavior remains unchanged except the rename and the two-phase cold-miss render; focused ownership/migration/crash/cache/security/browser tests and the canonical niced CPU gate (`tools/check.py`, 100% on Linux / 50% on macOS by default) pass.
 - A guarded 7772 restart plus 15-minute multi-port observation shows one healthy `storaged` process, one healthy shared `daemon` process, no runaway workers, responsive data RPC/SSE, and no retired daemon process.
-- Documentation and `docs/DONE.md` describe the shipped architecture, and this drained queue is removed.
+- Documentation and `docs/DONE/` describe the shipped architecture, and this drained queue is removed.
 
 ---
 
@@ -477,7 +488,7 @@ This is the document that occupied this path between `e219a7ca4` and the restore
 
 ### Backend Architecture — optional shared cache and direct fallback
 
-This document defines the intended backend direction and the contracts that survive the discarded two-daemon migration. The cache/IO boundary is an optimization, never the sole route to a file or durable state. Companion documents: [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) defines verification, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) defines current runbooks, and [`../DONE.md`](../DONE.md) records shipped work.
+This document defines the intended backend direction and the contracts that survive the discarded two-daemon migration. The cache/IO boundary is an optimization, never the sole route to a file or durable state. Companion documents: [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) defines verification, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) defines current runbooks, and [`../DONE/`](../DONE/README.md) records shipped work.
 
 The diagrams describe a target reached one measured boundary at a time. They do not claim that the target is shipped, and they do not decide whether the cache/IO server is long-lived or on-demand; F8 measurements decide that lifetime.
 

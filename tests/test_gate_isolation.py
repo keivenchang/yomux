@@ -1950,6 +1950,105 @@ def test_browser_fixture_finish_reads_ring_before_stop_and_rejects_late_warning(
     assert calls == ["quiesce", "full-gate", ("navigate", "about:blank"), "stop"]
 
 
+def test_browser_fixture_finish_retires_page_before_settling_delayed_app_work(monkeypatch):
+    calls = []
+    settlement_started = threading.Event()
+    release_settlement = threading.Event()
+
+    class FixtureBrowser(_RetainedJsLifecycleDriver):
+        current_url = "http://127.0.0.1:43210/live"
+
+        def get(self, url):
+            calls.append(("navigate", url))
+
+        def get_log(self, kind):
+            assert kind == "browser"
+            return []
+
+    monkeypatch.setattr(
+        gate_harness_module,
+        "wait_for_fixture_api_quiescence",
+        lambda _browser: calls.append("browser-quiescent") or {"diagnosticMode": "retained-js"},
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "assert_browser_journey_error_free",
+        lambda _browser, **_kwargs: calls.append("strict-evidence"),
+    )
+
+    def settle_app():
+        calls.append("settlement-started")
+        settlement_started.set()
+        assert release_settlement.wait(timeout=1)
+        calls.append("settlement-complete")
+
+    worker = threading.Thread(
+        target=browser_layout.finish_browser_fixture_boundary,
+        args=(FixtureBrowser(), "http://127.0.0.1:43210", lambda: calls.append("cleanup")),
+        kwargs={"settle_app": settle_app},
+    )
+    worker.start()
+    assert settlement_started.wait(timeout=1)
+    assert calls[:3] == [
+        "browser-quiescent",
+        "strict-evidence",
+        ("navigate", "about:blank"),
+    ]
+    release_settlement.set()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    assert calls == [
+        "browser-quiescent",
+        "strict-evidence",
+        ("navigate", "about:blank"),
+        "settlement-started",
+        "settlement-complete",
+        "cleanup",
+    ]
+
+
+def test_fixture_evidence_settlement_joins_watcher_then_session_files_then_jobd():
+    calls = []
+    watcher_stop = threading.Event()
+
+    def watcher_worker():
+        watcher_stop.wait()
+        calls.append("tmux-signal-joined")
+
+    watcher_thread = threading.Thread(target=watcher_worker)
+    watcher_thread.start()
+
+    class SessionFilesService:
+        def wait_for_idle(self, timeout):
+            calls.append(("session-files", timeout))
+            return True
+
+    class FixtureApp:
+        def __init__(self):
+            self.tmux_signal_event_watcher = SimpleNamespace(thread=watcher_thread)
+            self.session_files_service = SessionFilesService()
+            self.queued_delivery_ledger = SimpleNamespace()
+
+        def stop_client_event_watcher(self):
+            calls.append("client-event-watcher")
+            watcher_stop.set()
+
+        def wait_for_jobd_operations_terminal(self, timeout):
+            calls.append(("jobd-operations", timeout))
+
+    gate_harness_module.settle_fixture_app_evidence_boundary(
+        FixtureApp(),
+        label="fixture evidence",
+    )
+
+    assert calls == [
+        "client-event-watcher",
+        "tmux-signal-joined",
+        ("session-files", 3),
+        ("jobd-operations", 3),
+    ]
+
+
 def test_browser_fixture_finish_rejects_warning_between_full_gate_and_pre_stop_snapshot(monkeypatch):
     clean = {
         "ok": True,
@@ -1972,7 +2071,7 @@ def test_browser_fixture_finish_rejects_warning_between_full_gate_and_pre_stop_s
     }
     reads = iter((clean, warning, warning))
 
-    class FixtureBrowser:
+    class FixtureBrowser(_RetainedJsLifecycleDriver):
         current_url = "http://127.0.0.1:43210/app"
 
         def get(self, url):
@@ -2092,8 +2191,8 @@ def test_browser_fixture_finish_gates_and_blanks_every_owned_driver(monkeypatch)
     assert raised.value is viewer_failure
     assert calls == [
         ("quiesce", "host"),
-        ("gate", "host"),
         ("quiesce", "viewer"),
+        ("gate", "host"),
         ("gate", "viewer"),
         ("navigate", "host", "about:blank"),
         ("navigate", "viewer", "about:blank"),
@@ -2226,6 +2325,63 @@ def test_stop_browser_share_server_rejects_singular_and_plural_browser_inputs_af
     assert cleaned[0][3] == "isolated browser"
 
 
+@pytest.mark.parametrize("failure_stage", ("paths", "tmux", "app"))
+def test_fixture_runtime_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
+    calls = []
+    paths = object()
+    tmux = SimpleNamespace(sessions=["fixture"])
+
+    def isolate(*_args):
+        calls.append("paths-start")
+        if failure_stage == "paths":
+            raise RuntimeError("injected paths failure")
+        return paths
+
+    def start_tmux(*_args, **_kwargs):
+        calls.append("tmux-start")
+        if failure_stage == "tmux":
+            raise RuntimeError("injected tmux failure")
+        return tmux
+
+    def app(*_args, **_kwargs):
+        calls.append("app-start")
+        if failure_stage == "app":
+            raise RuntimeError("injected app failure")
+        return object()
+
+    monkeypatch.setattr(browser_layout, "isolate_browser_runtime_paths", isolate)
+    monkeypatch.setattr(browser_layout, "start_isolated_tmux_runtime", start_tmux)
+    monkeypatch.setattr(browser_layout, "TmuxWebtermApp", app)
+    monkeypatch.setattr(
+        browser_layout,
+        "stop_isolated_tmux_runtime",
+        lambda runtime: calls.append(("tmux-stop", runtime)),
+    )
+    monkeypatch.setattr(
+        browser_layout,
+        "cleanup_isolated_browser_runtime_paths",
+        lambda runtime_paths: calls.append(("paths-stop", runtime_paths)),
+    )
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_stage} failure"):
+        browser_layout.start_fixture_runtime(
+            monkeypatch,
+            tmp_path,
+            browser_layout.FixtureRuntimeOptions(),
+        )
+
+    expected = ["paths-start"]
+    if failure_stage != "paths":
+        expected.append("tmux-start")
+    if failure_stage == "app":
+        expected.append("app-start")
+    expected.extend((
+        ("tmux-stop", tmux if failure_stage == "app" else None),
+        ("paths-stop", paths if failure_stage != "paths" else None),
+    ))
+    assert calls == expected
+
+
 @pytest.mark.parametrize("failure_stage", ("bind", "request-tracker", "thread-start"))
 def test_share_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path, failure_stage):
     calls = []
@@ -2270,10 +2426,10 @@ def test_share_server_start_rolls_back_each_acquired_owner(monkeypatch, tmp_path
         if failure_stage == "request-tracker":
             raise RuntimeError("injected request tracker failure")
 
-    monkeypatch.setattr(browser_layout, "TmuxWebtermHTTPServer", Server)
-    monkeypatch.setattr(browser_layout, "track_fixture_http_requests", track)
-    monkeypatch.setattr(browser_layout.threading, "Thread", Thread)
-    monkeypatch.setattr(browser_layout, "prepare_fixture_http_app", lambda *_args: None)
+    monkeypatch.setattr(gate_harness_module, "TmuxWebtermHTTPServer", Server)
+    monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", track)
+    monkeypatch.setattr(gate_harness_module.threading, "Thread", Thread)
+    monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
 
     with pytest.raises((OSError, RuntimeError), match=failure_stage.replace("-", " ")):
         browser_layout.start_browser_share_server(monkeypatch, tmp_path, App())
@@ -3670,6 +3826,79 @@ def test_fixture_cleanup_phases_raise_ordered_group_after_multiple_failures():
     ]
 
 
+def test_runtime_root_removal_begins_only_after_registry_reaper_settlement(tmp_path, monkeypatch):
+    calls = []
+
+    class Registry(local_service_registry.LocalServiceRegistry):
+        @property
+        def service_dir(self):
+            return tmp_path / "services"
+
+        def seal_starts(self):
+            calls.append("seal")
+
+        def settle_reaper_threads(self):
+            calls.append("settle")
+
+    registry = object.__new__(Registry)
+    ledger = gate_harness_module.FixtureLocalServiceLedger()
+    ledger.record_registry(registry)
+    monkeypatch.setattr(
+        gate_harness_module,
+        "capture_fixture_local_service_processes",
+        lambda registries: calls.append("capture") or (),
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "stop_fixture_local_service_processes",
+        lambda owners, *, label: calls.append("stop"),
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "retire_local_service_daemons_beneath",
+        lambda root, *, label: calls.append("retire-unowned") or (),
+    )
+    monkeypatch.setattr(
+        gate_harness_module,
+        "assert_no_surviving_local_service_daemons",
+        lambda root, *, label: calls.append("prove-zero"),
+    )
+
+    gate_harness_module.retire_fixture_local_services(ledger, tmp_path, label="fixture root")
+    calls.append("remove-root")
+
+    assert calls == ["seal", "capture", "stop", "retire-unowned", "prove-zero", "settle", "remove-root"]
+
+
+def test_registry_reaper_settlement_failure_precedes_runtime_root_removal(tmp_path, monkeypatch):
+    removed = []
+
+    class Registry(local_service_registry.LocalServiceRegistry):
+        @property
+        def service_dir(self):
+            return tmp_path / "services"
+
+        def seal_starts(self):
+            pass
+
+        def settle_reaper_threads(self):
+            raise RuntimeError("injected reaper settlement failure")
+
+    ledger = gate_harness_module.FixtureLocalServiceLedger()
+    ledger.record_registry(object.__new__(Registry))
+    monkeypatch.setattr(gate_harness_module, "capture_fixture_local_service_processes", lambda _registries: ())
+    monkeypatch.setattr(gate_harness_module, "stop_fixture_local_service_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gate_harness_module, "retire_local_service_daemons_beneath", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(gate_harness_module, "assert_no_surviving_local_service_daemons", lambda *_args, **_kwargs: None)
+
+    monkeypatch.setattr(gate_harness_module.shutil, "rmtree", lambda _root: removed.append("removed"))
+
+    with pytest.raises(RuntimeError, match="injected reaper settlement failure"):
+        gate_harness_module.remove_fixture_runtime_root(ledger, tmp_path, label="fixture root")
+
+    assert removed == []
+
+
 @pytest.mark.parametrize("failure_phase", ("app", "tmux", "paths"))
 def test_isolated_browser_app_stop_attempts_every_later_owner_after_one_phase_fails(monkeypatch, failure_phase):
     calls = []
@@ -3696,6 +3925,81 @@ def test_live_runtime_logs_fixture_has_an_epoch_without_masking_explicit_payload
     assert "epoch: 'fixture-server-log-epoch'" in fixture
     assert "jsonResponse(window.__fixtureServerLogsPayload)" in fixture
     assert "window.__fixtureServerLogsPayload ||" not in fixture
+
+
+def test_browser_boot_scenario_facade_preserves_selected_fixture_bytes():
+    kwargs = {
+        "settings": {"appearance": {"theme": "light"}},
+        "sessions": ["7", "8"],
+        "auto_approve_payload": {"sessions": {"7": {"enabled": True}}},
+        "access_role": "readonly",
+        "share_bootstrap": {"view": True},
+        "wrap_app_root": True,
+        "grid_width": 812,
+        "grid_height": 477,
+    }
+    scenario = browser_layout.BrowserBootScenario(
+        settings=kwargs["settings"],
+        sessions=tuple(kwargs["sessions"]),
+        auto_approve_payload=kwargs["auto_approve_payload"],
+        access_role=kwargs["access_role"],
+        share_bootstrap=kwargs["share_bootstrap"],
+        wrap_app_root=kwargs["wrap_app_root"],
+        grid_width=kwargs["grid_width"],
+        grid_height=kwargs["grid_height"],
+    )
+
+    assert _live_runtime_boot_fixture_html(**kwargs) == browser_layout.render_browser_boot_scenario(scenario)
+
+
+def test_browser_boot_route_registry_has_one_handler_and_matches_gate_contract():
+    fixture = browser_layout.render_browser_boot_scenario(
+        browser_layout.BROWSER_BOOT_PRESETS["default"]
+    )
+
+    assert len(browser_layout.BROWSER_BOOT_ROUTES) == 34
+    assert len({route.path for route in browser_layout.BROWSER_BOOT_ROUTES}) == 34
+    for route in browser_layout.BROWSER_BOOT_ROUTES:
+        assert fixture.count(f"url.pathname === '{route.path}'") == 1
+        assert json.dumps(route.path) in fixture
+        for method in route.methods:
+            assert browser_layout.route_for_request(method, route.path) is not None
+    assert "fixture method not allowed" in fixture
+
+
+def test_browser_boot_route_validation_rejects_missing_and_duplicate_handlers():
+    routes = browser_layout.BROWSER_BOOT_ROUTES
+    complete = "\n".join(f"url.pathname === '{route.path}'" for route in routes)
+
+    browser_layout.validate_browser_boot_routes(complete)
+    with pytest.raises(AssertionError, match="exactly one fake handler"):
+        browser_layout.validate_browser_boot_routes(complete.replace(
+            f"url.pathname === '{routes[0].path}'",
+            "",
+        ))
+    with pytest.raises(AssertionError, match="exactly one fake handler"):
+        browser_layout.validate_browser_boot_routes(
+            complete + f"\nurl.pathname === '{routes[0].path}'"
+        )
+
+
+def test_browser_bootstrap_represents_or_names_every_production_key():
+    bootstrap = browser_layout.build_browser_bootstrap(
+        browser_layout.BROWSER_BOOT_PRESETS["default"]
+    )
+
+    assert browser_layout.browser_boot_production_contract_errors(bootstrap) == ()
+    assert set(browser_layout.BROWSER_BOOT_PRESETS) == {"default", "readonly", "share-view"}
+
+
+def test_browser_boot_scenario_is_deeply_immutable_at_its_mapping_boundaries():
+    settings = {"appearance": {"theme": "dark"}}
+    scenario = browser_layout.BrowserBootScenario(settings=settings)
+
+    settings["other"] = True
+    assert "other" not in scenario.settings
+    with pytest.raises(TypeError):
+        scenario.settings["other"] = True
 
 
 def _leak_one_local_service_daemon(root, service):

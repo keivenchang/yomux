@@ -87,6 +87,12 @@ The browser records the receipt immediately and owns pending state by operation 
 
 Ready, unavailable, producer error, daemon timeout, and delivery timeout each clear pending state and cancel the delayed progress paint. Every surface rendering the operation must settle together. A push or newer request may invalidate an older operation's render ownership, but it may not erase the older operation's telemetry or terminal record.
 
+### Browser resource extension paths
+
+Use `createLatestResource({initial, load, apply, onState})` only for read-only resources that need the same request dedupe, generation invalidation, last-good retention, and typed failure behavior. It is not a write transaction, retry engine, cache policy, or operation-receipt replacement. A new consumer proves delayed old success/failure after a newer target, same-target dedupe, last-good failure behavior, and exact apply/render order.
+
+Use `createLifecycleScope()` as the owner of listeners, timers, observers, EventSources, abort controllers, and other closeable resources started by one surface or state record. Register each handle when created and dispose the scope on replacement and retirement. A new resource family proves start, replace, stale late event, stop, and page retirement leave exactly one or zero live handles as appropriate and call close/disconnect/abort once.
+
 ## Frontend recording and upload
 
 The frontend records these lifecycle facts with the existing durable browser observation mechanism:

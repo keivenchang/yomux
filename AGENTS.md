@@ -11,7 +11,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - [`docs/RESEARCH.md`](docs/RESEARCH.md): dated peer research, including actionable lessons and non-goals.
 - [`docs/YOAGENT.md`](docs/YOAGENT.md): YO!agent product behavior, skill/context files, sends, watches, and handoffs.
 - [`docs/TODO.md`](docs/TODO.md): open roadmap and future work.
-- [`docs/DONE.md`](docs/DONE.md): completed work archive.
+- [`docs/DONE/`](docs/DONE/README.md): completed work archive.
 
 ## Development Workflow
 
@@ -66,7 +66,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - Cross-realm test equality: values returned from the vm-context bundle have a different prototype than the test realm, so `assert.deepStrictEqual` fails with "same structure but not reference-equal". Spread them first (`[...api.fn()]`) or compare primitives.
 - FALSE-GREEN / hung-await: `tests/layout_url.test.js` is now a shard launcher, not a behavioral monolith. Every launched shard must exit normally, print its `layout suite:` summary, and report a nonzero status for a signal, missing summary, or watchdog timeout; do not coerce a missing exit code to success. Within a shard, use `test()` for synchronous checks and `await testAsync()` for asynchronous checks. `test()` rejects thenables so an async body cannot be counted before it settles. The harness fires only the 8 ms filesystem-batch flush through real `setImmediate`; other timers remain inert. Remember cross-realm `deepStrictEqual` needs `canonical(...)` (see entry above).
 - The DOIT/TODO checkbox is the shared source of truth, not your internal task tracker. Flip `[ ]`->`[x]` with a DONE note in the DOIT file as part of finishing each item (I once marked internal tasks done but left the DOIT boxes unchecked, so a re-read showed stale "open" items). Re-read the exact line immediately before editing — these files change under you mid-batch, and concurrent edits cause "file modified since read" churn.
-- When the user asks to perform a `DOIT*.md` file, finish the queued behavior, validate it, archive the completed work in `docs/DONE.md`, update `README.md` for user-visible behavior, and remove the DOIT file once every item is complete. Keep the raw DOIT file only if unfinished work remains.
+- When the user asks to perform a `DOIT*.md` file, finish the queued behavior, validate it, archive the completed work in `docs/DONE/`, update `README.md` for user-visible behavior, and remove the DOIT file once every item is complete. Keep the raw DOIT file only if unfinished work remains.
 - Push the root cause back to the diagnosis. When the diagnosed cause is wrong, state the ACTUAL cause in the DONE note (drag-reorder was a threshold asymmetry, not an index off-by-one; the "PR pillbox" was a `ready-review` state badge, not a PR chip). The `file:symbol + FIX + Validate` contract only gets better if the implementer corrects it instead of silently coding around it.
 - Build + test after EACH item, not per batch. Every item this session ended with `tools/static_build.py` + `node tests/layout_url.test.js` (and pytest for backend) before moving on; that caught pinned-value regressions at the item that caused them instead of in a confusing end-of-batch pile.
 

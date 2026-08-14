@@ -1,6 +1,6 @@
 # YOLOmux TODOs
 
-Roadmap notes for YOLOmux. Keep active product, architecture, and refactor work here. Put completed work in [`DONE.md`](DONE.md), GUI behavior contracts in [`specs/GUI.md`](specs/GUI.md), YO!share replay details in [`specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md), dated peer research in [`RESEARCH.md`](RESEARCH.md), and build/restart/CPS commands in [`DEVELOPMENT.md`](DEVELOPMENT.md).
+Roadmap notes for YOLOmux. Keep active product, architecture, and refactor work here. Put completed work in [`DONE/`](DONE/README.md), GUI behavior contracts in [`specs/GUI.md`](specs/GUI.md), dated peer research in [`RESEARCH.md`](RESEARCH.md), and build/restart/CPS commands in [`DEVELOPMENT.md`](DEVELOPMENT.md).
 
 ## Product Direction
 
@@ -17,17 +17,21 @@ Borrow from other tools only when the feature improves the local control loop: k
 - Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state and tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/tmux/sessions.py`; repo/PR/CI metadata `yolomux_lib/workspace/metadata.py`; file ops `yolomux_lib/filesystem/`; shared helpers and paths `yolomux_lib/infra/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` and `static_src/css/yolomux/*.css` generate `static/yolomux.js` and `static/yolomux.css`.
 - State lives in `~/.config/yolomux/state.json`; events live in `~/.local/state/yolomux/events.jsonl`; YO!agent skill files live under `~/.config/yolomux/skills.d/` and context under `~/.config/yolomux/context.d/`.
 - Line numbers drift. Search by symbol, route, CSS class, setting key, or test name before editing.
-- `DOIT*.md` files are active work queues. When a queue is fully implemented and validated, archive the result in [`DONE.md`](DONE.md) and remove the queue file.
+- `DOIT*.md` files are active work queues. When a queue is fully implemented and validated, archive the result in [`DONE/`](DONE/README.md) and remove the queue file.
 
 ## Active Queue Follow-Ups
 
 - [ ] [L] Capture the client, method, and complete request line for observed `414 Request-URI Too Long` responses whose request lines looked like JSON fragments (`":0,"`, `":1,"`). `jsDebugStatsSampleQuery()` is fixed-length (seven scalar parameters, about 160 characters), so do not attribute this to `/api/stats-sample` or change HTTP parsing without the live framing evidence.
-- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive Linux `7770`, `7771`, `7772`, and `7773`, verify startup ownership order, `7771` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
+- [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive Linux `7770`, `7771`, `7772`, and `7773`, verify startup ownership order, `7771` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work. (Its former queue `DOIT.single_owner_background_indexing.md` is archived in `DONE/2026-06/DONE.background-indexing-owner-visibility.md`.)
 - [ ] [M] License history remote finalization. Only after explicit force-push authorization, push the rewritten PolyForm Noncommercial history with `--force-with-lease`, then verify a fresh clone against the key license searches. The current-tree migration, local history rewrite, and local verification are already complete.
 
 ## Current Priorities
 
-**0.7.1 scope, set by Keiven 2026-08-03: performance, instrumentation and pinpointing slowness are the #1 goal. Nothing else.** The active queue is [`DOIT.071-performance.md`](../DOIT.071-performance.md). Every item below this paragraph is deferred until Keiven reopens it, including the XL items, and no non-performance work should be started against 0.7.1. The standing invariant is that the `yolomux.py` web process must never perform intensive GIL-bound work; CPU work may go to any daemon except the web server, and a background thread inside the web process does not count because it shares the same GIL.
+**Current scope is 0.7.5, planned 2026-08-12: merge macOS support, delete YO!share, close the 0.7.4 refactor followups, fix first-launch agent auth. No new product surface.** The plan and its execution order are in [`../PLAN.0.7.5.md`](../PLAN.0.7.5.md); the four queues are `DOIT.075.1` through `DOIT.075.4` at the repo root. Everything below this paragraph is roadmap, not 0.7.5 scope — do not start an item here without moving it into the release plan first. Out-of-scope queues live in `../queues/backlog/`.
+
+The 0.7.1 performance freeze that used to sit here (set 2026-08-03, "nothing else") is over: 0.7.1, 0.7.2, and 0.7.3 all shipped and 0.7.4 is in acceptance. Its queue `DOIT.071-performance.md` no longer exists.
+
+The standing invariant survives that freeze and still holds: the `yolomux.py` web process must never perform intensive GIL-bound work. CPU work may go to any daemon except the web server, and a background thread inside the web process does not count because it shares the same GIL.
 
 - [ ] [XL] Reliable structured agent control. Replace as much scrape-and-type approval/send behavior as possible with structured channels: Claude permission hooks for Claude decisions, Codex app-server/SDK/MCP where YOLOmux owns or can safely resume the conversation, and `tmux-legacy` only as the verified visible-pane fallback.
 - [ ] [XL] Layout/render reconciliation. Move the grid, topbar, tab strips, virtual tabs, and pane chrome toward one keyed renderer driven by layout state, with fewer pane-type special cases.
@@ -60,11 +64,13 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 - [ ] [M] Add remaining editor power keys through CodeMirror where possible: multi-cursor, select all occurrences, add cursor above/below, line move/copy/delete, smart-select, matching bracket, fold/unfold, symbol jump, and command mode. Avoid app-side Ctrl-letter bindings on Mac.
 
-## YO!share
+## YO!share - removed
 
-- [ ] [M] Exchange the first valid token hit for a short-lived HttpOnly guest cookie, then redirect to a clean URL so bearer tokens leave browser history and Referer paths.
-- [ ] [L] Continue moving presenter state through host-owned replay rather than semantic client inference. Layout, active pane, scroll, menus, popovers, YO!info, Finder/Differ/Tabber, editor state, and terminal placeholders should converge from host frames.
-- [ ] [L] Add presenter-follow polish: host active pane, per-pane scroll, and host pointer/ghost-cursor frames. Apply them on viewers without echoing client-authored state back.
+**Decision 2026-08-12: `NO_BUILD`. YO!share is being deleted from the product in 0.7.5**, code and specs together, per `../DOIT.075.2.yoshare-removal.md`. It was never a supported feature; quarantine was the holding position and removal is the outcome.
+
+The three items that used to sit here (guest-cookie token exchange, host-owned presenter replay, presenter-follow polish) are void. Do not implement them. A future revival would be a new product decision starting from new code, not from this source.
+
+[`specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md) is retained only as historical evidence and is deleted by the same queue.
 
 ## Launch, Worktrees, And Vitals
 

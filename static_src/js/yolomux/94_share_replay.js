@@ -805,8 +805,8 @@ function shareReplayApplyStaticKeyframe(payload = {}, message = {}) {
   shareReplayApplyScrollEntries(payload.scroll || []);
   if (payload.viewport && typeof payload.viewport === 'object') applyShareViewportState(payload.viewport);
   bindShareReplayPaneTabPopovers(root);
-  shareReplayCurrentEpoch = Math.max(0, Math.round(Number(message.epoch) || Number(payload.epoch) || shareReplayCurrentEpoch || 1));
-  shareReplayLastSequence = Math.max(0, Math.round(Number(message.sequence) || Number(payload.sequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  shareReplayState.acceptSequence(Number(message.epoch) || Number(payload.epoch) || replaySequence.epoch || 1, Number(message.sequence) || Number(payload.sequence) || 0);
   shareReplayLastKeyframe = {payload, message};
   setShareReplayShellStatus('mirrored', {
     digest: payload.digest,
@@ -831,15 +831,16 @@ function shareReplayFrameNumberDetail(message = {}) {
     epoch: frameNumber(message.epoch),
     sequence: frameNumber(message.sequence),
     baseSequence: frameNumber(message.baseSequence ?? payload.baseSequence),
-    currentEpoch: Math.max(0, Math.round(Number(shareReplayCurrentEpoch) || 0)),
-    lastSequence: Math.max(0, Math.round(Number(shareReplayLastSequence) || 0)),
+    currentEpoch: shareReplayState.sequenceSnapshot().epoch,
+    lastSequence: shareReplayState.sequenceSnapshot().last,
   };
 }
 
 function shareReplayErrorDetail(reason = 'replay-error', detail = {}) {
   const cleanDetail = detail && typeof detail === 'object' ? detail : {};
-  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? shareReplayCurrentEpoch) || 0));
-  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? shareReplayLastSequence) || 0));
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const currentEpoch = Math.max(0, Math.round(Number(cleanDetail.currentEpoch ?? replaySequence.epoch) || 0));
+  const lastSequence = Math.max(0, Math.round(Number(cleanDetail.lastSequence ?? replaySequence.last) || 0));
   const epoch = Number(cleanDetail.epoch);
   const sequence = Number(cleanDetail.sequence);
   const baseSequence = Number(cleanDetail.baseSequence);
@@ -1016,9 +1017,8 @@ function shareReplaySkipUnknownNodeDelta(payload = {}, sequenceStatus = {}) {
   const sequence = Number(sequenceStatus.sequence);
   const epoch = Number(sequenceStatus.epoch);
   if (!Number.isFinite(epoch) || !Number.isFinite(sequence)) return false;
-  shareReplayStaleFrames += 1;
-  shareReplayCurrentEpoch = epoch;
-  shareReplayLastSequence = sequence;
+  shareReplayState.recordStaleFrame();
+  shareReplayState.acceptSequence(epoch, sequence);
   setShareReplayShellStatus('mirrored', {sequence});
   return true;
 }
@@ -1029,10 +1029,10 @@ function applyShareReplayDelta(payload = {}, message = {}) {
   const sequenceStatus = shareReplayDeltaSequenceStatus(message);
   if (!sequenceStatus.ok) {
     if (sequenceStatus.stale === true) {
-      shareReplayStaleFrames += 1;
+      shareReplayState.recordStaleFrame();
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     shareReplayRequestKeyframe(sequenceStatus.reason, {
       ...sequenceStatus,
       frameType: message.type || shareMirrorProtocol.frames.domDelta,
@@ -1056,8 +1056,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (expectedDigest && expectedDigest !== actualDigest) {
       throw new Error('replay DOM digest mismatch');
     }
-    shareReplayCurrentEpoch = sequenceStatus.epoch;
-    shareReplayLastSequence = sequenceStatus.sequence;
+    shareReplayState.acceptSequence(sequenceStatus.epoch, sequenceStatus.sequence);
     setShareReplayShellStatus('mirrored', {
       sequence: sequenceStatus.sequence,
       digest: expectedDigest || actualDigest,
@@ -1067,7 +1066,7 @@ function applyShareReplayDelta(payload = {}, message = {}) {
     if (shareReplayErrorIsUnknownNode(error) && shareReplaySkipUnknownNodeDelta(payload, sequenceStatus)) {
       return true;
     }
-    shareReplayDroppedFrames += 1;
+    shareReplayState.recordDroppedFrame();
     setShareReplayShellStatus('error', {sequence: message.sequence, digest: payload.digest});
     shareReplayRequestKeyframe('replay-error', {
       ...shareReplayFrameNumberDetail(message),
@@ -3561,22 +3560,24 @@ function shareReplayTerminalPlaceholderDiagnostics() {
 
 function shareReplayHealthDiagnostics() {
   const terminalPlaceholders = shareReplayTerminalPlaceholderDiagnostics();
+  const replaySequence = shareReplayState.sequenceSnapshot();
+  const keyframeRequest = shareReplayState.keyframeRequestSnapshot();
   return shareRedactDiagnosticValue({
     kind: 'share-replay-health',
     at: new Date().toISOString(),
     match: shareReplayShellState.status === 'mirrored' && terminalPlaceholders.healthy,
     status: shareReplayShellState.status || 'idle',
     userStatus: shareReplayUserStatusText(shareReplayShellState.status || ''),
-    epoch: shareReplayCurrentEpoch,
-    sequence: shareReplayLastSequence,
+    epoch: replaySequence.epoch,
+    sequence: replaySequence.last,
     keyframeBytes: shareReplayLastKeyframeBytes,
     deltaBytes: shareReplayLastDeltaBytes,
-    droppedFrames: shareReplayDroppedFrames,
-    staleFrames: shareReplayStaleFrames,
-    keyframeRequests: shareReplayKeyframeRequestCount,
-    keyframeRequestsSuppressed: shareReplayKeyframeRequestSuppressedCount,
-    keyframeRequestBackoffMs: shareReplayKeyframeBackoffMs,
-    keyframeRequestInFlight: shareReplayKeyframeInFlight,
+    droppedFrames: replaySequence.dropped,
+    staleFrames: replaySequence.stale,
+    keyframeRequests: keyframeRequest.count,
+    keyframeRequestsSuppressed: keyframeRequest.suppressed,
+    keyframeRequestBackoffMs: keyframeRequest.backoffMs,
+    keyframeRequestInFlight: keyframeRequest.inFlight,
     hostKeyframesSuppressed: shareReplayHostKeyframeSuppressedCount,
     hostKeyframePending: Boolean(shareReplayHostKeyframeTimer),
     replayLatencyMs: shareReplayLastLatencyMs,

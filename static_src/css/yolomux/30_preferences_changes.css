@@ -2341,11 +2341,11 @@
   font-size: var(--ui-font-size-sm);
 
 
-  --changes-row-hover-bg: var(--30-preferences-changes-changes-toolbar-changes-row-hover-bg-33);
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
   --changes-folder-bg: var(--30-preferences-changes-changes-toolbar-changes-folder-bg-34);
-  --changes-indent-line: var(--30-preferences-changes-changes-toolbar-changes-indent-line-35);
+  --changes-indent-line: var(--changes-tree-indent-line);
   --changes-path-text: var(--30-preferences-changes-changes-toolbar-changes-path-text-36);
-  --changes-icon-text: var(--30-preferences-changes-changes-toolbar-changes-icon-text-37);
+  --changes-icon-text: var(--changes-tree-icon-text);
 }
 .file-explorer-changes-panel:hover > .changes-toolbar,
 .file-explorer-changes-panel:focus-within > .changes-toolbar {
@@ -2571,11 +2571,11 @@
   overflow: hidden;
 
 
-  --changes-row-hover-bg: var(--30-preferences-changes-changes-repo-group-changes-row-hover-bg-38);
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
   --changes-folder-bg: var(--30-preferences-changes-changes-repo-group-changes-folder-bg-39);
-  --changes-indent-line: var(--30-preferences-changes-changes-repo-group-changes-indent-line-40);
+  --changes-indent-line: var(--changes-tree-indent-line);
   --changes-path-text: var(--30-preferences-changes-changes-repo-group-changes-path-text-41);
-  --changes-icon-text: var(--30-preferences-changes-changes-repo-group-changes-icon-text-42);
+  --changes-icon-text: var(--changes-tree-icon-text);
 }
 .changes-repo-head {
   width: 100%;
@@ -3569,9 +3569,9 @@
 }
 body .file-explorer-changes-panel {
 
-  --changes-row-hover-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-row-hover-bg-28);
+  --changes-row-hover-bg: var(--changes-tree-row-hover-bg);
   --changes-folder-bg: var(--30-preferences-changes-file-explorer-changes-panel-changes-folder-bg-29);
-  --changes-indent-line: var(--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30);
+  --changes-indent-line: var(--changes-tree-indent-line);
   --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
-  --changes-icon-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-icon-text-32);
+  --changes-icon-text: var(--changes-tree-icon-text);
 }

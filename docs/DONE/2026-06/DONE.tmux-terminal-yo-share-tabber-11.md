@@ -1,0 +1,15 @@
+# Tmux, Terminal, YO!share, and Tabber
+
+## Tmux sub-window keys, Info Bar rename, and per-session info drawer
+- Completed and removed `DOIT.tmux_window_keys_and_infobar.md`. Terminal `Ctrl-b n`/`p`/numeric tmux sub-window switches now mirror YOLOmux active-window/Header/Info Bar state without swallowing input, user-visible pane metadata copy says `Info Bar`, and each Info row has a lazy per-session drawer sourced from the existing YO!info/activity-summary metadata path with full path, git state, PR/CI/Linear metadata, latest summary, and recent events. Verification: backend activity-summary shape tests, frontend drawer/cache/source-shape tests, focused previously failing tests (`3 passed in 1.67s`), rebuilt `static/yolomux.js`/`static/yolomux.css`, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 45.42s`).
+
+## Shared Tabber and YO!info lookback controls
+- Completed and removed `DOIT.lookback_slider_tabber_and_info.md`. Tabber and YO!info now share the 30-minute-through-14-day lookback options, backend normalization accepts the full range, YO!info can request all visible tmux sessions with the selected touched-path lookback, and Tabber has its own persisted lookback control that invalidates/reloads touched-path state and sends the selected `hours` through both batch and single-session session-files requests. Verification: backend all-session/lookback pytest coverage, node URL/control/cache-invalidation coverage, rebuilt `static/yolomux.js`, and final `python3 tools/check.py` passed all 7 lanes (`CHECK PASSED in 43.83s`).
+
+## Tabber session rows styled like pane tabs
+- Completed and removed `DOIT.tabber_session_tab_styling.md`. First-level Tabber tmux session rows now render their label/description inside an inner `.tabber-session-tab` using the shared pane-tab tokens for height, width, border, radius, inactive/hover/active colors, font, and focus ring; window/repo/loading/non-tmux rows keep the normal tree-row rendering. The row itself remains the treeitem, disclosure, click target, and ARIA owner, so expand/collapse, selected/current state, indentation, keyboard behavior, and row delegation stay on the shared tree path. Long descriptions truncate inside the tab label while the numeric session name and date/ago column stay visible; current sessions read as active tabs via `.tabber-active-session`/`aria-current` without changing active-window styling.
+- Verification: `python3 -m pytest tests/test_browser_layout.py -k 'tabber_session_rows_use_pane_tab_shape_and_keep_columns' -q` passed dark/narrow and light/wide geometry plus screenshot checks; `node --check static/yolomux.js`, a generated-source Tabber guard, `python3 tools/static_build.py --check`, and `python3 tools/check.py` were run. The final gate passed all lanes except `node-layout`, which is blocked by unrelated search-history expectations (`Search & Runs` in the File menu and `__search_history__` in virtual tabs).
+
+---
+
+Completed 2026-06-19. Extracted from the 2026-06-19 daily log.

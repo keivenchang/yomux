@@ -13,7 +13,7 @@ from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
-from tests.test_gate_editor import gate_browser_runtime
+from tests.helpers.gate_editor import gate_browser_runtime
 from tools import static_build
 from yolomux_lib import web as web_module
 

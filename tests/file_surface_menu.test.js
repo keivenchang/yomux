@@ -15,6 +15,7 @@ function test(label, fn) {
 }
 
 const menus = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
+const terminalFacade = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
 const terminalBoot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
 const filePanelCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
@@ -109,7 +110,7 @@ test('Finder and Differ render shared selectors with independent selected-sessio
 });
 
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {
-  assert.match(terminalBoot, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
+  assert.match(terminalFacade, /function virtualPanelInnerControlsHtml\(session, options = \{\}\)[\s\S]*dockviewLayoutEnabled\(\) \? '' : virtualPanelControlsHtml\(session, options\)/);
   assert.match(dockview, /function dockviewHeaderActionsHtml\(item, slot = slotForItem\(item\)\)[\s\S]*if \(!isLayoutItem\(item\)\) return ''[\s\S]*if \(slotIsSidePane\(slot\)\)[\s\S]*if \(isVirtualItem\(item\)\) return `\$\{paneHandle\}\$\{virtualPanelControlsHtml\(item/);
   assert.match(dockview, /function hideDockviewInnerPaneTabs\(panel\)[\s\S]*head\.querySelector\('\.virtual-panel-controls'\)[\s\S]*controls\.remove\(\)/);
   assert.match(shell, /function paneTabDismissControlHtml\(item\)[\s\S]*const isLegacyFiles = type\?\.key === 'files'[\s\S]*if \(isLegacyFiles \|\| \(tabIsPinned\(item\) && !isEditor\)\) return ''/);

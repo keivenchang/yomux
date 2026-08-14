@@ -7,16 +7,22 @@ const fs = require('fs');
 const vm = require('vm');
 
 const source = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
+const transportLifecycleSource = fs.readFileSync('static_src/js/yolomux/09_transport_lifecycle.js', 'utf8');
+const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const lifecycleScopeSource = coreSource.slice(
+  coreSource.indexOf('function createLifecycleScope('),
+  coreSource.indexOf('\nfunction delegate(', coreSource.indexOf('function createLifecycleScope(')),
+).replace('function createLifecycleScope(', 'const createLifecycleScope = function (') + ';';
 
 function loadNamespace() {
   const context = vm.createContext({console});
+  vm.runInContext(lifecycleScopeSource, context, {filename: '10_core_utils.js:createLifecycleScope'});
+  vm.runInContext(transportLifecycleSource, context, {filename: '09_transport_lifecycle.js'});
   vm.runInContext(source, context, {filename: '84_stats_current.js'});
   return context.YOLOmuxStatsCurrent;
 }
 
-function loadController(options) {
-  return loadNamespace().createController(options);
-}
+function loadController(options) { return loadNamespace().createController(options); }
 
 function capabilities() {
   const matrix = [
@@ -204,6 +210,11 @@ class FakeEventSource {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, callback) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter(listener => listener !== callback));
+  }
+
   close() {
     this.closeCount += 1;
   }
@@ -224,8 +235,13 @@ class FakePageLifecycle {
     this.listeners.set(name, listeners);
   }
 
+  removeEventListener(name, callback) {
+    const listeners = this.listeners.get(name) || [];
+    this.listeners.set(name, listeners.filter(listener => listener !== callback));
+  }
+
   registered() {
-    return [...this.listeners.keys()];
+    return [...this.listeners.entries()].filter(([_name, listeners]) => listeners.length).map(([name]) => name);
   }
 
   emit(name) {
@@ -1923,6 +1939,10 @@ test('an unload-initiated stream close reports one machine-readable retirement i
   assert.equal(laterRetirements[0].reason, 'page_pagehide');
   client.stop();
   later.client.stop();
+  assert.deepEqual(lifecycle.registered(), [], 'client stop removes every page lifecycle listener');
+  await client.start();
+  assert.deepEqual(lifecycle.registered(), ['beforeunload', 'pagehide', 'pageshow'], 'client restart installs one fresh lifecycle listener set');
+  client.stop();
 });
 
 test('a genuine mid-session stream failure stays a warning-level transport failure through every retirement path', async () => {

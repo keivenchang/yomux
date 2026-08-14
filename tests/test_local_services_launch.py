@@ -27,6 +27,9 @@ from yolomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
 from tests.serving_process import pid_is_serving
+from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
+from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
+from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1834,20 +1837,20 @@ def _table(rows):
 
 
 def _process_record(pid):
-    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
+    return FixtureProcessRecordBuilder(pid=pid).build()
 
 
 def _write_service_record(service_dir, name, pid, socket_path):
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / f"{name}.service.json").write_text(
-        registry_mod.json.dumps({**_process_record(pid), "service": name, "socket": str(socket_path)}),
+        registry_mod.json.dumps(FixtureLocalServiceRecordBuilder(service=name, socket_path=socket_path, pid=pid).build()),
         encoding="utf-8",
     )
 
 
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
     socket_path = tmp_path / "services" / "jobd.sock"
-    record = {**_process_record(100), "service": "jobd", "socket": str(socket_path)}
+    record = FixtureLocalServiceRecordBuilder(service="jobd", socket_path=socket_path, pid=100).build()
     with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
@@ -1886,13 +1889,24 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
     assert groups[0]["member_pids"] == (200, 201, 202)
 
 
+def test_tracked_local_service_groups_preserve_darwin_member_identity(tmp_path):
+    service_dir = tmp_path / "services"
+    socket_path = service_dir / "jobd.sock"
+    _write_service_record(service_dir, "jobd", 200, socket_path)
+    table = {
+        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yolomux_lib.jobd --socket {socket_path}", 1200, 200, "proc:1200"),
+        201: registry_mod.ProcessTableEntry(200, 200, 1.0, "python3 worker", 1201, 200, "darwin:1201"),
+    }
+
+    groups, diagnostics = registry_mod.resolve_tracked_local_service_groups(service_dir, table)
+
+    assert diagnostics == []
+    assert groups[0]["member_records"][201]["process_start_identity"] == "darwin:1201"
+    assert registry_mod.process_record_diagnostic(groups[0]["member_records"][201], table=table).current is True
+
+
 def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
-    lease_dir = tmp_path / "server-leases"
-    lease_dir.mkdir(parents=True)
-    (lease_dir / "8881.lock").write_text(
-        registry_mod.json.dumps({**_process_record(400), "port": 8881}),
-        encoding="utf-8",
-    )
+    FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
     good = _table(
         [
             (400, 1, 400, 50.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),
@@ -1919,6 +1933,20 @@ def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
     # A recycled lease PID fails the command identity check.
     assert registry_mod.tracked_port_process_group(8881, tmp_path, recycled) == {}
     assert registry_mod.tracked_port_process_group(9999, tmp_path, good) == {}
+
+
+def test_tracked_port_process_group_preserves_darwin_member_identity(tmp_path):
+    FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
+    table = {
+        400: registry_mod.ProcessTableEntry(1, 400, 1.0, "python3 yolomux.py --port 8881 --dang", 1400, 400, "proc:1400"),
+        401: registry_mod.ProcessTableEntry(400, 400, 1.0, "tmux -C attach-session", 1401, 400, "darwin:1401"),
+    }
+
+    group, diagnostic = registry_mod.resolve_tracked_port_process_group(8881, tmp_path, table)
+
+    assert diagnostic is not None and diagnostic.current is True
+    assert group["member_records"][401]["process_start_identity"] == "darwin:1401"
+    assert registry_mod.process_record_diagnostic(group["member_records"][401], table=table).current is True
 
 
 def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, monkeypatch):

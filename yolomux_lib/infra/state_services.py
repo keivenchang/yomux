@@ -171,6 +171,7 @@ class TabberActivityCacheRecord:
 class SessionFilesWorkRecord:
     future: Future[tuple[SessionFilesPayload, HTTPStatus, bool, float]] = field(default_factory=Future)
     owner_thread_id: int | None = None
+    worker: threading.Thread | None = None
     stable_signature: str = ""
     stable_generation: int = 0
 
@@ -243,16 +244,50 @@ class SessionFilesService:
     repo_identity_cache: dict[tuple[Any, ...], tuple[int, float, tuple[Any, ...]]] = field(default_factory=dict)
     disk_prune_lock: threading.Lock = field(default_factory=threading.Lock)
     disk_prune_record: SessionFilesDiskPruneRecord = field(default_factory=SessionFilesDiskPruneRecord)
+    accepting_work: bool = True
+    work_condition: threading.Condition = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.work_condition = threading.Condition(self.cache_lock)
+
+    def allow_work(self) -> None:
+        with self.work_condition:
+            self.accepting_work = True
 
     def reserve_work(self, key: tuple[Any, ...], stable_signature: str) -> SessionFilesWorkRecord | None:
         """Reserve background work without letting worker start order redefine freshness."""
-        with self.cache_lock:
+        with self.work_condition:
+            if not self.accepting_work:
+                return None
             if key in self.work_records:
                 return None
             record = SessionFilesWorkRecord(owner_thread_id=None)
             self.assign_stable_generation(record, stable_signature)
             self.work_records[key] = record
             return record
+
+    def start_reserved_worker(
+        self,
+        key: tuple[Any, ...],
+        record: SessionFilesWorkRecord,
+        worker: threading.Thread,
+    ) -> bool:
+        """Bind and start the exact reserved worker before lifecycle teardown can observe it."""
+
+        with self.work_condition:
+            if not self.accepting_work or self.work_records.get(key) is not record:
+                return False
+            record.worker = worker
+            try:
+                worker.start()
+            except RuntimeError:
+                record.worker = None
+                if self.work_records.get(key) is record:
+                    self.work_records.pop(key, None)
+                self.release_stable_generation(record)
+                self.work_condition.notify_all()
+                raise
+            return True
 
     def claim_work(self, key: tuple[Any, ...], thread_id: int | None, *, reserved: bool = False, stable_signature: str = "") -> tuple[SessionFilesWorkRecord, bool]:
         with self.cache_lock:
@@ -291,16 +326,53 @@ class SessionFilesService:
                 self.latest_stable_generations.pop(record.stable_signature, None)
 
     def finish_work(self, key: tuple[Any, ...], record: SessionFilesWorkRecord) -> None:
-        with self.cache_lock:
+        with self.work_condition:
+            if self.work_records.get(key) is record and record.worker is None:
+                self.work_records.pop(key, None)
+            self.release_stable_generation(record)
+            self.work_condition.notify_all()
+
+    def finish_reserved_worker(
+        self,
+        key: tuple[Any, ...],
+        record: SessionFilesWorkRecord,
+        worker: threading.Thread,
+    ) -> None:
+        with self.work_condition:
+            if record.worker is worker:
+                record.worker = None
             if self.work_records.get(key) is record:
                 self.work_records.pop(key, None)
             self.release_stable_generation(record)
+            self.work_condition.notify_all()
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Wait until every service-owned background worker has returned."""
+
+        with self.work_condition:
+            return self.work_condition.wait_for(
+                lambda: not any(record.worker is not None for record in self.work_records.values()),
+                timeout=max(0.0, float(timeout)),
+            )
 
     def cancel_all_work(self) -> None:
-        """Fence former-owner workers before dropping their single-flight records."""
-        with self.cache_lock:
-            self.work_records.clear()
+        """Fence new work and join former-owner workers before returning."""
+        with self.work_condition:
+            self.accepting_work = False
             self.latest_stable_generations.clear()
+            workers = [
+                record.worker
+                for record in self.work_records.values()
+                if record.worker is not None and record.worker is not threading.current_thread()
+            ]
+            self.work_records = {
+                key: record for key, record in self.work_records.items() if record.worker is not None
+            }
+        for worker in workers:
+            worker.join()
+        with self.work_condition:
+            self.work_records.clear()
+            self.work_condition.notify_all()
 
     def acquire_compute_slot(self, limit: int) -> None:
         """Queue distinct cold rebuilds without defeating per-key single-flight."""

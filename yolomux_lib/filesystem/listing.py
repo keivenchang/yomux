@@ -288,7 +288,11 @@ def _visible_directory_names(
         resolved_parent = paths._normalized_scope_path(path)
         descriptor_parent = path.parent
         if descriptor_parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
-            directory_descriptor = os.dup(int(path.name))
+            directory_descriptor = os.open(
+                ".",
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=int(path.name),
+            )
         else:
             directory_descriptor = os.open(
                 path,
