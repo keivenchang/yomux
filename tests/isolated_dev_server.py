@@ -82,7 +82,6 @@ class BuildPaths:
     start_lock_path: Path
     tool_lock_path: Path
     ca_dir: Path
-    share_debug_dir: Path
     log_dir: Path
     workspace_dir: Path
 
@@ -106,7 +105,6 @@ def build_paths(root: Path, *, state_dir: Path | None = None) -> BuildPaths:
         start_lock_path=root / "locks" / "start.lock",
         tool_lock_path=root / "locks" / "expensive-tools.lock",
         ca_dir=root / "ca",
-        share_debug_dir=root / "share-debug",
         log_dir=root / "logs",
         workspace_dir=root / "workspaces",
     )
@@ -120,7 +118,6 @@ def build_paths(root: Path, *, state_dir: Path | None = None) -> BuildPaths:
         paths.tmp_dir,
         paths.start_lock_path.parent,
         paths.ca_dir,
-        paths.share_debug_dir,
         paths.log_dir,
         paths.workspace_dir,
     ):
@@ -162,7 +159,6 @@ def build_environment(
             "YOLOMUX_START_LOCK_DIR": str(paths.start_lock_path),
             "YOLOMUX_TOOL_LOCK_PATH": str(paths.tool_lock_path),
             "YOLOMUX_CA_DIR": str(paths.ca_dir),
-            "YOLOMUX_SHARE_DEBUG_DIR": str(paths.share_debug_dir),
             "YOLOMUX_LOG_DIR": str(paths.log_dir),
             "YOLOMUX_WORKSPACE_BASE": str(paths.workspace_dir),
             "YOLOMUX_TMUX_SOCKET": str(tmux_runtime.socket_path),

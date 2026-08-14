@@ -35,6 +35,28 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 
 async function runLayoutRestoreSuite() {
+  test('server-projected agent auth availability preserves the client tri-state decision', () => {
+    const cases = [
+      {loggedIn: true, available: true, disabled: false, detail: ''},
+      {loggedIn: false, available: false, disabled: true, detail: 'Run codex login'},
+      {loggedIn: null, available: true, disabled: false, detail: ''},
+      {loggedIn: false, available: true, disabled: false, detail: ''},
+      {loggedIn: true, available: false, disabled: true, detail: 'Run codex login'},
+    ];
+    for (const expected of cases) {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+        availableAgents: ['codex'],
+        agentAuth: {
+          codex: {installed: true, logged_in: expected.loggedIn, available: expected.available},
+        },
+      });
+      const fileMenu = api.appMenuTree().find(menu => menu.id === 'file');
+      const codex = fileMenu.items.find(item => item.type === 'command-pair' && item.primary.label === 'new Codex').primary;
+      assert.equal(codex.disabled, expected.disabled, `logged_in=${expected.loggedIn} uses available=${expected.available}`);
+      assert.equal(codex.detail, expected.detail, `logged_in=${expected.loggedIn} renders the projected availability detail`);
+    }
+  });
+
   await testAsync('activity summary is fail-closed across missing and malformed bootstrap values', async () => {
     for (const activitySummary of [undefined, null, {}, {enabled: false}, {enabled: 1}, {enabled: 'true'}]) {
       const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {activitySummary}});
@@ -58,6 +80,7 @@ async function runLayoutRestoreSuite() {
       fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8'),
     ].join('\n');
     for (const trigger of ['localeChange', 'setInfoSessionFileLookbackHours', 'createYoagentPanel', 'activateYoagentPanel', 'clearYoagentConversation', 'repairClientEventReadyChannels', "type === 'activity_summary_ready'", "type === 'yoagent_skills_changed'"]) {
       assert.ok(sources.includes(trigger), `missing activity-summary trigger coverage for ${trigger}`);
@@ -338,11 +361,118 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(events, ['install', 'dispose', 'install']);
   });
 
+  test('scoped bind-once owns listeners across double-bind, dispose, and reconstructed DOM', () => {
+    const api = loadYolomux();
+    const bind = root => api.bindScopedOnceForTest(root, 'click-owner', scope => (
+      scope.ownEvent('click', root, 'click', () => { root.clickCount = (root.clickCount || 0) + 1; })
+    ));
+    const root = new TestElement('scoped-bind-root');
+    const first = bind(root);
+    assert.strictEqual(bind(root), first);
+    assert.equal(root.listeners.get('click').length, 1);
+    root.listeners.get('click')[0]();
+    assert.equal(root.clickCount, 1);
+    assert.deepStrictEqual({...root.dataset}, {});
+    assert.equal(first(), true);
+    assert.equal(root.listeners.get('click').length, 0);
+    const reconstructed = new TestElement('scoped-bind-root');
+    bind(reconstructed);
+    assert.equal(reconstructed.listeners.get('click').length, 1);
+    assert.deepStrictEqual({...reconstructed.dataset}, {}, 'replayed DOM carries no ownership sentinel');
+  });
+
+  test('shared control normalization covers raw app buttons without replacing component classes', () => {
+    const api = loadYolomux();
+    const root = new TestElement('control-root');
+    const primary = new TestElement('primary', 'button');
+    primary.classList.add('component-action');
+    const secondary = new TestElement('secondary', 'button');
+    root.append(primary, secondary);
+    assert.equal(api.normalizeAppOwnedControlsForTest(root).length, 2);
+    assert.equal(primary.className, 'component-action btn-base');
+    assert.equal(secondary.className, 'btn-base');
+    api.normalizeAppOwnedControlsForTest(root);
+    assert.equal(primary.className, 'component-action btn-base', 'normalization is idempotent');
+  });
+
+  test('panel-body reconciliation normalizes reconstructed controls before afterReplace', () => {
+    const api = loadYolomux();
+    const body = new TestElement('reconstructed-panel-body');
+    let observed = '';
+    api.reconcilePanelBodyForTest({
+      body,
+      html: '<button>rebuilt</button>',
+      replace(root) {
+        root.children = [];
+        root.appendChild(new TestElement('rebuilt-action', 'button'));
+      },
+      afterReplace(root) { observed = root.querySelector('button').className; },
+    });
+    assert.equal(observed, 'btn-base');
+    assert.equal(body.querySelector('button').className, 'btn-base');
+  });
+
+  test('hover popovers use one child binding and dispose anchor plus child listeners', () => {
+    const api = loadYolomux();
+    const anchor = new TestElement('hover-anchor');
+    const popover = new TestElement('hover-child');
+    const controller = api.createHoverPopoverForTest({anchor, popover, showDelay: 0, hideDelay: 0});
+    assert.equal(anchor.listeners.get('pointerenter').length, 1);
+    assert.equal(popover.listeners.get('pointerenter').length, 1);
+    controller.openNow({});
+    assert.equal(popover.listeners.get('pointerenter').length, 1, 'first open reuses the initial child binding');
+    controller.dispose();
+    assert.equal(anchor.listeners.get('pointerenter').length, 0);
+    assert.equal(popover.listeners.get('pointerenter').length, 0);
+  });
+
+  test('panel popover bind-once disposal removes listeners before remount', () => {
+    const api = loadYolomux();
+    const panel = new TestElement('panel-popover-owner');
+    const zone = new TestElement('panel-popover-zone');
+    zone.classList.add('panel-popover-zone');
+    panel.appendChild(zone);
+    const first = api.bindPanelPopoverForTest(panel);
+    assert.strictEqual(api.bindPanelPopoverForTest(panel), first);
+    assert.equal(zone.listeners.get('pointerenter').length, 1);
+    first();
+    assert.equal(zone.listeners.get('pointerenter').length, 0);
+    api.bindPanelPopoverForTest(panel);
+    assert.equal(zone.listeners.get('pointerenter').length, 1);
+  });
+
+  test('legacy DOM and expando binding sentinels cannot return', () => {
+    const sources = fs.readdirSync('static_src/js/yolomux')
+      .filter(name => name.endsWith('.js'))
+      .map(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8'))
+      .join('\n');
+    const retired = [
+      'mdTaskBound', 'mdLinkBound', '_yolomuxPreviewControlsBound', '__yolomuxInfoPanelBound',
+      '__yolomuxEmptySpaceContextMenuBound', '__yolomuxPaneDragBound', 'linkContextMenuBound',
+      'fileExplorerHeaderActionsBound', 'clipboardPasteBound', 'hoverPopoverBound',
+      'tabInteractionBound', 'pathInputBound', 'imagePreviewBound', 'tabberChromeBound',
+      'tabberBound', 'popoverBound', 'changesBound', 'yoagentSessionLinksBound', 'terminalHandlersBound',
+    ];
+    for (const sentinel of retired) assert.equal(sources.includes(sentinel), false, `${sentinel} stays retired`);
+    assert.equal((sources.match(/document\.createElement\(['"]button['"]\)/g) || []).length, 1, 'makeButton remains the only raw DOM button constructor');
+    const dispatcher = fs.readFileSync('static_src/js/yolomux/76_panel_dom_actions.js', 'utf8');
+    assert.match(dispatcher, /function bindActionDispatcher[\s\S]*?normalizeAppOwnedControls\(parent\)/, 'delegated action roots normalize their controls');
+  });
+
   test('frontend orchestration facades expose the registered runtime families', () => {
     const api = loadYolomux();
     const debugPanel = api.debugRuntimeFacadeForTest('panel');
     assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'createYoCostPanel', 'renderDebugPanels', 'renderYoCostPanels']);
     assert.ok(Object.values(debugPanel).every(value => typeof value === 'function'));
+    assert.deepStrictEqual(Object.keys(api.debugRuntimeFacadeForTest('observation')).sort(), [
+      'disposeJsDebugCurrentObservationLifecycle',
+      'flushJsDebugCurrentObservations',
+      'installJsDebugCurrentObservationLiveness',
+      'queueJsDebugCurrentObservation',
+      'recordJsDebugClientEventsConnectionState',
+      'recordJsDebugStatsSample',
+      'scheduleJsDebugCurrentObservationFlush',
+    ]);
 
     const mobileActions = api.terminalRuntimeFacadeForTest('mobile-accessory-actions');
     assert.deepStrictEqual(canonical(mobileActions), {
@@ -352,6 +482,8 @@ async function runLayoutRestoreSuite() {
     });
     assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('panel')).sort(), ['createPanel', 'panelControlsHtml', 'relocalizeTerminalPanelChrome']);
     assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('transport')).sort(), ['connectTerminalSocket', 'installClientEventStream', 'startSummaryStream', 'startTranscriptStream']);
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('client-events')).sort(), ['disposeClientEventTransportLifecycle', 'handleClientPushEvent', 'installClientEventStream', 'queueClientPushEvent', 'syncClientEventDemand']);
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('boot')).sort(), ['boot', 'installDevAutoReload', 'installReconnectResyncHandlers']);
   });
 
   test('migrated framed-panel binders dispose and remount one listener without DOM sentinels', () => {
@@ -420,7 +552,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.normalizeSessionFileLookbackHoursForTest('365', 336), 336);
   });
 
-  test('layout, terminal, YO!agent, popout, and share chrome use locale keys', () => {
+  test('layout, terminal, YO!agent, and popout chrome use locale keys', () => {
     const layoutStateSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const layoutSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     const fileActionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
@@ -429,10 +561,10 @@ async function runLayoutRestoreSuite() {
     const markdownSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
     const previewSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
     const panePopoutSource = fs.readFileSync('static_src/js/yolomux/90_pane_popout.js', 'utf8');
-    const shareStateSource = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
-    const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
-    const shareAdminSource = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const terminalBootSource = [
+      fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8'),
+    ].join('\n');
 
     for (const key of ['hidden', 'minimized', 'expanded', 'autoClosed', 'swapped']) {
       assert.ok(layoutSource.includes(`t('layout.status.${key}'`), `layout status ${key} resolves through the active locale`);
@@ -478,10 +610,6 @@ async function runLayoutRestoreSuite() {
     assert.equal(markdownSource.includes('`Image unavailable: ${target.path || original}`'), false, 'Markdown image fallback retains no raw-English duplicate');
     assert.ok(previewSource.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout title reuses its existing locale key');
     assert.ok(/function panePopoutDefaultTitle[\s\S]*t\('pane\.popout\.title'[\s\S]*function writePanePopoutDocument[\s\S]*panePopoutDefaultTitle\(\)/.test(panePopoutSource), 'generic pane popouts share one localized fallback-title owner');
-    assert.ok(/function shareReplayMirrorLabel[\s\S]*share\.replay\.mirrorAria/.test(shareStateSource), 'share replay mirror aria text has one shared localized owner');
-    assert.ok(shareStateSource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());") && shareReplaySource.includes("root.setAttribute('aria-label', shareReplayMirrorLabel());"), 'both replay-root paths consume the same mirror-label helper');
-    assert.ok(shareReplaySource.includes("t('share.replay.sharedTerminalAria', {session: entry.session})"), 'replayed terminal placeholders expose a localized accessibility label');
-    assert.ok(shareAdminSource.includes("label: t('common.copy')") && shareAdminSource.includes("const debugTitle = t('share.debug.copyDiagnostics')"), 'share diagnostics control reuses the existing Copy label and localizes its specific tooltip through the shared button builder');
     assert.ok(/function terminalTmuxWindowShortcut\(key, options = \{\}\)[\s\S]*terminalTmuxWindowShortcutDefs[\s\S]*t\(definition\.labelKey\)/.test(terminalBootSource), 'tmux prefix and Alt shortcuts share one lazy localized semantic classifier');
     assert.ok(/function terminalTmuxPrefixWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key, \{includePrefixOnly: true, includeNumbers: true\}\)[\s\S]*function terminalTmuxAltWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key\)/.test(terminalBootSource), 'tmux prefix and Alt wrappers contain no duplicated shortcut labels');
     assert.ok(/function infoDimensionCountText[\s\S]*tPlural\(infoDimensionCountKeys\[key\]/.test(terminalBootSource), 'YO!info child counts use plural-aware locale keys');
@@ -548,18 +676,6 @@ async function runLayoutRestoreSuite() {
     assert.equal(codeMirrorLocaleApi.openFileStatus({kind: 'text', original: 'xy'}).message, '2 glyphs-T');
 
     const api = loadYolomux('', ['1']);
-    api.i18nSetCatalogForTest('share-test', {
-      'share.mirror.synced': 'synced test',
-      'share.mirror.checking': 'checking test',
-      'share.mirror.hostDisconnected': 'disconnected test',
-      'share.mirror.viewerBehind': 'behind test',
-    });
-    api.setActiveLocaleForTest('share-test');
-    assert.equal(api.shareReplayUserStatusTextForTest('mirrored'), 'synced test');
-    assert.equal(api.shareReplayUserStatusTextForTest('waiting'), 'checking test');
-    assert.equal(api.shareReplayUserStatusTextForTest('host-disconnected'), 'disconnected test');
-    assert.equal(api.shareReplayUserStatusTextForTest('viewer-behind'), 'behind test');
-
     api.i18nSetCatalogForTest('terminal-test', {
       'common.tabs.one': '{count} tab test',
       'common.tabs.other': '{count} tabs test',
@@ -654,32 +770,6 @@ async function runLayoutRestoreSuite() {
         right: {tabs: ['1'], active: '1'},
       },
     });
-  });
-
-  test('share bootstrap restores host layout and Finder state', () => {
-    const api = loadYolomux('', ['6', '7'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {
-        view: true,
-        id: 'share123',
-        sessions: ['6', '7'],
-        session: '6',
-        mode: 'ro',
-        layout: 'row@30(slot1,left)',
-        tabs: 'slot1:files;left:6,7*',
-        finder: {root: '/home/test/yolomux.dev1', rootMode: 'fixed', mode: 'tabber', session: '7'},
-      },
-    });
-    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots())), {
-      tree: {split: 'row', pct: 30, children: [{slot: 'slot1'}, {slot: 'left'}]},
-      panes: {
-        slot1: {tabs: ['__finder__', '__differ__', '__tabber__'], active: '__finder__'},
-        left: {tabs: ['6', '7'], active: '7'},
-      },
-    });
-    assert.equal(api.fileExplorerRootForTest(), '/home/test/yolomux.dev1');
-    assert.equal(api.fileExplorerRootModeValue(), 'fixed');
-    assert.equal(api.fileExplorerModeForTest(), 'tabber');
-    assert.equal(api.fileExplorerRootForOpen('6'), '/home/test/yolomux.dev1');
   });
 
   test('legacy layout URL modes migrate to independent Finder Differ Tabber tabs', () => {
@@ -1792,7 +1882,7 @@ async function runLayoutRestoreSuite() {
     const expected = [
       'latency', 'events-fallback', 'auto-approve', 'tabber-activity-fallback', 'file-index-refresh',
       'file-index-building', 'debug-stats', 'debug-system', 'debug-logs',
-      'share-geometry-digest', 'chat-relative-times', 'share-status',
+      'chat-relative-times',
     ].sort();
     assert.deepStrictEqual([...new Set(names)].sort(), expected, 'the source audit must name every production resetRuntimeInterval owner');
     for (const name of expected) {
@@ -1928,7 +2018,6 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const watchedPrRecords = new Map();'), 'watched-PR status and notification throttles share one PR-keyed owner');
     assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, now, notificationLastSentLimit);'), 'watched-PR notification transition keys use the shared bounded-map helper');
     assert.equal(/\b(?:openFiles|fileIdentityByPath|openFilePathByIdentity|fileOpenPromisesByPath)\b/.test(source), false, 'open-file content, identity, and in-flight state have no parallel legacy maps or aliases');
-    assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*async function apiFetch\(url, options = \{\}, internalOptions = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)[\s\S]*async function apiFetchJsonQuiet\(url, options = \{\}, phaseTimings = null\)[\s\S]*apiFetch\(url, options, \{recordDebug: false\}\)/.test(source), 'normal and quiet API fetches route through the one share-token header owner');
     assert.ok(/function readNotificationDelivery\(\)[\s\S]*safeJsonParse\(/.test(source) && /function clientEventEnvelope\(event\)[\s\S]*safeJsonParse\(/.test(source), 'stored notification and client-event JSON reads reuse the safe parser');
     assert.ok(/function chatRelativeTimesVisibleConsumer\(\)[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemInLayout\(chatItemId\)[\s\S]*itemIsActivePaneTab\(chatItemId\)/.test(source), 'chat relative-time refresh has one foreground active-panel consumer predicate');
     assert.ok(/function syncChatRelativeTimesRefresh\(\)[\s\S]*resetRuntimeInterval\('chat-relative-times',[\s\S]*!chatRelativeTimesVisibleConsumer\(\)\) return null;[\s\S]*refreshChatRelativeTimes\(\)/.test(source), 'chat relative-time timer skips the DOM query without a visible consumer');
@@ -1945,7 +2034,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function dismissNotificationsForTarget\(item, options = \{\}\)[\s\S]*for \(const \[id, record\] of toastRecords\.entries\(\)\)[\s\S]*function dismissSessionToasts\(session, options = \{\}\)[\s\S]*dismissNotificationsForTarget\(session, options\)/.test(source), 'session toast cleanup delegates to the shared target-notification record owner');
     assert.equal(/moveAttentionAlertsForSession|querySelectorAll\(['"]\.toast\[data-toast-kind=/.test(source), false, 'toast cleanup has no metadata-only rename path or parallel DOM scan');
     assert.ok(source.includes('existing?.delay === normalizedDelay'), 'runtime intervals keep their timer phase when refresh delays are unchanged');
-    assert.ok(/async function boot\(\)[\s\S]*?initialAutoStatusesPromise = loadAutoStatuses\(\)\.catch[\s\S]*?\}\s*bindClipboardPaste\(\);/.test(source), 'image paste binding is installed during boot and does not wait on background auto-status refresh');
+    const bootBody = source.slice(source.indexOf('async function boot()'), source.indexOf('\nboot();'));
+    assert.ok(bootBody.indexOf('bindClipboardPaste();') > bootBody.indexOf('const initialAutoStatusesPromise = loadAutoStatuses().catch'), 'image paste binding is installed after starting the background auto-status refresh');
+    assert.ok(bootBody.indexOf('bindClipboardPaste();') < bootBody.indexOf('await refreshTranscripts({refreshAuto: false})'), 'image paste binding does not wait on background auto-status refresh');
     // C12 F3: terminal fit scheduling collapsed from rAF + 80ms + 250ms (three fits) to one rAF + a single
     // trailing fit; the redundant middle timer (fitFinalTimer) is gone.
     assert.equal(source.includes('item.fitFinalTimer'), false, 'C12 F3: the redundant third fit timer is removed');
@@ -1962,7 +2053,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('maybeHandleServerVersionChange(transcriptMetadataState.payload.server_version, transcriptMetadataState.payload.client_revision)'), 'the metadata poll checks the live server version and client bundle revision');
     // #39: the new-session picker greys an installed-but-logged-out agent and names its login command;
     // the metadata poll refreshes agentAuth so it re-enables after the user logs in.
-    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.logged_in !== false/.test(source), '#39: agentLoggedIn treats only confirmed logged-out status as unavailable');
+    assert.ok(/function agentLoggedIn\(agent\)[\s\S]*entry\.available !== false/.test(source), '#39: agentLoggedIn consumes the server-owned tri-state availability decision');
     assert.ok(source.includes('const loggedOut = available && !agentLoggedIn(agent);'), '#39: the new-session picker computes a logged-out state per agent');
     assert.ok(/disabled: readOnlyMode \|\| !available \|\| loggedOut \|\| capped/.test(source), '#39: a logged-out agent is disabled in the picker');
     assert.ok(/loggedOut[\s\S]*?t\('menu\.tmux\.runLogin', \{command: agentLoginCommand\(agent\)\}\)/.test(source), '#39: a logged-out agent shows its login command as the menu detail (via t())');

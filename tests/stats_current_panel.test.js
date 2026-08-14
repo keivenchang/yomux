@@ -7,12 +7,22 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
+const source = [
+  'static_src/js/yolomux/84_debug_observation.js',
+  'static_src/js/yolomux/85_debug_panel.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
-const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const lifecycleScopeSource = coreSource.slice(
+  coreSource.indexOf('function createLifecycleScope('),
+  coreSource.indexOf('\nfunction createLatestResource(', coreSource.indexOf('function createLifecycleScope(')),
+);
+const terminalSource = [
+  'static_src/js/yolomux/99_terminal_boot.js',
+  'static_src/js/yolomux/99_client_event_transport.js',
+  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 let passed = 0;
@@ -59,7 +69,7 @@ function slice(text, startNeedle, endNeedle) {
 
 const clientCapabilityGuardSource = bootstrapSource.slice(
   bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()'),
-  bootstrapSource.indexOf('\nconst shareToken =', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
+  bootstrapSource.indexOf('\nfunction randomBrowserInstanceId()', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
 );
 
 function clientCapabilityFixtureSource(unscopedHostRequests) {
@@ -83,7 +93,7 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
 });
 
 test('Logs normalizes browser and server records without duplicate IDs or unsafe extra fields', () => {
-  const secret = 'fixture-share-token-never-log';
+  const secret = 'fixture-access-token-never-log';
   const tokenized = label => `${label}?token=${secret}`;
   const classifierContext = {result: null, jsDebugLogLevels: ['info', 'warning', 'debug', 'error']};
   vm.runInNewContext(`
@@ -104,7 +114,7 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
   const pacificTimeStart = coreSource.indexOf('const diagnosticPacificTimeFormatter');
   const pacificTimeSource = coreSource.slice(
     pacificTimeStart,
-    coreSource.indexOf('\nfunction recordJsDebugEvent(', pacificTimeStart),
+    coreSource.indexOf('\nfunction redactDiagnosticSecretText(', pacificTimeStart),
   );
   const context = {
     Date,
@@ -128,22 +138,16 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
     jsDebugEvents: [
       {id: 9, ts: '1970-01-01T00:01:41.000Z', type: 'stats_history', level: 'warning', source: '/stats/current', message: tokenized('graph stalled'), requestId: tokenized('r-graph'), route: tokenized('/stats/current'), eventType: tokenized('graph-activity'), deliveryOutcome: tokenized('stalled'), unsafe: secret},
     ],
-    shareDebugSecretValues: () => [],
     debugClientLogLevel: event => event.level,
     debugEventDetailText: event => event.message,
     debugEventStatusText: () => '',
     debugPhaseTimingText: () => '',
   };
-  const replayRedactorSource = shareSource.slice(
-    shareSource.indexOf('function shareReplayRedactText('),
-    shareSource.indexOf('\nfunction shareReplayAttributeIsTokenBearing('),
-  );
-  const diagnosticRedactorSource = shareSource.slice(
-    shareSource.indexOf('function shareRedactSecretText('),
-    shareSource.indexOf('\nfunction shareDebugNumber('),
+  const diagnosticRedactorSource = coreSource.slice(
+    coreSource.indexOf('function redactDiagnosticSecretText('),
+    coreSource.indexOf('\nfunction recordJsDebugEvent('),
   );
   vm.runInNewContext(`
-    ${replayRedactorSource}
     ${diagnosticRedactorSource}
     ${pacificTimeSource}
     ${modelSource}
@@ -154,10 +158,10 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
   assert.equal(context.result.records.length, 2);
   assert.deepEqual([...context.result.records.map(record => record.id)], ['client:9', 'server:7']);
   assert.equal(JSON.stringify(context.result).includes(secret), false);
-  assert.match(JSON.stringify(context.result.records), /\[redacted-share-token\]/);
+  assert.match(JSON.stringify(context.result.records), /\[redacted-secret\]/);
   for (const record of context.result.records) {
     for (const field of ['message', 'requestId', 'route', 'event', 'delivery']) {
-      assert.match(record[field], /\[redacted-share-token\]/, `${record.id} redacts ${field}`);
+      assert.match(record[field], /\[redacted-secret\]/, `${record.id} redacts ${field}`);
     }
   }
   assert.match(context.result.records[0].message, /^graph stalled\?token=/);
@@ -189,7 +193,7 @@ test('Logs formats failure evidence with an exact Pacific wall time', () => {
     jsDebugEventSeq: 0,
     jsDebugEvents: [],
     jsDebugEventLimit: 500,
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     scheduleJsDebugPanelRefresh: () => {},
     result: null,
   };
@@ -217,7 +221,7 @@ test('the mixed browser diagnostic ring retains the newest 500 records in exact 
     jsDebugEventSeq: 0,
     jsDebugEvents: [],
     jsDebugEventLimit: 500,
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     scheduleJsDebugPanelRefresh: () => {},
     result: null,
   };
@@ -348,7 +352,7 @@ test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall tim
     result: null, Number, Object, String, Set, Array, Date,
     jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
     jsDebugClientLogEpoch: 'client-1',
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
     diagnosticPacificWallTime: () => '',
     debugClientLogLevel: event => event.level || 'info',
     debugEventDetailText: event => String(event.message || ''),
@@ -795,33 +799,52 @@ test('client failures use the existing bounded observation uploader without debu
 
 test('browser observation uploader emits a periodic heartbeat when the page is otherwise idle', () => {
   assert.match(source, /const jsDebugCurrentObservationHeartbeatMs = 10_000/);
-  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval[\s\S]*currentObservationLifecycleScope\(\)\.ownTimer\('liveness'/);
+  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*const scope = currentObservationLifecycleScope\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval[\s\S]*scope\.ownTimer\('liveness'/);
   assert.match(source, /installJsDebugCurrentObservationLiveness\(\);/);
   const functionText = source.slice(
     source.indexOf('function installJsDebugCurrentObservationLiveness()'),
     source.indexOf('\nfunction jsDebugBrowserFamily()'),
   );
   const runFixture = unscopedHostRequests => {
-    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}, currentObservationLifecycleScope: () => ({ownTimer() {}})};
+    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}};
     vm.runInNewContext(`
       const jsDebugCurrentObservationHeartbeatMs = 10000;
+      let lifecycleCurrent = true;
+      function currentObservationLifecycleScope() { return {current() { return lifecycleCurrent; }, ownTimer() {}}; }
       function recordJsDebugClientHealthObservation(...args) { calls.push(args); }
-      function setInterval(callback, delay) { timers.push({callback, delay}); return 91; }
+      function setInterval(callback, delay) { timers.push({callback, delay}); return 90 + timers.length; }
       function clearInterval() {}
       ${clientCapabilityFixtureSource(unscopedHostRequests)}
       ${functionText}
+      globalThis.installForTest = installJsDebugCurrentObservationLiveness;
+      globalThis.retireForTest = () => {
+        lifecycleCurrent = false;
+        jsDebugCurrentObservationState.livenessTimer = null;
+      };
+      globalThis.resumeForTest = () => {
+        lifecycleCurrent = true;
+        installJsDebugCurrentObservationLiveness();
+      };
     `, context);
     return context;
   };
   const denied = runFixture(false);
-  assert.deepEqual(denied.calls, [], 'share-scoped clients do not queue host observation heartbeats');
-  assert.deepEqual(denied.timers, [], 'share-scoped clients do not install the host heartbeat timer');
+  assert.deepEqual(denied.calls, [], 'clients without host-request capability do not queue observation heartbeats');
+  assert.deepEqual(denied.timers, [], 'clients without host-request capability do not install the heartbeat timer');
   const context = runFixture(true);
   assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0]], 'boot queues an idle heartbeat immediately');
   assert.equal(context.timers.length, 1, 'boot owns exactly one periodic heartbeat timer');
+  context.installForTest();
+  assert.equal(context.timers.length, 1, 'starting observation liveness twice retains one timer owner');
   assert.equal(context.timers[0].delay, 10000);
   context.timers[0].callback();
   assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'the periodic timer emits another heartbeat without other traffic');
+  context.retireForTest();
+  context.timers[0].callback();
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'a page-retired heartbeat callback cannot publish stale liveness');
+  context.resumeForTest();
+  assert.equal(context.timers.length, 2, 'bfcache resume owns one fresh heartbeat timer');
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0], [0, 0]], 'bfcache resume publishes one fresh liveness sample');
 });
 
 test('observation, pricing, and graph resources share lifecycle scopes with pagehide disposal and bfcache resume', () => {
@@ -830,6 +853,84 @@ test('observation, pricing, and graph resources share lifecycle scopes with page
   assert.match(source, /function stopDebugGraphLiveTicker\(\)[\s\S]*debugGraphLifecycleScope\(\)\.release\('live-ticker'/);
   assert.match(source, /window\.addEventListener\('pagehide'[\s\S]*stopDebugGraphLiveTicker\(\)[\s\S]*disposeDebugPricingRefreshLifecycle\('pagehide'\)[\s\S]*disposeJsDebugCurrentObservationLifecycle\('pagehide'\)/);
   assert.match(source, /window\.addEventListener\('pageshow'[\s\S]*event\?\.persisted[\s\S]*installJsDebugCurrentObservationLiveness\(\)[\s\S]*scheduleJsDebugCurrentObservationFlush\(\)[\s\S]*syncDebugGraphLiveTicker\(\)/);
+});
+
+test('observation and pricing timer replacement rejects stale callbacks without changing null sentinels', () => {
+  const observationSource = slice(source, 'function scheduleJsDebugCurrentObservationFlush(', '\nasync function flushJsDebugCurrentObservations(');
+  const pricingSource = [
+    sourceFunction('scheduleDebugCostPricingStatusRefresh', 'disposeDebugPricingRefreshLifecycle'),
+    slice(source, 'function disposeDebugPricingRefreshLifecycle(', '\nasync function refreshDebugCostPricingStatus('),
+  ].join('\n');
+  const context = {result: null};
+  vm.runInNewContext(`
+    ${lifecycleScopeSource}
+    let nextTimer = 1;
+    const timers = new Map();
+    const cleared = [];
+    function setTimeout(callback, delay) {
+      const timer = {id: nextTimer++, callback, delay};
+      timers.set(timer.id, timer);
+      return timer;
+    }
+    function clearTimeout(timer) { cleared.push(timer?.id || 0); }
+    function clientCanUseUnscopedHostRequests() { return true; }
+    const jsDebugCurrentObservationBatchDelayMs = 10000;
+    const jsDebugCurrentObservationState = {queue: [{}], inFlight: false, timer: null};
+    let jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+    function currentObservationLifecycleScope() {
+      if (jsDebugCurrentObservationLifecycleScope.disposed()) jsDebugCurrentObservationLifecycleScope = createLifecycleScope();
+      return jsDebugCurrentObservationLifecycleScope;
+    }
+    const observationFlushes = [];
+    function flushJsDebugCurrentObservations(scope) { observationFlushes.push(scope.current()); }
+    ${observationSource}
+    scheduleJsDebugCurrentObservationFlush(50);
+    const observationFirst = jsDebugCurrentObservationState.timer;
+    scheduleJsDebugCurrentObservationFlush(0);
+    const observationSecond = jsDebugCurrentObservationState.timer;
+    observationFirst.callback();
+    const observationAfterStale = jsDebugCurrentObservationState.timer;
+    observationSecond.callback();
+
+    const jsDebugPricingRefreshState = {timer: null};
+    let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+    function debugPricingRefreshLifecycleScope() {
+      if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+      return jsDebugPricingRefreshLifecycleScope;
+    }
+    const pricingRefreshes = [];
+    function refreshDebugCostPricingStatus(scope) { pricingRefreshes.push(scope.current()); }
+    ${pricingSource}
+    scheduleDebugCostPricingStatusRefresh();
+    const pricingFirst = jsDebugPricingRefreshState.timer;
+    scheduleDebugCostPricingStatusRefresh();
+    const pricingSecond = jsDebugPricingRefreshState.timer;
+    pricingFirst.callback();
+    const pricingAfterStale = jsDebugPricingRefreshState.timer;
+    pricingSecond.callback();
+    scheduleDebugCostPricingStatusRefresh();
+    const pricingDisposed = jsDebugPricingRefreshState.timer;
+    disposeDebugPricingRefreshLifecycle('pagehide');
+    pricingDisposed.callback();
+    result = {
+      observation: {
+        replaced: observationFirst !== observationSecond,
+        afterStale: observationAfterStale === observationSecond,
+        finalTimer: jsDebugCurrentObservationState.timer,
+        flushes: observationFlushes,
+      },
+      pricing: {
+        replaced: pricingFirst !== pricingSecond,
+        afterStale: pricingAfterStale === pricingSecond,
+        finalTimer: jsDebugPricingRefreshState.timer,
+        refreshes: pricingRefreshes,
+      },
+      cleared,
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.observation)), {replaced: true, afterStale: true, finalTimer: null, flushes: [true]});
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.pricing)), {replaced: true, afterStale: true, finalTimer: null, refreshes: [true]});
+  assert.equal(context.result.cleared.length >= 4, true, 'replacement and pagehide dispose every superseded timer through its scope');
 });
 
 test('client failure observations are signed, source-bounded, and omit arbitrary event fields', () => {
@@ -855,7 +956,7 @@ test('client failure observations are signed, source-bounded, and omit arbitrary
     navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
     window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
     jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
   };
   vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:error:1',
@@ -931,7 +1032,7 @@ test('typed YO!stats warnings use the same durable browser-observation path', ()
     navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
     window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
     jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
-    shareRedactDiagnosticValue: value => value,
+    redactDiagnosticValue: value => value,
   };
   vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:stats:1',
@@ -1022,7 +1123,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       jsDebugFailureText: value => String(value || '').slice(0, 500),
       jsDebugFailureStack: value => String(value?.stack || '').slice(0, 4000),
       jsDebugFailureSource: value => String(value || '/').split('?', 1)[0],
-      shareRedactDiagnosticValue: value => value,
+      redactDiagnosticValue: value => value,
       reloadClientJourneyId: identity.journeyId || 'j-reload-test',
       bootstrap: {clientRevision: identity.codeRevision || 'test-revision'},
       navigator: {userAgent: identity.userAgent || 'Mozilla/5.0 Chrome/140.0'},
@@ -1032,7 +1133,8 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
       const jsDebugCurrentObservationBatchDelayMs = 10000;
       const jsDebugCurrentObservationRetryMaxMs = 300000;
       const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, epoch: ${JSON.stringify(epoch)}, highWaterDepth: 0, drops: 0, retries: 0, instrumentationCostMs: 0, receipts: new Map()};
-      function currentObservationLifecycleScope() { return {ownTimer() {}, release() { return false; }}; }
+      let observationLifecycleCurrent = true;
+      function currentObservationLifecycleScope() { return {current() { return observationLifecycleCurrent; }, ownTimer() {}, release() { return false; }}; }
       ${endpointSource}
       ${byteLengthSource}
       ${failureClassifierSource}
@@ -1042,6 +1144,7 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
         state: jsDebugCurrentObservationState,
         queue: queueJsDebugCurrentObservation,
         flush: flushJsDebugCurrentObservations,
+        retire: () => { observationLifecycleCurrent = false; },
         barrier: jsDebugCurrentObservationReceiptBarrier,
         projection: jsDebugCurrentObservationReceiptProjection,
         persist: persistJsDebugCurrentObservationReceipts,
@@ -1090,6 +1193,20 @@ testAsync('browser observation writer fences acknowledge, retry authentication, 
   }, 'an accepted event reaches the event/epoch receipt barrier before fixture retirement');
   assert.deepEqual(current.requests[0].body.protocol_version, 24);
   assert.deepEqual(current.requests[0].body.schema_generation, 5);
+
+  const retired = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-retired');
+  let rejectRetiredUpload;
+  retired.outcomes.push(new Promise((_resolve, reject) => { rejectRetiredUpload = reject; }));
+  retired.api.queue('page-retired:error:1', {...event, type: 'error', message: 'retired failure'});
+  retired.api.state.timer = null;
+  const retiredUpload = retired.api.flush();
+  retired.api.retire();
+  rejectRetiredUpload({status: 503});
+  await retiredUpload;
+  assert.equal(retired.api.state.retries, 0, 'a request failure after lifecycle retirement cannot mutate retry diagnostics');
+  assert.equal(retired.api.state.queue.length, 1, 'a retired request cannot discard or reclassify the pending observation');
+  assert.equal(retired.api.barrier('page-retired').pending, 1, 'the untouched receipt remains pending for a resumed lifecycle');
+  assert.equal(retired.api.state.inFlight, null, 'retirement restores the in-flight null sentinel after the stale request settles');
 
   const clearedAccepted = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-clear-accepted');
   const clearedAcceptedEvents = installEventClearLifecycle(clearedAccepted);
@@ -2623,20 +2740,26 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     function debugCostAgeRefreshDelayMs() { return 3000; }
     function setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; }
     function clearTimeout() {}
-    function debugGraphLifecycleScope() { return {ownTimer() {}, release() { return false; }, relinquish() { return true; }}; }
+    function debugGraphLifecycleScope() { return {current() { return true; }, ownTimer() {}, release() { return false; }, relinquish() { return true; }}; }
     const Date = {now: () => nowMs};
     ${tickerSource}
     syncDebugGraphLiveTicker();
     const firstDelay = timers[0].delay;
+    stopDebugGraphLiveTicker();
+    syncDebugGraphLiveTicker();
+    const replacementTimer = jsDebugGraphLiveTimer;
     nowMs = 1000;
     timers[0].callback();
-    result = {firstDelay, timerCount: timers.length, nextDelay: timers[1].delay, queryCount, liveTimer: jsDebugGraphLiveTimer};
+    const afterStale = {queryCount, liveTimer: jsDebugGraphLiveTimer};
+    timers[1].callback();
+    result = {firstDelay, timerCount: timers.length, nextDelay: timers[2].delay, queryCount, liveTimer: jsDebugGraphLiveTimer, replacementTimer, afterStale};
   `, context);
   assert.equal(context.result.firstDelay, 1000, 'a 1s live chart sleeps directly to its next slide boundary');
-  assert.equal(context.result.timerCount, 2, 'one timer fire schedules exactly one later wake instead of a frame loop');
+  assert.deepEqual({...context.result.afterStale}, {queryCount: 0, liveTimer: context.result.replacementTimer}, 'a retired ticker callback cannot clear or run over its replacement');
+  assert.equal(context.result.timerCount, 3, 'one current timer fire schedules exactly one later wake instead of a frame loop');
   assert.equal(context.result.nextDelay, 1000, 'the next wake remains one slide interval away');
   assert.equal(context.result.queryCount, 1, 'the ticker queries live graphs only at its due fire');
-  assert.equal(context.result.liveTimer, 2, 'one pending timeout remains after the due work completes');
+  assert.equal(context.result.liveTimer, 3, 'one pending timeout remains after the due work completes');
   assert.doesNotMatch(source, /requestAnimationFrame\(debugGraphLiveFrameTick\)/, 'the live ticker no longer perpetually arms a frame callback');
 });
 

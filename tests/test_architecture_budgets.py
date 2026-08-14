@@ -106,6 +106,59 @@ def test_command_exit_codes_distinguish_growth_from_shrink(tmp_path, monkeypatch
     assert architecture_budgets.main(["--manifest", str(manifest_path)]) == 2
 
 
+def test_retired_share_surface_guard_rejects_filenames_content_i18n_and_binary(tmp_path):
+    retired = "sha" + "re"
+    (tmp_path / f"old-{retired}-surface.txt").write_text("safe", encoding="utf-8")
+    (tmp_path / "content.txt").write_text("YO" + retired.upper(), encoding="utf-8")
+    (tmp_path / "locale.json").write_text(f'{{"{retired}.menu.open": "x"}}', encoding="utf-8")
+    (tmp_path / "binary.bin").write_bytes(b"\xff/api/" + retired.encode() + b"\x00")
+
+    violations = architecture_budgets._retired_share_surface_violations(tmp_path)
+
+    assert any("forbidden filename" in message and f"old-{retired}-surface.txt" in message for message in violations)
+    assert any("content.txt:1" in message for message in violations)
+    assert any("locale.json:1" in message and "quoted retired i18n key" in message for message in violations)
+    assert any("binary.bin:1" in message for message in violations)
+
+
+def test_retired_share_surface_guard_allows_only_named_paths_and_done_archive(tmp_path):
+    retired = "sha" + "re"
+    allowed = (
+        "DOIT.075.2." + "yo" + "share-removal.md",
+        "yolomux_lib/infra/" + "shared_config_lock.py",
+        "tests/test_" + "shared_config_lock.py",
+        "docs/DONE/old-" + retired + ".md",
+    )
+    for relative in allowed:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("safe", encoding="utf-8")
+    similarly_named = tmp_path / "copies" / allowed[0]
+    similarly_named.parent.mkdir(parents=True)
+    similarly_named.write_text("safe", encoding="utf-8")
+
+    violations = architecture_budgets._retired_share_surface_violations(tmp_path)
+
+    assert violations == (f"retired_share_surface: forbidden filename copies/{allowed[0]}",)
+
+
+def test_evaluate_and_cli_add_retired_share_guard_without_losing_budget_results(tmp_path, monkeypatch):
+    manifest = current_manifest()
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    stale = copy.deepcopy(manifest)
+    stale["file_lines"]["yolomux_lib/app.py"] -= 1
+    monkeypatch.setattr(architecture_budgets, "capture", lambda _root: stale)
+    retired = "sha" + "re"
+    (tmp_path / "retired.txt").write_text("/api/" + retired, encoding="utf-8")
+
+    result = architecture_budgets.evaluate(tmp_path, manifest_path)
+
+    assert any("retired_share_surface" in message for message in result.violations)
+    assert any("file_lines.yolomux_lib/app.py: shrank" in message for message in result.stale)
+    assert architecture_budgets.main(["--root", str(tmp_path), "--manifest", str(manifest_path)]) == 1
+
+
 def test_write_current_manifest_is_atomic_and_exact(tmp_path, monkeypatch):
     manifest = current_manifest()
     manifest_path = tmp_path / "nested" / "manifest.json"

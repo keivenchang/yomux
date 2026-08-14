@@ -2,7 +2,7 @@
 
 This document records product and architecture research that can inform YOLOmux. It is not a commitment to adopt a peer's design or replace the current tmux substrate. Update it when a comparison changes a product or technical decision.
 
-YOLOmux is a lightweight, powerful AI-work workspace: it combines AI management, editing and viewing, collaboration, file and Git context, observability, and replay-based sharing. Existing tmux sessions are one useful integration surface, not the product's defining theme. See the [runtime architecture](../README.md#runtime-architecture) and [YO!share contract](specs/SHARE_MIRRORING.md).
+YOLOmux is a lightweight, powerful AI-work workspace: it combines AI management, editing and viewing, collaboration, file and Git context, and observability. Existing tmux sessions are one useful integration surface, not the product's defining theme. See the [runtime architecture](../README.md#runtime-architecture).
 
 ## How this research maps to the roadmap
 
@@ -18,7 +18,7 @@ Status is a dated, high-level project-source snapshot (2026-07-11), not legal ad
 | [RMUX](https://rmux.io/) | Cross-platform, agent-programmable multiplexer with typed SDKs | PolyForm-Noncommercial-1.0.0 OR MIT; open source | Closest architectural reference for automation and browser sharing. Borrow contracts, not its substrate, unless a separate migration is approved. |
 | [Zellij](https://github.com/zellij-org/zellij) | Workspace-oriented terminal multiplexer | MIT; open source | Its layouts, WebAssembly plugins, built-in web client, and collaboration show the value of discoverable workspace templates and an extensibility boundary. |
 | [WezTerm](https://github.com/wezterm/wezterm) | Cross-platform GPU terminal and multiplexer | MIT; open source | A quality bar for terminal rendering and a reminder that terminal emulator, multiplexer, and browser workspace are distinct layers. |
-| [tmate](https://github.com/tmate-io/tmate) | Instant terminal sharing built around tmux | ISC; open source | Keep the first sharing action extremely simple while retaining YOLOmux's richer replay and application context. |
+| [tmate](https://github.com/tmate-io/tmate) | Instant terminal sharing built around tmux | ISC; open source | Reference for the entry-point simplicity a future, separately approved terminal-sharing product would need. |
 | [ttyd](https://github.com/tsl0922/ttyd) | Run/share one command in a browser terminal | MIT; open source | A focused benchmark for “one command → authenticated browser terminal,” including file transfer and broad platform support. |
 | [sshx](https://github.com/ekzhang/sshx) | Collaborative live browser terminal | MIT; open source | Its shared cursors, reconnection/latency feedback, and encrypted collaboration are strong UX/security references; its hosted mesh and lack of supported self-hosting are deliberate tradeoffs. |
 | [Coder](https://github.com/coder/coder) | Self-hosted cloud workspaces and agent governance | AGPL-3.0 community source; paid Premium offering | Different scope, but a strong reference for templates, workspace lifecycle, audit/governance, and secure remote access at organizational scale. |
@@ -31,7 +31,7 @@ Primary references: [Zellij project](https://github.com/zellij-org/zellij), [tty
 
 1. **Keep the layer boundaries clear.** tmux, Zellij, RMUX, and WezTerm own terminal/session substrate concerns. YOLOmux should continue to make the existing tmux workspace legible and controllable in a browser rather than becoming a second terminal emulator.
 2. **Make workspace templates first-class.** Zellij's layout model and Coder's provisioned workspaces both make repeatable starting state explicit. YOLOmux can add named, URL-backed workspace templates for common work such as investigation, review, incident response, and multi-agent coordination, without creating or replacing tmux sessions implicitly.
-3. **Treat collaboration as a product surface.** tmate proves low-friction sharing matters; sshx shows the value of presence, reconnection state, and clear latency feedback. YOLOmux should make share creation, access scope, expiry, revocation, viewer health, and host/viewer identity easy to inspect.
+3. **Treat collaboration as a product surface.** tmate and sshx show that any future remote-session collaboration product would need deliberate presence, reconnection, latency, authorization, expiry, and revocation contracts. Current YOLOmux collaboration remains authenticated chat and agent handoffs.
 4. **Separate local UX from organizational control.** Coder's template, identity, audit, workspace-cleanup, and governance model is relevant only when YOLOmux is used across an organization. It should inform optional administration boundaries, not turn the local-first app into a cloud workspace provider.
 5. **Agent orchestration needs observable, harness-neutral state.** RMUX and Warp both emphasize automation around terminal/agent workflows. YOLOmux's advantage is its real Claude/Codex context and tmux history; improve it with explicit jobs, safe handoffs, structured result markers, and durable traces rather than generic text scraping.
 
@@ -49,7 +49,7 @@ Zellij is a MIT-licensed terminal workspace with layouts, WebAssembly plugins, a
 - **ttyd** is a small MIT-licensed baseline: one command exposed in a browser terminal, with TLS, authentication, file transfer, and broad platform support. It usefully tests whether a YOLOmux action has grown more complex than the problem it solves. [ttyd](https://github.com/tsl0922/ttyd)
 - **sshx** is MIT-licensed and adds an infinite canvas, shared cursors, automatic reconnection, latency feedback, predictive echo, and documented end-to-end encryption. Its upstream README says supported self-hosted deployment is not currently offered, which is an important operational tradeoff. [sshx](https://github.com/ekzhang/sshx)
 
-**Take for YOLOmux:** improve share creation and health visibility first: explicit host/viewer presence, clear read/write role labels, current latency or connection state, bounded expiry, revoke controls, and reproducible reconnection behavior. Treat cryptographic transport claims as a dedicated security project with threat modeling and review, not a UI feature.
+**Take for YOLOmux:** keep current collaboration within authenticated chat and agent handoffs. Any future remote-session product starts as a new product decision with explicit roles, expiry, revocation, reconnection behavior, threat modeling, and security review.
 
 ### Coder — governed remote workspaces, not a terminal pane manager
 
@@ -137,18 +137,16 @@ RMUX Web Share keeps the PTY local, supports separate operator and spectator rol
 
 1. **A first-class automation contract.** Define a small, versioned internal pane-automation API for YO!agent and tests: stable pane/session IDs, snapshot revision, `wait_for_visible_text`, bounded output/render stream, input result, and typed timeout/unsupported errors. This is more reliable than every caller combining `capture-pane`, prompt detection, polling, and ad-hoc string matching. It should wrap tmux first, not expose RMUX types.
 
-2. **Terminal-native test primitives.** Add reusable visible-terminal assertions and quiet-state waits to the existing test helpers. These would complement—not replace—browser DOM tests: use terminal assertions for agent workflows and browser assertions for YOLOmux layout, controls, and replay. Record a bounded trace when an agent-routing test fails so failures can be reproduced without retaining unrestricted terminal history.
+2. **Terminal-native test primitives.** Add reusable visible-terminal assertions and quiet-state waits to the existing test helpers. These would complement—not replace—browser DOM tests: use terminal assertions for agent workflows and browser assertions for YOLOmux layout and controls. Record a bounded trace when an agent-routing test fails so failures can be reproduced without retaining unrestricted terminal history.
 
-3. **Share lifecycle and security checklist.** YO!share already has explicit read/write access and replay sequencing. Compare it against RMUX's equally explicit share-create/list/inspect/revoke lifecycle, target disappearance behavior, role-specific limits, expiry, and private-tailnet versus public tunnel choices. The concrete next step is a security design review—not an immediate cryptography retrofit—covering token placement, origin policy, replay/order defense, rate limits, revocation, and operator/spectator semantics.
+3. **Explicit ownership semantics.** RMUX's owned-session cleanup and daemon leases are a useful model for short-lived agent workspaces. YOLOmux already uses port and background-owner leases; extend that discipline only where it closes a real lifecycle gap, such as an explicitly app-created temporary session with a clear preserve-versus-cleanup policy.
 
-4. **Explicit ownership semantics.** RMUX's owned-session cleanup and daemon leases are a useful model for short-lived agent workspaces. YOLOmux already uses port and background-owner leases; extend that discipline only where it closes a real lifecycle gap, such as an explicitly app-created temporary session with a clear preserve-versus-cleanup policy.
-
-5. **Capability negotiation.** RMUX advertises optional daemon capabilities and reports unsupported operations as typed diagnostics. YOLOmux can apply the same shape to optional tmux features, share modes, agent clients, and platform dependencies so the UI explains a missing capability rather than silently degrading or guessing.
+4. **Capability negotiation.** RMUX advertises optional daemon capabilities and reports unsupported operations as typed diagnostics. YOLOmux can apply the same shape to optional tmux features, agent clients, and platform dependencies so the UI explains a missing capability rather than silently degrading or guessing.
 
 ### What not to adopt blindly
 
 - **Do not replace tmux with RMUX as a feature task.** YOLOmux depends on real tmux sessions, existing user configuration, agent discovery, and production workflows. A replacement would be a separate migration program with compatibility, import, operational, and rollback plans.
-- **Do not equate browser sharing with an E2EE claim.** RMUX's browser crypto is an end-to-end design with a static client trust boundary. YOLOmux must not make comparable claims until it has an equivalent threat model, independent review, key/token lifecycle, and browser-delivery guarantees.
+- **Do not equate a future browser collaboration proposal with an E2EE claim.** RMUX's browser crypto is an end-to-end design with a static client trust boundary. Any comparable YOLOmux claim would require an equivalent threat model, independent review, key lifecycle, and browser-delivery guarantees.
 - **Do not reduce agent semantics to text matching.** Visible-text locators are valuable for waits and tests, but YOLOmux still needs its Claude/Codex transcript, prompt-state, and per-window context model for safe routing.
 
 ### Recommended sequence
@@ -156,7 +154,6 @@ RMUX Web Share keeps the PTY local, supports separate operator and spectator rol
 | Priority | Proposal | Evidence of success |
 | --- | --- | --- |
 | P1 | Design and implement a tmux-backed internal automation adapter with stable identity, snapshots, and bounded waits. | One YO!agent routing flow and its regression tests no longer duplicate terminal polling/parsing. |
-| P1 | Audit YO!share against an explicit create/list/revoke/expiry/role-limit checklist. | Threat model, route/access inventory, and browser regressions for revocation, expiry, stale/reordered frames, and role enforcement. |
 | P2 | Add terminal-native assertion/trace helpers to test infrastructure. | A failing agent TUI regression reports a compact terminal trace and reproduces without sleep-based tests. |
 | P2 | Add capability reporting for optional runtime features. | Unsupported features become specific, actionable UI/API diagnostics. |
 | P3 | Evaluate an optional RMUX adapter only if Windows support or SDK-level lifecycle control becomes a product requirement. | Written compatibility matrix, user migration plan, and a reversible prototype—not a silent substrate swap. |

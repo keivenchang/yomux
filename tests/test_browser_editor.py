@@ -568,9 +568,32 @@ def test_editor_preview_mode_hides_codemirror_only_toolbar_buttons(browser, tmp_
 
 def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
-    metrics = browser.execute_script(
+    metrics = browser.execute_async_script(
         """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+        try {
+        const originalFetch = window.fetch.bind(window);
+        const rawRequests = [];
+        const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), window.location.href);
+          if (url.pathname === '/api/fs/raw') {
+            rawRequests.push(`${url.pathname}${url.search}`);
+            if (!['.mp3', '.mp4'].some(suffix => String(url.searchParams.get('path') || '').toLowerCase().endsWith(suffix))) {
+              return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
+            }
+          }
+          return originalFetch(input, options);
+        };
         const mount = document.getElementById('grid');
+        const waitImage = image => new Promise(resolve => {
+          if (!image) return resolve(false);
+          if (image.complete && image.naturalWidth > 0) return resolve(true);
+          const finish = () => resolve(image.naturalWidth > 0);
+          image.addEventListener('load', finish, {once: true});
+          image.addEventListener('error', finish, {once: true});
+        });
         const makePanel = (path, state, mode = 'preview') => {
           const item = fileEditorItemFor(path);
           setFileState(path, state);
@@ -603,9 +626,22 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         const code = makePanel('/home/test/repo/app.py', {kind: 'text', mtime: 16, size: 64, content: 'print("hello")\\n', original: 'print("hello")\\n', dirty: false, language: 'python'});
         const text = makePanel('/home/test/repo/notes.txt', {kind: 'text', mtime: 17, size: 24, content: 'plain notes\\n', original: 'plain notes\\n', dirty: false, language: 'text'});
         const unsupported = makePanel('/home/test/repo/archive.bin', {kind: 'too-large', size: 999999, maxBytes: 1024, error: 'binary preview blocked'});
-        const initialPngSrc = png.panel.querySelector('.file-editor-image-panel img.file-editor-image')?.getAttribute('src') || '';
+        const initialPngPane = png.panel.querySelector('.file-editor-image-panel');
+        if (initialPngPane?._previewAsync) await initialPngPane._previewAsync;
+        const initialPngImage = initialPngPane?.querySelector('img.file-editor-image');
+        await waitImage(initialPngImage);
+        const initialPngSrc = initialPngImage?.getAttribute('src') || '';
         setFileState('/home/test/repo/assets/photo.png', {kind: 'image', mtime: 11, mtime_ns: 11000000001, size: 1234, content: '', original: '', dirty: false});
         renderFileEditorPanel(png.panel, png.item);
+        const imagePanes = [png, apng, jpg, gif, webp, bmp, ico, avif, svg]
+          .map(({panel}) => panel.querySelector('.file-editor-image-panel'));
+        const mediaPanes = [
+          audio.panel.querySelector('.file-editor-preview-pane-panel'),
+          video.panel.querySelector('.file-editor-preview-pane-panel'),
+        ];
+        const pendingPanes = imagePanes.concat(mediaPanes);
+        await Promise.all(pendingPanes.map(pane => pane?._previewAsync).filter(Boolean));
+        await Promise.all(imagePanes.map(pane => waitImage(pane?.querySelector('img'))));
         const refreshedPngImage = png.panel.querySelector('.file-editor-image-panel img.file-editor-image');
         const imageInfo = ({panel}) => {
           const img = panel.querySelector('.file-editor-image-panel img.file-editor-image');
@@ -613,6 +649,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
             imagePaneHidden: panel.querySelector('.file-editor-image-panel')?.hidden === true,
             previewPaneHidden: panel.querySelector('.file-editor-preview-pane-panel')?.hidden === true,
             src: img?.getAttribute('src') || '',
+            naturalWidth: img?.naturalWidth || 0,
+            naturalHeight: img?.naturalHeight || 0,
             hasInlineSvg: Boolean(panel.querySelector('svg')),
             mode: editorViewModeFor(panel.dataset.filePath, panel.dataset.layoutItem),
             editButtonHidden: panel.querySelector('[data-editor-mode="edit"]')?.hidden === true,
@@ -637,7 +675,7 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
           modeControlHidden: panel.querySelector('.file-editor-mode-control-panel')?.hidden === true,
           popoutHidden: panel.querySelector('.file-editor-popout-preview-panel')?.hidden === true,
         });
-        return {
+        const result = {
           png: imageInfo(png),
           apng: imageInfo(apng),
           jpg: imageInfo(jpg),
@@ -683,15 +721,23 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
             after: refreshedPngImage?.getAttribute('src') || '',
             version: png.panel.querySelector('.file-editor-image-panel')?.dataset.imageVersion || '',
           },
+          rawRequests,
           errors: jsDebugFailureEvents('error'),
           rejections: jsDebugFailureEvents('rejection'),
         };
+        done(result);
+        } catch (error) {
+          done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }
+        })();
         """
     )
+    assert "error" not in metrics, metrics
     for key in ("png", "apng", "jpg", "gif", "webp", "bmp", "ico", "avif", "svg"):
         assert metrics[key]["imagePaneHidden"] is False, metrics
         assert metrics[key]["previewPaneHidden"] is True, metrics
-        assert metrics[key]["src"].startswith("/api/fs/raw?path="), metrics
+        assert metrics[key]["src"].startswith("blob:"), f"{key}: {metrics[key]!r}; requests={metrics['rawRequests']!r}"
+        assert metrics[key]["naturalWidth"] > 0 and metrics[key]["naturalHeight"] > 0, (key, metrics[key])
         assert metrics[key]["mode"] == "preview", metrics
         assert metrics[key]["previewButtonHidden"] is False, metrics
         assert metrics[key]["editButtonHidden"] is True, metrics
@@ -699,18 +745,26 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         assert metrics[key]["zoomToolbarExists"] is True, metrics
         assert metrics[key]["zoomActions"] == ["out", "fit", "actual", "in"], metrics
         assert metrics[key]["zoomPan"] == "1", metrics
-    assert "photo.png" in metrics["png"]["src"], metrics
-    assert metrics["pngRefresh"]["before"].endswith("&v=11"), metrics
-    assert metrics["pngRefresh"]["after"].endswith("&v=11000000001"), metrics
+    assert metrics["pngRefresh"]["before"].startswith("blob:"), metrics
+    assert metrics["pngRefresh"]["after"].startswith("blob:"), metrics
+    assert metrics["pngRefresh"]["before"] != metrics["pngRefresh"]["after"], metrics
     assert metrics["pngRefresh"]["version"] == "11000000001", metrics
-    assert "animation.apng" in metrics["apng"]["src"], metrics
-    assert "photo.jpg" in metrics["jpg"]["src"], metrics
-    assert "spinner.gif" in metrics["gif"]["src"], metrics
-    assert "photo.webp" in metrics["webp"]["src"], metrics
-    assert "photo.bmp" in metrics["bmp"]["src"], metrics
-    assert "favicon.ico" in metrics["ico"]["src"], metrics
-    assert "photo.avif" in metrics["avif"]["src"], metrics
-    assert "diagram.svg" in metrics["svg"]["src"], metrics
+    requested_paths = {request.partition("?")[2] for request in metrics["rawRequests"]}
+    for expected in (
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.png&v=11",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.png&v=11000000001",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fanimation.apng&v=111",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.jpg&v=12",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fspinner.gif&v=13",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.webp&v=131",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.bmp&v=132",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Ffavicon.ico&v=133",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.avif&v=134",
+        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fdiagram.svg&v=14",
+        "path=%2Fhome%2Ftest%2Frepo%2Fsound.mp3&v=151",
+        "path=%2Fhome%2Ftest%2Frepo%2Fmovie.mp4&v=152",
+    ):
+        assert expected in requested_paths, metrics
     assert metrics["svg"]["hasInlineSvg"] is False, metrics
     assert metrics["pdf"]["previewPaneHidden"] is False, metrics
     assert metrics["pdf"]["iframeSrc"].startswith("/api/fs/raw?path="), metrics
@@ -719,10 +773,10 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert "Open" in metrics["pdf"]["fallbackText"] and "Download" in metrics["pdf"]["fallbackText"], metrics
     assert metrics["pdf"]["editButtonHidden"] is True and metrics["pdf"]["splitButtonHidden"] is True, metrics
     assert metrics["pdf"]["previewButtonHidden"] is False, metrics
-    assert metrics["audio"]["mediaSrc"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["audio"]["mediaSrc"].startswith("blob:"), metrics
     assert metrics["audio"]["controls"] is True, metrics
     assert "Open" in metrics["audio"]["fallbackText"] and "Download" in metrics["audio"]["fallbackText"], metrics
-    assert metrics["video"]["mediaSrc"].startswith("/api/fs/raw?path="), metrics
+    assert metrics["video"]["mediaSrc"].startswith("blob:"), metrics
     assert metrics["video"]["controls"] is True and metrics["video"]["autoplay"] is False, metrics
     assert "Open" in metrics["video"]["fallbackText"] and "Download" in metrics["video"]["fallbackText"], metrics
     assert metrics["tiff"]["previewPaneHidden"] is False, metrics
@@ -1486,6 +1540,15 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
           try {
             const originalFetch = window.fetch.bind(window);
             const path = '/home/test/repo/renamed.bin';
+            const rawRequests = [];
+            const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+            const waitImage = image => new Promise(resolve => {
+              if (!image) return resolve(false);
+              if (image.complete && image.naturalWidth > 0) return resolve(true);
+              const finish = () => resolve(image.naturalWidth > 0);
+              image.addEventListener('load', finish, {once: true});
+              image.addEventListener('error', finish, {once: true});
+            });
             window.fetch = async (input, options = {}) => {
               const url = new URL(String(input), 'https://localhost');
               if (url.pathname === '/api/fs/read') {
@@ -1505,12 +1568,18 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
                   file_identity: 'id:1:2',
                 }), {status: 200, headers: {'Content-Type': 'application/json'}});
               }
+              if (url.pathname === '/api/fs/raw') {
+                rawRequests.push(`${url.pathname}${url.search}`);
+                return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
+              }
               return originalFetch(input, options);
             };
             const item = await openFileInEditor(path, {name: 'renamed.bin', size: 18, mtime: 33}, {userInitiated: true});
             const panel = panelNodes.get(item);
             const preview = panel?.querySelector('.file-editor-preview-pane-panel');
+            if (preview?._previewAsync) await preview._previewAsync;
             const image = preview?.querySelector('img.file-editor-preview-image');
+            await waitImage(image);
             const state = fileStateFor(path);
             done({
               stateKind: state?.kind || '',
@@ -1518,6 +1587,9 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
               mime: state?.mime || '',
               previewHidden: preview?.hidden === true,
               imageSrc: image?.getAttribute('src') || '',
+              imageNaturalWidth: image?.naturalWidth || 0,
+              imageNaturalHeight: image?.naturalHeight || 0,
+              rawRequests,
               mode: editorViewModeFor(path, item),
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
@@ -1528,14 +1600,6 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
         })();
         """
     )
-    assert "error" not in metrics, metrics
-    assert metrics["stateKind"] == "media", metrics
-    assert metrics["mediaKind"] == "image", metrics
-    assert metrics["mime"] == "image/png", metrics
-    assert metrics["previewHidden"] is False, metrics
-    assert metrics["imageSrc"].startswith("/api/fs/raw?path="), metrics
-    assert "renamed.bin" in metrics["imageSrc"], metrics
-    assert metrics["mode"] == "preview", metrics
     expected_api_error = consume_only_expected_js_debug_api_error(
         browser,
         path="/api/fs/read",
@@ -1543,6 +1607,15 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
         method="GET",
         query={"path": "/home/test/repo/renamed.bin"},
     )
+    assert "error" not in metrics, metrics
+    assert metrics["stateKind"] == "media", metrics
+    assert metrics["mediaKind"] == "image", metrics
+    assert metrics["mime"] == "image/png", metrics
+    assert metrics["previewHidden"] is False, metrics
+    assert metrics["imageSrc"].startswith("blob:"), metrics
+    assert metrics["imageNaturalWidth"] > 0 and metrics["imageNaturalHeight"] > 0, metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Frenamed.bin&v=33" in metrics["rawRequests"], metrics
+    assert metrics["mode"] == "preview", metrics
     assert len(metrics["errors"]) == 1, metrics
     assert all(expected_api_error.get(key) == value for key, value in metrics["errors"][0].items()), {
         "initial": metrics["errors"][0],
@@ -1553,8 +1626,29 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
 
 def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
-    metrics = browser.execute_script(
+    metrics = browser.execute_async_script(
         """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+        try {
+        const originalFetch = window.fetch.bind(window);
+        const rawRequests = [];
+        const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+        const waitImage = image => new Promise(resolve => {
+          if (!image) return resolve(false);
+          if (image.complete && image.naturalWidth > 0) return resolve(true);
+          const finish = () => resolve(image.naturalWidth > 0);
+          image.addEventListener('load', finish, {once: true});
+          image.addEventListener('error', finish, {once: true});
+        });
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), window.location.href);
+          if (url.pathname === '/api/fs/raw') {
+            rawRequests.push(`${url.pathname}${url.search}`);
+            return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
+          }
+          return originalFetch(input, options);
+        };
         const mount = document.getElementById('grid');
         const makePanel = (path, state, mode = 'preview') => {
           const item = fileEditorItemFor(path);
@@ -1608,7 +1702,9 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         const csv = makePanel('/home/test/repo/table.csv', {kind: 'text', content: 'name,count\\nalpha,1\\n"beta,gamma",2\\n', original: '', dirty: false, language: 'text'});
         const tsv = makePanel('/home/test/repo/table.tsv', {kind: 'text', content: 'name\\tcount\\nalpha\\t1\\n', original: '', dirty: false, language: 'text'});
         const mdPreview = markdown.panel.querySelector('.file-editor-preview-pane-panel');
+        if (mdPreview?._previewAsync) await mdPreview._previewAsync;
         const image = mdPreview.querySelector('img[alt="local"]');
+        await waitImage(image);
         const jsonlThemeMetrics = light => {
           document.body.classList.toggle('theme-light', light);
           document.body.classList.toggle('editor-theme-light', light);
@@ -1648,12 +1744,14 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
         jsonl.panel.style.width = '460px';
         const jsonlNarrowLayout = jsonlLayout();
         document.body.classList.remove('theme-light', 'editor-theme-light');
-        return {
+        const result = {
           markdown: {
             heading: mdPreview.querySelector('h1')?.textContent || '',
             tableCells: Array.from(mdPreview.querySelectorAll('table th, table td')).map(node => node.textContent),
             checkboxCount: mdPreview.querySelectorAll('input.markdown-task-checkbox').length,
             imageSrc: image?.getAttribute('src') || '',
+            imageNaturalWidth: image?.naturalWidth || 0,
+            imageNaturalHeight: image?.naturalHeight || 0,
             imageTitle: image?.getAttribute('title') || '',
             scriptCount: mdPreview.querySelectorAll('script').length,
             svgCount: mdPreview.querySelectorAll('svg').length,
@@ -1717,15 +1815,24 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
             header: tsv.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
             cells: Array.from(tsv.panel.querySelectorAll('.file-editor-table-preview th, .file-editor-table-preview td')).map(node => node.textContent),
           },
+          rawRequests,
           errors: jsDebugFailureEvents('error'),
           rejections: jsDebugFailureEvents('rejection'),
         };
+        done(result);
+        } catch (error) {
+          done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }
+        })();
         """
     )
+    assert "error" not in metrics, metrics
     assert metrics["markdown"]["heading"] == "Offline Preview", metrics
     assert metrics["markdown"]["tableCells"] == ["A", "B", "1", "2"], metrics
     assert metrics["markdown"]["checkboxCount"] == 1, metrics
-    assert metrics["markdown"]["imageSrc"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png", metrics
+    assert metrics["markdown"]["imageSrc"].startswith("blob:"), metrics
+    assert metrics["markdown"]["imageNaturalWidth"] > 0 and metrics["markdown"]["imageNaturalHeight"] > 0, metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fasset%20dir%2Fa.png" in metrics["rawRequests"], metrics
     assert metrics["markdown"]["imageTitle"] == "title", metrics
     assert metrics["markdown"]["scriptCount"] == 0 and metrics["markdown"]["svgCount"] == 0, metrics
     assert "code-keyword" in metrics["markdown"]["codeHtml"], metrics
@@ -1776,6 +1883,17 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         (async () => {
           try {
             const {frame} = window.__yolomuxTestHelpers;
+            const originalFetch = window.fetch.bind(window);
+            const rawRequests = [];
+            const fixturePng = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), window.location.href);
+              if (url.pathname === '/api/fs/raw') {
+                rawRequests.push(`${url.pathname}${url.search}`);
+                return new Response(fixturePng, {status: 200, headers: {'Content-Type': 'image/png'}});
+              }
+              return originalFetch(input, options);
+            };
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -1900,6 +2018,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             const externalImage = preview.querySelector('img[alt="external"]');
             const externalInitial = imageSnapshot('external');
             const externalCompletion = waitImage(externalImage);
+            if (preview._previewAsync) await preview._previewAsync;
+            await Promise.all(Array.from(preview.querySelectorAll('img.markdown-preview-image')).map(waitImage));
             await Promise.all(fixedImages.map(waitImage));
             await externalCompletion;
             const initialImages = {
@@ -1917,7 +2037,6 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             if (missing) missing.dispatchEvent(new Event('error'));
             const brokenText = Array.from(preview.querySelectorAll('.markdown-image-error'))
               .find(node => String(node.textContent || '').includes('/home/test/repo/docs/missing.png'))?.textContent || '';
-            if (preview._previewAsync) await preview._previewAsync;
             await frame();
             await frame();
             const mermaidImage = preview.querySelector('.mermaid-preview-host img.mermaid-preview-image');
@@ -1936,6 +2055,7 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 config: window.__mermaidConfig || {},
               },
               previewText: preview.textContent || '',
+              rawRequests,
               errors: jsDebugFailureEvents('error'),
               rejections: jsDebugFailureEvents('rejection'),
             });
@@ -1945,17 +2065,25 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
         })();
         """
     )
+    assert_only_expected_browser_network_error(
+        browser,
+        url="https://example.test/image.png",
+        reason="net::ERR_NAME_NOT_RESOLVED",
+    )
     assert "error" not in metrics, metrics
     assert metrics["initialImages"]["local"]["exists"] is True, metrics
-    assert metrics["initialImages"]["local"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal%20pic.png", metrics
+    assert metrics["initialImages"]["local"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["local"]["naturalWidth"] > 0 and metrics["initialImages"]["local"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["local"]["resolvedPath"] == "/home/test/repo/docs/images/local pic.png", metrics
     assert metrics["initialImages"]["local"]["originalSrc"] == "./images/local pic.png?cache=1#frag", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["local"]["className"], metrics
-    assert metrics["initialImages"]["bare"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fbare.png", metrics
+    assert metrics["initialImages"]["bare"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["bare"]["naturalWidth"] > 0 and metrics["initialImages"]["bare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["bare"]["resolvedPath"] == "/home/test/repo/docs/images/bare.png", metrics
     assert metrics["initialImages"]["bare"]["originalSrc"] == "images/bare.png", metrics
     assert "markdown-preview-image" in metrics["initialImages"]["bare"]["className"], metrics
-    assert metrics["initialImages"]["htmlBare"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fhtml-bare.png", metrics
+    assert metrics["initialImages"]["htmlBare"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["htmlBare"]["naturalWidth"] > 0 and metrics["initialImages"]["htmlBare"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["htmlBare"]["resolvedPath"] == "/home/test/repo/docs/images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["originalSrc"] == "images/html-bare.png", metrics
     assert metrics["initialImages"]["htmlBare"]["widthAttr"] == "300", metrics
@@ -1970,8 +2098,16 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["initialImages"]["fixedTall"]["naturalWidth"] == 120 and metrics["initialImages"]["fixedTall"]["naturalHeight"] == 720, metrics
     assert abs(metrics["initialImages"]["fixedWide"]["renderedWidth"] - 220) <= 1, metrics
     assert abs(metrics["initialImages"]["fixedTall"]["renderedWidth"] - 220) <= 1, metrics
-    assert metrics["initialImages"]["svg"]["src"] == "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg", metrics
+    assert metrics["initialImages"]["svg"]["src"].startswith("blob:"), metrics
+    assert metrics["initialImages"]["svg"]["naturalWidth"] > 0 and metrics["initialImages"]["svg"]["naturalHeight"] > 0, metrics
     assert metrics["initialImages"]["svg"]["resolvedPath"] == "/home/test/repo/assets/logo.svg", metrics
+    for expected in (
+        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Flocal%20pic.png",
+        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fbare.png",
+        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fimages%2Fhtml-bare.png",
+        "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fassets%2Flogo.svg",
+    ):
+        assert expected in metrics["rawRequests"], metrics
     assert metrics["initialImages"]["external"]["src"] == "https://example.test/image.png", metrics
     assert metrics["initialImages"]["external"]["resolvedPath"] == "", metrics
     assert metrics["initialImages"]["unsafe"]["exists"] is True, metrics
@@ -1993,11 +2129,6 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
-    assert_only_expected_browser_network_error(
-        browser,
-        url="https://example.test/image.png",
-        reason="net::ERR_NAME_NOT_RESOLVED",
-    )
 
 
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
@@ -2370,6 +2501,13 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
         (async () => {
           try {
             const {frame} = window.__yolomuxTestHelpers;
+            const originalFetch = window.fetch.bind(window);
+            const rawRequests = [];
+            window.fetch = async (input, options = {}) => {
+              const url = new URL(String(input), window.location.href);
+              if (url.pathname === '/api/fs/raw') rawRequests.push(`${url.pathname}${url.search}`);
+              return originalFetch(input, options);
+            };
             const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -2426,12 +2564,14 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
             writeFilePreviewPopoutDocument(path, iframe.contentWindow, completed);
             const doc = iframe.contentDocument;
             const root = doc.querySelector('[data-preview-root]');
+            const rawImage = root?.querySelector('img[alt="local"]');
             done({
               immediateText: immediate.html,
               completedText: completed.html,
               rootClass: root?.className || '',
               rootHtml: root?.innerHTML || '',
-              rawImageSrc: root?.querySelector('img[alt="local"]')?.getAttribute('src') || '',
+              rawImageSrc: rawImage?.getAttribute('src') || '',
+              rawRequests,
               mermaidExists: Boolean(root?.querySelector('img.mermaid-preview-image')),
               mermaidSrcPrefix: String(root?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
               toolbarText: doc.querySelector('.file-preview-popout-title')?.textContent || '',
@@ -2450,8 +2590,9 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
     # The "Rendering..." placeholder reuses the shared blinking-ellipsis loader, not a static string.
     assert "moving-ellipsis" in metrics["immediateText"], metrics
     assert "Rendering Mermaid diagram" not in metrics["completedText"], metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["completedText"], metrics
-    assert metrics["rawImageSrc"] in ("", "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png"), metrics
+    assert "blob:" in metrics["completedText"], metrics
+    assert metrics["rawImageSrc"] == "" or metrics["rawImageSrc"].startswith("blob:"), metrics
+    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Fdocs%2Fassets%2Fpopout.png" in metrics["rawRequests"], metrics
     assert metrics["mermaidExists"] is True, metrics
     assert metrics["mermaidSrcPrefix"] in ("blob:", "data:"), metrics
     assert "README.md" in metrics["toolbarText"], metrics

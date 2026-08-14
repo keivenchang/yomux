@@ -4,11 +4,14 @@
 import importlib.util
 import os
 import signal
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tools import yostats_capture_common
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,18 @@ def test_capture_tools_share_proc_cpu_reader_and_positive_validators():
     assert "def process_cpu_seconds" not in active_source
     assert "def process_cpu_time_seconds" not in contention_source
     assert "process_cpu_seconds(pid)" in contention_source
+
+
+def test_process_cpu_seconds_falls_back_to_portable_ps_without_procfs(tmp_path):
+    def run(command, **_kwargs):
+        assert command == ["ps", "-p", "4242", "-o", "time="]
+        return subprocess.CompletedProcess(command, 0, "1-02:03:04.50\n", "")
+
+    assert yostats_capture_common.process_cpu_seconds(
+        4242,
+        proc_root=tmp_path / "missing-proc",
+        runner=run,
+    ) == 93784.5
 
 
 def load_tool_module():

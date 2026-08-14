@@ -17,6 +17,7 @@ function test(label, fn) {
 const menus = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
 const terminalFacade = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
 const terminalBoot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const terminalShortcuts = fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
 const filePanelCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 const panel = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
@@ -25,8 +26,6 @@ const actions = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'u
 const dockview = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
 const coreUtils = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const layoutState = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
-const shareState = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
-const shareAdmin = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
 
 test('File submenu restores the desktop triplet through the layout owner', () => {
   assert.match(menus, /function fileSurfaceMenuItems\(\)[\s\S]*Array\.isArray\(fileSurfaceItems\)[\s\S]*openFileSurfaceFromMenu\(item\)/);
@@ -51,20 +50,11 @@ test('File destinations have a single-line icon label detail presentation', () =
 test('File navigation destinations share one localized alphabetical sort owner', () => {
   assert.match(menus, /function compareLocalizedMenuLabels\(left, right\)[\s\S]*localeCompare/);
   assert.match(menus, /function sortMenuCommandsByLabel\(commands\)[\s\S]*compareLocalizedMenuLabels\(left\?\.label, right\?\.label\)/);
-  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*menu\.file\.share[\s\S]*common\.preferences[\s\S]*\]\)/);
-});
-
-test('YO!share quarantine removes every host UI entry point behind one state owner', () => {
-  assert.match(shareState, /const shareFeatureQuarantined = true/);
-  assert.match(menus, /\.\.\.\(!shareFeatureQuarantined \? \[menuCommand\(t\('menu\.file\.share'/);
-  assert.match(layoutState, /\.\.\.\(!shareFeatureQuarantined \? \[\{label: t\('brand\.share'/);
-  assert.match(terminalBoot, /if \(key === 'k' && \(event\.shiftKey \|\| !shareFeatureQuarantined\)\)/);
-  assert.match(shareAdmin, /async function showShareModal\(\) \{\s+if \(shareFeatureQuarantined\) return;/);
-  assert.match(shareAdmin, /if \(shareFeatureQuarantined \|\| !shareHasActiveShare\(\)\)/);
+  assert.match(menus, /const fileDestinationCommands = sortMenuCommandsByLabel\(\[[\s\S]*fileMenuPanelCommands\(\)[\s\S]*common\.preferences[\s\S]*\]\)/);
 });
 
 test('Cmd/Ctrl+B delegates the triplet transaction without terminal fallback placement', () => {
-  const shortcut = terminalBoot.slice(terminalBoot.indexOf('function toggleFileExplorerShortcut()'), terminalBoot.indexOf('function handleFocusedTerminalCopyShortcut()'));
+  const shortcut = terminalShortcuts.slice(terminalShortcuts.indexOf('function toggleFileExplorerShortcut()'), terminalShortcuts.indexOf('function handleFocusedTerminalCopyShortcut()'));
   assert.match(shortcut, /typeof toggleAllFileSurfaces === 'function'\) return toggleAllFileSurfaces\(\)/);
   assert.doesNotMatch(shortcut, /applyLayoutSlots\(|selectSession\(fileExplorerItemId\)|layoutWithoutItem/);
 });

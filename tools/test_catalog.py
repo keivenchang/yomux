@@ -135,8 +135,8 @@ NODE_SHARD_LAUNCHER: Final[str] = "tests/layout_url.test.js"
 # The one place a Node shard may be kept out of the gate. Every other `tests/*.test.js` is derived
 # from disk below, so a new shard joins the gate by existing rather than by being remembered here.
 # This list previously enumerated its 14 members by hand and silently omitted three whole shards,
-# including tests/share_theme.test.js and its ~2,700 assertions over quick-open, Finder, Differ,
-# editor, terminal, and layout: the gate reported green without ever running them.
+# including cross-surface state assertions over quick-open, Finder, Differ, editor, terminal, and
+# layout: the gate reported green without ever running them.
 NODE_LAYOUT_EXCLUDED_FILES: Final[tuple[str, ...]] = (
     # gate_panels asserts on the decorator prose of tests/test_gate_panels.py, whose own
     # xfail(strict=True) markers already fail the pytest-browser lane if those gates start passing.
@@ -164,6 +164,8 @@ NODE_LAYOUT_FILES: Final[tuple[str, ...]] = discover_node_layout_files()
 # registered shard. Keeping them explicit makes architecture budgets recursive
 # without mistaking generic DOM helpers for assertion owners.
 NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
+    "tests/browser_helpers/cross_surface_quick_open_suite.js",
+    "tests/browser_helpers/editor_preview_info_graph_suite.js",
     "tests/browser_helpers/editor_preview_suite.js",
 )
 
@@ -171,7 +173,9 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 # collecting facades retain the historical pytest node IDs. These are explicit
 # because pytest collection alone cannot discover a non-test-named owner.
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
+    "tests/helpers/fixture_http_server.py",
     "tests/subsystems/app_darwin_memory.py",
+    "tests/subsystems/app_jobd_product.py",
     "tests/subsystems/browser_harness_lifecycle.py",
     "tests/subsystems/stats_24h_http.py",
 )

@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import copy
 import hashlib
 from http import HTTPStatus
+import inspect
 import io
 import json
 import os
@@ -32,6 +33,7 @@ from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
 from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
 from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
 from tests.subsystems import app_darwin_memory
+from tests.subsystems import app_jobd_product
 from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
@@ -76,81 +78,10 @@ def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeyp
 def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected): app_darwin_memory.assert_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected)
 
 
-def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-    responses = iter([
-        ({"ok": True, "state": "pending", "generation": 1}, None),
-        ({"ok": True, "state": "ready", "generation": 2}, b"ready"),
-    ])
-
-    class Client:
-        def product(self, key):
-            assert key == "product-key"
-            return next(responses)
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
-
-    assert (meta["generation"], body, state) == (2, b"ready", "ready")
-    assert sleeps == [app_module.JOBD_PRODUCT_POLL_INITIAL_SECONDS]
-
-
-def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-
-    class Client:
-        def product(self, key):
-            return {"ok": True, "state": "pending", "generation": 1}, None
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-    monkeypatch.setattr(app_module, "JOBD_PRODUCT_POLL_INITIAL_SECONDS", 0.25)
-
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 0.3)
-
-    assert (meta, body, state) == (None, None, "pending")
-    assert sleeps == [0.25, pytest.approx(0.05)]
-    assert sum(sleeps) == pytest.approx(0.3)
-
-
-def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-
-    class Client:
-        def product(self, key):
-            return ({"ok": True, "state": "ready", "generation": 2}, b"ready") if len(sleeps) == 3 else ({"ok": True, "state": "pending", "generation": 1}, None)
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
-    assert (meta["generation"], body, state) == (2, b"ready", "ready")
-    assert sleeps == [0.25, 0.5, 1.0]
-
-
-def test_wait_for_jobd_product_keeps_broker_failure_distinct():
-    class Client:
-        def product(self, key):
-            return {"ok": False}, None
-
-    with pytest.raises(app_module.JobdProductRpcUnavailable, match="rpc unavailable"):
-        app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch)
+def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch)
+def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch)
+def test_wait_for_jobd_product_keeps_broker_failure_distinct(): app_jobd_product.assert_wait_for_jobd_product_keeps_broker_failure_distinct()
 
 
 class StatsRoleOwner:
@@ -2382,470 +2313,6 @@ def test_auto_approve_agent_targets_include_codex_process_under_node(monkeypatch
     webapp = app_module.TmuxWebtermApp(["8002"])
     try:
         assert webapp.auto_approve_agent_targets("8002", payload=signal_payload) == ["%73", "%5"]
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_token_url_seeds_whole_layout_sessions_and_layout():
-    webapp = app_module.TmuxWebtermApp(["6", "7"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            sessions=["6", "7"],
-            base_url="https://yolo.example.test:8002",
-            created_by="keivenc",
-            layout="row@50(left,slot1)",
-            tabs="left:6;slot1:7",
-            finder={"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"},
-            scheme="https",
-            request_is_https=True,
-            tls_available=True,
-        )
-        parsed = urlparse(payload["url"])
-        params = parse_qs(parsed.query)
-
-        assert status == HTTPStatus.OK
-        assert payload["ok"] is True
-        assert payload["session"] == "6"
-        assert parsed.scheme == "https"
-        assert parsed.netloc == "yolo.example.test:8002"
-        assert parsed.path == f"/share/{payload['short_id']}"
-        assert parsed.fragment == f"t={payload['token']}"
-        assert "token" not in params
-        assert "sessions" not in params
-        assert "layout" not in params
-        assert "tabs" not in params
-        assert payload["sessions"] == ["6", "7"]
-        assert payload["layout"] == "row@50(left,slot1)"
-        assert payload["tabs"] == "left:6;slot1:7"
-        assert payload["finder"] == {"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"}
-        record = webapp.verify_share_token(payload["token"])
-        assert record["session"] == "6"
-        assert record["sessions"] == ["6", "7"]
-        assert record["finder"] == {"root": "/home/keivenc/yolomux.dev1", "rootMode": "fixed", "mode": "tabber", "session": "7"}
-        assert record["mode"] == "ro"
-        assert record["scheme"] == "https"
-        assert record["max_viewers"] == app_module.SHARE_MAX_VIEWERS_DEFAULT
-        assert webapp.share_record_for_short_id(payload["short_id"])["token"] == payload["token"]
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_debug_profile_is_opt_in_and_redacted(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module, "SHARE_DEBUG_PROFILE_LOG_DIR", tmp_path)
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        disabled, disabled_status = webapp.create_share_token("6", 900)
-        enabled, enabled_status = webapp.create_share_token("6", 900, debug_profile=True)
-
-        assert disabled_status == HTTPStatus.OK
-        assert enabled_status == HTTPStatus.OK
-        assert disabled["debug_profile"] is False
-        assert disabled["debugProfile"] is False
-        assert enabled["debug_profile"] is True
-        assert enabled["debugProfile"] is True
-        assert webapp.verify_share_token(disabled["token"])["debug_profile"] is False
-        assert webapp.verify_share_token(enabled["token"])["debug_profile"] is True
-
-        denied, denied_status = webapp.record_share_debug_profile(disabled["token"], {"kind": "share-replay-health"})
-        assert denied_status == HTTPStatus.FORBIDDEN
-        assert denied["error"] == "debug/profiling upload is not enabled for this share"
-        assert denied["user_message"]["key"] == "share.error.debugProfileDisabled"
-
-        payload, status = webapp.record_share_debug_profile(
-            enabled["token"],
-            {
-                "kind": "share-geometry-drift",
-                "viewerId": "viewer-a",
-                "url": f"https://host.example/share/{enabled['short_id']}#t={enabled['token']}",
-                "nested": {"shareToken": enabled["token"], "text": f"token={enabled['token']}"},
-            },
-            ip="203.0.113.9",
-            user_agent="Mozilla/5.0 Version/26.0 Safari/605.1.15",
-        )
-
-        assert status == HTTPStatus.OK
-        assert payload["ok"] is True
-        assert payload["logged"] is True
-        record = webapp.verify_share_token(enabled["token"])
-        stored_text = json.dumps(record["debug_profile_events"][-1], sort_keys=True)
-        assert record["debug_profile_events"][-1]["browser"] == "Safari 26.0"
-        assert "share-geometry-drift" in stored_text
-        assert enabled["token"] not in stored_text
-        assert f"/share/{enabled['short_id']}" not in stored_text
-        assert "[redacted-share-token]" in stored_text
-        log_text = (tmp_path / f"{enabled['short_id']}.jsonl").read_text(encoding="utf-8")
-        assert enabled["token"] not in log_text
-        assert f"/share/{enabled['short_id']}" not in log_text
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_token_clamps_mode_scheme_viewers_and_allows_concurrent_shares():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            base_url="https://yolo.example.test:8002",
-            mode="rw",
-            scheme="http",
-            request_is_https=True,
-            tls_available=True,
-        )
-        assert status == HTTPStatus.BAD_REQUEST
-        assert payload["error"] == "write shares require https"
-        assert payload["user_message"]["key"] == "share.error.writeHttps"
-
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            base_url="https://yolo.example.test:8002",
-            mode="rw",
-            scheme="https",
-            max_viewers=999,
-            request_is_https=True,
-            tls_available=True,
-        )
-        assert status == HTTPStatus.OK
-        assert payload["mode"] == "rw"
-        assert payload["scheme"] == "https"
-        assert payload["max_viewers"] == app_module.SHARE_MAX_VIEWERS_HARD_LIMIT
-
-        second, second_status = webapp.create_share_token(
-            "6",
-            120,
-            mode="ro",
-            scheme="http",
-            request_is_https=False,
-            tls_available=True,
-        )
-        assert second_status == HTTPStatus.OK
-        assert second["mode"] == "ro"
-        assert second["scheme"] == "http"
-        active = webapp.active_share_payload()[0]
-        assert {share["token"] for share in active["shares"]} == {payload["token"], second["token"]}
-        assert {share["mode"] for share in active["shares"]} == {"rw", "ro"}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_token_forces_readonly_without_tls():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            base_url="https://yolo.example.test:8002",
-            mode="rw",
-            scheme="https",
-            request_is_https=False,
-            tls_available=False,
-        )
-
-        assert status == HTTPStatus.OK
-        assert payload["mode"] == "ro"
-        assert payload["scheme"] == "http"
-        assert urlparse(payload["url"]).scheme == "http"
-    finally:
-        webapp.control_server.stop()
-
-
-def test_active_share_payload_and_stop_active_share():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        empty, empty_status = webapp.active_share_payload(base_url="https://yolo.example.test:8002")
-        assert empty_status == HTTPStatus.OK
-        assert empty == {"ok": True, "active": False, "shares": []}
-
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            base_url="https://yolo.example.test:8002",
-            scheme="https",
-            request_is_https=True,
-            tls_available=True,
-            layout="left",
-            tabs="left:6",
-            ui_state={"viewport": {"width": 1440, "height": 900}, "editor": {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}},
-        )
-        assert status == HTTPStatus.OK
-
-        active, active_status = webapp.active_share_payload(base_url="https://new-host.example.test:9443")
-        assert active_status == HTTPStatus.OK
-        assert active["active"] is True
-        assert active["token"] == payload["token"]
-        assert active["url"].startswith("https://new-host.example.test:9443/share/")
-        assert active["url"].endswith(f"#t={payload['token']}")
-        assert active["shares"][0]["token"] == payload["token"]
-
-        scoped_status, scoped_status_code = webapp.share_status_payload(payload["token"], base_url="https://viewer.example.test:9443")
-        assert scoped_status_code == HTTPStatus.OK
-        assert scoped_status["token"] == payload["token"]
-        assert scoped_status["url"].startswith("https://viewer.example.test:9443/share/")
-        assert scoped_status["shares"] == []
-        assert scoped_status["layout"] == "left"
-        assert scoped_status["tabs"] == "left:6"
-        assert scoped_status["viewport"] == {"width": 1440, "height": 900}
-        assert scoped_status["uiState"]["editor"] == {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}
-
-        missing_status, missing_status_code = webapp.share_status_payload("wrong-token")
-        assert missing_status_code == HTTPStatus.UNAUTHORIZED
-        assert missing_status["active"] is False
-        assert missing_status["user_message"]["key"] == "share.error.tokenExpired"
-
-        second, second_status = webapp.create_share_token(
-            "6",
-            120,
-            base_url="http://new-host.example.test:9443",
-            scheme="http",
-            request_is_https=False,
-            tls_available=True,
-        )
-        assert second_status == HTTPStatus.OK
-
-        scoped, scoped_status = webapp.stop_active_share(payload["short_id"])
-        assert scoped_status == HTTPStatus.OK
-        assert scoped["stopped"] == 1
-        assert scoped["active"] is True
-        assert webapp.verify_share_token(payload["token"]) is None
-        assert webapp.verify_share_token(second["token"]) is not None
-
-        stopped, stopped_status = webapp.stop_active_share()
-        assert stopped_status == HTTPStatus.OK
-        assert stopped["stopped"] == 1
-        assert webapp.verify_share_token(second["token"]) is None
-        assert webapp.active_share_payload()[0] == {"ok": True, "active": False, "shares": []}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_viewer_registration_enforces_cap_and_decrements():
-    webapp = app_module.TmuxWebtermApp(["6", "7"])
-    try:
-        payload, status = webapp.create_share_token("6", 900, sessions=["6", "7"], max_viewers=1)
-        assert status == HTTPStatus.OK
-
-        user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
-        viewer, viewer_status = webapp.register_share_viewer(payload["token"], "6", "viewer-a", "203.0.113.4", user_agent)
-        assert viewer_status == HTTPStatus.OK
-        assert viewer["viewers"] == 1
-        active = webapp.active_share_payload()[0]
-        assert active["viewers"] == 1
-        assert active["viewer_details"][0]["ip"] == "203.0.113.4"
-        assert active["viewer_details"][0]["browser"] == "Chrome 125.0.0.0"
-        assert active["viewer_details"][0]["connected_seconds"] >= 0
-
-        same_viewer, same_viewer_status = webapp.register_share_viewer(payload["token"], "7", "viewer-a")
-        assert same_viewer_status == HTTPStatus.OK
-        assert same_viewer["viewers"] == 1
-        assert webapp.active_share_payload()[0]["viewers"] == 1
-
-        wrong_session, wrong_status = webapp.register_share_viewer(payload["token"], "8")
-        assert wrong_status == HTTPStatus.FORBIDDEN
-        assert wrong_session["error"] == "share token is scoped to a different session"
-        assert wrong_session["user_message"]["key"] == "share.error.sessionScope"
-
-        rejected, rejected_status = webapp.register_share_viewer(payload["token"], "6", "viewer-b")
-        assert rejected_status == HTTPStatus.FORBIDDEN
-        assert rejected["error"] == "share viewer limit reached"
-        assert rejected["user_message"]["key"] == "share.error.viewerLimitReached"
-        status_frame = webapp.share_status_frame_payload(payload["token"])
-        assert status_frame["viewer_details"][0]["ip"] == "203.0.113.4"
-        assert status_frame["viewer_details"][0]["browser"] == "Chrome 125.0.0.0"
-
-        assert webapp.unregister_share_viewer(payload["token"], "viewer-a") == 1
-        assert webapp.unregister_share_viewer(payload["token"], "viewer-a") == 0
-        assert webapp.active_share_payload()[0]["viewers"] == 0
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_token_revokes_when_session_disappears():
-    webapp = app_module.TmuxWebtermApp(["6", "7"])
-    try:
-        payload, status = webapp.create_share_token("6", 900, sessions=["6", "7"])
-        assert status == HTTPStatus.OK
-        assert webapp.verify_share_token(payload["token"])["session"] == "6"
-        assert webapp.verify_share_token(payload["token"])["sessions"] == ["6", "7"]
-
-        assert webapp.revoke_share_tokens_for_missing_sessions({"6"}) == 1
-        assert webapp.verify_share_token(payload["token"]) is None
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_extend_updates_expiry_and_status_frame_is_secret_free():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            base_url="https://yolo.example.test:8002",
-            scheme="https",
-            request_is_https=True,
-            tls_available=True,
-            max_viewers=5,
-        )
-        assert status == HTTPStatus.OK
-        before = payload["expires_at"]
-
-        extended, extend_status = webapp.extend_share_token(payload["short_id"], 600)
-
-        assert extend_status == HTTPStatus.OK
-        assert extended["extended"] is True
-        assert extended["expires_at"] > before
-        status_frame = webapp.share_status_frame_payload(payload["token"])
-        assert status_frame["active"] is True
-        assert status_frame["short_id"] == payload["short_id"]
-        assert status_frame["viewers"] == 0
-        assert status_frame["max_viewers"] == 5
-        assert "token" not in status_frame
-        assert "url" not in status_frame
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_record_ui_state_updates_late_viewer_layout_and_files():
-    webapp = app_module.TmuxWebtermApp(["6", "7"])
-    try:
-        payload, status = webapp.create_share_token("6", 900, sessions=["6", "7"], tabs="left:6")
-        assert status == HTTPStatus.OK
-        token = payload["token"]
-
-        webapp.update_share_record_ui_state(token, {
-            "layout": "row@60(left,slot1)",
-            "tabs": "left:6;slot1:file:/tmp/a.md,filediff:/tmp/c.py,filecopy:copy-1:/tmp/d.py,image:/tmp/screen.png",
-            "finder": {"root": "/tmp", "rootMode": "fixed", "mode": "tabber", "session": "7"},
-            "uiState": {"editor": {"modes": [{"path": "/tmp/b.md", "mode": "split"}]}},
-        })
-
-        record = webapp.verify_share_token(token)
-        assert record["layout"] == "row@60(left,slot1)"
-        assert record["tabs"] == "left:6;slot1:file:/tmp/a.md,filediff:/tmp/c.py,filecopy:copy-1:/tmp/d.py,image:/tmp/screen.png"
-        assert record["finder"] == {"root": "/tmp", "rootMode": "fixed", "mode": "tabber", "session": "7"}
-        assert record["ui_state"] == {"editor": {"modes": [{"path": "/tmp/b.md", "mode": "split"}]}}
-        assert webapp.share_record_allows_file_path(record, "/tmp/a.md")
-        assert webapp.share_record_allows_file_path(record, "/tmp/b.md")
-        assert webapp.share_record_allows_file_path(record, "/tmp/c.py")
-        assert webapp.share_record_allows_file_path(record, "/tmp/d.py")
-        assert webapp.share_record_allows_file_path(record, "/tmp/screen.png")
-        assert not webapp.share_record_allows_file_path(record, "/tmp/private.md")
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_record_ui_state_updates_late_viewer_sessions_from_layout_tabs():
-    webapp = app_module.TmuxWebtermApp(["6", "7"])
-    try:
-        payload, status = webapp.create_share_token("6", 900, sessions=["6"], tabs="left:6")
-        assert status == HTTPStatus.OK
-        token = payload["token"]
-
-        webapp.update_share_record_ui_state(token, {
-            "layout": "row@50(left,right)",
-            "tabs": "left:6;right:7,ghost,file:/tmp/a.md",
-            "finder": {"root": "/tmp", "rootMode": "fixed", "mode": "diff", "session": "7"},
-        })
-
-        record = webapp.verify_share_token(token)
-        assert record["session"] == "6"
-        assert record["sessions"] == ["6", "7"]
-        assert record["finder"]["session"] == "7"
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_ui_state_normalizes_viewport_and_appearance():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        normalized = webapp.normalize_share_ui_state({
-            "viewport": {"w": "1440.4", "h": "900.2"},
-            "appearance": {
-                "locale": "ja",
-                "languagePref": "system",
-                "uiFontSize": 999,
-                "terminalFontSize": 15,
-                "terminalLineHeight": 1,
-                "editorFontSize": 14,
-                "previewFontSize": 16,
-                "fileExplorerFontSize": 13,
-                "tabWidth": 240,
-                "paneSpacing": -4,
-                "theme": "dark",
-                "resolvedTheme": "dark",
-                "terminalTheme": "follow-app",
-                "activeColor": "green",
-                "separatorColor": "theme",
-                "unknown": "ignored",
-            },
-            "chrome": {"tabMetaVisible": False, "infoSubTab": "yoagent"},
-            "editor": {"modes": [{"path": "/tmp/a.py", "item": "file:/tmp/a.py", "mode": "diff", "diffExpandUnchanged": True}]},
-            "scroll": [
-                {"target": "preferences", "kind": "preferences", "top": "444.6", "left": 12, "ignored": "drop"},
-                {"target": "editor:file:/tmp/a.py:editor", "kind": "editor", "path": "/tmp/a.py", "item": "file:/tmp/a.py", "source": "editor", "top": 80, "left": 2, "anchor": 5, "head": 7},
-            ],
-        })
-        assert normalized["viewport"] == {"width": 1440, "height": 900}
-        assert normalized["appearance"]["uiFontSize"] == 20
-        assert normalized["appearance"]["paneSpacing"] == 0
-        assert normalized["appearance"]["locale"] == "ja"
-        assert normalized["appearance"]["languagePref"] == "system"
-        assert normalized["appearance"]["terminalTheme"] == "follow-app"
-        assert normalized["chrome"] == {"tabMetaVisible": False, "infoSubTab": "yoagent"}
-        assert normalized["editor"]["modes"][0]["diffExpandUnchanged"] is True
-        assert normalized["scroll"] == [
-            {"target": "preferences", "kind": "preferences", "top": 445, "left": 12},
-            {"target": "editor:file:/tmp/a.py:editor", "kind": "editor", "top": 80, "left": 2, "path": "/tmp/a.py", "item": "file:/tmp/a.py", "source": "editor", "anchor": 5, "head": 7},
-        ]
-        assert "unknown" not in normalized["appearance"]
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_ui_state_patch_merges_geometry_without_losing_editor_state():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            tabs="left:file:/tmp/a.md",
-            ui_state={"editor": {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}},
-        )
-        assert status == HTTPStatus.OK
-        webapp.update_share_record_ui_state(payload["token"], {"uiStatePatch": {"viewport": {"width": 1280, "height": 720}}})
-        webapp.update_share_record_ui_state(payload["token"], {"uiStateScroll": {"target": "preferences", "kind": "preferences", "top": 444, "left": 12}})
-        webapp.update_share_record_ui_state(payload["token"], {"uiStateScroll": {"target": "info", "kind": "info", "top": 20, "left": 30}})
-        record = webapp.verify_share_token(payload["token"])
-        assert record["ui_state"]["editor"] == {"modes": [{"path": "/tmp/a.md", "mode": "split"}]}
-        assert record["ui_state"]["viewport"] == {"width": 1280, "height": 720}
-        assert record["ui_state"]["scroll"] == [
-            {"target": "preferences", "kind": "preferences", "top": 444, "left": 12},
-            {"target": "info", "kind": "info", "top": 20, "left": 30},
-        ]
-        assert webapp.share_record_allows_file_path(record, "/tmp/a.md")
-    finally:
-        webapp.control_server.stop()
-
-
-def test_share_file_read_allowlist_tracks_current_editor_state():
-    webapp = app_module.TmuxWebtermApp(["6"])
-    try:
-        payload, status = webapp.create_share_token(
-            "6",
-            900,
-            tabs="left:6",
-            ui_state={"editor": {"modes": [{"path": "/tmp/a.md", "mode": "edit"}]}},
-        )
-        assert status == HTTPStatus.OK
-        record = webapp.verify_share_token(payload["token"])
-        assert webapp.share_record_allows_file_path(record, "/tmp/a.md")
-
-        webapp.update_share_record_ui_state(payload["token"], {"uiState": {"editor": {"modes": [{"path": "/tmp/b.md", "mode": "preview"}]}}})
-        record = webapp.verify_share_token(payload["token"])
-        assert not webapp.share_record_allows_file_path(record, "/tmp/a.md")
-        assert webapp.share_record_allows_file_path(record, "/tmp/b.md")
     finally:
         webapp.control_server.stop()
 
@@ -9803,6 +9270,10 @@ def test_context_product_unexpected_completion_failure_terminalizes_operation(mo
 
 
 def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypatch, tmp_path):
+    assert tuple(inspect.signature(app_module.TmuxWebtermApp.fs_batch_http_payload).parameters) == (
+        "self",
+        "payload",
+    )
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     actions = []
 
@@ -9851,6 +9322,7 @@ def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypat
         assert status == HTTPStatus.ACCEPTED
         operation_id = receipt["operation"]["id"]
         assert receipt["operation"]["kind"] == "fs_batch"
+        assert receipt["operation"]["context"]["session"] == ""
         assert receipt["operation"]["context"]["product_key"].startswith("fs-batch:")
         assert terminal.wait(2.0), "accepted filesystem batch did not publish terminal completion"
         result, result_status = webapp.operation_status_payload(operation_id)
@@ -11375,28 +10847,28 @@ def test_filesystem_operation_submission_is_stable_per_scope_and_watchd_revision
         "list",
         "/repo/./src",
         {"limit": "400"},
-        scope="share-token-a",
+        scope="user:admin:alice",
         generation="watchd:epoch-a:7",
     )
     second_payload, second_key = app_module.filesystem_operation_submission(
         "list",
         "/repo/src",
         {"limit": "400"},
-        scope="share-token-a",
+        scope="user:admin:alice",
         generation="watchd:epoch-a:7",
     )
     _, other_scope_key = app_module.filesystem_operation_submission(
         "list",
         "/repo/src",
         {"limit": "400"},
-        scope="share-token-b",
+        scope="user:admin:bob",
         generation="watchd:epoch-a:7",
     )
     _, newer_revision_key = app_module.filesystem_operation_submission(
         "list",
         "/repo/src",
         {"limit": "400"},
-        scope="share-token-a",
+        scope="user:admin:alice",
         generation="watchd:epoch-a:8",
     )
 
@@ -15844,6 +15316,23 @@ def test_resolve_yoagent_backend_auto_prefers_codex_then_claude(monkeypatch):
     monkeypatch.setattr(app_module, "agent_auth_status", status(False, False))
     assert app_module.resolve_yoagent_backend("claude") == "claude"
     assert app_module.resolve_yoagent_backend("deterministic") == "deterministic"
+
+
+def test_resolve_yoagent_backend_uses_shared_auth_availability_owner(monkeypatch):
+    statuses = {
+        "codex": {"installed": True, "logged_in": True, "shared_available": False},
+        "claude": {"installed": True, "logged_in": False, "shared_available": True},
+    }
+    seen = []
+    monkeypatch.setattr(app_module, "agent_auth_status", lambda: statuses)
+    monkeypatch.setattr(
+        app_module.yoagent_backends,
+        "agent_auth_entry_available",
+        lambda entry: seen.append(entry) or entry["shared_available"],
+    )
+
+    assert app_module.resolve_yoagent_backend("auto") == "claude"
+    assert seen == [statuses["codex"], statuses["claude"]]
 
 
 def test_yoagent_language_directive_only_for_non_english_locales():

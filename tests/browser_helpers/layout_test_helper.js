@@ -714,7 +714,6 @@ function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
 
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
   const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireTimeoutDelays', 'locationPort', 'locationHash', 'coarsePointer', 'hoverCapable', 'viewport', 'performance', 'PerformanceObserver'].includes(key)));
-  if (options.share && !bootstrapOverrides.share) bootstrapOverrides.share = options.share;
   const fireTimeoutDelays = new Set((Array.isArray(options.fireTimeoutDelays) ? options.fireTimeoutDelays : [])
     .map(Number)
     .filter(delay => Number.isFinite(delay) && delay >= 0));
@@ -902,7 +901,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // The bundle schedules the batched /api/fs/batch directory-listing flush via
     // setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs) — and 8ms is UNIQUE to that flush
     // (verified: no other bundle timer uses an 8ms delay). All other bundle timers (polls, debounces,
-    // share publishers) must stay no-ops here. So fire ONLY the 8ms flush, on a real setImmediate, so any
+    // periodic publishers) must stay no-ops here. So fire ONLY the 8ms flush, on a real setImmediate, so any
     // code that `await`s a directory listing settles instead of hanging forever (which used to leave the
     // trailing suite IIFE unsettled and silently exit 0 — see the suite watchdog + AGENTS.md note).
     // Synchronous back-to-back enqueues still batch into one request (no await between them = no yield),
@@ -1331,7 +1330,6 @@ globalThis.__layoutTestApi = {
   fileExplorerRootModeValue,
   setFileExplorerRootMode,
   scheduleFileExplorerActiveTabSyncForTest: scheduleFileExplorerActiveTabSync,
-  shareReadOnlyFinderStateIsHostOwnedForTest: shareReadOnlyFinderStateIsHostOwned,
   fileExplorerLabel,
   fileExplorerPanelCloseClass,
   fileEditorPanelCloseClass,
@@ -1384,6 +1382,8 @@ globalThis.__layoutTestApi = {
       resourceRevisions: Object.fromEntries(clientEventTransportState.resourceRevisions),
       queued: clientEventTransportState.queue.size,
       frame: clientEventTransportState.frame,
+      demandTimer: clientEventTransportState.demandTimer,
+      disconnectTimer: clientEventTransportState.disconnectTimer,
       resyncTimer: clientEventTransportState.resyncTimer,
     };
   },
@@ -1407,6 +1407,11 @@ globalThis.__layoutTestApi = {
   fileExplorerPaneTabHtml,
   makeButtonForTest: makeButton,
   bindOnceForTest: bindOnce,
+  bindScopedOnceForTest: bindScopedOnce,
+  normalizeAppOwnedControlsForTest: normalizeAppOwnedControls,
+  reconcilePanelBodyForTest: reconcilePanelBody,
+  createHoverPopoverForTest: createHoverPopover,
+  bindPanelPopoverForTest: bindPanelPopover,
   debugRuntimeFacadeForTest: debugRuntimeFacade,
   terminalRuntimeFacadeForTest: terminalRuntimeFacade,
   setStatsCurrentNamespaceForTest(value) { globalThis.YOLOmuxStatsCurrent = value; },
@@ -1466,8 +1471,6 @@ globalThis.__layoutTestApi = {
   recordClientPerfCounterForTest: recordClientPerfCounter,
   clientPerfSummaryForTest: clientPerfSummary,
   clearClientPerfCountersForTest: clearClientPerfCounters,
-  shareDebugTextForClipboardForTest: shareDebugTextForClipboard,
-  shareDebugProfileUploadPayloadForTest: shareDebugProfileUploadPayload,
   recordJsDebugEventForTest: recordJsDebugEvent,
   jsDebugCurrentObservationFromEventForTest: jsDebugCurrentObservationFromEvent,
   jsDebugObservationBatchForEntriesForTest: jsDebugObservationBatchForEntries,
@@ -1843,6 +1846,7 @@ globalThis.__layoutTestApi = {
   flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
   scheduleReconnectResyncForTest: scheduleReconnectResync,
   installClientEventStreamForTest: installClientEventStream,
+  disposeClientEventTransportForTest: disposeClientEventTransportLifecycle,
   commandPaletteItemScore,
   commandPaletteRankItems,
   commandPaletteCandidateItems,
@@ -2260,7 +2264,6 @@ globalThis.__layoutTestApi = {
       return {matches, addEventListener() {}, addListener() {}};
     };
   },
-  shareResolvedGlobalThemeModeForTest() { return shareResolvedGlobalThemeMode; },
   terminalThemeModeForTest() { return terminalThemeMode; },
   setTerminalThemeModeForTest(value) { terminalThemeMode = normalizeTerminalThemeMode(value); },
   expandPaneFromLayout,
@@ -2367,6 +2370,8 @@ globalThis.__layoutTestApi = {
   renderFileEditorPanel,
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
+  sourcePositionForPreviewScrollForTest: sourcePositionForPreviewScroll,
+  editorScrollTopForSourcePositionForTest: editorScrollTopForSourcePosition,
   fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
   reloadOpenFileFromDiskForTest: reloadOpenFileFromDisk,
@@ -2439,6 +2444,10 @@ globalThis.__layoutTestApi = {
   changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
   rawFileUrl,
   rawFileDownloadUrl,
+  fetchRawFileBlobForTest: fetchRawFileBlob,
+  installRawFileMediaSourceForTest: installRawFileMediaSource,
+  releaseRawFileMediaSourceForTest: releaseRawFileMediaSource,
+  releaseRawFileMediaSourcesForTest: releaseRawFileMediaSources,
   previewFileActionLinksForTest: previewFileActionLinks,
   zipFileDownloadUrl,
   downloadFilenameFromContentDisposition,
@@ -2676,8 +2685,6 @@ globalThis.__layoutTestApi = {
   paneStateWithTabs,
   emptyPaneState,
   emptyPlaceholderPaneState,
-  shareLayoutSeed,
-  shareSlotDigestSnapshot,
   terminalWheelSignedLines,
   terminalWheelEventIsDiscrete,
   terminalTouchGestureDecision,
@@ -2879,146 +2886,7 @@ globalThis.__layoutTestApi = {
   appSpaceRect,
   appSpacePoint,
   visualPointFromAppSpace,
-  setAppMirrorTransformForTest: setAppMirrorTransform,
-  ensureShareMirrorStageForTest: ensureShareMirrorStage,
-  shareMirrorFitTransform,
-  normalizeShareViewFit,
-  shareAppearanceSnapshotForTest: shareAppearanceSnapshot,
-  applyShareAppearanceStateForTest: applyShareAppearanceState,
-  shareCreateFormHtmlForTest: shareCreateFormHtml,
-  shareCreatePayloadFromFormForTest: shareCreatePayloadFromForm,
-  shareBuildUiMessageForTest: shareBuildUiMessage,
-  setActiveSharesForTest(shares) { setActiveShares(shares || []); },
-  syncShareRuntimeIntervalsForTest: syncShareRuntimeIntervals,
-  shareHostStatusBackupPollDueForTest: shareHostStatusBackupPollDue,
-  setShareHostSocketForTest(token, socket) {
-    const record = shareHostConnectionRecord(token, {create: true});
-    if (record) record.socket = socket;
-  },
-  shareHostQueueForTest(token) { return [...(shareHostConnectionRecord(token)?.queue || [])]; },
-  shareHostConnectionCountForTest() { return shareSenderRecordEntries('connection').length; },
-  shareHostConnectionRecordForTest(token) { return shareHostConnectionRecord(token); },
-  shareSenderRecordForTest(key) { return shareSenderRecord(key, {create: false}); },
-  enqueueShareHostMessageForTest: enqueueShareHostMessage,
-  ensureShareHostSocketForTest: ensureShareHostSocket,
-  ensureShareHostSocketsForTest: ensureShareHostSockets,
-  sharePublishPointerEventForTest: sharePublishPointerEvent,
-  applyShareUiMessageForTest: applyShareUiMessage,
-  shareMirrorProtocolForTest: shareMirrorProtocol,
-  shareReplayFeatureEnabledForTest: shareReplayFeatureEnabled,
-  shareReplaySemanticEscapeEnabledForTest() { return shareReplaySemanticEscapeEnabled === true; },
-  shareReadOnlyReplayModeEnabledForTest: shareReadOnlyReplayModeEnabled,
-  shareViewModeForTest() { return shareViewMode; },
-  shareSemanticReadOnlyMirrorEnabledForTest: shareSemanticReadOnlyMirrorEnabled,
-  shareReplayShellEnabledForTest: shareReplayShellEnabled,
-  installShareReplayShellForTest: installShareReplayShell,
-  shareReplayShellStateForTest() { return {...shareReplayShellState}; },
-  setShareReplaySequenceStateForTest(epoch, sequence) {
-    shareReplayShellActive = true;
-    shareReplayShellState = {status: 'mirrored'};
-    shareReplayState.resetViewerSequence(epoch, sequence);
-  },
-  shareReplayNodeMapSizeForTest() { return shareReplayNodeMap.size; },
-  shareReplayTerminalPlaceholderCountForTest() { return shareReplayTerminalPlaceholders.size; },
-  shareReplayMutationEntriesForTest: shareReplayMutationEntries,
-  shareReplayEnqueueMutationRecordsForTest: shareReplayEnqueueMutationRecords,
-  shareReplayFlushMutationDeltasForTest: shareReplayFlushMutationDeltas,
-  shareReplayScrollEntryForElementForTest: shareReplayScrollEntryForElement,
-  shareReplayScrollSnapshotForTest: shareReplayScrollSnapshot,
-  scheduleShareReplayScrollPublishForElementForTest: scheduleShareReplayScrollPublishForElement,
-  shareReplayPointerPayloadForTest: shareReplayPointerPayload,
-  shareReplayApplyPointerForTest: shareReplayApplyPointer,
-  renderSharePointerGhostForTest: renderSharePointerGhost,
-  sharePointerRecordsForTest() {
-    return shareSenderRecordEntries('pointer').map(([sender, record]) => ({
-      sender,
-      ghost: record.pointer.ghost,
-      hideTimer: record.pointer.hideTimer,
-    }));
-  },
-  shareReplayDeltaSequenceStatusForTest: shareReplayDeltaSequenceStatus,
-  shareReplayDeltaCanApplyBestEffortForTest: shareReplayDeltaCanApplyBestEffort,
-  applyShareReplayKeyframeForTest: applyShareReplayKeyframe,
-  applyShareReplayDeltaForTest: applyShareReplayDelta,
-  bindShareReplayPaneTabPopoversForTest: bindShareReplayPaneTabPopovers,
-  sharePointerPayloadForPointForTest: sharePointerPayloadForPoint,
-  shareReplayLastDeltaBatchForTest() { return shareReplayLastDeltaBatch ? JSON.parse(JSON.stringify(shareReplayLastDeltaBatch)) : null; },
-  shareReplaySequenceStateForTest() {
-    const sequence = shareReplayState.sequenceSnapshot();
-    const request = shareReplayState.keyframeRequestSnapshot();
-    return {epoch: sequence.epoch, sequence: sequence.last, dropped: sequence.dropped, stale: sequence.stale, requests: request.count, suppressed: request.suppressed, backoffMs: request.backoffMs, inFlight: request.inFlight};
-  },
-  shareReplayRequestKeyframeForTest: shareReplayRequestKeyframe,
-  shareReplayHealthDiagnosticsForTest: shareReplayHealthDiagnostics,
-  shareReplayUserStatusTextForTest: shareReplayUserStatusText,
-  shareReplayCurrentDomDigestForTest: shareReplayCurrentDomDigest,
-  shareReplayRedactTextForTest: shareReplayRedactText,
-  shareReplaySanitizeAttributeForTest: shareReplaySanitizeAttribute,
-  shareCreateDomKeyframePayloadForTest: shareCreateDomKeyframePayload,
-  shareCreateDomKeyframeMessageForTest: shareCreateDomKeyframeMessage,
-  shareDropStaleMirrorFrameForTest: shareDropStaleMirrorFrame,
-  scheduleShareTopologySnapshotForTest: scheduleShareTopologySnapshot,
-  shareTopologyDomKeyframeDelayMsForTest: shareTopologyDomKeyframeDelayMs,
-  setSharePointerLastPublishedAtForTest(value) { sharePointerLastPublishedAt = Number(value); },
-  setShareReplayHostLastKeyframeAtForTest(value) { shareReplayHostLastKeyframeAt = Number(value) || 0; },
-  setShareReplayTopologyKeyframeQueuedAtForTest(value) { shareReplayTopologyKeyframeQueuedAt = Number(value) || 0; },
-  shareMirrorLastFrameForTest(sender = '', family = '') {
-    const cleanSender = String(sender || 'host');
-    const key = family ? cleanSender + ':' + family : cleanSender;
-    const state = shareSenderRecord(key, {create: false})?.lastFrame || null;
-    return state ? {...state} : null;
-  },
-  shareCreateUiStateSnapshotForTest: shareCreateUiStateSnapshot,
-  sharePopupLayerPayloadForTest: sharePopupLayerPayload,
-  applySharePopupLayerForTest: applySharePopupLayer,
-  sharePopupLayerLastSeqForTest(owner = '') { return shareSenderRecord(String(owner || 'host'), {create: false})?.popupSequence || 0; },
-  sharePopupLayerNodeForTest() { return sharePopupLayerNode; },
-  shareUiStateSnapshotForTest: shareUiStateSnapshot,
-  shareGeometryDigestSnapshotForTest: shareGeometryDigestSnapshot,
-  shareGeometryFirstDifferenceForTest: shareGeometryFirstDifference,
-  shareGeometryRepairActionForDiffForTest: shareGeometryRepairActionForDiff,
-  publishShareGeometryDigestForTest: publishShareGeometryDigest,
-  shareHostConnectedViewerCountForTest: shareHostConnectedViewerCount,
-  shareHostHasConnectedViewersForTest: shareHostHasConnectedViewers,
-  shareReplayHostPerformanceForTest: shareReplayHostPerformanceDiagnostics,
-  applyShareTerminalCellsRepairForTest: applyShareTerminalCellsRepair,
-  shareWrappedTextDigestSnapshotForTest: shareWrappedTextDigestSnapshot,
-  applyShareUiStateForTest: applyShareUiState,
-  applyShareScrollStateForTest: applyShareScrollState,
-  applyShareScrollSnapshotForTest: applyShareScrollSnapshot,
-  shareCanPublishUiForTest: shareCanPublishUi,
-  shareCanPublishScrollForTest: shareCanPublishScroll,
-  setShareScrollTargetRecordForTest(target, state, payload = {}) {
-    const cleanTarget = String(target || '');
-    const cleanState = state || {};
-    const record = shareScrollTargetRecord(cleanTarget);
-    record.top = Number(cleanState.top || 0);
-    record.left = Number(cleanState.left || 0);
-    record.payload = {...payload, target: cleanTarget, ...cleanState};
-  },
-  shareScrollTargetPositionForTest(target) {
-    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
-    return state ? {top: state.top, left: state.left} : null;
-  },
-  shareScrollTargetPayloadForTest(target) {
-    const state = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget?.payload;
-    return state ? {...state} : null;
-  },
-  shareScrollTargetRecordForTest(target) {
-    const record = shareSenderRecord(String(target || ''), {create: false})?.scrollTarget;
-    return record ? {...record, payload: {...record.payload}} : null;
-  },
-  restoreShareReadonlyScrollTargetForTest: restoreShareReadonlyScrollTarget,
-  restoreShareScrollTargetByKeyForTest: restoreShareScrollTargetByKey,
-  scheduleShareScrollRestoreByKeyForTest: scheduleShareScrollRestoreByKey,
-  applyShareViewBodyClassesForTest: applyShareViewBodyClasses,
-  shareHostTerminalSizeForTest: shareHostTerminalSize,
-  updateShareHostTerminalSizeForTest: updateShareHostTerminalSize,
   fitTerminalForTest: fitTerminal,
-  shareReadonlyTargetIsMirroredSurfaceForTest: shareReadonlyTargetIsMirroredSurface,
-  shareReadonlyKeyboardAllowsDefault,
-  shareReadonlyShouldPreventDefault,
-  blockShareReadonlyInteraction,
   setSessionFilesPayloadForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
@@ -3036,7 +2904,6 @@ globalThis.__layoutTestApi = {
   },
   applyLayoutUrlStateSeedForTest: applyLayoutUrlStateSeed,
   applyEditorStateFieldsForTest: applyEditorStateFields,
-  applyShareEditorStateForTest: applyShareEditorState,
   applyPendingLayoutUrlStateForTest: applyPendingLayoutUrlState,
   scheduleLayoutUrlStateRefreshForTest: scheduleLayoutUrlStateRefresh,
   layoutUrlStateForTest() { return {...layoutUrlState}; },
@@ -3227,14 +3094,6 @@ globalThis.__layoutTestApi = {
   gridForTest() {
     return grid;
   },
-  sharePointerPayloadForPoint,
-  sharePointerPayloadForEvent,
-  sharePointFromPointerPayload,
-  shareScrollPayloadForElement,
-  applyShareScrollState,
-  stableDigestJson,
-  shareGeometryDigestValue,
-  shareGeometryFirstDifference,
   setAppMenuBarRectForTest(rect) {
     renderSessionButtons({force: true});
     const bars = sessionButtons.querySelectorAll('.app-menu-bar');

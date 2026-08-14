@@ -3,11 +3,37 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from http.client import HTTPConnection
+import os
+from pathlib import Path
 from threading import Thread
 from typing import Mapping
 from typing import Sequence
 
 from yolomux_lib.server import TmuxWebtermHTTPServer
+
+
+@dataclass
+class FixtureArtifactTransfer:
+    """Own one worker artifact descriptor with the production bounded-read contract."""
+
+    descriptor: int
+    product: dict[str, object]
+    chunk_bytes: int
+    closed: bool = False
+
+    @classmethod
+    def adopt(cls, path: Path, product: dict[str, object], chunk_bytes: int) -> FixtureArtifactTransfer:
+        descriptor = os.open(path, os.O_RDONLY)
+        path.unlink()
+        return cls(descriptor, dict(product), chunk_bytes)
+
+    def read(self, offset: int) -> bytes:
+        return os.pread(self.descriptor, self.chunk_bytes, offset)
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            os.close(self.descriptor)
 
 
 @dataclass(frozen=True)

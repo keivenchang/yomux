@@ -25,7 +25,7 @@ BROWSER_BOOT_ROUTES = tuple(
         ("/api/create-session-plan", ("GET",)), ("/api/create-session", ("POST",)),
         ("/api/rename-session", ("POST",)), ("/api/ensure-session", ("POST",)),
         ("/api/attention-ack", ("POST",)), ("/api/auto-approve", ("GET", "POST")),
-        ("/api/share", ("GET", "POST")), ("/api/session-metadata", ("GET",)),
+        ("/api/session-metadata", ("GET",)),
         ("/api/transcripts", ("GET",)), ("/api/activity-summary", ("GET",)),
         ("/api/background/status", ("GET",)), ("/api/session-files", ("GET",)),
         ("/api/stats-capabilities", ("GET",)), ("/api/stats-observations", ("POST",)),
@@ -54,8 +54,6 @@ class BrowserBootScenario:
     auto_approve_payload: Mapping | None = None
     access_role: str = "admin"
     auth_username: str = "alice"
-    share_bootstrap: Mapping | None = None
-    share_status_payload: Mapping | None = None
     wrap_app_root: bool = False
     yoagent_chat_mode: str | None = None
     available_agents: tuple[str, ...] | None = None
@@ -66,7 +64,7 @@ class BrowserBootScenario:
     hold_auto_approve: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "share_bootstrap", "share_status_payload", "agent_auth", "background_status_payload"):
+        for name in ("settings", "fs_entries", "transcript_sessions", "session_files_payloads", "session_files_payload", "auto_approve_payload", "agent_auth", "background_status_payload"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, MappingProxyType(dict(value)))
@@ -75,8 +73,7 @@ class BrowserBootScenario:
 BROWSER_BOOT_PRESETS = MappingProxyType({
     "default": BrowserBootScenario(),
     "readonly": BrowserBootScenario(access_role="readonly"),
-    "share-view": BrowserBootScenario(access_role="readonly", auth_username="", share_bootstrap=MappingProxyType({"view": True})),
 })
 
 PRODUCTION_BOOTSTRAP_UNSUPPORTED_BY_BROWSER_FIXTURE = frozenset({"activitySummary", "agentLaunchCommands", "clientRevision", "dev", "devBundleRevision", "linearIssueBaseUrl", "recentSessions", "serverStartedAt", "serverStartedAtMs", "terminalCommands", "versionCommit", "versionCommitCount"})
-PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE = frozenset({"agentAuth", "share"})
+PRODUCTION_BOOTSTRAP_OPTIONAL_IN_BROWSER_FIXTURE = frozenset({"agentAuth"})

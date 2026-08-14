@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 from threading import Event
 
 import pytest
@@ -59,6 +60,34 @@ def test_unreadable_mountinfo_is_unknown_and_refuses(tmp_path):
     assert result == FilesystemClassification(tmp_path, "unknown", False, False)
     with pytest.raises(FilesystemPreflightError, match="unknown"):
         preflight_mutable_roots(wal_databases=[tmp_path / "stats.sqlite3"], classifier=lambda _path: result)
+
+
+def test_macos_classifies_local_apfs_without_linux_mountinfo(tmp_path):
+    def run(command, **_kwargs):
+        assert command == ("mount",)
+        return subprocess.CompletedProcess(command, 0, "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n", "")
+
+    result = classify_filesystem(tmp_path / "service.sock", platform_name="darwin", runner=run)
+
+    assert result == FilesystemClassification(tmp_path, "apfs", False, True)
+
+
+def test_macos_uses_longest_mount_and_rejects_smbfs(tmp_path):
+    network_root = tmp_path / "share"
+    network_root.mkdir()
+
+    def run(command, **_kwargs):
+        assert command == ("mount",)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            f"/dev/disk3s1s1 on / (apfs, local)\n//server/share on {network_root} (smbfs, nodev, nosuid)\n",
+            "",
+        )
+
+    result = classify_filesystem(network_root / "service.sock", platform_name="darwin", runner=run)
+
+    assert result == FilesystemClassification(network_root, "smbfs", True, True)
 
 
 def _network_classifier(path):

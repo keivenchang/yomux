@@ -188,7 +188,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
                 client_binding_secret=b"stats-e2e-client-binding-secret",
             ),
         )
-        http_server, http_thread = start_browser_share_server(
+        http_server, http_thread = start_browser_server(
             monkeypatch,
             tmp_path,
             app,
@@ -258,7 +258,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
                 client_binding_secret=b"stats-e2e-client-binding-secret",
             ),
         )
-        follower_server, follower_thread = start_browser_share_server(
+        follower_server, follower_thread = start_browser_server(
             monkeypatch,
             tmp_path,
             follower_app,
@@ -292,9 +292,9 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
         assert json.loads(owner_http_body)["cache_generation"] == owner_metadata["cache_generation"]
     finally:
         if follower_server is not None and follower_thread is not None:
-            stop_browser_share_server(follower_server, follower_thread)
+            stop_browser_server(follower_server, follower_thread)
         if http_server is not None and http_thread is not None:
-            stop_browser_share_server(http_server, http_thread, browser=browser)
+            stop_browser_server(http_server, http_thread, browser=browser)
         service.stop_event.set()
         service.work_event.set()
         service_thread.join(timeout=3)

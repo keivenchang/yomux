@@ -11,6 +11,7 @@ import hmac
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import secrets
 import ssl
@@ -20,6 +21,15 @@ import time
 import urllib.request
 import urllib.error
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from yolomux_lib.infra.host_identity import process_start_identity
+from yolomux_lib.local_services.registry import darwin_process_environment
+from yolomux_lib.tmux.sessions import process_cwd
+from tools.instance_isolation import resolve_instance_environment
+
 WARMUPS = 20
 SAMPLES = 200
 BUDGET_MS = 20.0
@@ -27,7 +37,85 @@ HEADER = "X-YOLOmux-Measurement"
 METRIC = "route_to_representation_ready_ms"
 
 
+def process_parent_pid(pid: int) -> int:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        value = completed.stdout.strip()
+        return int(value) if completed.returncode == 0 and value.isdigit() else 0
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    fields = stat.rpartition(")")[2].split()
+    return int(fields[1]) if len(fields) > 1 and fields[1].isdigit() else 0
+
+
+def process_command(pid: int) -> str:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return completed.stdout.strip() if completed.returncode == 0 else ""
+    try:
+        return Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def canonical_listener_pids(
+    pids: list[int],
+    *,
+    parent_reader=process_parent_pid,
+    command_reader=process_command,
+) -> list[int]:
+    """Collapse only a fork-before-exec clone of an already identified listener owner.
+
+    A loaded server can be observed after fork and before close-on-exec closes its listener in the
+    child. Both PIDs then name the same socket and command for that instant. Unrelated listeners,
+    an exec'd child, or an unobservable process stay distinct and fail the exact-one-owner gate.
+    """
+
+    candidates = sorted(set(pids))
+    candidate_set = set(candidates)
+    commands = {pid: command_reader(pid) for pid in candidates}
+    canonical = []
+    for pid in candidates:
+        command = commands[pid]
+        ancestor = parent_reader(pid)
+        seen = {pid}
+        inherited = False
+        while ancestor > 1 and ancestor not in seen:
+            if ancestor in candidate_set:
+                inherited = bool(command and command == commands[ancestor])
+                break
+            seen.add(ancestor)
+            ancestor = parent_reader(ancestor)
+        if not inherited:
+            canonical.append(pid)
+    return canonical
+
+
 def listener_pids(port: int) -> list[int]:
+    if platform.system() == "Darwin":
+        completed = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        pids = sorted({int(line) for line in completed.stdout.splitlines() if line.strip().isdigit()})
+        return canonical_listener_pids(pids)
     inodes = set()
     for table in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
@@ -48,27 +136,29 @@ def listener_pids(port: int) -> list[int]:
                 pids.add(int(process_dir.name))
         except (OSError, PermissionError):
             continue
-    return sorted(pids)
+    return canonical_listener_pids(sorted(pids))
 
 
 def process_environment(pid: int) -> dict[str, str]:
-    raw = Path(f"/proc/{pid}/environ").read_bytes()
-    return {key.decode(): value.decode() for item in raw.split(b"\0") if b"=" in item for key, value in [item.split(b"=", 1)]}
+    try:
+        items = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        items = darwin_process_environment(pid)
+    return {key.decode(): value.decode() for item in items if b"=" in item for key, value in [item.split(b"=", 1)]}
 
 
 def process_identity(pid: int) -> dict[str, object]:
-    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    fields = stat[stat.rfind(")") + 1 :].split()
-    cwd = str(Path(f"/proc/{pid}/cwd").resolve(strict=True))
+    start_identity = process_start_identity(pid)
+    cwd = process_cwd(pid)
     sha_result = subprocess.run(["git", "-C", cwd, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5, check=False)
     sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
-    identity = {"pid": pid, "start_ticks": int(fields[19]), "cwd": cwd, "sha": sha}
+    identity = {"pid": pid, "start_identity": start_identity, "cwd": cwd, "sha": sha}
     if any(value in (None, "") for value in identity.values()):
         raise RuntimeError(f"listener identity is incomplete: {identity}")
     return identity
 
 
-def config_dir_from_process(environ: dict[str, str]) -> Path:
+def config_dir_from_process(environ: dict[str, str], port: int | None = None) -> Path:
     root = environ.get("YOLOMUX_ROOT", "").strip()
     configured = environ.get("YOLOMUX_CONFIG_DIR", "").strip()
     if root:
@@ -78,7 +168,11 @@ def config_dir_from_process(environ: dict[str, str]) -> Path:
             raise RuntimeError("listener config root escapes YOLOMUX_ROOT")
         return config
     if not configured:
-        raise RuntimeError("listener process exposes no authoritative config root")
+        resolution = resolve_instance_environment(port, environ, platform=platform.system())
+        root = resolution.environment.get("YOLOMUX_ROOT", "")
+        if not root:
+            raise RuntimeError("listener process exposes no authoritative config root")
+        return Path(root).resolve(strict=True) / "config"
     return Path(configured).resolve(strict=True)
 
 
@@ -129,7 +223,7 @@ def run(port: int, scheme: str, output: Path) -> bool:
         raise RuntimeError(f"port {port} must have exactly one listener; found {pids or 'none'}")
     pid = pids[0]
     before = process_identity(pid)
-    cookie = auth_cookie(config_dir_from_process(process_environment(pid)), port)
+    cookie = auth_cookie(config_dir_from_process(process_environment(pid), port), port)
     base = f"{scheme}://127.0.0.1:{port}"
     for _ in range(WARMUPS):
         status, body = get_json(base + "/api/system-status", cookie)

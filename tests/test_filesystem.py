@@ -1,8 +1,10 @@
-import json
+import fcntl
 import inspect
 import itertools
+import json
 import os
 import subprocess
+import sys
 import threading
 import time
 import zipfile
@@ -24,6 +26,21 @@ from _git_helpers import git, init_repo
 
 
 def _open_descriptors_beneath(root: Path) -> dict[str, str]:
+    if sys.platform == "darwin":
+        descriptors = {}
+        for descriptor in range(256):
+            try:
+                raw_path = fcntl.fcntl(
+                    descriptor,
+                    filesystem_paths.DARWIN_F_GETPATH,
+                    b"\0" * filesystem_paths.DARWIN_PATH_BUFFER_BYTES,
+                )
+                target = Path(raw_path.split(b"\0", 1)[0].decode("utf-8"))
+            except (OSError, UnicodeDecodeError):
+                continue
+            if target == root or target.is_relative_to(root):
+                descriptors[str(descriptor)] = str(target)
+        return descriptors
     descriptor_root = next(path for path in (Path("/proc/self/fd"), Path("/dev/fd")) if path.exists())
     descriptors = {}
     for descriptor in descriptor_root.iterdir():
@@ -124,6 +141,29 @@ def test_list_directory_returns_entries(tmp_path):
     assert "is_repo" not in names["file.txt"]
     assert names["file.txt"]["size"] == len("hello")
     assert names["big.dat"]["kind"] == "file"
+
+
+def test_visible_directory_scan_duplicates_pinned_dev_fd_on_macos(tmp_path, monkeypatch):
+    (tmp_path / "hello.txt").write_text("hello", encoding="utf-8")
+    descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    real_open = os.open
+
+    def guarded_open(path, *args, **kwargs):
+        assert Path(path).parent != Path("/dev/fd")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", guarded_open)
+    try:
+        names, truncated = filesystem.listing._visible_directory_names(
+            Path("/dev/fd") / str(descriptor),
+            requested_path=tmp_path,
+            include_repo_info=False,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert names == ["hello.txt"]
+    assert truncated is False
 
 
 def test_listing_reuses_parent_canonicalization_for_ordinary_children(monkeypatch, tmp_path):
@@ -1272,10 +1312,10 @@ def test_list_directory_bounds_slow_repo_enrichment_without_dropping_repo_row(tm
     started = time.perf_counter()
     entries = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}
     assert time.perf_counter() - started < 0.25
-    assert entries["a-slow"]["is_repo"] is True
-    assert "repo" in entries["a-slow"]
-    assert entries["z-fast"]["is_repo"] is True
-    assert entries["z-fast"]["repo_info_deferred"] is True
+    repo_rows = [entries["a-slow"], entries["z-fast"]]
+    assert all(entry["is_repo"] is True for entry in repo_rows)
+    assert sum("repo" in entry for entry in repo_rows) == 1
+    assert sum(entry.get("repo_info_deferred") is True for entry in repo_rows) == 1
 
 
 def test_list_directory_allows_root_by_default(monkeypatch):

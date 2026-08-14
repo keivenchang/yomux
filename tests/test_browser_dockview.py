@@ -9084,14 +9084,12 @@ def test_dockview_tabber_toolbar_controls_update_the_independent_surface(browser
             lookbackValue: panel.querySelector('[data-tabber-lookback]').value,
             lookbackHours: tabberSessionFileLookbackHours,
             activityFetch: activityFetch || null,
-            bound: panel.dataset.fileExplorerHeaderActionsBound,
             errors: [...(jsDebugFailureEvents('error')), ...(jsDebugFailureEvents('rejection'))],
           });
         })().catch(error => done({error: String(error?.stack || error)}));
         """
     )
     assert "error" not in result and result["errors"] == [], result
-    assert result["bound"] == "true", result
     assert result["initial"] == ["1", "2"] and result["sorted"] == ["2", "1"], result
     assert result["sortValue"] == "za", result
     assert result["dateBefore"] != result["dateAfter"], result

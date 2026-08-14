@@ -284,10 +284,10 @@ def test_evidence_baseline_rejects_malformed_cursor_identity(cursors):
 
 def test_redact_chrome_query_credentials():
     canaries = ("query-canary-one", "query-canary-two")
-    redacted = soak.redact_log_entry({"message": f"GET /x?token={canaries[0]}&share_token={canaries[1]}"})
+    redacted = soak.redact_log_entry({"message": f"GET /x?token={canaries[0]}&api_key={canaries[1]}"})
     assert all(canary not in redacted["message"] for canary in canaries)
     assert "token=[redacted" in redacted["message"]
-    assert "share_token=[redacted" in redacted["message"]
+    assert "api_key=[redacted" in redacted["message"]
 
 
 def test_cleanup_driver_terminates_only_its_webdriver_service_when_quit_hangs():
@@ -634,7 +634,7 @@ def test_write_artifact_redacts_nested_key_context_and_basic_credentials(tmp_pat
 def test_shared_redactor_covers_probe_channels_and_keeps_the_matching_logs_row(tmp_path):
     output = tmp_path / "artifact.json"
     canary = "P0-LIVE-SOAK-CANARY-DO-NOT-RETAIN"
-    share_url = f"https://localhost:7443/share/{canary}?token={canary}#token={canary}"
+    diagnostic_url = f"https://localhost:7443/api/diagnostic?token={canary}#token={canary}"
     row = {
         "requestId": "r-web-controlled-1",
         "source": "browser",
@@ -642,15 +642,15 @@ def test_shared_redactor_covers_probe_channels_and_keeps_the_matching_logs_row(t
         "event": "api",
         "wallTime": "2026-08-06 13:00:00 PDT",
         "deliveryOutcome": "failed",
-        "message": f"controlled browser failure {share_url}",
+        "message": f"controlled browser failure {diagnostic_url}",
     }
     artifact = {
         "browserProbe": {
-            "dom": f"<article data-js-debug-log-entry>{share_url}</article>",
+            "dom": f"<article data-js-debug-log-entry>{diagnostic_url}</article>",
             "clipboard": f"row token={canary}",
             "retained": [{**row, "credentials": {"password": canary, "authorization": f"Bearer {canary}"}}],
-            "upload": {"observations": [{"share_url": share_url, "api_key": canary}]},
-            "storage": {"debug": f"{share_url}&share_token={canary}"},
+            "upload": {"observations": [{"diagnostic_url": diagnostic_url, "api_key": canary}]},
+            "storage": {"debug": f"{diagnostic_url}&api_key={canary}"},
         },
         "expected_failure_durably_detected": {"rendered": row},
     }
@@ -2326,6 +2326,85 @@ def test_atomic_finalizer_rejects_content_change_of_an_observed_event(monkeypatc
     assert soak.evidence_failed(boundary["evidence"])
 
 
+def test_atomic_finalizer_accepts_producer_owned_api_enrichment_after_observation(monkeypatch):
+    """Late API measurements enrich one event identity without rewriting its result."""
+    driver = RewrittenEventFinalizerDriver(
+        limit=200,
+        appended=1,
+        events=[
+            {
+                "id": index,
+                "type": "api",
+                "method": "GET",
+                "url": "/api/ping",
+                "endpoint": "/api/ping",
+                "durationMs": 1,
+                "status": 200,
+                "ok": True,
+                "phaseTimings": {"queueMs": 0.1},
+            }
+            for index in range(1, 201)
+        ],
+        rewrite=lambda event: {
+            **event,
+            "responseBytes": 123,
+            "connectionProtocol": "h2",
+            "phaseTimings": {**event["phaseTimings"], "downloadMs": 0.2, "applyRenderMs": 0.3},
+        },
+    )
+
+    boundary = retirement_boundary(monkeypatch, driver)
+
+    delta = soak.validate_browser_retirement_delta(boundary["eventRing"]["delta"])
+    assert delta["reason"] == soak.RETIREMENT_DELTA_BENIGN, delta
+    assert delta["mutatedEvents"] == 0, delta
+    assert boundary["evidence"]["integrityFailures"] == []
+    assert not soak.evidence_failed(boundary["evidence"])
+
+
+@pytest.mark.parametrize(
+    ("initial", "rewrite"),
+    (
+        ({}, lambda event: {**event, "status": 503}),
+        ({}, lambda event: {**event, "ok": False}),
+        ({}, lambda event: {**event, "url": "/api/changed"}),
+        ({"responseBytes": 100}, lambda event: {**event, "responseBytes": 101}),
+        ({}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "queueMs": 0.2}}),
+        ({}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "unknownMs": 0.2}}),
+        ({"type": "render"}, lambda event: {**event, "phaseTimings": {**event["phaseTimings"], "downloadMs": 0.2}}),
+    ),
+    ids=("status", "ok", "url", "response_bytes_rewrite", "phase_rewrite", "unknown_phase", "non_api_phase"),
+)
+def test_api_enrichment_normalization_still_rejects_identity_and_measurement_rewrites(monkeypatch, initial, rewrite):
+    driver = RewrittenEventFinalizerDriver(
+        limit=200,
+        appended=1,
+        events=[
+            {
+                "id": index,
+                "type": "api",
+                "method": "GET",
+                "url": "/api/ping",
+                "endpoint": "/api/ping",
+                "durationMs": 1,
+                "status": 200,
+                "ok": True,
+                "phaseTimings": {"queueMs": 0.1},
+                **initial,
+            }
+            for index in range(1, 201)
+        ],
+        rewrite=rewrite,
+    )
+
+    boundary = retirement_boundary(monkeypatch, driver)
+
+    delta = soak.validate_browser_retirement_delta(boundary["eventRing"]["delta"])
+    assert delta["reason"] == soak.RETIREMENT_DELTA_MUTATED_EVENTS, delta
+    assert delta["mutatedEvents"] == 1, delta
+    assert soak.evidence_failed(boundary["evidence"])
+
+
 @pytest.mark.parametrize("rewrite", (
     lambda event: {key: value for key, value in event.items() if value is not None},
     lambda event: {**event, "route": None, "computeMs": None},
@@ -3371,11 +3450,11 @@ def test_page_identity_accepts_a_bare_root_url_growing_its_own_view_state():
     ("actual", "expected_url", "reasons"),
     (
         (live_page_identity(LIVE_MEASURED_URL.replace("localhost:7891", "localhost:7892"), origin="https://localhost:7892"), LIVE_MEASURED_URL, ["origin_changed"]),
-        (live_page_identity("https://localhost:7891/share/abc"), LIVE_MEASURED_URL, ["path_changed", "sessions_emptied"]),
+        (live_page_identity("https://localhost:7891/outside-app"), LIVE_MEASURED_URL, ["path_changed", "sessions_emptied"]),
         (live_page_identity(LIVE_MEASURED_URL, visibility="hidden"), LIVE_MEASURED_URL, ["page_hidden"]),
         (live_page_identity(LIVE_MEASURED_URL, journey_id=""), LIVE_MEASURED_URL, ["document_journey_unavailable"]),
         (live_page_identity(LIVE_MEASURED_URL, journey_id="j-reload-2"), LIVE_MEASURED_URL, ["document_replaced"]),
-        (live_page_identity(LIVE_MEASURED_URL + "&share=1"), LIVE_MEASURED_URL, ["query_field_count_exceeded", "query_keys_added"]),
+        (live_page_identity(LIVE_MEASURED_URL + "&unexpected=1"), LIVE_MEASURED_URL, ["query_field_count_exceeded", "query_keys_added"]),
         (live_page_identity(LIVE_MEASURED_URL.replace("sessions=1,", "sessions=1,other-session,")), LIVE_MEASURED_URL, ["sessions_substituted"]),
         (live_page_identity(LIVE_MEASURED_URL.replace("sessions=1,bullpen-74ea25007664&", "sessions=&")), LIVE_MEASURED_URL, ["sessions_emptied"]),
         (live_page_identity(LIVE_MEASURED_URL.replace("&tabs=left:", "&tabs=elsewhere:")), LIVE_MEASURED_URL, ["tab_slots_substituted", "tabs_substituted"]),
@@ -3809,7 +3888,7 @@ def test_page_identity_accepts_any_slot_order_but_never_a_repeated_slot(slot_ord
     (
         ("malformed percent escape", "https://localhost:7891/?sessions=1&layout=left&tabs=left:1&state=%zz", "query_escapes_malformed"),
         ("truncated percent escape", "https://localhost:7891/?sessions=1&layout=left&tabs=left:1&state=%7", "query_escapes_malformed"),
-        ("over-limit field count", "https://localhost:7891/?sessions=1&layout=left&tabs=left:1&state=%7B%22v%22%3A1%7D&share=1", "query_field_count_exceeded"),
+        ("over-limit field count", "https://localhost:7891/?sessions=1&layout=left&tabs=left:1&state=%7B%22v%22%3A1%7D&unexpected=1", "query_field_count_exceeded"),
         ("field without a value assignment", "https://localhost:7891/?sessions=1&layout=left&tabs&state=%7B%22v%22%3A1%7D", "query_unparsable"),
     ),
 )

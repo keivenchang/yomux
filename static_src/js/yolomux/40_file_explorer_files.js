@@ -11,12 +11,7 @@ function toggleFileExplorer() {
   }
 }
 
-function shareReadOnlyFinderStateIsHostOwned() {
-  return shareViewMode && !shareWriteMode && !applyingShareRemoteUiState;
-}
-
 async function openFileExplorerAt(path, options = {}) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
   const root = normalizeDirectoryPath(expandUserPath(path));
   if (options.manualSelection === true) {
@@ -65,7 +60,6 @@ async function openFileExplorerAt(path, options = {}) {
   }
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   updateFileExplorerCurrentFileHighlight();
-  scheduleShareTopologySnapshot('finder-root');
   return true;
 }
 
@@ -319,7 +313,7 @@ function fileExplorerFsBatchClientMetadata() {
   const watchToken = String(fileExplorerFilesystemWatchToken || '');
   return {
     client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
-    client_scope: shareViewMode ? 'share' : 'browser',
+    client_scope: 'browser',
     watch_token: watchToken.slice(0, 128),
   };
 }
@@ -1022,7 +1016,6 @@ function setFileExplorerRootMode(mode, options = {}) {
   if (fileExplorerRootMode === 'sync' && options.sync !== false) {
     scheduleFileExplorerActiveTabSync(fileExplorerExplicitSyncSessionTarget(), {explicit: true});
   }
-  scheduleShareTopologySnapshot('finder-root-mode');
 }
 
 function fileExplorerRootModeValue() {
@@ -1867,9 +1860,9 @@ async function commitFileExplorerPathInput(input) {
 }
 
 function bindFileExplorerPathInput(input) {
-  if (!input || input.dataset.pathInputBound === 'true') return;
-  input.dataset.pathInputBound = 'true';
-  input.addEventListener('keydown', event => {
+  if (!input) return null;
+  return bindScopedOnce(input, 'file-explorer-path-input', scope => {
+  scope.ownEvent('keydown', input, 'keydown', event => {
     if (event.key === 'Enter') {
       event.preventDefault();
       event.stopPropagation();
@@ -1881,7 +1874,8 @@ function bindFileExplorerPathInput(input) {
       input.blur?.();
     }
   });
-  input.addEventListener('focus', () => input.select?.());
+  scope.ownEvent('focus', input, 'focus', () => input.select?.());
+  });
 }
 
 function pathIsInsideDirectory(path, root) {
@@ -1958,7 +1952,6 @@ function fileExplorerSessionFilesPaneIsVisible() {
 function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return;
   if (fileExplorerRootMode !== 'sync') return;
-  if (shareReadOnlyFinderStateIsHostOwned()) return;
   const explicit = options.explicit === true;
   if (fileExplorerManualSelectionActive && !explicit) return;
   if (explicit) setFileExplorerSelectionPin(false);
@@ -1995,7 +1988,6 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
 
 function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
   if (!plan?.root || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   if (options.guardExplicitTarget === true && isTmuxSession(plan.session)) {
     return fileExplorerExplicitSyncSessionTarget() === String(plan.session);
   }
@@ -2011,7 +2003,6 @@ function cancelPendingFileExplorerActiveSync(options = {}) {
 
 async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   return syncFileExplorerRootToPlan(fileExplorerSyncPlan(preferredItem), preferredItem, {
     ...options,
     guardExplicitTarget: options.force === true,
@@ -2020,7 +2011,6 @@ async function syncFileExplorerRootToActiveTmux(preferredItem = null, options = 
 
 async function syncFileExplorerRootToActiveFile(path, options = {}) {
   if (!fileExplorerIsOpen() || fileExplorerRootMode !== 'sync') return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   forgetFileExplorerSyncManualCollapse(dirnameOf(path));
   return syncFileExplorerRootToPlan(fileExplorerSyncPlanForFile(path), fileEditorItemFor(path), options);
 }
@@ -2076,7 +2066,6 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   }
   updateFileExplorerCurrentFileHighlight();
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
-  scheduleShareTopologySnapshot('finder-root');
   return true;
 }
 
@@ -2120,7 +2109,6 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
 }
 
 async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = {}) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const signature = fileExplorerSyncPlanSignature(plan);
   if (!plan.root || fileExplorerSyncState.inFlightSignature === signature) return false;
   if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
@@ -2172,7 +2160,6 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
 async function syncFileExplorerToActiveTab(preferredItem = null, options = {}) {
   if (!fileExplorerIsOpen()) return false;
   if (fileExplorerRootMode !== 'sync' && options.explicit !== true) return false;
-  if (shareReadOnlyFinderStateIsHostOwned()) return false;
   const path = options.explicit === true ? explicitFinderTargetPath(preferredItem) : activeFinderTargetPath(preferredItem);
   if (!path || fileExplorerSyncState.inFlightSignature === path) return false;
   const root = currentFileExplorerRoot();
@@ -3374,22 +3361,13 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   reconcileChildNodes(container, nextNodes);
 }
 
-function rawFileUrl(path, params = {}) {
-  const queryParts = [`path=${encodeURIComponent(path)}`];
-  if (shareToken) queryParts.push(`token=${encodeURIComponent(shareToken)}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value === null || value === undefined || value === '') continue;
-    queryParts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-  }
-  return `/api/fs/raw?${queryParts.join('&')}`;
-}
-
 function zipFileDownloadUrl(path) {
   return `/api/fs/zip?path=${encodeURIComponent(path)}`;
 }
 
 function closeFileImagePreview(options = {}) {
   if (!options.fromController) fileImagePreviewController?.cancelTimers?.();
+  releaseRawFileMediaSources(fileImagePreviewPopover);
   fileImagePreviewPopover?.remove();
   fileImagePreviewPopover = null;
 }
@@ -3413,7 +3391,6 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   popover.dataset.previewPath = path;
   const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
   const media = document.createElement(mediaKind === 'video' ? 'video' : 'img');
-  media.src = options.sourceUrl || rawFileUrl(path);
   if (mediaKind === 'video') {
     media.autoplay = true;
     media.loop = true;
@@ -3426,11 +3403,26 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
   appOverlayRootElement().appendChild(popover);
   fileImagePreviewPopover = popover;
   positionFileImagePreview(anchor, popover, point);
+  if (options.sourceUrl) {
+    media.src = options.sourceUrl;
+  } else {
+    void installRawFileMediaSource(media, path, {
+      onFailure: error => {
+        if (fileImagePreviewPopover !== popover) return;
+        const failure = document.createElement('div');
+        failure.className = 'file-image-preview-error';
+        failure.textContent = userMessageText(error, t('preview.image.loadFailed'));
+        popover.replaceChildren(failure);
+        positionFileImagePreview(anchor, popover, point);
+      },
+      isCurrent: () => fileImagePreviewPopover === popover,
+    });
+  }
 }
 
 function bindFileImagePreview(anchor, path, entry, options = {}) {
-  if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
-  anchor.dataset.imagePreviewBound = 'true';
+  if (!anchor) return null;
+  return bindScopedOnce(anchor, 'file-image-preview', scope => {
   let pointer = null;
   const updatePointer = event => {
     pointer = {x: event.clientX, y: event.clientY};
@@ -3455,11 +3447,13 @@ function bindFileImagePreview(anchor, path, entry, options = {}) {
       if (fileImagePreviewController === controller) fileImagePreviewController = null;
     },
   });
-  anchor.addEventListener('pointerenter', event => {
+  scope.ownEvent('pointerenter', anchor, 'pointerenter', event => {
     fileImagePreviewController = controller;
     updatePointer(event);
   });
-  anchor.addEventListener('pointermove', updatePointer);
+  scope.ownEvent('pointermove', anchor, 'pointermove', updatePointer);
+  return () => controller?.dispose?.();
+  });
 }
 
 function selectableFileTreeRows(container = document) {
@@ -3484,7 +3478,6 @@ function updateFileExplorerCurrentFileHighlight() {
 }
 
 function scheduleFileExplorerActiveFileReveal(path = activeFile) {
-  if (shareReadOnlyFinderStateIsHostOwned()) return;
   if (!path) {
     updateFileExplorerCurrentFileHighlight();
     return;
@@ -5035,8 +5028,8 @@ function tabberNativeDragImageForRow(row) {
 
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
-  if (!tab || tab.dataset.tabberChromeBound === 'true') return;
-  tab.dataset.tabberChromeBound = 'true';
+  if (!tab) return null;
+  return bindScopedOnce(tab, 'tabber-session-chrome', scope => {
   tab.dataset.paneTab = session;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
@@ -5046,7 +5039,7 @@ function bindTabberSessionChrome(row, session) {
     ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
     dragImage: () => tabberNativeDragImageForRow(row),
   });
-  tab.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', tab, 'pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
     if (!autoTarget) return;
     event.preventDefault();
@@ -5058,6 +5051,7 @@ function bindTabberSessionChrome(row, session) {
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (session === currentSessionActionTarget()) focusPanel(session);
     },
+  });
   });
 }
 
@@ -5191,7 +5185,6 @@ function setTabberPathExpanded(fullPath, expanded) {
     fileExplorerTabberCollapsed.add(fullPath);
   }
   persistTabberCollapsed();
-  scheduleShareUiStatePublish();
   return true;
 }
 
@@ -5234,7 +5227,6 @@ function setAllTabberCollapsed(collapsed) {
   }
   persistTabberCollapsed();
   refreshTabberPanels();
-  scheduleShareUiStatePublish();
 }
 
 async function openTabberActivityOverview() {
@@ -5412,15 +5404,16 @@ function scheduleTabberTreeLayoutStateSync() {
 }
 
 function bindTabberPanel(panel) {
-  if (!panel || panel.dataset.tabberBound === 'true') return;
-  panel.dataset.tabberBound = 'true';
-  panel.addEventListener('click', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'tabber-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('click', panel, 'click', event => {
     if (!itemInLayout(tabberItemId)) return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type]');
     if (!row || !panel.contains(row)) return;
     tabberTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     if (!itemInLayout(tabberItemId)) return;
     if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
@@ -5431,13 +5424,13 @@ function bindTabberPanel(panel) {
     event.stopPropagation();
     openTabberSession(session);
   });
-  panel.addEventListener('change', event => {
+  scope.ownEvent('change', panel, 'change', event => {
     if (!itemInLayout(tabberItemId)) return;
     const lookback = event.target.closest?.('[data-tabber-lookback]');
     if (!lookback || !panel.contains(lookback)) return;
     setTabberSessionFileLookbackHours(lookback.value);
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     if (!itemInLayout(tabberItemId)) return;
     const tabRow = event.target.closest?.('.file-tree-row[data-tabber-type="session"], .file-tree-row[data-tabber-type="window"], .file-tree-row[data-tabber-type="tab"]');
     const tabItem = tabRow?.dataset.tabberType === 'tab' ? tabRow.dataset.tabberItem : tabRow?.dataset.tabberSession;
@@ -5457,5 +5450,6 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+  });
   });
 }

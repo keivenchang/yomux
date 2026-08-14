@@ -35,6 +35,28 @@ from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_query_if_running_does_not_launch_an_absent_local_service(tmp_path, monkeypatch):
+    client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
+    absent_error = FileNotFoundError(2, "socket is absent")
+    launch_calls = []
+
+    monkeypatch.setattr(
+        client,
+        "_request_once",
+        lambda *_args, **_kwargs: (
+            {"ok": False, "error": "socket is absent", "_transport_error": "absent"},
+            b"",
+            TransportFailure(absent_error, "traceback", "status", "r-status", 1.0),
+        ),
+    )
+    monkeypatch.setattr(client.registry, "ensure_started", lambda: launch_calls.append(True) or True)
+
+    response = client.request_if_running({"action": "status"})
+
+    assert response["_transport_error"] == "absent"
+    assert launch_calls == []
+
+
 def test_sealed_local_service_client_rejects_late_demand_without_rpc_or_respawn(tmp_path, monkeypatch):
     client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
     rpc_calls = []
@@ -109,8 +131,9 @@ def test_serving_predicate_rejects_a_real_unreaped_zombie():
             time.sleep(0.01)
         assert registry_mod.process_state(child) == "Z", registry_mod.process_state(child)
 
-        # Red for the retired oracle: the zombie retains its start ticks.
-        assert registry_mod.process_start_identity(child)
+        # Linux retains readable start ticks for a zombie; macOS libproc deliberately does not.
+        if sys.platform != "darwin":
+            assert registry_mod.process_start_identity(child)
         # Green for the shared predicate: a zombie is not serving.
         assert pid_is_serving(child) is False
         # Fails closed: this live test process is still serving.
@@ -368,6 +391,8 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
 
     assert args[:3] == [sys.executable, "-m", "yolomux_lib.jobd"]
     assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
+    inherited_paths = kwargs["env"]["PYTHONPATH"].split(os.pathsep)
+    assert all(path in inherited_paths for path in sys.path if path)
     assert args[args.index("--socket") + 1] == str(registry.socket_path)
     assert args[args.index("--idle-seconds") + 1] == "12.5"
     assert args[-2:] == ["--workers", "1"]
@@ -700,7 +725,8 @@ def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypa
     }
 
 
-def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path):
+def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path, monkeypatch):
+    monkeypatch.delenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", raising=False)
     registry = LocalServiceRegistry(
         tmp_path,
         LocalServiceSpec(
@@ -725,7 +751,11 @@ def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup
         assert len(ownership.generation_marker) == 32
         assert ownership.member_identities
         process_entry = registry_mod.bounded_process_table().get(process.pid)
-        assert process_entry is not None
+        assert process_entry is not None, {
+            "poll": process.poll(),
+            "state": registry_mod.process_state(process.pid),
+            "identity": registry_mod.process_start_identity(process.pid),
+        }
         assert registry_mod.process_spawn_generation(process.pid) == ownership.generation_marker
 
         stop_fixture_local_service_process(
@@ -1881,6 +1911,22 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
     assert groups[0]["member_pids"] == (200, 201, 202)
 
 
+def test_tracked_local_service_groups_preserve_darwin_member_identity(tmp_path):
+    service_dir = tmp_path / "services"
+    socket_path = service_dir / "jobd.sock"
+    _write_service_record(service_dir, "jobd", 200, socket_path)
+    table = {
+        200: registry_mod.ProcessTableEntry(1, 200, 1.0, f"python3 -m yolomux_lib.jobd --socket {socket_path}", 1200, 200, "proc:1200"),
+        201: registry_mod.ProcessTableEntry(200, 200, 1.0, "python3 worker", 1201, 200, "darwin:1201"),
+    }
+
+    groups, diagnostics = registry_mod.resolve_tracked_local_service_groups(service_dir, table)
+
+    assert diagnostics == []
+    assert groups[0]["member_records"][201]["process_start_identity"] == "darwin:1201"
+    assert registry_mod.process_record_diagnostic(groups[0]["member_records"][201], table=table).current is True
+
+
 def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
     FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
     good = _table(
@@ -1909,6 +1955,20 @@ def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
     # A recycled lease PID fails the command identity check.
     assert registry_mod.tracked_port_process_group(8881, tmp_path, recycled) == {}
     assert registry_mod.tracked_port_process_group(9999, tmp_path, good) == {}
+
+
+def test_tracked_port_process_group_preserves_darwin_member_identity(tmp_path):
+    FixtureLeaseRecordBuilder(pid=400, pgid=400, port=8881).write(tmp_path)
+    table = {
+        400: registry_mod.ProcessTableEntry(1, 400, 1.0, "python3 yolomux.py --port 8881 --dang", 1400, 400, "proc:1400"),
+        401: registry_mod.ProcessTableEntry(400, 400, 1.0, "tmux -C attach-session", 1401, 400, "darwin:1401"),
+    }
+
+    group, diagnostic = registry_mod.resolve_tracked_port_process_group(8881, tmp_path, table)
+
+    assert diagnostic is not None and diagnostic.current is True
+    assert group["member_records"][401]["process_start_identity"] == "darwin:1401"
+    assert registry_mod.process_record_diagnostic(group["member_records"][401], table=table).current is True
 
 
 def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, monkeypatch):

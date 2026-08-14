@@ -31,6 +31,7 @@ from .registry import ProcessTableUnavailable
 from .registry import bounded_preflight_process_table
 from .registry import process_fence_record
 from .registry import process_record_diagnostic
+from .registry import process_table_start_identity
 from .registry import read_server_port_lease_record
 from .registry import resolve_tracked_port_process_group
 from .registry import stale_local_service_groups_of_dead_launcher
@@ -63,7 +64,7 @@ def stale_orphans_of_dead_owner(record: dict, table: dict[int, ProcessTableEntry
         if pid > 0 and start_time > 0:
             identities.add((pid, start_time))
     return {
-        pid: process_fence_record(record, pid=pid, start_identity=f"proc:{entry.start_time}")
+        pid: process_fence_record(record, pid=pid, start_identity=process_table_start_identity(entry))
         for pid, entry in table.items()
         if entry.ppid == 1 and entry.pgid == lease_pgid and (pid, entry.start_time) in identities
     }

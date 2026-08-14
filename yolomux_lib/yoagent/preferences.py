@@ -87,11 +87,6 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "uploads.image_action_order": ("image action", "image actions", "image action order", "image paste actions", "image drop actions"),
     "uploads.custom_actions": ("custom upload actions", "custom drop actions", "file drop actions"),
     "uploads.max_bytes": ("file transfer size cap", "transfer size cap", "upload max bytes", "upload limit", "download limit", "max upload size", "max download size"),
-    "share.ttl_seconds": ("share ttl", "share expiry", "share duration"),
-    "share.max_viewers": ("share max viewers", "max viewers"),
-    "share.read_only": ("share read only", "share write access"),
-    "share.scheme": ("share scheme", "share protocol", "share https"),
-    "share.view_fit": ("share view fit", "share fit", "mirror fit"),
     "performance.latency_refresh_ms": ("latency refresh", "ping refresh"),
     "performance.event_log_refresh_ms": ("event log refresh", "log refresh"),
     "performance.tabber_activity_refresh_ms": ("tabber refresh", "recent agents refresh", "activity refresh"),
@@ -285,8 +280,6 @@ def settings_for_topic(question: str, catalog: dict[str, dict[str, Any]]) -> lis
         return [path for path in catalog if any(term in path for term in ["theme", "color", "cursor"])]
     if "upload" in text or "drop" in text or "paste" in text:
         return [path for path in catalog if path.startswith("uploads.")]
-    if "share" in text:
-        return [path for path in catalog if path.startswith("share.")]
     return []
 
 
@@ -696,7 +689,7 @@ def parse_settings_read(question: str, payload: dict[str, Any], locale: str = "e
         return None
     if not any(term in text for term in [
         "setting", "settings", "preference", "preferences", "theme", "color", "font", "cursor", "tab", "notify",
-        "notification", "upload", "share", "yolo", "yoagent", "yo agent", "finder", "differ", "settings.yaml",
+        "notification", "upload", "yolo", "yoagent", "yo agent", "finder", "differ", "settings.yaml",
         "config", "default",
     ]):
         return None
@@ -821,19 +814,6 @@ def product_capability_registry() -> list[dict[str, Any]]:
             "backing": "settings catalog + drop-action registry",
             "setting_keys": ["uploads.image_action_order", "uploads.custom_actions", "uploads.retention_days"],
             "examples": ["what are my image paste actions?", "set upload retention to 14 days"],
-        },
-        {
-            "key": "share",
-            "name": "YO!share",
-            "read": True,
-            "write": True,
-            "read_action": "explain share defaults and active shares",
-            "write_action": "route through share creation/management helpers",
-            "auth": "admin for shares",
-            "locale_keys": {"name": "brand.share"},
-            "backing": "share APIs and share.* Preferences",
-            "setting_keys": ["share.ttl_seconds", "share.max_viewers", "share.read_only", "share.scheme"],
-            "examples": ["what are my share defaults?", "make share links read-only"],
         },
         {
             "key": "recentWork",

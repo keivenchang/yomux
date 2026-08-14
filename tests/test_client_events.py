@@ -311,7 +311,7 @@ def test_app_publishes_only_known_client_event_types():
 
 
 def test_browser_client_event_contract_matches_server_event_types():
-    source = (REPO_ROOT / "static_src" / "js" / "yolomux" / "99_terminal_boot.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src" / "js" / "yolomux" / "99_client_event_transport.js").read_text(encoding="utf-8")
     match = re.search(r"const clientServerPushEventTypes = Object\.freeze\(\[(.*?)\]\);", source, flags=re.DOTALL)
     assert match, "browser EventSource/dispatch contract must have one declared event table"
     browser_types = set(re.findall(r"'([a-z_]+)'", match.group(1)))

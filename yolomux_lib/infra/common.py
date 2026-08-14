@@ -61,7 +61,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.4"
+YOLOMUX_VERSION = "0.7.5"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -83,8 +83,9 @@ def resolve_yolomux_roots(
 ) -> YolomuxRoots:
     """Resolve all writable product roots from one parent without creating paths.
 
-    A rooted run must never fall back to ambient XDG/Codex configuration: that
-    would make an apparently isolated server mutate a user's live state.
+    A rooted run isolates YOLOmux-owned XDG state. Codex credentials and
+    configuration remain user-owned by default; only YOLOMUX_CODEX_HOME opts
+    into a Codex home inside the root.
     """
     values = os.environ if environ is None else environ
     paths = _resolve_root_paths(
@@ -557,13 +558,14 @@ def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
     return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
 
-def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+def codex_runtime_env(base_env: dict[str, str] | None = None, *, create_home: bool = True) -> dict[str, str]:
     """Build the Codex subprocess environment used by YO!agent."""
     env = dict(os.environ)
     if base_env is not None:
         env.update(base_env)
     codex_home = codex_home_from_env(env)
-    codex_home.mkdir(parents=True, exist_ok=True)
+    if create_home:
+        codex_home.mkdir(parents=True, exist_ok=True)
     env["PATH"] = healed_runtime_path(env, home=Path.home())
     env["CODEX_HOME"] = str(codex_home)
     env["TERM"] = "xterm-256color"

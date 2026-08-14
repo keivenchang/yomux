@@ -16,8 +16,8 @@ from urllib.request import urlopen
 
 import pytest
 
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import stop_browser_share_server
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import stop_browser_server
 from tests.helpers.gate_stats import NOW
 from tests.helpers.gate_stats import _seed_realistic_stats
 from tests.helpers.gate_stats import record_current_database_migration
@@ -188,7 +188,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
             "retryable": False,
             "terminal": True,
         })]
-        http_server, http_thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+        http_server, http_thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
         base_url = f"http://127.0.0.1:{http_server.server_address[1]}"
         endpoint_measurements = {}
         latency_samples = []
@@ -349,7 +349,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
         return latency_samples
     finally:
         if "http_server" in locals():
-            stop_browser_share_server(http_server, http_thread)
+            stop_browser_server(http_server, http_thread)
         service.stop_event.set()
         service.work_event.set()
         thread.join(timeout=3)
@@ -378,7 +378,7 @@ def exercise_empty_window(monkeypatch, tmp_path: Path, clock_seconds: float, lab
                 client, client_binding_secret=b"stats-24h-empty-window-client-binding-secret",
             ),
         )
-        http_server, http_thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+        http_server, http_thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
         status, snapshot, response_bytes, elapsed_ms = _http_json(
             f"http://127.0.0.1:{http_server.server_address[1]}",
             "/api/stats-snapshot?range_seconds=300&resolution=1&client_id=stats-24h-empty-window",
@@ -394,7 +394,7 @@ def exercise_empty_window(monkeypatch, tmp_path: Path, clock_seconds: float, lab
         }
     finally:
         if http_server is not None and http_thread is not None:
-            stop_browser_share_server(http_server, http_thread)
+            stop_browser_server(http_server, http_thread)
         service.stop_event.set()
         service.work_event.set()
         thread.join(timeout=3)

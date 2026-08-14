@@ -13,10 +13,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
 from tests.browser_helpers.browser_layout import browser
 from tests.browser_helpers.browser_layout import load_live_runtime_boot_fixture
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
-from tests.browser_helpers.browser_layout import stop_browser_share_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import start_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.browser_helpers.browser_layout import stop_isolated_browser_app
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import wait_for_fixture_api_quiescence
@@ -295,7 +295,7 @@ def _warm_realistic_status_snapshot(runtime) -> None:
 
 @contextmanager
 def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, session_count: int):
-    runtime = start_isolated_browser_share_app(
+    runtime = start_isolated_browser_app(
         monkeypatch,
         gate_runtime_paths.root,
         session_count=session_count,
@@ -307,7 +307,7 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
         assert runtime.paths.config_dir.parent == gate_runtime_paths.root
         assert runtime.paths.state_dir.parent == gate_runtime_paths.root
         _launch_mock_agents(runtime, runtime.sessions)
-        server, thread = start_browser_share_server(
+        server, thread = start_browser_server(
             monkeypatch,
             gate_runtime_paths.config_dir,
             runtime.app,
@@ -333,8 +333,8 @@ def _realistic_agent_browser_runtime(browser, monkeypatch, gate_runtime_paths, s
         yield SimpleNamespace(browser=browser, runtime=runtime, server=server)
     finally:
         if server is not None and thread is not None:
-            stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+            stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
 
 
 @pytest.mark.browser

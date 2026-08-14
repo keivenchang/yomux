@@ -6,7 +6,6 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 import json
-import math
 from numbers import Real
 from typing import Any
 from urllib.parse import parse_qs
@@ -16,21 +15,13 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support.ui import WebDriverWait
 
 from yolomux_lib import browser_diagnostic_receipts
+from yolomux_lib.live_browser_soak import js_debug_event_enrichment_matches
 
 
 # Live activity-summary and session-files errors arrived 8 and 15 seconds after the first
 # transport failure. Sixteen seconds covers the latest measured arrival with a one-second margin.
 BROWSER_JOURNEY_OBSERVATION_SECONDS = 16.0
 BROWSER_JOURNEY_POLL_SECONDS = 0.25
-_JS_DEBUG_MAX_SAFE_INTEGER = 2**53 - 1
-_JS_DEBUG_PROTOCOL_TOKEN_CHARACTERS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._/-"
-)
-_JS_DEBUG_ASYNC_ENRICHMENT_FIELDS = frozenset({"responseBytes", "connectionProtocol", "phaseTimings"})
-_JS_DEBUG_ASYNC_PHASE_FIELDS = frozenset({
-    "queueMs", "connectMs", "tlsMs", "ttfbMs", "downloadMs", "applyRenderMs",
-})
-_JS_DEBUG_MAX_ASYNC_PHASE_MS = 86_400_000.0
 
 
 def read_browser_console_log(driver) -> tuple[dict[str, Any], ...]:
@@ -236,67 +227,6 @@ def acknowledge_browser_diagnostic_receipts(driver) -> Mapping[str, Any]:
     return receipt
 
 
-def _js_debug_async_phase_timing(value: Any) -> bool:
-    return (
-        not isinstance(value, bool)
-        and isinstance(value, Real)
-        and math.isfinite(float(value))
-        and 0 <= float(value) <= _JS_DEBUG_MAX_ASYNC_PHASE_MS
-    )
-
-
-def _js_debug_async_enrichment_matches(
-    expected: Mapping[str, Any],
-    retired: Mapping[str, Any],
-) -> bool:
-    added_fields = set(retired) - set(expected)
-    if not added_fields <= _JS_DEBUG_ASYNC_ENRICHMENT_FIELDS:
-        return False
-    if any(
-        field not in retired or retired[field] != value
-        for field, value in expected.items()
-        if field != "phaseTimings"
-    ):
-        return False
-
-    if "responseBytes" in added_fields:
-        response_bytes = retired["responseBytes"]
-        if (
-            isinstance(response_bytes, bool)
-            or not isinstance(response_bytes, int)
-            or not 0 <= response_bytes <= _JS_DEBUG_MAX_SAFE_INTEGER
-        ):
-            return False
-    if "connectionProtocol" in added_fields:
-        protocol = retired["connectionProtocol"]
-        if (
-            not isinstance(protocol, str)
-            or len(protocol) > 24
-            or protocol != protocol.lower()
-            or any(character not in _JS_DEBUG_PROTOCOL_TOKEN_CHARACTERS for character in protocol)
-        ):
-            return False
-
-    expected_phases = expected.get("phaseTimings")
-    retired_phases = retired.get("phaseTimings")
-    if "phaseTimings" in expected:
-        if not isinstance(expected_phases, Mapping) or not isinstance(retired_phases, Mapping):
-            return retired_phases == expected_phases
-        if any(key not in retired_phases or retired_phases[key] != value for key, value in expected_phases.items()):
-            return False
-        added_phases = set(retired_phases) - set(expected_phases)
-    elif "phaseTimings" in retired:
-        if not isinstance(retired_phases, Mapping):
-            return False
-        added_phases = set(retired_phases)
-    else:
-        added_phases = set()
-    return (
-        added_phases <= _JS_DEBUG_ASYNC_PHASE_FIELDS
-        and all(_js_debug_async_phase_timing(retired_phases[key]) for key in added_phases)
-    )
-
-
 def acknowledge_and_consume_only_expected_js_debug_failures(
     driver,
     expected: Sequence[Mapping[str, Any]],
@@ -308,7 +238,7 @@ def acknowledge_and_consume_only_expected_js_debug_failures(
     if (
         len(actual_events) != len(expected_events)
         or any(
-            not _js_debug_async_enrichment_matches(expected_event, actual_event)
+            not js_debug_event_enrichment_matches(expected_event, actual_event)
             for expected_event, actual_event in zip(expected_events, actual_events, strict=True)
         )
     ):
@@ -340,7 +270,7 @@ def acknowledge_and_consume_only_expected_js_debug_failures(
     if (
         len(retired_events) != len(expected_events)
         or any(
-            not _js_debug_async_enrichment_matches(expected_event, retired_event)
+            not js_debug_event_enrichment_matches(expected_event, retired_event)
             for expected_event, retired_event in zip(expected_events, retired_events, strict=True)
         )
     ):

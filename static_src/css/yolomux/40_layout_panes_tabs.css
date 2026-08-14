@@ -1624,10 +1624,6 @@ body.app-topbar-touch-compact .pane-tab-close {
     0 8px 16px rgba(0, 0, 0, 0.52),
     var(--active-control-focus-shadow-compact);
 }
-body.share-replay-shell .share-mirror-stage .app-overlay-root,
-body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
-  position: absolute;
-}
 .session-popover-host.popover-open {
   z-index: var(--z-pane-modal);
 }

@@ -64,7 +64,7 @@ BATCH_ALLOWED_TRIGGERS = frozenset({
     "sync-revalidation",
 })
 BATCH_CLIENT_SCOPE_LEGACY = "legacy"
-BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser", "share"})
+BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser"})
 BATCH_PATH_FINGERPRINT_LIMIT = 8
 BATCH_CLIENT_REVISION_MAX_LENGTH = 80
 BATCH_TRIGGER_COUNT_LIMIT = MAX_BATCH_REQUESTS
@@ -541,9 +541,21 @@ def read_raw(raw_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
 
 
 @normalize_os_errors
+def copy_raw_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str, str]:
+    _sync_package_overrides()
+    return io_ops.copy_raw_to(raw_path, target, max_bytes=max_bytes)
+
+
+@normalize_os_errors
 def zip_directory(raw_path: str, max_bytes: int | None = None):
     _sync_package_overrides()
     return io_ops.zip_directory(raw_path, max_bytes=max_bytes)
+
+
+@normalize_os_errors
+def zip_directory_to(raw_path: str, target: Any, max_bytes: int | None = None) -> tuple[int, str]:
+    _sync_package_overrides()
+    return io_ops.zip_directory_to(raw_path, target, max_bytes=max_bytes)
 
 
 @normalize_os_errors

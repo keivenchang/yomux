@@ -762,7 +762,6 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
   renderFileExplorerChangesPanels({force: true});
   fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
-  scheduleShareTopologySnapshot('differ-refs');
   return true;
 }
 
@@ -801,7 +800,6 @@ function fileExplorerSelectedSessionForView(view) {
 }
 
 function fileExplorerFinderTargetSession() {
-  if (shareViewMode && !shareWriteMode) return fileExplorerSelectedSessionForView('finder');
   const selected = fileExplorerSelectedSessionForView('finder');
   if (selected) {
     fileExplorerFinderSelectedSession = selected;
@@ -813,9 +811,6 @@ function fileExplorerFinderTargetSession() {
 }
 
 function fileExplorerSessionFilesTargetSession() {
-  if (shareViewMode && !shareWriteMode) {
-    return fileExplorerSelectedSessionForView('differ');
-  }
   const selected = fileExplorerSelectedSessionForView('differ');
   if (selected) {
     fileExplorerChangesSelectedSession = selected;
@@ -899,16 +894,12 @@ function switchFileExplorerChangesSession(session) {
   if (!session || !document.querySelector('.file-explorer-changes-panel')) return;
   rememberFileExplorerExplicitSyncSession(session);
   fileExplorerChangesSelectedSession = session;
-  // Session selection belongs to Differ now. Keep the old semantic shape only for older share
-  // viewers; it no longer drives any live panel mode.
-  sharePublish('finder-mode', {mode: 'diff', session});
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
   // Tabber is backed by transcript/activity data, so a pane-tab click changes only its current and
   // active row state. Preparing Differ payloads, rebuilding the tree, and forcing a session-files
   // request here made one tab activation perform the same Tabber state sync twice.
   if (itemInLayout(tabberItemId) && focusedPanelItem === tabberItemId) {
     scheduleTabberTreeLayoutStateSync();
-    scheduleShareTopologySnapshot('finder-session');
     return;
   }
   const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
@@ -927,18 +918,14 @@ function switchFileExplorerChangesSession(session) {
   // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
   // that parent and submit a full session-files job for every tab switch.
   fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
-  scheduleShareTopologySnapshot('finder-session');
 }
 
 function switchFileExplorerFinderSession(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
   if (fileExplorerFinderSelectedSession === session) return false;
   fileExplorerFinderSelectedSession = session;
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
-  sharePublish('finder-mode', {mode: 'files', session});
-  scheduleShareTopologySnapshot('finder-session');
   return true;
 }
 
@@ -949,7 +936,6 @@ function fileExplorerChangesSessionInteractionIsCurrent(session) {
 
 function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
   if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
   if (fileExplorerChangesSelectedSession === session) return false;
@@ -1476,7 +1462,6 @@ function setAllFileExplorerChangesCollapsed(collapsed) {
   writeStoredChangesRepoCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
-  scheduleShareUiStatePublish();
 }
 
 function toggleAllFileExplorerChanges() {
@@ -1495,7 +1480,6 @@ function setAllFileExplorerChangesDirectoriesExpanded(expand) {
   writeStoredChangesFolderCollapsed();
   renderFileExplorerChangesPanels({force: true});
   syncFileExplorerChangesCollapseButtons();
-  scheduleShareUiStatePublish();
 }
 
 function sessionFileIsDifferVisible(item) {
@@ -2221,9 +2205,10 @@ function openDiffRefPickerForInput(input, controls) {
 }
 
 function bindChangesPanel(panel) {
-  if (!panel || panel.dataset.changesBound === 'true') return;
-  panel.dataset.changesBound = 'true';
-  panel.addEventListener('change', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'changes-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('change', panel, 'change', event => {
     if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
@@ -2240,23 +2225,23 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('input', event => {
+  scope.ownEvent('input', panel, 'input', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
     renderDiffRefPopover(diffRefInput, {showAll: false});
   });
-  panel.addEventListener('focusin', event => {
+  scope.ownEvent('focusin', panel, 'focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
       if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
@@ -2276,7 +2261,7 @@ function bindChangesPanel(panel) {
     }
     differTreeInteractionController.handleKeydown(event, panel);
   });
-  panel.addEventListener('click', async event => {
+  scope.ownEvent('actions-click', panel, 'click', async event => {
     if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
@@ -2326,7 +2311,7 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('dragstart', event => {
+  scope.ownEvent('dragstart', panel, 'dragstart', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
     if (!event.dataTransfer) return;
@@ -2340,18 +2325,18 @@ function bindChangesPanel(panel) {
     event.dataTransfer.setData('text/plain', path);
     startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
   });
-  panel.addEventListener('dragend', () => {
+  scope.ownEvent('dragend', panel, 'dragend', () => {
     cancelDragOperationState();
   });
   // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
   // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
-  panel.addEventListener('click', event => {
+  scope.ownEvent('tree-click', panel, 'click', event => {
     if (event.__sharedTreeInteractionHandled) return;
     const row = event.target.closest('.file-tree-row[data-path]');
     if (!row || !panel.contains(row)) return;
     differTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
@@ -2394,6 +2379,7 @@ function bindChangesPanel(panel) {
     if (!directoryRow || !panel.contains(directoryRow)) return;
     event.preventDefault();
     showChangedDirectoryContextMenu(directoryRow, event.clientX, event.clientY);
+  });
   });
 }
 
@@ -2448,7 +2434,6 @@ const differTreeInteractionController = createSharedTreeInteractionController({
     else changesFolderCollapsed.add(key);
     writeStoredChangesFolderCollapsed();
     renderFileExplorerChangesPanels({force: true});
-    scheduleShareUiStatePublish();
   },
   activateRow(row, event) {
     if (row?.dataset?.openChangeFile) {
@@ -2770,7 +2755,6 @@ function setEditorPreviewFontSize(value) {
   applyCssSettings();
   updateEditorPreviewFontControls();
   refreshFilePreviewPopouts();
-  scheduleShareUiStatePublish();
   saveSettingsPatch(settingPatch('appearance.preview_font_size', next))
     .then(() => { statusEl.textContent = t('status.previewFontSizeSaved'); })
     .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
@@ -2953,9 +2937,6 @@ function renderFileExplorerChangesPanels(options = {}) {
     if (requestedView && fileExplorerViewForItem(panel.dataset.panelItem) !== requestedView) continue;
     renderFileExplorerChangesPanel(panel, options);
   }
-  if (shareViewMode && typeof scheduleShareScrollRestoreByKey === 'function') {
-    scheduleShareScrollRestoreByKey('finder:differ');
-  }
 }
 
 // Fixed file surfaces may mount before their asynchronous payload arrives and later become active
@@ -2985,9 +2966,9 @@ function activateFileExplorerSurface(item) {
 function bindFileExplorerChangesResizer(panel) {
   const handle = panel?.querySelector?.('[data-file-explorer-changes-resizer]');
   const pane = panel?.querySelector?.('.file-explorer-pane');
-  if (!handle || !pane || handle.dataset.bound === 'true') return;
-  handle.dataset.bound = 'true';
-  handle.addEventListener('pointerdown', event => {
+  if (!handle || !pane) return null;
+  return bindScopedOnce(handle, 'file-explorer-changes-resizer', scope => {
+  scope.ownEvent('pointerdown', handle, 'pointerdown', event => {
     event.preventDefault();
     event.stopPropagation();
     const pointerId = event.pointerId;
@@ -3015,6 +2996,7 @@ function bindFileExplorerChangesResizer(panel) {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', done);
     window.addEventListener('pointercancel', done);
+  });
   });
 }
 
@@ -3530,6 +3512,7 @@ function fileEditorEmptyState(title, detail = '') {
 }
 
 function disconnectFileEditorImageObserver(imagePane) {
+  releaseRawFileMediaSources(imagePane);
   if (imagePane?._imageResizeObserver) {
     imagePane._imageResizeObserver.disconnect();
     imagePane._imageResizeObserver = null;
@@ -3559,19 +3542,30 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
       applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
-    img.onerror = () => {
-      disconnectFileEditorImageObserver(imagePane);
-      imagePane.replaceChildren(fileEditorEmptyState(
-        t('preview.image.loadFailed'),
-        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
-      ));
-      status(t('preview.image.loadFailedStatus'), 'error');
-    };
-    img.src = rawFileUrl(path, {v: version});
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
+    imagePane._previewAsync = installRawFileMediaSource(img, path, {
+      params: {v: version},
+      isCurrent: () => imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version && imagePane.contains(img),
+      onFailure: error => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          userMessageText(error, t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)})),
+        ));
+        status(userMessageText(error, t('preview.image.loadFailedStatus')), 'error');
+      },
+      onDecodeFailure: () => {
+        disconnectFileEditorImageObserver(imagePane);
+        imagePane.replaceChildren(fileEditorEmptyState(
+          t('preview.image.loadFailed'),
+          t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+        ));
+        status(t('preview.image.loadFailedStatus'), 'error');
+      },
+    });
   }
   if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);
   else applyPreviewZoomSurface(imagePane, img, zoomOptions);
@@ -3662,7 +3656,6 @@ function captureFileEditorPanelViewState(item, panel) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!isFileEditorItem(item) || !view || !scrollDOM) return;
-  if (shareViewMode && !shareWriteMode && !applyingShareRemoteScroll && !applyingShareRemoteUiState) return;
   if (fileEditorViewState.has(item) && !fileEditorPanelViewStateCaptureHasLayout(panel, scrollDOM)) return;
   const selection = view.state?.selection?.main;
   fileEditorViewState.set(item, {

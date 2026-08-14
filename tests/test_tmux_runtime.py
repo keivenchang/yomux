@@ -109,29 +109,29 @@ def test_wait_for_isolated_tmux_pane_exit_accepts_proven_absent_pid(monkeypatch)
 
 
 def test_tmux_session_birth_retirement_excludes_zombies_and_same_pgid_foreign_births(monkeypatch):
+    # Capture owns the whole-table group discovery; join owns only these frozen births.
     identity = SessionRetirementIdentity(
         session="fixture",
         members=(ProcessBirthIdentity(43213, 43213, "proc:125", "fixture command"),),
     )
-
-    # bounded_process_table is the owner that excludes zombies, so a zombie birth is absent.
     assert retained_tmux_session_births(identity, table={}) == ()
-
-    # A new process may occupy the same PGID or even recycle the PID. Neither is the captured birth.
     foreign = ProcessTableEntry(1, 43213, 0.0, "foreign command", 126, 43213, "proc:126")
     assert retained_tmux_session_births(identity, table={43213: foreign}) == ()
-
     monkeypatch.setattr(session_retirement, "process_state", lambda _pid: "S")
     retained = ProcessTableEntry(1, 43213, 0.0, "fixture command", 125, 43213, "proc:125")
-    assert retained_tmux_session_births(identity, table={43213: retained}) == (
-        {
-            "pid": 43213,
-            "pgid": 43213,
-            "state": "S",
-            "start_identity": "proc:125",
-            "command": "fixture command",
-        },
-    )
+    expected = ({"pid": 43213, "pgid": 43213, "state": "S", "start_identity": "proc:125", "command": "fixture command"},)
+    assert retained_tmux_session_births(identity, table={43213: retained}) == expected
+    # The join-side path double-fences only the captured PID around its current PGID read.
+    # It must not pay for or depend on another complete process-table sweep.
+    live = SimpleNamespace(state="S", start_identity="proc:125")
+    calls = []
+    monkeypatch.setattr(session_retirement, "process_identity_snapshot", lambda pid: calls.append(pid) or live)
+    monkeypatch.setattr(session_retirement.os, "getpgid", lambda pid: calls.append(("pgid", pid)) or 43213)
+    monkeypatch.setattr(session_retirement, "bounded_process_table", lambda **_kwargs: pytest.fail("join swept unrelated processes"))
+    assert retained_tmux_session_births(identity) == expected
+    # Both identity reads surround getpgid, closing exit and PID-reuse races.
+    # No unrelated process identity was queried.
+    assert calls == [43213, ("pgid", 43213), 43213]
 
 
 def test_stop_isolated_tmux_runtime_waits_for_the_exact_pane_exit_side_effect(monkeypatch, tmp_path):

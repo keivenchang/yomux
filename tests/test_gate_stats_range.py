@@ -44,8 +44,8 @@ import pytest
 from tests import latency_calibration
 from tests.browser_helpers.browser_layout import (  # noqa: F401
     browser,
-    start_browser_share_server,
-    stop_browser_share_server,
+    start_browser_server,
+    stop_browser_server,
 )
 from tests.helpers.browser_stats_coverage import _start_current_stats, _write_current_stats_fixture_assets
 from tests.helpers.gate_stats import NOW
@@ -329,7 +329,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
                 client, client_binding_secret=b"stats-range-baseline-client-binding-secret",
             ),
         )
-        http_server, http_thread = start_browser_share_server(monkeypatch, tmp_path, app, auth_bypass=True)
+        http_server, http_thread = start_browser_server(monkeypatch, tmp_path, app, auth_bypass=True)
         browser.get(f"http://127.0.0.1:{http_server.server_address[1]}/static/{asset_name}")
         _start_current_stats(browser)
         result = browser.execute_async_script(
@@ -543,7 +543,7 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
         assert not latency_failures, f"G4b latency guard: {'; '.join(latency_failures)}"
     finally:
         if http_server is not None and http_thread is not None:
-            stop_browser_share_server(http_server, http_thread, browser=browser)
+            stop_browser_server(http_server, http_thread, browser=browser)
         service.stop_event.set()
         service.work_event.set()
         service_thread.join(timeout=3)

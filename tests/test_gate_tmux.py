@@ -145,6 +145,7 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
         tmux_utils.tmux_command(["kill-server"])
 
 
+@pytest.mark.gate_serial
 def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(monkeypatch, tmp_path, make_tmux_webterm_app, no_control_socket, isolated_yoagent_conversation_state):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")

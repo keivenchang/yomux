@@ -11,10 +11,10 @@ import pytest
 from selenium.webdriver.support.ui import WebDriverWait
 
 from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
-from tests.browser_helpers.browser_layout import start_browser_share_server
-from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
-from tests.browser_helpers.browser_layout import stop_browser_share_server
-from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
+from tests.browser_helpers.browser_layout import start_browser_server
+from tests.browser_helpers.browser_layout import start_isolated_browser_app
+from tests.browser_helpers.browser_layout import stop_browser_server
+from tests.browser_helpers.browser_layout import stop_isolated_browser_app
 from tests.gate_harness import wait_for_browser_boot
 
 EDITOR_GLOBALS = {
@@ -27,7 +27,7 @@ EDITOR_GLOBALS = {
 
 @pytest.fixture
 def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
-    runtime = start_isolated_browser_share_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
+    runtime = start_isolated_browser_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
     assert runtime.paths.config_dir.parent == gate_runtime_paths.root
     assert runtime.paths.state_dir.parent == gate_runtime_paths.root
     auto_approve_payload = {
@@ -43,7 +43,7 @@ def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
         "auto_approve_status_bytes",
         lambda session=None: (json.dumps(auto_approve_payload).encode("utf-8"), HTTPStatus.OK),
     )
-    server, thread = start_browser_share_server(monkeypatch, gate_runtime_paths.config_dir, runtime.app, auth_bypass=True)
+    server, thread = start_browser_server(monkeypatch, gate_runtime_paths.config_dir, runtime.app, auth_bypass=True)
     session = runtime.sessions[0]
     browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{urlencode({'sessions': session, 'layout': 'left', 'tabs': f'left:{session}'})}")
     assert_live_runtime_boot_healthy(browser, "regression-gate", timeout=12)
@@ -51,8 +51,8 @@ def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
     try:
         yield SimpleNamespace(browser=browser, runtime=runtime, server=server, session=session)
     finally:
-        stop_browser_share_server(server, thread, browser=browser)
-        stop_isolated_browser_share_app(runtime)
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
 
 
 def _open_editor(gate_browser_runtime, target, expected):
@@ -494,4 +494,3 @@ def _a8_missing_snapshot(gate_browser_runtime, target):
         """,
         str(target),
     )
-

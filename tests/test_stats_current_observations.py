@@ -431,7 +431,6 @@ def test_http_route_is_authenticated_bounded_and_passes_username(monkeypatch):
     assert writes == [({"ok": True}, HTTPStatus.OK)]
     assert route.handler is http_routes.post_stats_observations
     assert route.role == "readonly"
-    assert route.share_access == http_routes.SHARE_ACCESS_NONE
     assert route.body_limit == 128 * 1024
 
 
@@ -543,23 +542,21 @@ def test_statsd_rotates_browser_failure_jsonl_at_its_bound(tmp_path, monkeypatch
 
 
 def test_sanitize_retained_payload_redacts_then_rebounds_so_second_validation_passes():
-    """W2: redaction markers expand text past the byte bound and turn a /share path
-    into a non-absolute marker; sanitize must re-bound and normalize so the mandatory
-    second validation passes instead of failing closed on a raw-valid input."""
+    """W2: redaction markers expand text past the byte bound; sanitize must re-bound
+    so the mandatory second validation passes instead of failing on raw-valid input."""
     raw = {
         "kind": "error",
         "signature": "sig",
         "message": ("token=a " * 63)[:500],
         "stack": ("token=a " * 500)[:4000],
-        "source": "/share/raw-secret-token",
+        "source": "/api/diagnostic",
     }
     validated = families.validate_payload("browser", raw)
     sanitized = browser_family.sanitize_retained_payload(validated)
 
     assert "token=a" not in sanitized["message"]
     assert "token=a" not in sanitized["stack"]
-    assert "raw-secret-token" not in sanitized["source"]
-    assert sanitized["source"] == "/share/[redacted]"
+    assert sanitized["source"] == "/api/diagnostic"
     assert len(sanitized["message"].encode("utf-8")) <= 500
     assert len(sanitized["stack"].encode("utf-8")) <= 4000
     # the mandatory second validation now succeeds

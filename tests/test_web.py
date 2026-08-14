@@ -98,12 +98,10 @@ def test_html_page_marks_readonly_role_without_breaking_out():
     assert json.loads(bootstrap)["accessRole"] == "readonly"
 
 
-def test_html_page_bootstraps_authoritative_username_but_never_for_share():
+def test_html_page_bootstraps_authoritative_username():
     bootstrap = json.loads(_bootstrap_json(web.html_page([], auth_username="alice")))
-    shared = json.loads(_bootstrap_json(web.html_page([], access_role="readonly", auth_username="alice", share={"id": "share"})))
 
     assert bootstrap["authUsername"] == "alice"
-    assert shared["authUsername"] == ""
 
 
 def test_html_page_bootstrap_includes_linear_issue_base_url():

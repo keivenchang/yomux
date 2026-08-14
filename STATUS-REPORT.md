@@ -1,60 +1,54 @@
-# Progress
+# v0.7.5 Progress
 
-Updated: 2026-08-13 09:33 AM PT
+Updated: 2026-08-13 10:08 PM PT
 Worktree: `/home/keivenc/dev/yolomux.dev7771`
 
-**Goal:** Drain DOIT.p0.0.7.4-cleanup.md with behavior-preserving refactors, verified integration, docs, and live acceptance
+This file is the sole source of truth for v0.7.5 release order and progress. Active `DOIT.075.*.md` files own their detailed requirements; completed queues move to `docs/DONE/` as historical evidence. This report does not mirror them, and retired planning files must not be recreated.
 
-**Goal totals:** 4/5 done (80%); 1 TODO.
+The candidate working tree contains this one aggregate ledger and no `PLAN.0.7.5.md`. Published `origin/main` still tracks both files at `a66b91d2c`; deleting the retired plan from origin is part of the not-yet-landed v0.7.5 release rewrite.
+
+**Goal:** Drain all five v0.7.5 queues in order, pass release gates, archive the queues, and complete live acceptance using only 7772 while keeping recovered 7771 stable
+
+**Goal totals:** 2/7 done (29%); 5 TODO.
 
 ## Goal checklist
 
-- [x] 1. Phase 0 characterization and safe test movement complete
-- [x] 2. Backend shared parents and typed boundaries complete
-- [x] 3. Backend god-object decomposition complete
-- [x] 4. Frontend state, extension, and lifecycle architecture complete
-- [ ] 5. Test/file ratchets, docs, frozen gate, live acceptance, and queue archive complete
+- [x] 1. Markdown preview image failure fixed from real same-page browser evidence
+- [ ] 2. macOS branch merged with Linux and real-macOS acceptance plus named review
+- [ ] 3. Retired collaboration feature removed completely with a zero-hit reappearance guard
+- [x] 4. Thirteen 0.7.4 cleanup follow-ups completed
+- [ ] 5. First-launch Codex auth, tri-state banner, and rotating YO completed
+- [ ] 6. Release-level gates passed and all five queues archived
+- [ ] 7. Restarted 7772 passed final authenticated real-browser acceptance; recovered 7771 remained unchanged after 11:32:22 AM PT
 
-**Supporting queue totals:** 26/26 done; 0 pending.
+**Supporting active-queue totals:** 22/38 done; 16 pending. Queues 0 and 3 completed at 11/11 and 13/13 and moved to `docs/DONE/2026-08/`. Queue 1 is 10/12: signed merge `87b2b4143` and reviewed Darwin fence correction `fd37d7707` fully contain `origin/fix/macos-v0.7.3`; its only remaining requirement is clean exact-SHA certification recorded in two gate checkboxes, while real-macOS acceptance is explicitly recorded as blocked because this host has no supported command-capable Mac path. Queue 2 is 12/13 on exact clean candidate `7228cb20e`: all eight functional lanes and authenticated 7772 acceptance passed; exact-SHA certification has passed as many as five of six units, but unchanged attempts continue to be refused only by measured host I/O/CPU qualification, so its one canonical-gate checkbox remains open. Queue 4 remains 0/13 in its isolated branch: exact pre-fix tri-state evidence is retained, and the fixed branch passed 84 Node layout cases, 10 focused Python owner tests, and the static source check; integration and live/browser acceptance remain.
 
-## Archived queues
+## Release scope, in execution order
 
-| queue | done | pending | archive evidence |
-| --- | ---: | ---: | --- |
-| `DOIT.p0.0.7.4-cleanup.md` | 26 | 0 | Reached 26/26 in `81c6d9fe1`; archived and deleted in `7f1a89863`; retained at `docs/DONE/2026-08/DONE.0-7-4-behavior-preserving-architecture-cleanup.md` |
+The order is a dependency chain. Queue 0 is complete. Queues 1 through 4 retain their existing numbers and continue in order.
 
-## Release closure
+| # | queue | work | scope |
+| ---: | --- | --- | ---: |
+| 0 | `DOIT.075.0.markdown-image-401.md` | Authenticated /api/fs/raw returns 401 for preview images | 5 items |
+| 1 | `DOIT.075.1.macos-merge.md` | Merge `origin/fix/macos-v0.7.3` | 12 items |
+| 2 | Queue 2 | Delete the retired collaboration feature completely | 13 items |
+| 3 | `DOIT.075.3.cleanup-followups.md` | Close the 0.7.4 refactor leftovers | 13 items |
+| 4 | `DOIT.075.4.first-launch-auth.md` | Codex auth on first launch, tri-state banner, rotating YO | 13 items |
 
-- [x] Frozen P0 queue reached 26/26 and was archived; the root queue file is intentionally gone.
-- [x] The latest stats/logs browser failure was reproduced as a null public-facade dereference and corrected through one lexical transport-lifecycle owner.
-- [x] The corrected worktree passed all 8/8 canonical functional lanes in 354.40 seconds after deterministic Dockview and transport-retirement regressions.
-- [ ] Freeze a clean exact-SHA candidate and pass one unmodified `python3 tools/check.py`: all eight lanes, qualified preflight/postflight, and every registered certification unit.
-- [ ] Restart only 7771 on that exact SHA and verify its listener, checkout, full SHA, authentication boundary, and served bundle identity.
-- [ ] Pass authenticated real-Chrome acceptance, a clean 600-second soak, and the 30-second negative browser failure probe on that same SHA and bundle.
-- [ ] Record the final evidence and close goal item 5. No 0.7.5 queue may start before then.
+### Why this order
 
-## Pending goal items
-
-- 5. Test/file ratchets, docs, frozen gate, live acceptance, and queue archive complete
-
-## Current blocker
-
-- Clean exact candidate `73471e6686d9b0d88ebcdb8233d05d36eb1ebbd4` passed all 8/8 functional lanes in one unmodified 430.71-second gate: browser 356.43 seconds, non-browser 324.92 seconds, E2E 131.13 seconds, Node layout 23.37 seconds, static/architecture 24.73 seconds, plus syntax/compile/whitespace. Four of six exclusive certification units passed, including S1, I3a, I3b, and the loaded-host negative control. The phase is not certifiable because I/O PSI rose before the chat-store and 24-hour stats units; both refused before measuring at full/some PSI 0.106302/0.107199 and 0.111147/0.111601. No product ceiling breached, but partial certification is not acceptance. Evidence: `/tmp/yolomux-check-runs/check-1786638360407397149-853534.json` and `/tmp/yolomux-certification/cert-1786638360407623512-853534`.
-- Clean exact candidate `2d05a754d0978aef86528368aba8b7521720c31e` ran one unmodified gate in 406.94 seconds. Browser and E2E passed; static and non-browser pytest reported the same deterministic violation because `tests/test_gate_stats_range.py` grew from its fixed 999-line owner budget to 1,077. The budget was not raised: the 24-hour fixture engine is now behind one explicit shared test helper, the original collecting owner is 550 lines, the helper is ratcheted at 510, zero test-to-test imports were added, and focused semantic 6/6 plus certification ownership 4/4 are green. This split is not yet committed or admitted by a canonical gate. Certification on `2d05a754d` ran six registered nodes but was void: only chat-store passed, five units refused their own unqualified I/O PSI, and postflight measured I/O full/some PSI 0.074175/0.075628 above 0.051/0.056. Evidence: `/tmp/yolomux-check-runs/check-1786637069071679716-184098.json` and `/tmp/yolomux-certification/cert-1786637069071800417-184098`.
-- Clean exact candidate `48fd327449ee40a5c572ef5b6e4bf97cb9870d2f` passed 7/8 functional lanes in 331.10 seconds. Whitespace, Node syntax, Python compile, Node layout, static/architecture, E2E, and non-browser pytest were green. Browser behavior had one failure after 635 passes: `tests/test_gate_stats_range.py::test_stats_24h_combined_observations_and_transcripts_reconcile_at_300_seconds` measured one cold 24-hour snapshot at 54.6 ms against the unchanged 50.0 ms ceiling. Certification was refused at preflight with 0/5 units because disk busy was 0.906901 above 0.9 and I/O full/some PSI were 0.284593/0.285485 above 0.051/0.056; no postflight ran. The fixed wall verdict belongs in the existing exclusive certification phase, while the parallel sibling retains semantic coverage and deterministic delayed-route negative controls. Evidence: `/tmp/yolomux-check-runs/check-1786635796540655229-3706208.json` and `/tmp/yolomux-certification/cert-1786635796540915999-3706208`.
-- The automatic 15-minute `STATUS-REPORT.md` writer is absent from crontab because timestamp-only edits invalidate exact-SHA admission. The pre-gate crontab is retained at `/tmp/yolomux-crontab-before-074`; the generic writer currently drops archived-queue and release evidence when the source queue is gone, so it must not be restored unchanged.
-
-## Live 7771
-
-- One listener is running as PID 4189697 from this worktree; it started at 12:42 AM PT before candidate `48fd32744`. Health was last verified as 200 and unauthenticated `/api/ping` as 401. It has not been restarted or accepted on the current candidate; restart and live-browser verification remain blocked until a clean committed exact SHA passes the full gate and qualified certification. Prior browser acceptance on bundle `d784f4753ce72286464d5b578f996c34e541d278ff2cee6bd75b21f8dce7380b` is not evidence for this candidate.
+- **Item 0 goes first** because it is a small user-visible break on the live server, not a refactor, and it does not touch any file the other four items touch.
+- **Markdown image failure completed first.** Same-page evidence on 7772 showed both `/api/fs/raw` and `/api/ping` carried the auth cookie; ping returned 200 and raw reached authenticated jobd handling but returned a typed 503. Bounded artifact transfer plus the shared authenticated Blob owner now pass all eight functional gate lanes and real-browser acceptance. The historical 7771 response remains unexplained. At 11:27:58 AM PT, temporary merge markers in this watched worktree triggered the former 7771 dev process to re-exec and exit with `SyntaxError`; it was restored from the clean checkout at 11:32:22 AM PT as PID 3613344 and has remained unchanged since. All later test-runtime work uses 7772.
+- **macOS merge second.** It is the only item with an external branch that keeps diverging. It overlaps the 0.7.4 work and has one real conflict in `yolomux_lib/local_services/registry.py`; resolve it by intent before deleting the retired collaboration feature.
+- **Retired collaboration feature removal third.** It is the largest change and primarily deletes. Doing it on a merged green tree makes breakage attributable to the deletion.
+- **Cleanup follow-ups fourth.** They touch files also affected by the retired collaboration feature removal, so they apply to the smaller post-deletion tree.
+- **First-launch auth last.** It is independent and user-visible, with the least overlap with the other queues.
 
 ## Hourly history (last 24 hours)
 
 | PT hour | done | pending | delta done | note |
 | --- | ---: | ---: | ---: | --- |
-| 2026-08-12 10:00 PT | 0 | 5 | - | Cleanup queue initialized at 0/26; three read-only architecture audits complete; execution ownership being frozen |
-| 2026-08-12 11:00 PT | 0 | 5 | +0 | Phase 0 lifecycle/reaper barrier verified; queue 13/26. Phase 4 content-root helper ready for serialized browser-layout integration. |
-| 2026-08-12 12:00 PT | 2 | 3 | +2 | Package split reclosed after exact ordered 735/735 parity, zero imported test symbols, 12 focused passes, and no reviewed-test growth; queue 23/26 |
+| 2026-08-12 12:00 PT | 2 | 3 | - | Package split reclosed after exact ordered 735/735 parity, zero imported test symbols, 12 focused passes, and no reviewed-test growth; queue 23/26 |
 | 2026-08-12 13:00 PT | 4 | 1 | +2 | App-domain decomposition and architecture ratchets verified; queue 25/26. Extension docs written; browser/full-gate/live archive rung remains prohibited in this session. |
 | 2026-08-12 14:00 PT | 4 | 1 | +0 |  |
 | 2026-08-12 15:00 PT | 4 | 1 | +0 | Wave 1 assigned: fixture parents, local-service/file-index lifecycle, and gate architecture; 13 follow-ups had been appended before the P0 queue freeze. |
@@ -70,58 +64,13 @@ Worktree: `/home/keivenc/dev/yolomux.dev7771`
 | 2026-08-13 04:00 PT | 4 | 1 | +0 | Status reconciled to the archived P0 queue at 26/26 and release closure at 4/5. Current corrected worktree remains functionally green 8/8 but lacks one clean exact-SHA qualified certification, restart, and live-browser acceptance. No 0.7.5 work began. |
 | 2026-08-13 08:00 PT | 4 | 1 | +0 | Committed candidate 48fd32744 ran one clean exact-SHA gate: 7/8 functional lanes, with 635 browser passes and one 54.6 ms cold 24h stats snapshot over the unchanged 50 ms ceiling; certification ran 0/5 units because host preflight failed I/O qualification. The fixed wall verdict is being moved from the parallel semantic lane to the existing exclusive certification phase; release remains 4/5 and 7771 was not restarted. |
 | 2026-08-13 09:00 PT | 4 | 1 | +0 | Candidate 73471e668 passed all 8/8 functional lanes in 430.71 seconds. Four of six exclusive certification units passed; chat-store and stats correctly refused before measuring when I/O PSI rose, so the exact-SHA gate is not certifiable and no ceiling breach was recorded. Release remains 4/5; 7771 was not restarted and no 0.7.5 work began. |
-
-## 24-hour tally
-
-Samples: 2026-08-12 10:00 PT to 2026-08-13 09:00 PT | done +4 | TODO -4
-
-## Velocity (last 24 PT hours)
-
-```text
-hour   done  TODO  +done  chart
-10:00     0     5     +0
-11:00     0     5     +0
-12:00     2     3     +2  ##
-13:00     4     1     +2  ##
-14:00     4     1     +0
-15:00     4     1     +0
-16:00     4     1     +0
-17:00     4     1     +0
-21:00     4     1     +0
-22:00     4     1     +0
-23:00     4     1     +0
-00:00     4     1     +0
-01:00     4     1     +0
-02:00     4     1     +0
-03:00     4     1     +0
-04:00     4     1     +0
-08:00     4     1     +0
-09:00     4     1     +0
-```
-
-## Done/TODO (last 24 PT hours)
-
-```text
-hour   done  TODO
-10:00     0     5
-11:00     0     5
-12:00     2     3
-13:00     4     1
-14:00     4     1
-15:00     4     1
-16:00     4     1
-17:00     4     1
-21:00     4     1
-22:00     4     1
-23:00     4     1
-00:00     4     1
-01:00     4     1
-02:00     4     1
-03:00     4     1
-04:00     4     1
-08:00     4     1
-09:00     4     1
-```
-
-<!-- progress-report-goal: {"goal":"Drain DOIT.p0.0.7.4-cleanup.md with behavior-preserving refactors, verified integration, docs, and live acceptance","items":[{"id":1,"text":"Phase 0 characterization and safe test movement complete","done":true},{"id":2,"text":"Backend shared parents and typed boundaries complete","done":true},{"id":3,"text":"Backend god-object decomposition complete","done":true},{"id":4,"text":"Frontend state, extension, and lifecycle architecture complete","done":true},{"id":5,"text":"Test/file ratchets, docs, frozen gate, live acceptance, and queue archive complete","done":false}],"queues":[]} -->
-<!-- progress-report-history: [{"hour":"2026-08-12 10:00 PT","done":0,"pending":5,"note":"Cleanup queue initialized at 0/26; three read-only architecture audits complete; execution ownership being frozen"},{"hour":"2026-08-12 11:00 PT","done":0,"pending":5,"note":"Phase 0 lifecycle/reaper barrier verified; queue 13/26. Phase 4 content-root helper ready for serialized browser-layout integration."},{"hour":"2026-08-12 12:00 PT","done":2,"pending":3,"note":"Package split reclosed after exact ordered 735/735 parity, zero imported test symbols, 12 focused passes, and no reviewed-test growth; queue 23/26"},{"hour":"2026-08-12 13:00 PT","done":4,"pending":1,"note":"App-domain decomposition and architecture ratchets verified; queue 25/26. Extension docs written; browser/full-gate/live archive rung remains prohibited in this session."},{"hour":"2026-08-12 14:00 PT","done":4,"pending":1},{"hour":"2026-08-12 15:00 PT","done":4,"pending":1,"note":"Wave 1 assigned: fixture parents, local-service/file-index lifecycle, and gate architecture; 13 follow-ups had been appended before the P0 queue freeze."},{"hour":"2026-08-12 16:00 PT","done":4,"pending":1},{"hour":"2026-08-12 17:00 PT","done":4,"pending":1},{"hour":"2026-08-12 21:00 PT","done":4,"pending":1,"note":"Clean checkpoint 907db7ac40c097c193122f25a707742ac88b3d49 created; first exact-SHA gate found one load-sensitive rename failure and an unqualified 0.978951 disk-busy preflight; exact focused rename journey then passed 5/5."},{"hour":"2026-08-12 22:00 PT","done":4,"pending":1,"note":"Exact HEAD 69f7c8d93 was canonically certified (all eight lanes + 5/5 units, 436.60s) and restarted on 7771 as PID 458296 with bundle 04779d68. Authenticated soak then exposed one expected stale Finder-root retirement logged at warning after 103.5s. The shared reindex owner now records expected 403/404/credential-blocked change evidence at info; exact regression passed 1/1. This uncommitted source fix supersedes the certified/live candidate, so gate, restart, 600s soak, negative probe, manual browser journey, and archive remain open."},{"hour":"2026-08-12 23:00 PT","done":4,"pending":1,"note":"Exact HEAD 8ac6110b3 passed focused functional recovery (non-browser 17,596 tests; browser lane 378.63s) and exact 5/5 certification in 86.75s. Restarted 7771 is PID 2107857 from dev7771 at 8ac6110b3 with bundle 04779d68. Clean authenticated soak passed 603.29s with zero server/browser/integrity failures; negative injection durably detected its sole HTTP 500 with full redaction proof and zero unrelated failures. Manual real-browser journey, queue 26/26, archive, and final closure-SHA canonical gate/restart remain open."},{"hour":"2026-08-13 00:00 PT","done":4,"pending":1,"note":"P0 reached 26/26 in 81c6d9fe1 and was archived/deleted in clean closure SHA 7f1a89863. Exact committed-SHA browser acceptance r22 passed on PID 4189697 / bundle d784f475. The unmodified closure-SHA gate then failed one browser retirement-delta classification test (635 passed, 17 skipped, 9 xfailed); every other lane and exact 5/5 certification passed. Item 5 remains open pending root-cause classification and any required correction, a green canonical rerun, restart, and final live-browser verification."},{"hour":"2026-08-13 01:00 PT","done":4,"pending":1,"note":"Root cause corrected and frozen in candidate 9b58faac0. Its canonical gate finished in 339.83s with 7/8 lanes green; pytest-browser returned 1 after 338.14s, while the retained report omitted the exact failed test output. Certification ran 0/5 units because host preflight exceeded both I/O-stall thresholds, and exact-SHA admission rejected the tracked status-report edit. Artifacts were retained; no restart or 0.7.5 work began."},{"hour":"2026-08-13 02:00 PT","done":4,"pending":1,"note":"Candidate f3b6f8925 passed 7/8 canonical lanes plus qualified-host certification 5/5 with exact-SHA admission; 11 browser failures shared one stats fixture that omitted the new lexical owner. The shared fixture now evaluates 09_transport_lifecycle.js plus 84_stats_current.js together, and all affected modules pass 25/25 in 53.15s. Archived queue 26/26; release 4/5; 7771 was not restarted."},{"hour":"2026-08-13 03:00 PT","done":4,"pending":1,"note":"Corrected worktree passed all 8/8 canonical functional lanes in 354.40s after deterministic Dockview and retirement-lifecycle regressions. Host I/O-stall preflight refused certification; independently, exact-SHA admission was false on seven tracked modifications. Release remains 4/5; 7771 was not restarted and no 0.7.5 work began."},{"hour":"2026-08-13 04:00 PT","done":4,"pending":1,"note":"Status reconciled to the archived P0 queue at 26/26 and release closure at 4/5. Current corrected worktree remains functionally green 8/8 but lacks one clean exact-SHA qualified certification, restart, and live-browser acceptance. No 0.7.5 work began."},{"hour":"2026-08-13 08:00 PT","done":4,"pending":1,"note":"Committed candidate 48fd32744 ran one clean exact-SHA gate: 7/8 functional lanes, with 635 browser passes and one 54.6 ms cold 24h stats snapshot over the unchanged 50 ms ceiling; certification ran 0/5 units because host preflight failed I/O qualification. The fixed wall verdict is being moved from the parallel semantic lane to the existing exclusive certification phase; release remains 4/5 and 7771 was not restarted."},{"hour":"2026-08-13 09:00 PT","done":4,"pending":1,"note":"Candidate 73471e668 passed all 8/8 functional lanes in 430.71 seconds. Four of six exclusive certification units passed; chat-store and stats correctly refused before measuring when I/O PSI rose, so the exact-SHA gate is not certifiable and no ceiling breach was recorded. Release remains 4/5; 7771 was not restarted and no 0.7.5 work began."}] -->
+| 2026-08-13 10:00 PT | 5 | 0 | +1 | Exact release SHA 0d0af221a passed 8/8 functional lanes plus qualified 6/6 certification, restarted on 7771 as PID 1755199, passed the authenticated browser journey, 603.43-second clean soak, and sole-cause redacted negative probe, then landed as signed annotated v0.7.4 on origin. |
+| 2026-08-13 12:00 PT | 0 | 7 | -5 | Queue 0 cookie branches closed from same-page evidence; Archimedes found and verified Darwin process-identity fence fix (120 focused tests passed) |
+| 2026-08-13 14:00 PT | 1 | 6 | +1 | Queue 0 reached 11/11 and was archived after all eight functional gate lanes passed; certification correctly refused on host disk load and dirty-merge exact-SHA admission. Recovered 7771 remained unchanged after 11:32:22 AM PT; all test-runtime work used 7772. |
+| 2026-08-13 15:00 PT | 1 | 6 | +0 | Queue 1 reached 9/12. Current-tree Linux gate passed all eight functional lanes and all six qualified-host certification units but exact-SHA admission correctly rejected the dirty merge. Restarted 7772 PID 3485809 passed the exact-identity real-Chrome six-service journey and 603.13-second clean soak; 7771 remained PID 3613344. Real-macOS acceptance is explicitly blocked because this Linux host has no supported command-capable Mac path and the uncommitted candidate is not transferable. |
+| 2026-08-13 16:00 PT | 1 | 6 | +0 | Rewrote the published v0.7.0-v0.7.4 release line to one signed commit per consecutive boundary, preserving every released and branch-tip tree exactly. Queue 1 then moved from the old equivalent identities to rewritten `origin/main` a66b91d2c and `origin/fix/macos-v0.7.3` 03657d9f0 without changing its audited index tree 3ad69f999, final worktree tree cdda18156, 30 staged/35 unstaged/two untracked path layers, or either runtime PID. The unresolved merge remains uncommitted; 7771 remains PID 3613344 and 7772 remains PID 3485809. |
+| 2026-08-13 18:00 PT | 1 | 6 | +0 | Committed candidate `aa7cf14f1` passed all eight exact-SHA functional lanes in 474.83 seconds: browser 426.31, non-browser 352.71, E2E 158.26, and all source/static lanes green. Certification-only retries executed 5/6, 1/6, and 3/6 units before the unchanged host qualifier refused later units on disk busy 0.978329-0.995319; no executed unit breached its behavior ceiling; a later unchanged retry was refused before units on disk busy plus I/O stall. Queue 1 remains 10/12 pending one fully qualified certification. 7771 remains PID 3613344 from `/home/keivenc/dev/yolomux`; 7772 remains the older dev runtime and is not presented as 0.7.5. Queue 2 reached 2/13 after its exact-base inventory corrected the whole-file deletion set to eight files / 11,562 lines, preserved two mixed owners, froze 90 locale keys per source locale and the deleted-test denominator, and proved the hard quarantine blocks every supported UI entry; implementation remains isolated and unlanded. Queue 4 is isolated through SHA `87c626e14`: unknown Codex auth is usable, the rooted-home policy and contradictory source comment are corrected, the pulse/rotation regression is pinned, and an executable JS test covers server-projected true/false/unknown availability; 84 layout-restore cases, 15 focused auth/root tests, and the static bundle check passed, with integration, canonical gate, and real-browser acceptance still pending. |
+| 2026-08-13 19:00 PT | 1 | 6 | +0 | Queue 2 removal reached 127 isolated changed paths across production backend, frontend, configuration, locale, CSS, tests, and generated owners. Independent review caught and the owner repaired four normal-product contracts that had been housed in retired files: layout URL state capture/restore, font readiness, diagnostic redaction, and preference ordering; exhaustive review found zero retained references to 417 deleted declarations. The complete Node audit corrected the removal denominator from `-12` to `-21`, restored two over-deleted layout-transaction contracts, rehomed normal YO!info assertions, and independently passed all 19 shards with exactly 778 retained contracts; Queue 2 returned to 2/13. The reappearance guard is implemented and its unit tests pass; documentation cleanup, remaining focused tests, integration, canonical gate, and live 7772 acceptance remain open. Neither live port changed. |
+| 2026-08-13 20:00 PT | 1 | 6 | +0 | Verified the candidate contains exactly one `STATUS-REPORT.md` and no retired plan file; published `origin/main` still contains both ledgers and has no `v0.7.5` tag. Queue 2 integrated through `fc27d810b`, passed all 19 Node shards at 778 contracts and 12,071 focused Python tests, and reached 11/13. Its 352.47-second canonical gate passed six of eight lanes but exposed one non-browser rapid-read connection-close failure and one browser current-stats Logs lifecycle failure; certification was separately inadmissible on dirty-start identity and host I/O qualification. Queue 3 audit verified seven items with 288/288 focused tests, left item 1 open on a non-fail-closed fixed-file guard, and has items 3-4 and 12 active in isolated worktrees. Port 7772 remains empty; 7771 remains PID 3613344 from the clean 0.7.4 checkout. |
+| 2026-08-13 21:00 PT | 1 | 6 | +0 | Exact clean candidate `7228cb20e` passed all eight functional lanes and authenticated 7772 acceptance across supported surfaces plus the retired-route negative probes. Exact-SHA certification passed as many as five of six units, while repeated unchanged attempts were refused only by host I/O/CPU qualification and no behavior ceiling failed. Queue 3 items 1-4 and 7-13 then integrated through `d20ca72a8` and passed 288 focused owner tests, the static check, and all 19 Node shards with 780 contracts; items 5-6 remain active together. 7772 remains exact candidate `7228cb20e`; 7771 remains PID 3613344. |
+| 2026-08-13 22:00 PT | 2 | 5 | +1 | Queue 3 reached 13/13 and was archived after the integrated tree passed the direct static lane, all 19 Node shards, 88 lifecycle/layout cases, four radius-lint cases, and a real-browser dark/light geometry check. Independent review defects in rebuilt control normalization and popover listener ownership were fixed before landing. Queue 4 pre-fix tri-state evidence and focused branch green evidence are retained for integration. 7772 remains exact candidate `7228cb20e`; 7771 remains PID 3613344. |

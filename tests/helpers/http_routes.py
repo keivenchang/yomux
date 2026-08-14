@@ -27,7 +27,6 @@ def capturing_route_request(app, path: str, method: str = "GET", body: bytes = b
     handler.server = SimpleNamespace(app=app, dev=False); handler.close_connection = False
     handler.require_auth = lambda role="readonly": True; handler.auth_readonly = lambda: False
     handler.auth_identity = lambda: SimpleNamespace(role="admin", username="tester")
-    handler.share_readonly_api_allowed = lambda parsed: False; handler.share_token_text = lambda: ""; handler.share_token = lambda: ""
     handler.redirect_plaintext_to_https_if_needed = lambda parsed: False
     writes = []
     def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):

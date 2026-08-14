@@ -182,7 +182,7 @@ pre {
   background: #69aa00;
   box-shadow: 0 0 0 rgba(118, 185, 0, 0);
   transform-origin: center;
-  animation: setup-brand-yolo-pulse 2.8s ease-in-out infinite, setup-brand-yolo-rotate 20s linear infinite;
+  animation: setup-brand-yolo-pulse 2.8s ease-in-out infinite;
 }
 @keyframes setup-brand-yolo-pulse {
   0%, 100% {
@@ -198,10 +198,5 @@ pre {
     border-color: rgba(184, 238, 92, 0.95);
     box-shadow: 0 0 5px rgba(155, 227, 61, 0.32);
     filter: saturate(1.12) brightness(1.06);
-  }
-}
-@keyframes setup-brand-yolo-rotate {
-  to {
-    transform: rotate(360deg);
   }
 }

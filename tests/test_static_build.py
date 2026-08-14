@@ -564,10 +564,10 @@ def test_dialog_capacities_have_one_content_relative_token_owner():
     assert "--dialog-compact-inline-size: 80ch" in tokens
     assert "--dialog-standard-inline-size: 112ch" in tokens
     assert "--dialog-wide-inline-size: 144ch" in tokens
-    assert topbar.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
-    assert topbar.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert "width: min(var(--dialog-compact-inline-size), 100%)" not in topbar
+    assert "width: min(var(--dialog-wide-inline-size), 100%)" not in topbar
     assert file_tree.count("width: min(var(--dialog-compact-inline-size), 100%)") == 1
-    assert file_tree.count("width: min(var(--dialog-wide-inline-size), 100%)") == 1
+    assert "width: min(var(--dialog-wide-inline-size), 100%)" not in file_tree
     assert "width: min(var(--dialog-standard-inline-size), var(--popover-max-inline-size))" in preferences
     assert preferences.count("width: min(var(--dialog-wide-inline-size), var(--popover-max-inline-size))") == 1
     assert "width: min(var(--dialog-standard-inline-size), 100%)" in panels
@@ -597,7 +597,6 @@ def test_static_browser_fixture_write_and_navigation_pairs_have_one_owner():
         "tests/test_browser_layout.py",
         "tests/test_browser_editor.py",
         "tests/test_browser_finder.py",
-        "tests/test_browser_share.py",
     )
 
     def is_page_write(statement):
@@ -653,7 +652,6 @@ def test_browser_fixtures_use_one_read_only_english_catalog_owner():
     helper_path = "tests/browser_helpers/browser_layout.py"
     browser_fixture_paths = (
         "tests/test_browser_editor.py",
-        "tests/test_browser_share.py",
         helper_path,
     )
     direct_read = '(REPO_ROOT / "static" / "locales" / "en.json").read_text'
@@ -678,7 +676,6 @@ def test_event_rows_use_one_container_responsive_layout_owner():
 
 def test_browser_fixture_wait_loops_have_one_injected_owner():
     browser_fixture_paths = (
-        "tests/test_browser_share.py",
         "tests/test_browser_layout.py",
         "tests/test_browser_editor.py",
         "tests/test_browser_dockview.py",
@@ -880,16 +877,122 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
             assert '<div class="panel-head' not in source
 
 
+def test_framed_panel_construction_lint_tree_is_clean():
+    assert sb.lint_framed_panel_construction() == []
+
+
+def _write_synthetic_framed_panel_owner(path: Path, *, extra_source: str = "") -> None:
+    path.write_text(
+        "function renderEmptyPane() {\n  return document.createElement('article');\n}\n"
+        f"{extra_source}"
+        "function panelFrameHtml() {\n  return `<div class=\"panel-head\"></div>`;\n}\n"
+        "function createFramedPanel() {\n"
+        "  const panel = document.createElement('article');\n"
+        "  panel.innerHTML = panelFrameHtml({});\n"
+        "  bindPanelShell(panel, 'item');\n"
+        "  return panel;\n"
+        "}\n"
+        "function bindPanelShell() {}\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("parallel_body", "message"),
+    (
+        (
+            "function createParallelPanel() {\n  return document.createElement('article');\n}\n",
+            "20_parallel.js:2: raw article panel construction; use createFramedPanel()",
+        ),
+        (
+            'function createParallelPanel() {\n  return `<div class="panel-head">bad</div>`;\n}\n',
+            "20_parallel.js:2: raw panel-head construction; use createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  head.className = 'panel-head';\n}\n",
+            "20_parallel.js:2: raw panel-head construction; use createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  return panelFrameHtml({item: 'bad'});\n}\n",
+            "20_parallel.js:2: panelFrameHtml() is private to createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  bindPanelShell(panel, 'bad');\n}\n",
+            "20_parallel.js:2: bindPanelShell() is private to createFramedPanel()",
+        ),
+    ),
+)
+def test_framed_panel_construction_lint_rejects_registered_parallel_owners(monkeypatch, tmp_path, parallel_body, message):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(owner)
+    (tmp_path / "20_parallel.js").write_text(parallel_body, encoding="utf-8")
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js", "20_parallel.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [message]
+
+
+def test_framed_panel_construction_lint_rejects_raw_article_outside_owner_functions(monkeypatch, tmp_path):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(
+        owner,
+        extra_source="const strayPanel = document.createElement('article');\n",
+    )
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [
+        "static_src/js/yolomux/78_panel_shell.js:4: raw article panel construction; use createFramedPanel()"
+    ]
+
+
+def test_framed_panel_construction_lint_fails_closed_for_missing_registered_partial(monkeypatch, tmp_path):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(owner)
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js", "missing.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [
+        "missing.js: registered yolomux.js partial is missing; framed-panel ownership cannot be verified"
+    ]
+
+
 def test_frontend_orchestration_facade_partials_load_before_their_owners():
     parts = sb.ASSETS["yolomux.js"]
     debug_facade = "static_src/js/yolomux/84_debug_runtime_facade.js"
-    debug_owner = "static_src/js/yolomux/85_debug_panel.js"
+    debug_owners = [
+        "static_src/js/yolomux/84_debug_observation.js",
+        "static_src/js/yolomux/85_debug_panel.js",
+    ]
     terminal_facade = "static_src/js/yolomux/98_terminal_runtime_facade.js"
-    terminal_owner = "static_src/js/yolomux/99_terminal_boot.js"
-    assert parts.count(debug_facade) == parts.count(debug_owner) == 1
-    assert parts.count(terminal_facade) == parts.count(terminal_owner) == 1
-    assert parts.index(debug_facade) < parts.index(debug_owner)
-    assert parts.index(terminal_facade) < parts.index(terminal_owner)
+    terminal_owners = [
+        "static_src/js/yolomux/99_terminal_boot.js",
+        "static_src/js/yolomux/99_client_event_transport.js",
+        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
+    ]
+    assert all(parts.count(path) == 1 for path in [debug_facade, *debug_owners, terminal_facade, *terminal_owners])
+    assert [parts.index(path) for path in [debug_facade, *debug_owners]] == sorted(parts.index(path) for path in [debug_facade, *debug_owners])
+    assert [parts.index(path) for path in [terminal_facade, *terminal_owners]] == sorted(parts.index(path) for path in [terminal_facade, *terminal_owners])
+    registrations = {
+        debug_owners[0]: "registerDebugRuntimeFacade('observation'",
+        debug_owners[1]: "registerDebugRuntimeFacade('panel'",
+        terminal_owners[1]: "registerTerminalRuntimeFacade('client-events'",
+        terminal_owners[2]: "registerTerminalRuntimeFacade('shortcuts'",
+    }
+    for path, registration in registrations.items():
+        assert registration in repo_path(path).read_text(encoding="utf-8")
 
 
 def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, tmp_path):
@@ -924,25 +1027,6 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
     assert "static_src/js/yolomux/98_terminal_runtime_facade.js: paneFrameControlsHtml() must use toolbarButtonHtml(), not raw button templates" in errors
 
 
-def test_shared_ui_ownership_lint_rejects_parallel_share_connection_maps(monkeypatch, tmp_path):
-    share_state = tmp_path / "93_share_state.js"
-    share_state.write_text(
-        "const shareHostConnectionRecords = new Map();\n"
-        "const shareHostSockets = new Map();\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
-        "93_share_state.js": (("share connection record", "shareHostConnectionRecords"),),
-    })
-    monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES", (("parallel share host socket map", "shareHostSockets"),))
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["93_share_state.js"])
-    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
-
-    assert sb.lint_shared_ui_ownership() == [
-        "93_share_state.js: shared ownership forbids parallel share host socket map ('shareHostSockets')",
-    ]
-
-
 def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
     launcher = repo_path("tests/layout_url.test.js").read_text(encoding="utf-8")
     helper = repo_path("tests/browser_helpers/layout_test_helper.js").read_text(encoding="utf-8")
@@ -951,7 +1035,7 @@ def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary()
 
     assert len(suite_files) == len(set(suite_files)) and set(suite_files) == {f"tests/{path.name}" for path in repo_path("tests").glob("*.test.js") if path.name != "layout_url.test.js"}
     assert "defaultGateExcludedSuiteFiles" in launcher
-    assert "tests/share_theme.test.js" in launcher
+    assert "tests/cross_surface_state.test.js" in launcher
     assert "tests/gate_panels.test.js" in launcher
     assert "allSuiteFiles.filter(file => !defaultGateExcludedSuiteFiles.has(file))" in launcher
     assert "layout suite shards:" in launcher
@@ -1039,6 +1123,14 @@ def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properti
 def test_standard_border_radius_lint_tree_is_clean():
     assert lint_raw_standard_border_radii() == []
     assert lint_custom_border_radius_classifications() == []
+
+
+def test_custom_border_radius_inventory_stays_scoped_and_complete():
+    inventory = sb.CUSTOM_BORDER_RADIUS_CLASSIFICATIONS
+    assert len(inventory) == 19
+    assert sum(key.endswith(":5px") for key in inventory) == 14
+    assert sum(key.endswith(":7px") for key in inventory) == 5
+    assert all(reason.strip() for reason in inventory.values())
 
 
 def test_custom_border_radius_lint_rejects_unclassified_and_stale_entries(monkeypatch, tmp_path):
@@ -1233,7 +1325,6 @@ def test_linked_semantic_colors_alias_one_palette_owner():
         "--lt-code-comment: var(--lt-muted);",
         "--editor-preview-bg: var(--editor-scheme-preview-bg);",
         "--markdown-html-dark-border: var(--markdown-html-dark-bg);",
-        "--share-stage-bg: var(--paint-black);",
         "--pane-resizer-shadow: var(--pane-resizer-bg);",
     ):
         assert declaration in css

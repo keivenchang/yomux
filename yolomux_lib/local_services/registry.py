@@ -37,6 +37,7 @@ from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
+from ..host_identity import process_identity_snapshot
 from ..host_identity import recorded_start_identity
 from .rpc import LocalRpcError
 from .rpc import new_envelope
@@ -77,6 +78,43 @@ def record_transport_teardown(exception_type: str = "unknown") -> None:
         _TRANSPORT_TEARDOWNS_BY_EXCEPTION[normalized_type] = (
             _TRANSPORT_TEARDOWNS_BY_EXCEPTION.get(normalized_type, 0) + 1
         )
+
+
+def read_process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
+    """Return cumulative CPU seconds and RSS bytes for one local process."""
+
+    if pid <= 0:
+        return None
+    if platform.system() == "Linux":
+        try:
+            stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+            statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+            cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
+            rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+        except (IndexError, OSError, ValueError):
+            return None
+        return (cpu_seconds, rss_bytes)
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=,time=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    fields = str(completed.stdout or "").split()
+    if len(fields) < 2:
+        return None
+    try:
+        rss_bytes = int(fields[0]) * 1024
+    except ValueError:
+        return None
+    parsed_cpu_seconds = parse_ps_cpu_seconds(fields[1])
+    if parsed_cpu_seconds is None:
+        return None
+    return (parsed_cpu_seconds, rss_bytes)
 
 
 def transport_diagnostics() -> dict[str, Any]:
@@ -204,31 +242,37 @@ class ProcessTableUnavailable(RuntimeError):
     """The launch preflight cannot establish process identity safely."""
 
 
+def inherited_python_path(environ: dict[str, str]) -> str:
+    """Keep service imports attached to the interpreter even when callers replace HOME."""
+
+    candidates = [*str(environ.get("PYTHONPATH") or "").split(os.pathsep), *map(str, sys.path)]
+    return os.pathsep.join(dict.fromkeys(path for path in candidates if path))
+
+
 def process_start_time(pid: int) -> int:
-    """Return Linux /proc stat field 22, or zero where identity is unavailable."""
-    try:
-        raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
-        _prefix, separator, tail = raw.rpartition(")")
-        if not separator:
-            return 0
-        fields = tail.split()
-        # ``tail`` begins at field 3 (state), so field 22 is index 19. Splitting
-        # only after the final ')' preserves comm values containing spaces/parens.
-        return max(0, int(fields[19]))
-    except (IndexError, OSError, ValueError):
-        return 0
+    """Return the platform's numeric process-birth counter, or zero if unavailable."""
+    return process_start_ticks(process_start_identity(pid)) or 0
 
 
 def process_state(pid: int) -> str:
-    """Return Linux /proc stat field 3, preserving zombie identity as non-serving."""
-    try:
-        raw = (Path("/proc") / str(int(pid)) / "stat").read_text(encoding="utf-8")
-        _prefix, separator, tail = raw.rpartition(")")
-        if not separator:
-            return ""
-        return str(tail.split()[0] if tail.split() else "")
-    except (OSError, ValueError):
+    """Return the native process state, preserving zombies as non-serving."""
+    snapshot = process_identity_snapshot(pid)
+    if snapshot is not None:
+        return snapshot.state
+    if platform.system() != "Darwin":
         return ""
+    try:
+        completed = subprocess.run(
+            ("ps", "-o", "state=", "-p", str(int(pid))),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    state = str(completed.stdout or "").strip()
+    return state[0] if completed.returncode == 0 and state else ""
 
 
 def process_spawn_generation(
@@ -347,12 +391,19 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             pid, ppid, pgid, session_id = int(fields[0]), int(fields[1]), int(fields[2]), int(fields[3])
         except ValueError:
             continue
+        if platform.system() == "Darwin" and session_id <= 0:
+            try:
+                session_id = os.getsid(pid)
+            except OSError:
+                continue
         cpu_seconds = parse_ps_cpu_seconds(fields[4])
         if cpu_seconds is None:
             continue
-        if process_state(pid) == "Z":
+        snapshot = process_identity_snapshot(pid)
+        if snapshot is not None and snapshot.state == "Z":
             continue
-        start_time = process_start_time(pid)
+        start_identity = snapshot.start_identity if snapshot is not None else ""
+        start_time = process_start_ticks(start_identity) or 0
         table[pid] = ProcessTableEntry(
             ppid,
             pgid,
@@ -360,7 +411,7 @@ def bounded_process_table(*, require_complete: bool = False) -> dict[int, Proces
             fields[5] if len(fields) > 5 else "",
             start_time,
             session_id,
-            f"proc:{start_time}" if start_time > 0 else "",
+            start_identity,
         )
     if require_complete and not table:
         raise ProcessTableUnavailable("process_table_read_failed")
@@ -391,7 +442,9 @@ def process_record_diagnostic(
 
     def table_start_identity(pid: int) -> str | None:
         entry = table.get(pid)
-        return f"proc:{entry.start_time}" if entry is not None and entry.start_time > 0 else None
+        if entry is None:
+            return None
+        return process_table_start_identity(entry) or None
 
     return is_current_local_process(
         record,
@@ -430,6 +483,12 @@ def process_fence_record(
         "process_start_identity": recorded_start,
         "process_start_ticks": recorded_ticks,
     }
+
+
+def process_table_start_identity(entry: ProcessTableEntry) -> str:
+    """Preserve one native process identity, with a legacy Linux-tick fallback."""
+
+    return entry.start_identity or (f"proc:{entry.start_time}" if entry.start_time > 0 else "")
 
 
 def service_record_identity_matches(record: dict[str, Any], table: dict[int, ProcessTableEntry]) -> bool:
@@ -483,7 +542,7 @@ def resolve_tracked_local_service_groups(
         pgid = table[pid].pgid
         members = tuple(sorted(member for member, entry in table.items() if entry.pgid == pgid))
         member_records = {
-            member: process_fence_record(record, pid=member, start_identity=f"proc:{table[member].start_time}")
+            member: process_fence_record(record, pid=member, start_identity=process_table_start_identity(table[member]))
             for member in members
         }
         groups.append(
@@ -731,7 +790,7 @@ def resolve_tracked_port_process_group(
         "member_pids": members,
         "process_record": process_fence_record(record),
         "member_records": {
-            member: process_fence_record(record, pid=member, start_identity=f"proc:{table[member].start_time}")
+            member: process_fence_record(record, pid=member, start_identity=process_table_start_identity(table[member]))
             for member in members
         },
     }, diagnostic
@@ -1430,6 +1489,7 @@ class LocalServiceRegistry:
         # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOLOMUX_FS_ROOTS` here.
         spawn_environ = dict(os.environ)
         spawn_environ[LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation_marker
+        spawn_environ["PYTHONPATH"] = inherited_python_path(spawn_environ)
         try:
             with self.stderr_path.open("wb") as output:
                 process = self.popen(
@@ -2030,33 +2090,4 @@ class LocalServiceRegistry:
 
     def _read_process_cpu_seconds_and_rss(self, pid: int) -> tuple[float, int] | None:
         """Return (cumulative CPU seconds, RSS bytes) for an existing pid."""
-        if platform.system() == "Linux":
-            try:
-                stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-                statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-                cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-                rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-            except (IndexError, OSError, ValueError):
-                return None
-            return (cpu_seconds, rss_bytes)
-        try:
-            completed = subprocess.run(
-                ["ps", "-o", "rss=,time=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-            )
-        except (OSError, ValueError, subprocess.SubprocessError):
-            return None
-        fields = str(getattr(completed, "stdout", "") or "").split()
-        if len(fields) < 2:
-            return None
-        try:
-            rss_bytes = int(fields[0]) * 1024
-        except ValueError:
-            return None
-        parsed_cpu_seconds = parse_ps_cpu_seconds(fields[1])
-        if parsed_cpu_seconds is None:
-            return None
-        return (parsed_cpu_seconds, rss_bytes)
+        return read_process_cpu_seconds_and_rss(pid)

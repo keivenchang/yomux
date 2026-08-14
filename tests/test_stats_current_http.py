@@ -482,22 +482,20 @@ def test_authenticated_route_passes_only_query_and_username_to_the_forwarder(res
         assert writes == [("json", result.status, result.payload)]
 
 
-def test_snapshot_route_is_current_authenticated_and_not_share_visible():
+def test_snapshot_route_is_current_and_authenticated():
     route = http_routes.route_for_request("GET", "/api/stats-snapshot")
 
     assert route is not None
     assert route.handler is http_routes.get_stats_snapshot
     assert route.role == "readonly"
-    assert route.share_access == http_routes.SHARE_ACCESS_NONE
 
 
-def test_delta_route_is_current_authenticated_and_not_share_visible():
+def test_delta_route_is_current_and_authenticated():
     route = http_routes.route_for_request("GET", "/api/stats-delta")
 
     assert route is not None
     assert route.handler is http_routes.get_stats_delta
     assert route.role == "readonly"
-    assert route.share_access == http_routes.SHARE_ACCESS_NONE
 
 
 def test_stream_route_is_authenticated_and_sse_forwards_validated_delta_bytes_exactly():
@@ -505,7 +503,6 @@ def test_stream_route_is_authenticated_and_sse_forwards_validated_delta_bytes_ex
     assert route is not None
     assert route.handler is http_routes.get_stats_stream
     assert route.role == "readonly"
-    assert route.share_access == http_routes.SHARE_ACCESS_NONE
 
     sink = io.BytesIO()
     request = SimpleNamespace(wfile=sink)
@@ -823,7 +820,6 @@ def test_capabilities_route_is_authenticated_and_uses_the_same_policy_owner():
     assert route is not None
     assert route.handler is http_routes.get_stats_capabilities
     assert route.role == "readonly"
-    assert route.share_access == http_routes.SHARE_ACCESS_NONE
 
 
 def test_retry_route_is_authenticated_and_returns_the_forwarder_result():

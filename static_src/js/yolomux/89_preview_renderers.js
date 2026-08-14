@@ -952,17 +952,31 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   const version = String(state?.mtime || state?.size || 0);
   const img = document.createElement('img');
   img.className = 'file-editor-preview-image';
-  img.src = rawFileUrl(path, version ? {v: version} : {});
   img.alt = basenameOf(path);
   img.loading = 'eager';
   img.decoding = 'async';
-  img.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t('preview.image.loadFailed'), `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(previewZoomSurfaceNode(img, previewZoomOptionsForKind('imagePreview', {
     path,
     context: options.context || '',
   })));
+  container._previewAsync = installRawFileMediaSource(img, path, {
+    params: version ? {v: version} : {},
+    isCurrent: () => container.contains(img),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t('preview.image.loadFailed'),
+        `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderPdfPreviewInto(container, path) {
@@ -990,9 +1004,17 @@ function previewFileActionLinks(path, {separator = ' · ', leadingSeparator = ''
   open.target = target;
   open.rel = 'noopener noreferrer';
   open.textContent = t('common.open');
+  open.addEventListener('click', event => {
+    event.preventDefault();
+    void openRawFileInNewTab(path);
+  });
   const download = document.createElement('a');
   download.href = rawFileDownloadUrl(path);
   download.textContent = t('common.download');
+  download.addEventListener('click', event => {
+    event.preventDefault();
+    void triggerFileDownload(path);
+  });
   return [
     ...(leadingSeparator ? [document.createTextNode(leadingSeparator)] : []),
     open,
@@ -1020,11 +1042,25 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.className = `file-editor-native-media file-editor-native-${kind}`;
   media.controls = true;
   media.preload = 'metadata';
-  media.src = rawFileUrl(path, state?.mtime ? {v: state.mtime} : {});
-  media.addEventListener('error', () => {
-    container.replaceChildren(previewActionFallbackNode(t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
-  }, {once: true});
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
+  container._previewAsync = installRawFileMediaSource(media, path, {
+    params: state?.mtime ? {v: state.mtime} : {},
+    isCurrent: () => container.contains(media),
+    onFailure: error => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        userMessageText(error, t('common.requestFailed')),
+        path,
+      ));
+    },
+    onDecodeFailure: () => {
+      container.replaceChildren(previewActionFallbackNode(
+        t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
+        `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
+        path,
+      ));
+    },
+  });
 }
 
 function renderUnsupportedPreviewInto(container, path, state = null) {
@@ -1089,6 +1125,7 @@ const PREVIEW_SURFACE_CLASSES = Object.freeze([
 ]);
 
 function cleanupStandardPreviewStrategy(container) {
+  releaseRawFileMediaSources(container);
   container._previewPath = null;
   container._previewText = null;
   container._previewDisplayMode = null;
@@ -1117,18 +1154,20 @@ function mermaidPreviewStrategySignature({path, text, context}) {
 
 function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
-  if (currentSignature === signature) return;
+  if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
   renderMarkdownPreviewInto(container, text, path, {context});
+  return true;
 }
 
 function renderMermaidPreviewStrategy({container, path, text, context, signature}) {
-  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return;
+  if (container._mermaidSig === signature && container.querySelector('img.mermaid-preview-image, .mermaid-preview-error')) return false;
   container._mermaidSig = signature;
   container._previewAsync = renderMermaidSourceInto(container, text, {path, zoomKey: 'mermaid', context});
+  return true;
 }
 
 function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
@@ -1149,6 +1188,7 @@ function renderPreviewDescriptor(renderer, context) {
 
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  const previousAsync = container._previewAsync;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
@@ -1157,6 +1197,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
-  renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
+  if (rendered === false) container._previewAsync = previousAsync;
   restoreElementScrollPosition(container, scrollTop, scrollLeft);
 }

@@ -29,10 +29,10 @@ from tests.browser_helpers.browser_layout import (
     WebDriverWait,
     new_chrome_driver,
     register_browser_new_document_script,
-    start_browser_share_server,
-    start_isolated_browser_share_app,
-    stop_browser_share_server,
-    stop_isolated_browser_share_app,
+    start_browser_server,
+    start_isolated_browser_app,
+    stop_browser_server,
+    stop_isolated_browser_app,
 )
 
 FETCH_PROBE_SOURCE = """
@@ -483,11 +483,11 @@ def trigger_forced_watch_diff_refresh(driver) -> None:
 
 def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0) -> dict[str, Any]:
     fixture = create_fixture_tree(tmp_path)
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, session_cwd=fixture["root"])
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=1, session_cwd=fixture["root"])
     server = thread = None
     drivers: dict[str, Any] = {}
     try:
-        server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+        server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         marker = measurement_marker()
         drivers = {
@@ -587,8 +587,8 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         # never a bare best-effort quit that leaves a chromedriver behind when quit() hangs.
         retire_all([WebDriverLease.from_driver(driver) for driver in drivers.values()])
         if server is not None and thread is not None:
-            stop_browser_share_server(server, thread)
-        stop_isolated_browser_share_app(runtime)
+            stop_browser_server(server, thread)
+        stop_isolated_browser_app(runtime)
 
 
 def main(argv: list[str] | None = None) -> int:

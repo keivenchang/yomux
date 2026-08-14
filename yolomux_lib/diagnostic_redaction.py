@@ -5,12 +5,17 @@ from collections.abc import Mapping
 from typing import Any
 
 
+DIAGNOSTIC_TOKEN_PREFIX_PATTERN = r"[A-Za-z](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?"
 DIAGNOSTIC_SECRET_NAME_PATTERN = (
     r"(?:token|secret|password|passwd|(?:proxy[_-]?)?authorization|(?:set[_-]?)?cookie|bearer|"
-    r"(?:x[_-]?)?api[_-]?key|client[_-]?secret|(?:access|refresh|share)[_-]?token|x[_-]?share[_-]?token)"
+    rf"(?:x[_-]?)?api[_-]?key|client[_-]?secret|(?:access|refresh)[_-]?token|"
+    rf"{DIAGNOSTIC_TOKEN_PREFIX_PATTERN}[_-]token)"
 )
 DIAGNOSTIC_SECRET_KEY_RE = re.compile(rf"^{DIAGNOSTIC_SECRET_NAME_PATTERN}$", re.I)
-DIAGNOSTIC_SHARE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
+DIAGNOSTIC_TOKEN_QUERY_RE = re.compile(
+    r"([?#&](?:[A-Za-z][A-Za-z0-9_-]{0,63})?token=)[^&#\s\"']+",
+    re.I,
+)
 DIAGNOSTIC_SECRET_ASSIGNMENT_RE = re.compile(
     rf"\b(?P<prefix>{DIAGNOSTIC_SECRET_NAME_PATTERN}\b[\"']?[ \t]*(?:=|:)[ \t]*)"
     r"(?:(?P<quote>[\"'])(?P<quoted_value>(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])*)(?P=quote)|"
@@ -75,12 +80,12 @@ def _redact_secret_header(match: re.Match[str]) -> str:
 
 
 def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0) -> Any:
-    """Remove share credentials from bounded diagnostic values before retention."""
+    """Remove credentials from bounded diagnostic values before retention."""
 
     if depth > 12:
         return "[truncated-depth]"
     if DIAGNOSTIC_SECRET_KEY_RE.search(str(key or "")):
-        return "[redacted-share-token]"
+        return "[redacted-secret]"
     if isinstance(value, Mapping):
         # Accept any Mapping (e.g. the MappingProxyType returned by
         # families.validate_payload) and always return a plain redacted dict.
@@ -91,13 +96,9 @@ def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0) -> Any:
     if isinstance(value, list):
         return [redact_diagnostic_value(item, key, depth + 1) for item in value[:256]]
     if isinstance(value, str):
-        text = DIAGNOSTIC_SHARE_URL_RE.sub("[redacted-share-url]", value)
-        text = re.sub(
-            r"([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s\"']+",
-            r"\1[redacted-share-token]",
-            text,
-            flags=re.I,
-        )
+        # Diagnostics can outlive the producer that named a credential. Keep upgrade data safe via
+        # a bounded token-suffix grammar instead of retaining producer-specific identifiers here.
+        text = DIAGNOSTIC_TOKEN_QUERY_RE.sub(r"\1[redacted-secret]", value)
         text = DIAGNOSTIC_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
         text = DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE.sub(_redact_secret_header, text)
         text = DIAGNOSTIC_COOKIE_HEADER_RE.sub(_redact_secret_header, text)

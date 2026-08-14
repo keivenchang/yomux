@@ -98,7 +98,6 @@ function codeMirrorWorkingUpdateExtension(api, panel, path) {
       updateCodeMirrorCursorStatus(panel);
       captureCodeMirrorPanelViewState(panel, path);
     }
-    if (update.selectionSet) scheduleShareScrollPublishForElement(update.view?.scrollDOM || panel);
     if (update.docChanged) {
       handleFileEditorContentChanged(panel, path, update.state.doc.toString(), {syntax: false});
     }
@@ -976,7 +975,6 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
           }
-          if (transaction.selectionSet) scheduleShareScrollPublishForElement(panel._cmView?.scrollDOM || panel);
           if (transaction.docChanged) {
             handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
           }
@@ -1038,7 +1036,6 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
             updateCodeMirrorCursorStatus(panel);
             captureCodeMirrorPanelViewState(panel, path);
           }
-          if (transaction.selectionSet) scheduleShareScrollPublishForElement(panel._cmView?.scrollDOM || panel);
           if (transaction.docChanged) {
             handleFileEditorContentChanged(panel, path, panel._cmView.state.doc.toString(), {syntax: false});
           }
@@ -1129,14 +1126,6 @@ function applyPendingFileEditorLineTarget(item, panel) {
   } catch (_) {
     return false;
   }
-}
-
-function scheduleShareFileEditorScrollRestore(item, path) {
-  if (!shareViewMode || typeof scheduleShareScrollRestoreByKey !== 'function') return;
-  const key = item || path || '';
-  if (!key) return;
-  scheduleShareScrollRestoreByKey(`editor:${key}:editor`);
-  scheduleShareScrollRestoreByKey(`editor:${key}:preview`);
 }
 
 function editorPanelParts(panel) {
@@ -1324,7 +1313,6 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
     parts.previewPane.hidden = false;
     renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
   }
-  scheduleShareFileEditorScrollRestore(item, path);
 }
 
 function renderTextCodeMode(panel, item, path, state, parts, mode) {
@@ -1338,7 +1326,6 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
     if (loaded === false) renderFileEditorRawPane(rawPane, path, state.content);
-    else scheduleShareFileEditorScrollRestore(item, path);
   }).catch(error => {
     if (panel.dataset.filePath !== path) return;
     console.warn('CodeMirror editor unavailable; showing read-only raw text', error);
@@ -1359,7 +1346,6 @@ function renderTextEditorMode(panel, item, path, state, parts, mode) {
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
   focusFileEditorPanelIfReady(panel, item);
-  scheduleShareFileEditorScrollRestore(item, path);
 }
 
 function renderFileEditorPanel(panel, item, options = {}) {
@@ -1876,6 +1862,7 @@ function clampScrollTop(element, value) {
 }
 
 const fileEditorSplitScrollFocusRatio = 0.5;
+const fileEditorSplitScrollAnchorSnapPx = 1;
 
 function editorScrollEdgeTarget(from, to) {
   const maxFrom = Math.max(0, Number(from?.scrollHeight || 0) - Number(from?.clientHeight || 0));
@@ -1915,6 +1902,7 @@ function sourcePositionForPreviewScroll(previewPane) {
   for (let index = 1; index < anchors.length; index += 1) {
     const next = anchors[index];
     if (next.top > y) {
+      if (next.top - y <= fileEditorSplitScrollAnchorSnapPx) return {line: next.line};
       const span = Math.max(1, next.top - previous.top);
       const fraction = Math.min(1, Math.max(0, (y - previous.top) / span));
       return {line: previous.line + ((next.line - previous.line) * fraction)};
@@ -1952,7 +1940,12 @@ function editorScrollTopForSourcePosition(cmView, position) {
     const afterLine = Math.max(1, Math.min(Math.ceil(line), cmView.state.doc.lines));
     const beforeBlock = cmView.lineBlockAt(cmView.state.doc.line(beforeLine).from);
     const beforeTop = Number(beforeBlock?.top || 0);
-    if (afterLine === beforeLine) return clampScrollTop(cmView.scrollDOM, beforeTop - targetOffset);
+    if (afterLine === beforeLine) {
+      // CodeMirror may classify the exact top boundary as the preceding visual block. Keep an integer
+      // source position just inside its target block so preview -> editor sync cannot land one line early.
+      const interiorInset = Math.min(1, Math.max(0, Number(beforeBlock?.height || 0)) / 2);
+      return clampScrollTop(cmView.scrollDOM, beforeTop + interiorInset - targetOffset);
+    }
     const afterBlock = cmView.lineBlockAt(cmView.state.doc.line(afterLine).from);
     const afterTop = Number(afterBlock?.top || beforeTop);
     return clampScrollTop(cmView.scrollDOM, beforeTop + ((afterTop - beforeTop) * (line - beforeLine)) - targetOffset);
@@ -2358,7 +2351,6 @@ async function saveFileEditor(path, panel, options = {}) {
     }
     renderSessionButtons();
     renderPaneTabStrips();
-    sharePublishFileVersion(path, {mtime: state.mtime, size: state.size});
     return true;
   } catch (err) {
     if (err?.status === 409) {

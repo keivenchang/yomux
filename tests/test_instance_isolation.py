@@ -44,6 +44,12 @@ def test_one_instance_descriptor_owns_port_and_managed_capability(tmp_path: Path
     assert is_managed_instance_port(7771, {YOLOMUX_ROOT_ENV: str(tmp_path / "root")}) is False
 
 
+def test_macos_managed_instance_uses_short_default_socket_root():
+    resolution = resolve_instance_environment(8881, {}, platform="darwin")
+
+    assert resolution.environment[YOLOMUX_ROOT_ENV] == f"/tmp/y{os.getuid()}/p8881"
+
+
 def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: Path):
     """W1: the launcher builds one clean child env per row - inherited YOLOmux
     root/instance vars (from a parent shell that belongs to another instance) are

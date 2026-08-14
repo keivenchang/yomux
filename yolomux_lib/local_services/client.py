@@ -269,6 +269,14 @@ class LocalServiceClient:
         response, _binary = self.request_with_binary(payload, timeout=timeout, probe=probe)
         return response
 
+    def request_if_running(self, payload: dict[str, Any], timeout: float = 0.5, *, probe: bool = False) -> dict[str, Any]:
+        """Query an existing service without turning observation into launch demand."""
+
+        response, _binary, error = self._request_once(payload, timeout, probe=probe)
+        if error is not None and response.get("_transport_error") not in {"absent", "refused"}:
+            self._report_transport_error(error)
+        return response
+
     def ensure_started(self) -> bool:
         started = self.registry.ensure_started()
         if started:

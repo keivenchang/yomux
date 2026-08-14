@@ -27,7 +27,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Current Priorities
 
-**Current scope is 0.7.5, planned 2026-08-12: merge macOS support, delete YO!share, close the 0.7.4 refactor followups, fix first-launch agent auth. No new product surface.** The plan and its execution order are in [`../PLAN.0.7.5.md`](../PLAN.0.7.5.md); the four queues are `DOIT.075.1` through `DOIT.075.4` at the repo root. Everything below this paragraph is roadmap, not 0.7.5 scope — do not start an item here without moving it into the release plan first. Out-of-scope queues live in `../queues/backlog/`.
+[`../STATUS-REPORT.md`](../STATUS-REPORT.md) is the sole source for the current release scope, execution order, and progress. Everything below this paragraph is roadmap; do not start an item here without explicitly promoting it into the status report. Out-of-scope queues live in `../queues/backlog/`.
 
 The 0.7.1 performance freeze that used to sit here (set 2026-08-03, "nothing else") is over: 0.7.1, 0.7.2, and 0.7.3 all shipped and 0.7.4 is in acceptance. Its queue `DOIT.071-performance.md` no longer exists.
 
@@ -64,14 +64,6 @@ The standing invariant survives that freeze and still holds: the `yolomux.py` we
 
 - [ ] [M] Add remaining editor power keys through CodeMirror where possible: multi-cursor, select all occurrences, add cursor above/below, line move/copy/delete, smart-select, matching bracket, fold/unfold, symbol jump, and command mode. Avoid app-side Ctrl-letter bindings on Mac.
 
-## YO!share - removed
-
-**Decision 2026-08-12: `NO_BUILD`. YO!share is being deleted from the product in 0.7.5**, code and specs together, per `../DOIT.075.2.yoshare-removal.md`. It was never a supported feature; quarantine was the holding position and removal is the outcome.
-
-The three items that used to sit here (guest-cookie token exchange, host-owned presenter replay, presenter-follow polish) are void. Do not implement them. A future revival would be a new product decision starting from new code, not from this source.
-
-[`specs/SHARE_MIRRORING.md`](specs/SHARE_MIRRORING.md) is retained only as historical evidence and is deleted by the same queue.
-
 ## Launch, Worktrees, And Vitals
 
 - [ ] [L] Evaluate hidden-document terminal WebSocket suspension as an isolated feature. Use a bounded grace period and prove no lost input, duplicate socket, resize-authority drift, scrollback loss, missed attention transition, or incomplete current-snapshot recovery before enabling it; demand-aware HTTP/SSE gating intentionally leaves terminal sockets connected until this proof exists.
@@ -89,7 +81,7 @@ The three items that used to sit here (guest-cookie token exchange, host-owned p
 
 ## Internationalization
 
-- [ ] [M] Finish structured localization for the auxiliary tmux-wall shell and remaining browser-visible share/upload/filesystem/search/run-history/transcript/API errors while retaining raw OS/git/tmux/model text only as diagnostic detail.
+- [ ] [M] Finish structured localization for the auxiliary tmux-wall shell and remaining browser-visible upload/filesystem/search/run-history/transcript/API errors while retaining raw OS/git/tmux/model text only as diagnostic detail.
 
 ## Product Guardrails
 

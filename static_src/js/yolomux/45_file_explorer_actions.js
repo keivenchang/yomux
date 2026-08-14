@@ -201,12 +201,12 @@ async function copyImageFileToClipboard(path, options = {}) {
     return;
   }
   try {
-    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
-    if (!response.ok) {
-      await showFileTransferResponseError(response, t('common.copyFailed', {error: t('common.requestFailed')}));
+    const result = await fetchRawFileBlob(path);
+    if (!result.ok) {
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('common.copyFailed', {error: t('common.requestFailed')})});
       return;
     }
-    const blob = await response.blob();
+    const blob = result.blob;
     const type = blob.type || 'image/png';
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
     showCopyFeedback({button: options.button, statusText: t('status.copiedImage', {name: basenameOf(path)})});
@@ -267,17 +267,37 @@ async function triggerFileDownload(path) {
   const label = basenameOf(path) || path;
   statusEl.textContent = t('fileTransfer.downloading', {name: label});
   try {
-    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
-    if (!response.ok) {
-      await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
+    const result = await fetchRawFileBlob(path, {params: {download: 1}});
+    if (!result.ok) {
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
       return;
     }
-    const filename = downloadFilenameFromContentDisposition(response.headers.get('Content-Disposition'), basenameOf(path) || 'download');
-    const blob = await response.blob();
-    saveBlobDownload(blob, filename);
+    const filename = downloadFilenameFromContentDisposition(result.contentDisposition, basenameOf(path) || 'download');
+    saveBlobDownload(result.blob, filename);
     statusEl.textContent = t('fileTransfer.downloadStarted', {name: filename});
   } catch (error) {
     showFileTransferError(error, {fallback: t('fileTransfer.downloadFailed', {name: label})});
+  }
+}
+
+async function openRawFileInNewTab(path) {
+  if (!path) return;
+  const opened = window.open('about:blank', '_blank');
+  if (opened) opened.opener = null;
+  try {
+    const result = await fetchRawFileBlob(path);
+    if (!result.ok) {
+      opened?.close?.();
+      if (!result.aborted) showFileTransferError(result.error, {fallback: t('preview.openFailed', {path})});
+      return;
+    }
+    const objectUrl = URL.createObjectURL(result.blob);
+    if (opened) opened.location.href = objectUrl;
+    else window.open(objectUrl, '_blank', 'noopener,noreferrer');
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+  } catch (error) {
+    opened?.close?.();
+    showFileTransferError(error, {fallback: t('preview.openFailed', {path})});
   }
 }
 
@@ -476,17 +496,14 @@ async function setAllFileTreeDirectoriesExpanded(source, expand, options = {}) {
   const view = options.view || fileExplorerToolbarView(source);
   if (view === 'tabber') {
     setAllTabberCollapsed(!expand);
-    scheduleShareUiStatePublish();
     return;
   }
   if (view === 'differ' || source?.closest?.('.file-explorer-changes-panel')) {
     setAllFileExplorerChangesDirectoriesExpanded(expand);
-    scheduleShareUiStatePublish();
     return;
   }
   if (expand) await expandAllFileExplorerDirectories();
   else await collapseAllFileExplorerDirectories();
-  scheduleShareUiStatePublish();
 }
 
 function handleFileExplorerTreeToolbarAction(container, event) {
@@ -514,9 +531,10 @@ function handleFileExplorerTreeToolbarChange(container, event) {
 }
 
 function bindFileExplorerHeaderActions(container = document) {
-  if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
-  if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
-  container.addEventListener('click', event => {
+  if (!container) return null;
+  return bindScopedOnce(container, 'file-explorer-header-actions', scope => {
+  normalizeAppOwnedControls(container);
+  scope.ownEvent('click', container, 'click', event => {
     if (handleFileExplorerTreeToolbarAction(container, event)) return;
     const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
@@ -541,8 +559,9 @@ function bindFileExplorerHeaderActions(container = document) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
     }
   });
-  container.addEventListener('change', event => {
+  scope.ownEvent('change', container, 'change', event => {
     handleFileExplorerTreeToolbarChange(container, event);
+  });
   });
 }
 
@@ -699,7 +718,6 @@ function setFileTreeDirectoryExpanded(row, fullPath, expand) {
     else changesFolderCollapsed.add(fullPath);
     writeStoredChangesFolderCollapsed();
     renderFileExplorerChangesPanels({force: true});
-    scheduleShareUiStatePublish();
     return;
   }
   if (expand) expandDirectoryRow(row, fullPath, {manual: true});
@@ -2534,7 +2552,7 @@ function clientServerWatchState() {
   const state = {
     // This is the existing client-event identity, not a filesystem path. The
     // server unions simultaneous tabs and releases this descriptor on SSE close.
-    client_id: String(shareClientId || ''),
+    client_id: String(browserClientId || ''),
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),

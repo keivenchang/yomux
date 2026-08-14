@@ -9,11 +9,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from functools import lru_cache
+import ctypes
+import ctypes.util
 import os
 from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 from typing import Any
 import uuid
 
@@ -22,10 +25,111 @@ HOST_ID_OVERRIDE_ENV = "YOLOMUX_HOST_ID"
 MACHINE_ID_PATH = Path("/etc/machine-id")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+_DARWIN_PROC_PIDTBSDINFO = 3
+_DARWIN_MAXCOMLEN = 16
+_DARWIN_PROCESS_STATES = {1: "I", 2: "R", 3: "S", 4: "T", 5: "Z"}
 
 
 class HostIdentityError(RuntimeError):
     """The host or process identity cannot be established safely."""
+
+
+class _DarwinProcBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * _DARWIN_MAXCOMLEN),
+        ("pbi_name", ctypes.c_char * (2 * _DARWIN_MAXCOMLEN)),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    ]
+
+
+@dataclass(frozen=True)
+class ProcessIdentitySnapshot:
+    state: str
+    start_identity: str
+
+
+def _darwin_process_identity_snapshot(pid: int) -> ProcessIdentitySnapshot | None:
+    library_path = ctypes.util.find_library("proc")
+    if not library_path:
+        return None
+    try:
+        library = ctypes.CDLL(library_path, use_errno=True)
+        info = _DarwinProcBsdInfo()
+        size = ctypes.sizeof(info)
+        result = library.proc_pidinfo(int(pid), _DARWIN_PROC_PIDTBSDINFO, 0, ctypes.byref(info), size)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if result != size or int(info.pbi_pid) != int(pid) or int(info.pbi_start_tvsec) <= 0:
+        return None
+    started_microseconds = int(info.pbi_start_tvsec) * 1_000_000 + int(info.pbi_start_tvusec)
+    return ProcessIdentitySnapshot(
+        state=_DARWIN_PROCESS_STATES.get(int(info.pbi_status), "?"),
+        start_identity=f"darwin:{started_microseconds}",
+    )
+
+
+def process_identity_snapshot(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    platform_name: str = sys.platform,
+    darwin_reader: Callable[[int], ProcessIdentitySnapshot | None] = _darwin_process_identity_snapshot,
+) -> ProcessIdentitySnapshot | None:
+    """Return one process state and birth identity from the platform's native owner."""
+
+    clean_pid = int(pid)
+    if clean_pid <= 1:
+        return None
+    try:
+        stat_text = (proc_root / str(clean_pid) / "stat").read_text(encoding="utf-8")
+    except OSError:
+        stat_text = ""
+    closing_paren = stat_text.rfind(")")
+    if closing_paren >= 0:
+        fields = stat_text[closing_paren + 1 :].split()
+        if len(fields) > 19:
+            try:
+                return ProcessIdentitySnapshot(state=fields[0], start_identity=f"proc:{int(fields[19])}")
+            except ValueError:
+                pass
+    if platform_name.casefold() == "darwin":
+        # libproc is the authoritative, constant-time owner on macOS. Falling back to one
+        # `ps` subprocess per inaccessible PID makes a bounded process-table read take minutes.
+        return darwin_reader(clean_pid)
+    try:
+        completed = runner(
+            ("ps", "-o", "state=,lstart=", "-p", str(clean_pid)),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    state, separator, started = " ".join(str(completed.stdout or "").split()).partition(" ")
+    if completed.returncode != 0 or not separator or not state or not started:
+        return None
+    return ProcessIdentitySnapshot(state=state[0], start_identity=f"ps:{started}")
 
 
 class LocalProcessReason(str, Enum):
@@ -59,44 +163,19 @@ def process_start_identity(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> str | None:
     """Return a stable kernel/process-table birth identity for one live PID."""
-
-    clean_pid = int(pid)
-    if clean_pid <= 1:
-        return None
-    try:
-        stat_text = (proc_root / str(clean_pid) / "stat").read_text(encoding="utf-8")
-    except OSError:
-        stat_text = ""
-    closing_paren = stat_text.rfind(")")
-    if closing_paren >= 0:
-        fields = stat_text[closing_paren + 1 :].split()
-        if len(fields) > 19:
-            try:
-                return f"proc:{int(fields[19])}"
-            except ValueError:
-                pass
-    try:
-        completed = runner(
-            ("ps", "-o", "lstart=", "-p", str(clean_pid)),
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    started = " ".join(str(completed.stdout or "").split())
-    return f"ps:{started}" if completed.returncode == 0 and started else None
+    snapshot = process_identity_snapshot(pid, proc_root=proc_root, runner=runner)
+    return snapshot.start_identity if snapshot is not None else None
 
 
 def process_start_ticks(identity: object) -> int | None:
-    """Extract Linux start ticks from a portable process-start identity."""
+    """Extract the numeric birth counter from a native process-start identity."""
 
     text = str(identity or "")
-    if not text.startswith("proc:"):
+    prefix, separator, value = text.partition(":")
+    if not separator or prefix not in {"proc", "darwin"}:
         return None
     try:
-        return int(text.removeprefix("proc:"))
+        return int(value)
     except ValueError:
         return None
 
@@ -114,6 +193,43 @@ def _host_id_override_state(environ: Mapping[str, str]) -> tuple[bool, str]:
     if HOST_ID_OVERRIDE_ENV not in environ:
         return False, ""
     return True, normalize_stable_host_id(environ[HOST_ID_OVERRIDE_ENV], source=HOST_ID_OVERRIDE_ENV)
+
+
+def _darwin_command_identity(
+    command: tuple[str, ...],
+    pattern: str,
+    *,
+    label: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
+    """Read one stable macOS identity without weakening the fail-closed fence."""
+    try:
+        completed = runner(command, capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise HostIdentityError(f"cannot read macOS {label}") from exc
+    match = re.search(pattern, str(completed.stdout or ""), flags=re.IGNORECASE)
+    if completed.returncode != 0 or match is None:
+        raise HostIdentityError(f"cannot read macOS {label}")
+    return normalize_stable_host_id(match.group(1), source=" ".join(command))
+
+
+def _darwin_stable_host_id(*, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> str:
+    return _darwin_command_identity(
+        ("ioreg", "-rd1", "-c", "IOPlatformExpertDevice"),
+        r'"IOPlatformUUID"\s*=\s*"([A-Za-z0-9-]+)"',
+        label="platform UUID",
+        runner=runner,
+    )
+
+
+def _darwin_boot_id(*, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> str:
+    boot_time = _darwin_command_identity(
+        ("sysctl", "-n", "kern.boottime"),
+        r"sec\s*=\s*([0-9]+)",
+        label="boot time",
+        runner=runner,
+    )
+    return f"darwin-{boot_time}"
 
 
 @dataclass(frozen=True)
@@ -160,11 +276,16 @@ class HostIdentity:
         pid_reader: Callable[[], int] = os.getpid,
         start_identity_reader: Callable[[int], str | None] = process_start_identity,
         nonce_factory: Callable[[], str] | None = None,
+        platform_name: str = sys.platform,
+        command_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> HostIdentity:
         values = os.environ if environ is None else environ
         if HOST_ID_OVERRIDE_ENV in values:
             source = HOST_ID_OVERRIDE_ENV
             stable_host_id = normalize_stable_host_id(values[HOST_ID_OVERRIDE_ENV], source=source)
+        elif platform_name == "darwin" and machine_id_path == MACHINE_ID_PATH:
+            source = "ioreg IOPlatformUUID"
+            stable_host_id = _darwin_stable_host_id(runner=command_runner)
         else:
             source = str(machine_id_path)
             stable_host_id = _read_required_identity(
@@ -175,7 +296,11 @@ class HostIdentity:
         display_hostname = str(hostname_reader() or "").strip()
         if not display_hostname:
             raise HostIdentityError("display hostname is empty")
-        boot_id = _read_required_identity(boot_id_path, label="boot ID")
+        boot_id = (
+            _darwin_boot_id(runner=command_runner)
+            if platform_name == "darwin" and boot_id_path == BOOT_ID_PATH
+            else _read_required_identity(boot_id_path, label="boot ID")
+        )
         pid = int(pid_reader())
         start_identity = start_identity_reader(pid)
         if pid <= 1 or not start_identity:

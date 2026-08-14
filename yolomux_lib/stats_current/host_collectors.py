@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import plistlib
@@ -13,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+
+from ..local_services.registry import read_process_cpu_seconds_and_rss
 
 
 def _clamp(value: float) -> float:
@@ -38,6 +41,51 @@ def _linux_process_ticks(pid: int) -> tuple[float, int] | None:
     except (IndexError, OSError, ValueError):
         return None
     return ticks, max(0, rss)
+
+
+def _darwin_system_times() -> tuple[float, float] | None:
+    """Read aggregate CPU ticks through Mach without spawning a process."""
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        libsystem = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        libsystem.mach_host_self.restype = ctypes.c_uint32
+        libsystem.mach_task_self.restype = ctypes.c_uint32
+        libsystem.host_processor_info.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(ctypes.c_int)), ctypes.POINTER(ctypes.c_uint32)]
+        libsystem.host_processor_info.restype = ctypes.c_int
+        libsystem.vm_deallocate.argtypes = [ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64]
+        libsystem.vm_deallocate.restype = ctypes.c_int
+        processor_count = ctypes.c_uint32()
+        info = ctypes.POINTER(ctypes.c_int)()
+        info_count = ctypes.c_uint32()
+        if libsystem.host_processor_info(libsystem.mach_host_self(), 2, ctypes.byref(processor_count), ctypes.byref(info), ctypes.byref(info_count)) != 0:
+            return None
+        try:
+            values = [int(info[index]) for index in range(int(info_count.value))]
+            total = float(sum(values))
+            idle = float(sum(values[index] for index in range(2, len(values), 4)))
+            return (total, total - idle) if total > 0 else None
+        finally:
+            address = ctypes.cast(info, ctypes.c_void_p).value
+            if address:
+                libsystem.vm_deallocate(libsystem.mach_task_self(), address, ctypes.sizeof(ctypes.c_int) * int(info_count.value))
+    except (AttributeError, OSError):
+        return None
+
+
+def _system_times() -> tuple[float, float] | None:
+    return _darwin_system_times() if sys.platform == "darwin" else _linux_system_times()
+
+
+def _process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
+    if sys.platform == "darwin":
+        return read_process_cpu_seconds_and_rss(pid)
+    reading = _linux_process_ticks(pid)
+    if reading is None:
+        return None
+    ticks, rss = reading
+    return ticks / float(os.sysconf("SC_CLK_TCK")), rss
 
 
 # The ONE cadence/staleness policy for the web process's own CPU/memory sample.
@@ -101,19 +149,19 @@ class CpuSampler:
 
         now = time.time()
         monotonic = time.monotonic()
-        process = _linux_process_ticks(pid)
-        system = _linux_system_times()
+        process = _process_cpu_seconds_and_rss(pid)
+        system = _system_times()
         process_percent: float | None = None
         system_percent: float | None = None
         rss = 0
         if process is not None:
-            ticks, rss = process
+            cpu_seconds, rss = process
             if self._previous_process is not None:
-                previous_ticks, previous_at = self._previous_process
+                previous_cpu_seconds, previous_at = self._previous_process
                 elapsed = monotonic - previous_at
                 if elapsed > 0:
-                    process_percent = max(0.0, ((ticks - previous_ticks) / float(os.sysconf("SC_CLK_TCK"))) / elapsed * 100.0)
-            self._previous_process = (ticks, monotonic)
+                    process_percent = max(0.0, (cpu_seconds - previous_cpu_seconds) / elapsed * 100.0)
+            self._previous_process = (cpu_seconds, monotonic)
         if system is not None:
             if self._previous_system is not None:
                 previous_total, previous_busy = self._previous_system

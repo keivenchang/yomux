@@ -1615,7 +1615,6 @@ async function refreshActivitySummary(options = {}) {
     activitySummaryState.refreshing = false;
     return false;
   }
-  if (shareViewMode) return false;
   if (options.silent === true && options.localeChange !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;

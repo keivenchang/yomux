@@ -7,6 +7,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -95,6 +96,10 @@ def wait_for_isolated_tmux_pane_exit(
             if current_identity == identity:
                 retained.append((pid, identity))
             elif current_identity is None and pid_is_alive(pid):
+                if sys.platform == "darwin":
+                    # libproc stops exposing birth identity once an exited child is a zombie;
+                    # the matching identity was already captured before fixture shutdown.
+                    continue
                 raise AssertionError(
                     f"cannot prove isolated tmux pane PID {pid} exited because its start identity is unavailable"
                 )
@@ -178,6 +183,8 @@ def start_isolated_tmux_runtime(
     if not session_names:
         remove_isolated_tmux_socket_dir(socket_dir)
         raise ValueError("at least one isolated tmux session is required")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     monkeypatch.setenv("HISTFILE", os.devnull)
     runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=["-S", str(socket_path)], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, stopped=False)

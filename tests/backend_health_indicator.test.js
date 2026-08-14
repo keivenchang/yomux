@@ -25,7 +25,10 @@ const {
 
 const EN = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
 const CORE_SOURCE = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const BOOT_SOURCE = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const BOOT_SOURCE = [
+  'static_src/js/yolomux/99_terminal_boot.js',
+  'static_src/js/yolomux/99_client_event_transport.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 
 function topbarHost() {
   const host = new TestElement('', 'div');
@@ -321,7 +324,10 @@ async function runBackendHealthIndicatorSuite() {
   });
 
   test('the indicator owns no request or timer of its own', () => {
-    const region = CORE_SOURCE.slice(0, CORE_SOURCE.indexOf('function applyShareTokenHeaders'));
+    const region = CORE_SOURCE.slice(
+      CORE_SOURCE.indexOf('function backendHealthStateSeverity'),
+      CORE_SOURCE.indexOf('function noteBackendHealthFailure'),
+    );
     assert.ok(region.includes('function syncBackendHealthIndicator'), 'the backend-health region is the one being scanned');
     for (const forbidden of ['apiFetch(', 'fetch(', 'setInterval(', 'setTimeout(']) {
       assert.ok(!region.includes(forbidden), `the indicator must not ${forbidden.slice(0, -1)}: health is pushed, never polled`);

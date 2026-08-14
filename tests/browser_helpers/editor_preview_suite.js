@@ -34,70 +34,7 @@ const {
   finishSuite,
 } = require('./layout_test_helper');
 
-
-registerTest('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
-  const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-  assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
-  assert.ok(source.includes('if (!infoHasWorkGraph(info)) return [];'), 'YO!info returns no Git sources without a normalized graph');
-  assert.equal(source.includes('info?.project'), false, 'YO!info has no legacy project projection fallback');
-  assert.ok(source.includes('function infoSourceBranches(source = {})'), 'graph branches use a shared graph-native selector');
-  assert.ok(source.includes('source.workGraph\n          ? `${source.localRepositoryId}'), 'graph rows deduplicate using canonical local repository and branch IDs');
-  assert.ok(source.includes('function infoGraphTabAgentsForSource(source = {})'), 'YO!info derives tab/actor attribution from graph associations');
-  assert.ok(source.includes('workGraph.path_observations?.[id]?.git_worktree_id === worktreeId'), 'actor attribution uses canonical observation-to-worktree edges');
-});
-
-registerTest('YO!info canonical relationship records ignore conflicting legacy projections and keep an empty graph empty', () => {
-  const api = loadYolomux('', ['graph-session']);
-  const graph = {
-    version: 1,
-    generation: 7,
-    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
-    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude'}},
-    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%graph', active: true, window_active: true}},
-    runtime_actors: {'actor:graph': {id: 'actor:graph', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', cwd: '/canonical/right', status: 'working', path_observation_ids: ['observation:graph']}},
-    path_observations: {'observation:graph': {id: 'observation:graph', runtime_actor_id: 'actor:graph', git_worktree_id: 'worktree:graph', path: '/canonical/right', source: 'transcript', last_observed_at: 42}},
-    git_worktrees: {'worktree:graph': {id: 'worktree:graph', root: '/canonical/right', git_dir: '/canonical/right/.git', local_repository_id: 'local:graph', hosted_repository_id: 'hosted:graph', current_branch_id: 'branch:graph'}},
-    local_repositories: {'local:graph': {id: 'local:graph', common_git_dir: '/canonical/.git', local_branch_ids: ['branch:graph']}},
-    hosted_repositories: {'hosted:graph': {id: 'hosted:graph', url: 'https://github.test/canonical/right'}},
-    local_branches: {'branch:graph': {id: 'branch:graph', local_repository_id: 'local:graph', name: 'canonical-branch', subject: 'canonical subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-1'], pull_request_lookup_state: 'ready'}},
-    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:graph', number: 80, title: 'canonical PR', state: 'open', url: 'https://github.test/canonical/right/pull/80', linear_ids: ['CAN-1'], local_branch_ids: ['branch:graph']}},
-    linear_issues: {'linear:CAN-1': {id: 'linear:CAN-1', identifier: 'CAN-1', title: 'canonical issue', url: 'https://linear.test/CAN-1'}},
-    worktree_branch_activity: {},
-  };
-  const legacyProject = {
-    git: {root: '/legacy/wrong', branch: 'legacy-branch', other_branches: {branches: [{name: 'legacy-branch', current: true, pull_request: {number: 999, url: 'https://legacy.test/pull/999'}}]}},
-    repos: [],
-  };
-  api.setTranscriptInfoForTest('graph-session', {work_graph: graph, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
-  api.setTranscriptSessionOrderForTest(['graph-session']);
-  const records = api.infoRelationshipRecords();
-  assert.equal(records.length, 1, 'one canonical graph branch creates one relationship record');
-  const [record] = records;
-  assert.equal(record.pathKey, '/canonical/right');
-  assert.equal(record.branchKey, 'canonical-branch');
-  assert.equal(record.prNumber, 80);
-  assert.equal(record.gitWorktreeKey, 'worktree:graph');
-  assert.equal(record.localRepositoryKey, 'local:graph');
-  assert.equal(record.hostedRepositoryKey, 'hosted:graph');
-  assert.equal(JSON.stringify(records).includes('/legacy/wrong'), false, 'legacy path projection cannot leak into a graph-backed result');
-  assert.equal(JSON.stringify(records).includes('legacy-branch'), false, 'legacy branch projection cannot leak into a graph-backed result');
-  assert.equal(JSON.stringify(records).includes('#999'), false, 'legacy PR projection cannot leak into a graph-backed result');
-
-  const empty = {...graph, git_worktrees: {}, local_repositories: {}, local_branches: {}, hosted_repositories: {}, pull_requests: {}, linear_issues: {}, path_observations: {}, runtime_actors: {}, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, worktree_branch_activity: {}};
-  api.setTranscriptInfoForTest('graph-session', {work_graph: empty, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
-  assert.deepStrictEqual(canonical(api.infoRelationshipRecords()), [], 'a schema-valid empty graph does not revive stale legacy rows');
-});
-
-registerTestAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
-  const api = loadYolomux('', ['graph-refresh']);
-  const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
-  await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  await api.applySessionMetadataPayloadForTest({metadata_loading: true, session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {version: 1, generation: 0, loading: true}, metadata_loading: true}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'a lightweight refresh retains the last complete canonical graph instead of reviving a legacy projection');
-  const accepted = await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {...completeGraph, generation: 19}, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  assert.equal(accepted, false, 'a late older graph generation cannot overwrite the newer canonical session graph');
-  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'the newer graph remains active after stale delivery');
-});
+require('./editor_preview_info_graph_suite');
 
 registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
   const api = loadYolomux('', ['focus-graph']);
@@ -522,7 +459,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal((allSource.match(new RegExp(`^function ${name}\\(`, 'gm')) || []).length, 1, `${name} has one declaration`);
       assert.ok(coreSource.includes(`function ${name}(`), `${name} is owned by the earliest shared core partial`);
     }
-    for (const removed of ['readableParamComponentDecode', 'safeDecodePathComponent', 'safeDecodeMarkdownUrlPath', 'shareSerializedByteLength', 'shareReplayHostPerfNow', 'domBuilderDataAttributeName', 'dataAttributeName', 'terminalAttentionTextPart', 'infoSearchText', 'jsDebugByteLength', 'clientPerfNow']) {
+    for (const removed of ['readableParamComponentDecode', 'safeDecodePathComponent', 'safeDecodeMarkdownUrlPath', 'domBuilderDataAttributeName', 'dataAttributeName', 'terminalAttentionTextPart', 'infoSearchText', 'jsDebugByteLength', 'clientPerfNow']) {
       assert.equal(new RegExp(`^function ${removed}\\(`, 'm').test(allSource), false, `${removed} duplicate is removed`);
     }
     assert.equal(api.safeDecodeURIComponent('hello%20world'), 'hello world');
@@ -540,6 +477,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(popoutSource, /function syncFilePreviewPopoutScroll[\s\S]*filePreviewPopoutReflectedScrollMatches[\s\S]*beginFilePreviewPopoutScrollOwner\(record, \{kind: 'popout'/, 'reflected writes cannot steal ownership while a genuine popup scroll can');
     assert.match(popoutSource, /function writeFilePreviewPopoutAfterNavigation\(path, previewWindow, snapshot, previewGeneration\)[\s\S]*record\.navigationWrite !== job[\s\S]*filePreviewPopoutGenerationMatches\(path, previewWindow, previewGeneration\)[\s\S]*settleFilePreviewPopoutNavigationWrite/, 'deferred navigation writes validate the current record, window, and generation at the actual write boundary');
     assert.match(popoutSource, /function applyFilePreviewPopoutAsync[\s\S]*return apply\(snapshot\)[\s\S]*completion\.then\(finish, finish\)/, 'async readiness follows the apply result through a deferred navigation write instead of retiring when it is merely scheduled');
+    assert.match(popoutSource, /const listenerOptions = \['scroll', 'wheel', 'touchstart'\]\.includes\(type\) \? \{passive: true\} : undefined;[\s\S]*scope\.ownEvent\([^\n]+listenerOptions\)/, 'only scroll, wheel, and touch listeners are passive; click, pointer, and keyboard controls can prevent defaults');
     const frames = [];
     const measures = [];
     let now = 0;
@@ -609,6 +547,49 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(panel._splitScrollBottomConvergence, null, 'bottom convergence retires only after stable measured snapshots');
     api.scheduleFileEditorPreviewLayoutSyncForTest(panel);
     assert.equal(panel._splitScrollPendingSource, 'editor', 'an explicit preview-layout refresh can still elect the editor source');
+  });
+
+  test('integer preview source positions land inside the target CodeMirror block', () => {
+    const api = loadYolomux('', ['1']);
+    const targetLine = 50;
+    for (const lineHeight of [8, 16, 20, 37]) {
+      for (const clientHeight of [75, 200, 401]) {
+        const doc = {
+          lines: 120,
+          line: number => ({from: number}),
+          lineAt: from => ({number: from}),
+        };
+        const cmView = {
+          scrollDOM: {clientHeight, scrollHeight: 120 * lineHeight},
+          state: {doc},
+          lineBlockAt: position => ({top: (position - 1) * lineHeight, height: lineHeight}),
+          // CodeMirror can assign an exact shared boundary to the preceding visual block.
+          lineBlockAtHeight: height => ({from: Math.max(1, Math.ceil(height / lineHeight))}),
+        };
+        const scrollTop = api.editorScrollTopForSourcePositionForTest(cmView, {line: targetLine});
+        const center = scrollTop + (clientHeight * 0.5);
+        const targetTop = (targetLine - 1) * lineHeight;
+        const centerLine = doc.lineAt(cmView.lineBlockAtHeight(center).from).number;
+        assert.ok(center > targetTop && center < targetTop + lineHeight, `line ${targetLine} owns the center for ${lineHeight}px lines in a ${clientHeight}px viewport`);
+        assert.equal(centerLine, targetLine, `boundary classification stays on line ${targetLine} for ${lineHeight}px lines in a ${clientHeight}px viewport`);
+      }
+    }
+    for (const anchorGap of [0, 0.125, 0.5, 1]) {
+      const preview = {
+        scrollTop: 299,
+        clientHeight: 476,
+        getBoundingClientRect: () => ({top: 0}),
+      };
+      const anchorRows = [[37, 100], [targetLine, 537 + anchorGap]].map(([line, top]) => ({
+        dataset: {sourceLine: String(line)},
+        closest: () => null,
+        getClientRects: () => [{}],
+        getBoundingClientRect: () => ({top: top - preview.scrollTop, width: 1, height: 1}),
+      }));
+      preview.querySelectorAll = () => anchorRows;
+      const position = api.sourcePositionForPreviewScrollForTest(preview);
+      assert.equal(position.line, targetLine, `a ${anchorGap}px scroll-quantization gap snaps to the focused source anchor`);
+    }
   });
 
   test('coarse-pointer tablets retain menus while phones compact the topbar', () => {
@@ -768,7 +749,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = \[\];[\s\S]*applyTopbarPackingSteps\(applied\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*applied\.push\(topbarPackingStepOrder\[applied\.length\]\)/.test(source), 'topbar packing starts from the full representation on every pass, then reduces in one contiguous priority prefix');
     assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
     assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /function fileSurfaceMenuItems\(\)[\s\S]*menuCommand\(itemLabel\(item\), \(\) => openFileSurfaceFromMenu\(item\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
-    assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
+    assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
     assert.ok(/nestedRoot: true[\s\S]*function openAppMenu\(wrapper, options = \{\}\)[\s\S]*app-menu--nested-root/.test(source), 'compact Menus exposes File/View/tmux/Tabs/Help first and opens their command layers only on demand');
     assert.ok(/function createAppSubmenu\(item\)[\s\S]*const compactRoot[\s\S]*app-menu--nested-root[\s\S]*app-menu-submenu-wrap\.open[\s\S]*if \(compactRoot\(\) && wrapper\.classList\.contains\(CLS\.open\)\)[\s\S]*setOpen\(false\)/.test(source), 'first-level File/View/tmux/Tabs/Help entries in compact Menus are collapsible disclosures rather than one-way popovers');
     const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
@@ -1294,7 +1275,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
-    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
     assert.ok(/function renderErrorEditor[\s\S]*fileErrorText\(state\.error/.test(editorSource), 'file error panes resolve their stored descriptor at render time');
     assert.equal(/fileErrorState\([^)]*t\(/.test(fileSource), false, 'file error state constructors do not receive translated fallback prose');
     assert.ok(/function yoagentJobNotificationTitle\([^)]*\)[\s\S]*t\('brand\.tab\.agent'\)/.test(terminalSource), 'YO!agent notifications reuse the current localized brand key');
@@ -1369,6 +1350,160 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       'static_src/js/yolomux/86_changes_editor.js',
     ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
     assert.equal(/status\.(?:settingsSaveFailed|settingsResetFailed|themeSaveFailed)', \{error\}\)/.test(settingsSources), false, 'settings save/reset/theme catches have no raw Error interpolation path');
+  });
+
+  await testAsync('raw media fetches expose typed status and own exact blob URL lifecycles', async () => {
+    const api = loadYolomux('', ['1']);
+    api.i18nSetCatalogForTest('raw-media', {
+      'auth.error.authenticationRequired': 'AUTH-T',
+      'common.pathNotFound': 'MISSING-T {path}',
+      'editor.fileTooLargeTitle': 'LARGE-T',
+      'common.requestFailed': 'REQUEST-T',
+    });
+    api.setActiveLocaleForTest('raw-media');
+    const response = (payload, status, blob = null) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      statusText: String(status),
+      body: null,
+      headers: {get: name => name === 'Content-Type' ? (blob?.type || 'application/json') : ''},
+      json: async () => payload,
+      blob: async () => blob,
+    });
+    const missingNonJson = response({}, 404);
+    missingNonJson.json = async () => { throw new SyntaxError('not json'); };
+    const failures = [response({}, 401), missingNonJson, response({}, 413)];
+    const requests = [];
+    api.setFetchForTest(async (url, options) => {
+      requests.push({url: String(url), options});
+      return failures.shift();
+    });
+    const auth = await api.fetchRawFileBlobForTest('/repo/image.png');
+    const missing = await api.fetchRawFileBlobForTest('/repo/image.png');
+    const large = await api.fetchRawFileBlobForTest('/repo/image.png');
+    assert.deepStrictEqual(canonical([
+      [auth.status, api.fileErrorTextForTest(auth.error, 'common.requestFailed')],
+      [missing.status, api.fileErrorTextForTest(missing.error, 'common.requestFailed')],
+      [large.status, api.fileErrorTextForTest(large.error, 'common.requestFailed')],
+    ]), [
+      [401, 'AUTH-T'],
+      [404, 'MISSING-T /repo/image.png'],
+      [413, 'LARGE-T'],
+    ], '401, 404, and over-cap failures retain distinct localized status messages');
+    assert.equal(requests[0].options.credentials, 'same-origin', 'raw media explicitly uses the authenticated same-origin fetch contract');
+    assert.ok(requests[0].options.signal instanceof AbortSignal, 'raw media passes an AbortSignal through the shared fetch owner');
+    assert.equal(requests[1].url, '/api/fs/raw?path=%2Frepo%2Fimage.png', 'a non-JSON error response retains the requested path for its typed fallback');
+    assert.deepStrictEqual(canonical(api.locationAssignmentsForTest()), [], 'status-aware raw media does not redirect before rendering its typed 401');
+
+    const created = [];
+    const revoked = [];
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = blob => {
+      const value = `blob:test-${created.length + 1}`;
+      created.push({value, blob});
+      return value;
+    };
+    URL.revokeObjectURL = value => revoked.push(value);
+    try {
+      const blob = new Blob(['image'], {type: 'image/png'});
+      api.setFetchForTest(async () => response({}, 200, blob));
+      const media = new TestElement('raw-media', 'img');
+      media.naturalWidth = 640;
+      media.naturalHeight = 480;
+      let assignedSource = '';
+      let loadListenerInstalledBeforeSource = false;
+      Object.defineProperty(media, 'src', {
+        get: () => assignedSource,
+        set(value) {
+          loadListenerInstalledBeforeSource = typeof media.listeners.get('load')?.[0] === 'function';
+          assignedSource = value;
+        },
+      });
+      let installedSettled = false;
+      let postLoadFailures = 0;
+      const installedPending = api.installRawFileMediaSourceForTest(media, '/repo/image.png', {
+        onDecodeFailure: (_error, failure) => {
+          postLoadFailures += 1;
+          assert.equal(failure.decodeFailed, true, 'post-load failure retains the typed decode result');
+        },
+      });
+      installedPending.then(() => { installedSettled = true; });
+      await flushAsyncWork();
+      assert.equal(loadListenerInstalledBeforeSource, true, 'image readiness listener is installed before assigning the blob URL');
+      assert.equal(installedSettled, false, 'raw image installation stays pending until authoritative load readiness');
+      media.listeners.get('load')[0]();
+      const installed = await installedPending;
+      assert.equal(installed.ok, true);
+      assert.equal(media.src, 'blob:test-1');
+      assert.equal(installedSettled, true, 'raw image installation settles with usable decoded dimensions');
+      assert.equal(created.length, 1, 'only a successful response creates a blob URL');
+      const postLoadErrorHandler = media.listeners.get('error')?.[0];
+      assert.equal((media.listeners.get('error') || []).length, 1, 'one readiness owner retains the post-load error lifecycle');
+      postLoadErrorHandler();
+      postLoadErrorHandler();
+      assert.equal(postLoadFailures, 1, 'the readiness owner reports a post-load decode failure exactly once');
+      api.releaseRawFileMediaSourceForTest(media);
+      api.releaseRawFileMediaSourceForTest(media);
+      assert.deepStrictEqual(revoked, ['blob:test-1'], 'the installed object URL is revoked exactly once');
+
+      let decodeFailures = 0;
+      const decodeMedia = new TestElement('decode-media', 'img');
+      const brokenPending = api.installRawFileMediaSourceForTest(decodeMedia, '/repo/broken.png', {
+        onDecodeFailure: (_error, failure) => {
+          decodeFailures += 1;
+          assert.equal(failure.decodeFailed, true, 'decode failure is typed');
+        },
+      });
+      await flushAsyncWork();
+      const decodeHandler = decodeMedia.listeners.get('error')?.[0];
+      assert.equal(typeof decodeHandler, 'function', 'a fetched image installs a readiness error handler');
+      decodeHandler();
+      decodeHandler();
+      const broken = await brokenPending;
+      assert.equal(broken.ok, false);
+      assert.equal(broken.decodeFailed, true, 'the installation promise resolves with a typed decode failure');
+      api.releaseRawFileMediaSourceForTest(decodeMedia);
+      assert.equal(decodeFailures, 1, 'decode failure is reported exactly once');
+      assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2'], 'decode failure revokes its object URL exactly once');
+
+      const zeroDimensionMedia = new TestElement('zero-dimension-media', 'img');
+      const zeroDimensionPending = api.installRawFileMediaSourceForTest(zeroDimensionMedia, '/repo/zero.png');
+      await flushAsyncWork();
+      zeroDimensionMedia.listeners.get('load')[0]();
+      const zeroDimension = await zeroDimensionPending;
+      assert.equal(zeroDimension.ok, false);
+      assert.equal(zeroDimension.decodeFailed, true, 'a load event without usable decoded dimensions is a typed failure');
+      assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2', 'blob:test-3'], 'zero-dimension load revokes its unusable object URL');
+
+      let settleFetch;
+      api.setFetchForTest(() => new Promise(resolve => { settleFetch = resolve; }));
+      const staleMedia = new TestElement('stale-media', 'img');
+      const pending = api.installRawFileMediaSourceForTest(staleMedia, '/repo/old.png');
+      await flushAsyncWork();
+      api.releaseRawFileMediaSourceForTest(staleMedia);
+      settleFetch(response({}, 200, blob));
+      const stale = await pending;
+      assert.equal(stale.ok, true);
+      assert.equal(staleMedia.src, undefined, 'an aborted/stale owner cannot install late bytes');
+      assert.equal(created.length, 3, 'an aborted/stale owner creates no object URL');
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+
+    const sources = [
+      fs.readFileSync('static_src/js/yolomux/39_raw_file_media.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8'),
+    ].join('\n');
+    assert.equal((sources.match(/function fetchRawFileBlob\(/g) || []).length, 1, 'one shared raw-byte fetch owner serves every preview surface');
+    assert.ok(/rewriteMarkdownPreviewImages[\s\S]*installRawFileMediaSource/.test(sources), 'Markdown local images use the shared status-aware owner');
+    assert.ok(/function openFileImagePreview[\s\S]*installRawFileMediaSource/.test(sources), 'Finder and Differ hover images use the shared status-aware owner');
+    assert.ok(/function renderFileEditorImagePane[\s\S]*installRawFileMediaSource/.test(sources), 'editor images use the shared status-aware owner');
+    assert.ok(/function previewFileActionLinks[\s\S]*openRawFileInNewTab[\s\S]*triggerFileDownload/.test(sources), 'Open and Download siblings route through status-aware fetch owners');
   });
 
   test('Differ repo issues resolve descriptors at render time', () => {
@@ -4100,7 +4235,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const localeFiles = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
     for (const file of localeFiles) {
       const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${file}`, 'utf8'));
-      assert.ok(catalog['brand.share'], `${file} localizes brand.share`);
       assert.ok(catalog['common.readOnly'], `${file} localizes common.readOnly`);
       assert.ok(catalog['common.result'], `${file} localizes common.result`);
       assert.ok(catalog['common.tmuxSession']?.includes('{label}'), `${file} localizes common.tmuxSession and preserves {label}`);
@@ -4707,7 +4841,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(row.path, '/repo/app');
     assert.equal(row.branch, 'main');
     assert.deepStrictEqual(canonical(row.tabAgents.map(item => item.label)), ['s1 / 0:claude', 's2 / 1:codex'], 'YO!info aggregates every Tab/AI pair for a path+branch row');
-    assert.equal(row.session, 's1 / 0:claude, s2 / 1:codex', 'the legacy sort/share text follows the aggregated Tab/AI labels');
+    assert.equal(row.session, 's1 / 0:claude, s2 / 1:codex', 'the legacy sort text follows the aggregated Tab/AI labels');
   });
 
   test('YO!info active sub-window follows tmux signals', () => {
@@ -4811,7 +4945,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setInfoSearchForTest('', {publish: false});
     api.setInfoSearchForTest('feature linked', {publish: false});
     assert.equal(api.currentInfoSearchForTest(), 'feature linked', 'YO!info stores the current search text');
-    assert.ok(api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(records, api.currentInfoSearchForTest()), ['path', 'branch']).includes('data-info-search="feature linked"'), 'YO!info tree html records the active search query for DOM/share diagnostics');
+    assert.ok(api.infoTreeHtmlForTest(api.infoFilteredRecordsForTest(records, api.currentInfoSearchForTest()), ['path', 'branch']).includes('data-info-search="feature linked"'), 'YO!info tree html records the active search query for DOM diagnostics');
     api.setInfoSearchForTest('', {publish: false});
 
     const tabTree = api.infoGroupTree(records, ['tab', 'ai', 'path', 'branch']);
@@ -5169,6 +5303,15 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/info-tree-ai-window-token[\s\S]*?info-tree-ai-pid">\(pid=2345\)<\/span>[\s\S]*?info-tree-ai-recency info-tree-trailing-meta">10 min ago<\/span>/.test(describedMain), 'YO!info keeps the PID inline after its tmux sub-window button and the recency trailing');
     assert.ok(describedMain.indexOf('<span class="info-tree-field-label">Linear:</span>') < describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>'), 'YO!info leaf rows render Linear before the PR');
     assert.ok(describedMain.indexOf('<span class="info-tree-field-label">GitHub PR:</span>') < describedMain.indexOf('info-tree-field-tab'), 'YO!info leaf rows render the PR before session/window and repository metadata');
+
+    const orderedApi = loadYolomux('', ['alpha', 'beta']);
+    orderedApi.setTranscriptInfoForTest('alpha', {project: {git: {root: '/repo/alpha', branch: 'zeta', other_branches: {branches: [
+      {name: 'zeta', current: true, updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
+    ]}}}});
+    orderedApi.setTranscriptInfoForTest('beta', {project: {git: {root: '/repo/beta', branch: 'alpha', other_branches: {branches: [
+      {name: 'alpha', current: true, updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
+    ]}}}});
+    assert.deepStrictEqual(canonical(orderedApi.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'YO!info relationship rows preserve newest-first repository ordering');
   });
 
   test('YO!info long relationship labels and shared tree styles remain complete', () => {
@@ -5181,6 +5324,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 	    const editorCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 	    const infoSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 	    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
+	    const fullSource = fs.readFileSync('static/yolomux.js', 'utf8');
 	    assert.ok(/function infoFieldLabel\(kind\)[\s\S]*path:\s*'common\.field\.path'[\s\S]*branch:\s*'info\.field\.gitBranch'[\s\S]*pr:\s*'info\.field\.githubPr'[\s\S]*'tmux-window':\s*'info\.field\.tmuxWindow'[\s\S]*return t\(labels\[kind\] \|\| kind\)/.test(infoSource), 'YO!info field and group labels route through one localized label owner');
 	    assert.ok(/function infoGroupDimensionLabel\(key\)[\s\S]*infoFieldLabel\(key\)/.test(infoSource), 'YO!info group dimension labels reuse the same localized field label owner as leaf rows');
 	    assert.ok(/\.info-tree-group\[data-info-dimension="tmux-window"\] > summary \.info-tree-group-dimension\s*\{[\s\S]*text-transform:\s*none/.test(infoTreeCss), 'YO!info tmux sub-window group labels preserve lowercase text');
@@ -5296,14 +5440,24 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.info-tree-search-control input\s*\{[\s\S]*height:\s*24px/.test(infoTreeCss), 'YO!info toolbar includes a compact search input');
     assert.ok(/\.info-tree-search-match\s*\{[\s\S]*color:\s*var\(--info-tree-search-match-text\)[\s\S]*background:\s*var\(--info-tree-search-match-bg\)/.test(infoTreeCss), 'YO!info search matches have a dedicated non-red/non-purple highlight style');
     assert.ok(/\.info-tree-sort-controls\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(infoTreeCss), 'YO!info Sort control is right-aligned on the selector toolbar line');
-    assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
+    assert.ok(/ownDelegate\('click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
     assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
     assert.ok(infoPanelSource.includes('data-info-refresh title="${esc(t(\'common.refresh\'))}"') && infoPanelSource.includes('setMetadataRefreshButtonLoading(refresh, transcriptMetadataState.loading, t(\'common.refresh\'), t(\'common.refresh\'))'), 'YO!info metadata refresh button uses the compact Refresh label');
     assert.ok(/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = idleLabel;/.test(infoSource) && !/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = loading \?/.test(infoSource), 'YO!info metadata loading keeps the Refresh button label footprint stable');
     assert.ok(infoPanelSource.includes("info-tree-order-label\">${esc(t('info.group.orderBy'))}</span>") && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render their localized Order by: label before select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
-    assert.ok(/delegate\(panel, 'click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.ok(/ownDelegate\('click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*bindScopedOnce\(panel, 'info-panel'[\s\S]*ownDelegate\('click', '\[data-info-refresh\]'[\s\S]*ownDelegate\('click', '\[data-info-preset\]'[\s\S]*ownDelegate\('click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
+    assert.ok(/scope\.ownEvent\('toggle', panel, 'toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
+    assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(infoSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
+    assert.equal(/function bindInfoColumnResizers/.test(infoSource), false, 'old YO!info table column resizer owner is removed');
+    assert.equal(/dataset\.bound/.test(infoSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
+    assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
+    assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(infoSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
+    assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(infoSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
+    assert.equal(/function setInfoColumnWidth/.test(fullSource), false, 'deleted YO!info table column width code is not retained');
     assert.deepStrictEqual(canonical(api.infoSortFields().map(field => `${field.value}:${field.label}`)), ['name:asc:A-Z', 'name:desc:Z-A', 'date:desc:recent', 'date:asc:oldest'], 'YO!info exposes only A-Z, Z-A, recent, and oldest sort modes');
     api.setInfoSortForTest('name:desc');
     assert.deepStrictEqual(canonical(api.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'YO!info stores the selected sort mode');
@@ -5722,103 +5876,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.sessionActivitySummary('alpha').local, "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1).");
   });
 
-  test('YO!share mirrors host YO!info state and scroll position', () => {
-    const api = loadYolomux('', ['alpha', 'beta']);
-    api.setTranscriptInfoForTest('alpha', {
-      project: {
-        git: {
-          root: '/repo/alpha',
-          branch: 'zeta',
-          other_branches: {
-            branches: [
-              {name: 'zeta', current: true, updated: 'yesterday', updated_ts: 100, subject: 'second item', linear_ids: ['GH-2']},
-            ],
-          },
-        },
-      },
-    });
-    api.setTranscriptInfoForTest('beta', {
-      project: {
-        git: {
-          root: '/repo/beta',
-          branch: 'alpha',
-          other_branches: {
-            branches: [
-              {name: 'alpha', current: true, updated: 'today', updated_ts: 200, subject: 'first item', linear_ids: ['GH-1']},
-            ],
-          },
-        },
-      },
-    });
-
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI']);
-    api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
-    api.setInfoSortForTest({key: 'name', dir: 'desc'});
-    api.setInfoSearchForTest('alpha pr', {publish: false});
-    api.setInfoTreeGroupCollapsedForTest('group:host-collapsed', true);
-    const shareInfoSnapshot = api.shareUiStateSnapshotForTest().info;
-    assert.equal('branchSort' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table branch-sort state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.grouping), ['pr', 'tab', 'path', 'branch'], 'YO!share snapshots the host YO!info grouping order');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
-    assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.collapsedGroupKeys), ['group:host-collapsed'], 'YO!share snapshots host-owned YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'YO!share snapshots host-owned YO!info rows');
-    assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
-    const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
-      share: {view: true, id: 'share-info', mode: 'ro', session: '1', sessions: ['1']},
-    });
-    const shareInfoScroller = shareApi.testElementForId('info-content');
-    shareInfoScroller.scrollTop = 0;
-    shareInfoScroller.scrollLeft = 0;
-    shareApi.setTranscriptInfoForTest('1', {
-      project: {
-        git: {
-          root: '/repo/client-only',
-          branch: 'client-local',
-          other_branches: {
-            branches: [
-              {name: 'client-local', current: true, updated: 'now', updated_ts: 999, subject: 'must not render'},
-            ],
-          },
-        },
-      },
-    });
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['1 / no AI'], 'share client starts with local YO!info rows before a host snapshot arrives');
-    shareApi.applyShareUiStateForTest({info: {branchSort: {key: 'session', dir: 'desc'}, grouping: shareInfoSnapshot.grouping, sort: shareInfoSnapshot.sort, search: shareInfoSnapshot.search, collapsedGroupKeys: shareInfoSnapshot.collapsedGroupKeys, columnWidths: {branch: 610, desc: 820}, branchRows: shareInfoSnapshot.branchRows}});
-    assert.equal('branchSort' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table sort snapshots');
-    assert.deepStrictEqual(canonical(shareApi.currentInfoGroupingForTest()), ['pr', 'tab', 'path', 'branch'], 'share viewers apply host YO!info grouping state');
-    assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
-    assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
-    assert.deepStrictEqual(canonical(shareApi.infoCollapsedGroupKeysForTest()), ['group:host-collapsed'], 'share viewers preserve host YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
-    assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
-    shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
-    assert.equal(shareInfoScroller.scrollTop, 88, 'share viewers apply YO!info vertical host scroll');
-    assert.equal(shareInfoScroller.scrollLeft, 144, 'share viewers apply YO!info horizontal host scroll');
-    shareInfoScroller.scrollTop = 0;
-    shareInfoScroller.scrollLeft = 0;
-    shareApi.restoreShareReadonlyScrollTargetForTest(shareInfoScroller);
-    assert.equal(shareInfoScroller.scrollTop, 88, 'readonly YO!info local vertical scroll restores to the host position');
-    assert.equal(shareInfoScroller.scrollLeft, 144, 'readonly YO!info local horizontal scroll restores to the host position');
-    const source = fs.readFileSync('static/yolomux.js', 'utf8');
-    const infoPanelSource = fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-refresh\]'[\s\S]*delegate\(panel, 'click', '\[data-info-preset\]'[\s\S]*delegate\(panel, 'click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
-    assert.ok(/panel\.addEventListener\('toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
-    assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(terminalBootSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
-    assert.equal(/function bindInfoColumnResizers/.test(terminalBootSource), false, 'old YO!info table column resizer owner is removed');
-    assert.equal(/dataset\.bound/.test(terminalBootSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
-    assert.equal(/querySelectorAll\('\[data-info-sort\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach sort click listeners after every repaint');
-    assert.equal(/querySelectorAll\('\[data-info-session-drawer\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderInfoPanel does not reattach drawer click listeners after every repaint');
-    assert.equal(/querySelectorAll\('\[data-watched-remove\]'\)[\s\S]{0,180}addEventListener\('click'/.test(terminalBootSource), false, 'renderWatchedPrs does not reattach remove click listeners after every repaint');
-    assert.equal(/document\.querySelectorAll\('\[data-info-refresh\]'\)/.test(terminalBootSource), false, 'metadata loading refreshes scope the YO!info refresh button instead of scanning the whole document');
-    assert.equal(/function setInfoColumnWidth/.test(source), false, 'deleted YO!info table column width code is not retained');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*options\.includeRows !== false[\s\S]*snapshot\.branchRows = infoBranchRows\(\)\.map\(shareInfoRowSnapshot\)/.test(source), 'YO!share info snapshots include host YO!info rows when full state is requested');
-    assert.ok(/function shareInfoRowSnapshot\(row = \{\}\)[\s\S]*branchState:\s*normalizeInfoBranchState\(row\.branchState\)/.test(source), 'YO!share preserves each path branch current/available state instead of downgrading it during replay');
-    assert.ok(/function shareInfoStateSnapshot\(options = \{\}\)[\s\S]*grouping:\s*currentInfoGrouping\(\)[\s\S]*sort:\s*currentInfoSort\(\)[\s\S]*search:\s*currentInfoSearch\(\)[\s\S]*collapsedGroupKeys/.test(source), 'YO!share info snapshots include host YO!info grouping, sort, search, and collapse state');
-    assert.ok(/function applyShareInfoState\(info = \{\}\)[\s\S]*collapsedGroupKeys[\s\S]*shareInfoBranchRowsOverride = cleanShareInfoRows\(info\.branchRows\)[\s\S]*renderInfoPanel\(\)/.test(source), 'share clients apply host YO!info collapse state and rows without persisting or echo-publishing');
-  });
-
   await testAsync('YO!agent chat queue waits for pending target-agent waits before sending', async () => {
     const api = loadYolomux('', ['alpha'], 'http:', 'Linux x86_64', 'admin', {
       bootstrapOverrides: {
@@ -6037,7 +6094,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux();
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
     const lines = [
-      terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123'),
+      terminalLine('• Documented it in tests/TERMINAL_INVENTORY.md:123'),
       terminalLine('Open https://example.com/guide here'),
     ];
     const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -6049,14 +6106,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       line: fileRef?.line,
       range: fileRef?.range,
     }), {
-      text: 'tests/SHARE_TEST_INVENTORY.md:123',
-      path: 'tests/SHARE_TEST_INVENTORY.md',
+      text: 'tests/TERMINAL_INVENTORY.md:123',
+      path: 'tests/TERMINAL_INVENTORY.md',
       line: 123,
-      range: {start: {x: 20, y: 1}, end: {x: 52, y: 1}},
+      range: {start: {x: 20, y: 1}, end: {x: 50, y: 1}},
     }, 'terminal output detects relative file:line references as context-menu references');
-    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
+    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/TERMINAL_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
     assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), true, 'file references are visually marked for right-click open/copy actions');
-    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/TERMINAL_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
     const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
     assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
     assert.equal(urlRef.href, 'https://example.com/guide');
@@ -6073,6 +6130,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalFileReferenceAbsolutePath('1', larkRef), '/home/test/vortex4/lib/llm/src/protocols/openai/chat_completions/lark3_coder_v2.rs', 'lark-style paths resolve against the live terminal cwd');
     const basenameRef = api.terminalWrappedLineReferences(larkTerm, 2).find(ref => ref.type === 'file');
     assert.deepStrictEqual(canonical({path: basenameRef?.path, line: basenameRef?.line}), {path: 'preprocessor.rs', line: 1972}, 'terminal output detects basename.rs:line references in prose');
+
+    const sentenceLines = [terminalLine('Drafted the email in /tmp/ron-240v.md. It is ready.')];
+    const sentenceTerm = {cols: 100, rows: 10, buffer: {active: {viewportY: 0, getLine: index => sentenceLines[index] || null}}};
+    const sentenceRef = api.terminalWrappedLineReferences(sentenceTerm, 1).find(ref => ref.type === 'file');
+    assert.deepStrictEqual(canonical({path: sentenceRef?.path, text: sentenceRef?.text}), {
+      path: '/tmp/ron-240v.md',
+      text: '/tmp/ron-240v.md',
+    }, 'sentence-ending periods are not included in terminal file references');
 
     const container = api.testElementForId('terminal-pane-1');
     container.rect = {left: 0, top: 0, width: 800, height: 200, right: 800, bottom: 200};
@@ -6680,7 +6745,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const preferencesSource = fs.readFileSync('static_src/js/yolomux/83_preferences_panel.js', 'utf8');
     const notificationSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yolomux/35_agent_window_activity.js', 'utf8');
-    const autoApproveSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const autoApproveSource = [
+      'static_src/js/yolomux/99_terminal_boot.js',
+      'static_src/js/yolomux/99_client_event_transport.js',
+    ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
     const locale = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
     assert.ok(/"notify_working_attention": True,[\s\S]*"notify_working_done": False,/.test(settingsSource), 'working-to-attention notification defaults on while working-to-done defaults off');
     assert.ok(preferencesSource.includes("preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'})") && preferencesSource.includes("preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'})"), 'Notifications preferences expose separate working-attention and working-done toggles');
@@ -7029,18 +7097,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepEqual(state.demand.channels, ['activity', 'chat', 'core', 'status', 'transcripts', 'yoagent']);
   });
 
-
-  test('share host backup polling requires an active share', () => {
-    const api = loadYolomux();
-    api.setActiveSharesForTest([]);
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a host without shares never performs the recurring backup request');
-    api.setActiveSharesForTest([{active: true, token: 'active-token'}]);
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'an active share retains expiry and viewer-status backup polling');
-    api.setShareHostSocketForTest('active-token', {readyState: 1});
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a healthy share socket suppresses the host backup request');
-    api.setShareHostSocketForTest('active-token', {readyState: 3});
-    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'a closed share socket re-enables the bounded host repair request');
-  });
 
   await testAsync('background owner context menu claims follower leadership', async () => {
     const api = loadYolomux();
@@ -7533,7 +7589,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(src.includes("active.matches?.('select, input, .topbar-language, .app-menu-button')") && /function renderSessionButtons[\s\S]*?topbarControlIsActive\(\)/.test(src), 'the topbar does not rebuild while a topbar control is focused/open');
     assert.ok(/function resolveLocalePref\(pref\)[\s\S]*i18nLocaleRegistry\.systemLocale/.test(src), 'Phase 1: system uses the server-resolved locale from the shared registry');
     assert.equal(/navigator\.language|nav\.startsWith\('zh'\)/.test(i18nRegistrySource), false, 'the client carries no parallel browser-language classifier');
-    assert.ok(/share\.ttl_seconds[\s\S]*suffix:\s*t\('unit\.minute\.short'\)/.test(src), 'YO!share Preferences minute suffix is localized');
     assert.ok(/function tmuxSessionNameError\(name\)[\s\S]*rename\.error\.required[\s\S]*rename\.error\.tooLong[\s\S]*rename\.error\.invalidChars/.test(src), 'session rename validation errors use locale keys');
     assert.ok(/function dropActionDisplayLabel\(action\)[\s\S]*action\.labelKey[\s\S]*t\(action\.labelKey\)/.test(src), 'drop action display labels use locale keys while canonical labels remain stable');
     assert.ok(/function showTerminalDropSuggestions[\s\S]*t\('drop\.pathInserted'\)[\s\S]*tPlural\('drop\.files'[\s\S]*t\('drop\.suggestionHint'/.test(src), 'terminal drop suggestion header is localized');
@@ -7636,7 +7691,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
         assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
         assert.notEqual(cat[key], en[key], `${loc} localizes ${key} instead of falling back to English`);
       }
-      for (const key of ['share.maxTime', 'share.maxViewers', 'share.newShare', 'share.readOnly', 'drop.pathInserted']) {
+      for (const key of ['drop.pathInserted']) {
         assert.ok(typeof cat[key] === 'string' && cat[key].length, `${loc} has ${key}`);
         assert.notEqual(cat[key], en[key], `${loc} localizes ${key} instead of falling back to English`);
       }
@@ -7806,6 +7861,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const dispatch = source.slice(source.indexOf('function renderEditorPreviewPane'), source.indexOf('\n}', source.indexOf('function renderEditorPreviewPane')) + 2);
     assert.ok(dispatch.includes('renderPreviewDescriptor(renderer'), 'editor preview routes through the registry descriptor');
     assert.equal(/previewKind\s*===|render(?:Html|RawImage|Pdf|Structured|Table|NativeMedia|Unsupported|EditorCode)PreviewInto/.test(dispatch), false, 'editor preview has no parallel kind switch');
+    const markdown = new TestElement('unchanged-markdown-preview');
+    api.renderEditorPreviewPane(markdown, '/repo/README.md', '# Ready', {context: 'preview'});
+    const readiness = markdown._previewAsync;
+    assert.ok(readiness && typeof readiness.then === 'function', 'the initial Markdown render exposes its asynchronous readiness');
+    api.renderEditorPreviewPane(markdown, '/repo/README.md', '# Ready', {context: 'preview'});
+    assert.strictEqual(markdown._previewAsync, readiness, 'an unchanged Markdown refresh preserves the current media-readiness promise');
   });
 
   test('i18n catalogs interpolate fallback and relocalize UI', () => {
@@ -8172,7 +8233,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.setActiveLocaleForTest('en');
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
-    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'share', 'github', 'cost', 'yolo'];
+    const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
     assert.deepStrictEqual(sectionOrder, expectedOrder, 'Preferences sections follow the shared File-menu panel order where a matching section exists');
     assert.ok(bootstrapSource.includes('const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([') && bootstrapSource.includes('const FILE_MENU_PREFERENCE_SECTION_ORDER = Object.freeze(['), 'File and Preferences ordering have one shared definition owner');
     const sectionHtml = title => {
@@ -8185,11 +8246,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(sectionHtml('notifications').includes('data-setting-path="general.reload_on_update_auto"'), 'server-version auto-reload is in Notifications');
     assert.equal(sectionHtml('notifications').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check toggle is removed from Notifications');
     assert.ok(sectionHtml('notifications').includes('data-setting-path="updates.notify_level"'), 'origin/main update notification threshold is in Notifications');
-    const shareHtml = sectionHtml('share');
-    assert.ok(shareHtml.includes('data-setting-path="share.ttl_seconds"'), 'YO!share Preferences exposes the default share lifetime');
-    assert.ok(shareHtml.includes('data-setting-path="share.max_viewers"'), 'YO!share Preferences exposes the default viewer cap');
-    assert.ok(shareHtml.includes('data-setting-path="share.read_only"'), 'YO!share Preferences exposes the read-only default');
-    assert.ok(/type="radio"[^>]*value="http"[^>]*data-setting-path="share\.scheme"[\s\S]*type="radio"[^>]*value="https"[^>]*data-setting-path="share\.scheme"/.test(shareHtml), 'YO!share Preferences exposes http/https protocol defaults');
     assert.equal(sectionHtml('performance').includes('data-setting-path="general.reload_on_update_auto"'), false, 'server-version auto-reload no longer lives in Performance');
     assert.equal(sectionHtml('performance').includes('data-setting-path="updates.check_enabled"'), false, 'origin/main update check no longer lives in Performance');
     assert.equal(sectionHtml('yoagent').includes('data-setting-path="yoagent.refresh_interval_seconds"'), false, 'YO!agent Preferences no longer exposes the background transcript-summary interval');
@@ -8507,12 +8563,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.chatStatusMarkerHtmlForTest().includes('agent-window-status-dot--acknowledging'), false, 'a new message cancels an in-flight acknowledgement fade');
     assert.deepStrictEqual(canonical(api.chatStatusTonesForTest()), ['attention', 'working'], 'the new question restores red while typing remains green');
 
-    const bootstrap = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
-    const shared = fs.readFileSync('static_src/js/yolomux/79_conversation_shared.js', 'utf8');
+    const shared = fs.readFileSync('static_src/js/yolomux/79_conversation_common.js', 'utf8');
     const chat = fs.readFileSync('static_src/js/yolomux/82_chat_panel.js', 'utf8');
     const agent = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
     const conversationCss = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
-    assert.ok(bootstrap.includes("if (!shareViewMode) items.splice(2, 0, chatItemId)"), 'YO!share cannot enumerate YO!chat');
     assert.ok(shared.includes('function conversationMessageShellHtml('));
     assert.ok(agent.includes('return conversationMessageShellHtml({'), 'YO!agent routes through the shared message builder');
     assert.ok(chat.includes('return conversationMessageShellHtml({'), 'YO!chat routes through the shared message builder');

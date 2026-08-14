@@ -330,6 +330,7 @@ def _connect_to_service(service_socket_path, *, timeout=1.0, deadline_seconds=2.
 def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, peer_uid=None):
     if monkeypatch is not None:
         monkeypatch.setattr(runtime, "peer_uid", lambda _connection: peer_uid)
+    listener_ready = threading.Event()
 
     def handle(request, request_binary):
         if request.get("action") == "shutdown":
@@ -350,10 +351,15 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
             handle=handle,
             on_idle=lambda: False,
             on_client=lambda: None,
+            on_start=listener_ready.set,
         ),
         daemon=True,
     )
     worker.start()
+    if not listener_ready.wait(timeout=2.0):
+        stop_event.set()
+        worker.join(timeout=1.0)
+        pytest.fail("local service listener did not reach its post-listen start boundary")
     _wait_for_service_socket(socket_path)
     return worker
 
@@ -975,7 +981,9 @@ def test_a_capacity_refusal_written_before_the_peer_closed_is_not_lost(tmp_path,
 
 def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_path, monkeypatch):
     """Negative control for the recovery read: nothing on the wire means nothing to recover."""
-    socket_path = tmp_path / "silentd.sock"
+    requested_socket_path = tmp_path / "silentd.sock"
+    socket_path = rpc.safe_socket_path(requested_socket_path, prefix="yolomux-silentd")
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(socket_path))
     listener.listen(8)
@@ -1004,7 +1012,7 @@ def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_
     monkeypatch.setattr(rpc, "write_message", write_after_the_peer_has_closed)
     envelope = rpc.new_envelope("silentd", "echo", {"action": "echo"}, timeout_seconds=10.0)
     with pytest.raises(BrokenPipeError):
-        rpc.request(socket_path, envelope, timeout_seconds=10.0)
+        rpc.request(requested_socket_path, envelope, timeout_seconds=10.0)
     monkeypatch.undo()
 
     closer.join(timeout=10.0)
@@ -1263,14 +1271,15 @@ def test_local_service_traffic_keeps_probe_and_work_separate_under_concurrency(t
     assert snapshot["work"]["errors"] == snapshot["probe"]["errors"] == 0
 
 
-def test_a_client_reaches_a_service_whose_socket_is_published_before_it_listens(tmp_path, monkeypatch):
-    """The published socket file is not yet a listening socket, and a client must survive that.
+def test_echo_service_fixture_returns_only_after_the_listener_is_ready(tmp_path, monkeypatch):
+    """The fixture's published socket file is not enough to prove listener readiness.
 
     `run_local_rpc_service` binds the path -- creating it with its final 0600 mode -- and calls
     `listen()` afterwards. Every readiness predicate built on the file (existence plus mode) is
     therefore true while the service still refuses connections, and a connect issued in that window
     fails with ECONNREFUSED against a service that is starting normally. A loaded gate hit exactly
-    that window; this forces it by delaying `listen()`.
+    that window; this forces it by delaying `listen()` and requires the shared fixture parent to
+    return only after the runtime's post-listen start boundary.
     """
 
     socket_path = tmp_path / "service.sock"
@@ -1286,18 +1295,11 @@ def test_a_client_reaches_a_service_whose_socket_is_published_before_it_listens(
     monkeypatch.setattr(socket.socket, "listen", delayed_listen)
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
     try:
-        # The readiness predicate the tests use is already satisfied here, before `listen()` ran.
+        # The socket path is published, but the fixture must not return until the same service can
+        # accept the caller's first real request without a connect retry or readiness probe.
         assert socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600
-        # Negative control, and the exact pre-fix failure: a single connect in this window is
-        # refused, so this test can never pass because the window failed to open.
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as premature:
-            premature.settimeout(1.0)
-            with pytest.raises(ConnectionRefusedError):
-                premature.connect(str(service_socket_path))
-        with _connect_to_service(service_socket_path) as client:
-            envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
-            rpc.write_message(client, envelope, envelope.payload)
-            _response_envelope, response, _binary, _legacy = rpc.read_message(client)
+        envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
+        response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=1.0)
         assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
     finally:
         stop_event.set()

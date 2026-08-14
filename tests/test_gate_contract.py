@@ -38,7 +38,6 @@ DISCOVERED_MUTATING_ACTIONS = {
     "js-debug-observation-flush": "background",
     "pricing-catalog-refresh": "pending",
     "debug-service-control": "pending",
-    "share-debug-profile": "pending",
     "yolo-rule-open": "pending",
     "yolo-rule-reload": "pending",
     "ensure-session": "pending",
@@ -68,10 +67,6 @@ DISCOVERED_MUTATING_ACTIONS = {
     "recovery-recover-all-action": "pending",
     "tmux-copy-selection": "pending",
     "recovery-adopt": "pending",
-    "share-create": "pending",
-    "share-stop-token": "pending",
-    "share-stop-active": "pending",
-    "share-extend": "pending",
     "chat-api-post": "optimistic",
     "drop-action-run": "pending",
     "attention-ack": "background",
@@ -92,7 +87,7 @@ _USER_COMMAND_CONTRACT_CLASSES = frozenset({"pending", "optimistic"})
 @pytest.mark.socket
 def test_k0_browser_command_registry_exactly_matches_the_declared_inventory(browser, gate_live_server):
     """Every discovered mutation is declared once in the browser registry and assigned one lifecycle class."""
-    assert len(DISCOVERED_MUTATING_ACTIONS) == 55, DISCOVERED_MUTATING_ACTIONS
+    assert len(DISCOVERED_MUTATING_ACTIONS) == 50, DISCOVERED_MUTATING_ACTIONS
     load_gate_browser(browser, gate_live_server)
     inventory = browser.execute_script(
         """

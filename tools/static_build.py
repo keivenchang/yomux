@@ -39,12 +39,6 @@ RAW_COMPONENT_LITERAL_REPEAT_ALLOWLIST: dict[str, str] = {}
 # use a shared token or be added here with a reviewed reason; normalized identities make equivalent
 # hex/rgb spellings share one entry.
 NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
-    "static_src/css/yolomux/10_topbar_menus.css": (
-        frozenset({
-            "#041108", "rgb(255 255 255 / 0.42)", "rgb(255 255 255 / 0.66)",
-        }),
-        "reviewed pre-token component palette (2026-07-07)",
-    ),
     "static_src/css/yolomux/20_sessions_popovers.css": (
         frozenset({
             "#082014", "#10151f", "#3a3524", "#67d7ff", "#7a1020", "#9befad",
@@ -157,18 +151,18 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
         ("search-history controls", "function searchHistoryResultHtml", "toolbarButtonHtml(", "bindActionDispatcher(panel, {"),
         ("search-history panel close", "panelDetailCloseButtonHtml(searchHistoryItemId)"),
     ),
+    "static_src/js/yolomux/84_debug_observation.js": (
+        ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml("),
+    ),
     "static_src/js/yolomux/85_debug_panel.js": (
-        ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml(", "'debug-subtab':"),
         ("debug panel close controls", "panelDetailCloseButtonHtml(yocostItemId)", "panelDetailCloseButtonHtml(debugPaneItemId)"),
+        ("debug subtab dispatch", "'debug-subtab':"),
     ),
     "static_src/js/yolomux/98_terminal_runtime_facade.js": (
         ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
     ),
     "static_src/js/yolomux/20_layout_state.js": (
         ("editor state", "function applyEditorStateFields", "applyEditorStateFields("),
-    ),
-    "static_src/js/yolomux/94_share_replay.js": (
-        ("shared editor replay", "applyEditorStateFields("),
     ),
     "static_src/js/yolomux/84_stats_current.js": (
         (
@@ -199,29 +193,8 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/86_changes_editor.js": (
         ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
     ),
-    # Socket and queue state are one token-keyed record.  A second map lets reconnect, close, and
-    # pruning disagree about ownership, which was the source of a prior share replay regression.
-    "static_src/js/yolomux/00_bootstrap_state.js": (
-        (
-            "share sender lifecycle-record owner",
-            "const shareSenderRecords = new Map()",
-        ),
-    ),
-    "static_src/js/yolomux/93_share_state.js": (
-        (
-            "share host connection-record operations",
-            "function shareHostConnectionRecord",
-            "function enqueueShareHostMessage",
-            "function sendOrQueueShareHostMessage",
-            "function ensureShareHostSocket",
-            "function ensureShareHostSockets",
-        ),
-    ),
 }
-SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = (
-    ("parallel share host socket map", "shareHostSockets"),
-    ("parallel share host queue map", "shareHostQueues"),
-)
+SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = ()
 # Exact normalized production clones are rare; each reviewed exception must name why the two
 # surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
 # normalized block digest emitted by lint_normalized_production_clones().
@@ -267,10 +240,6 @@ CUSTOM_BORDER_RADIUS_CLASSIFICATIONS = {
     "static_src/css/yolomux/50_terminal_file_tree.css:.file-image-preview-popover:7px": "image preview overlay",
     "static_src/css/yolomux/50_terminal_file_tree.css:.transcript-item:5px": "transcript message block",
     "static_src/css/yolomux/50_terminal_file_tree.css:.conversation-message:5px": "conversation message block",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-entry:7px": "share entry card",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-create-panel:7px": "share creation card",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-url-primary:7px": "primary share URL surface",
-    "static_src/css/yolomux/50_terminal_file_tree.css:.share-protocol-group:7px": "share protocol fieldset",
     "static_src/css/yolomux/50_terminal_file_tree.css:.file-tree-date:5px": "file-tree date chip",
 }
 STANDARD_COMPONENT_FONT_SIZE_TOKENS = {
@@ -647,7 +616,7 @@ I18N_ALLOWED_IDENTICAL_TERMS = {
     "aa", "ai", "apache", "api", "ci", "claude", "cli", "codex", "cpu", "css", "csv", "geojson", "git", "github", "gitlab", "head", "html", "http",
     "graph", "id", "ip", "javascript", "json", "jsonl", "linear", "linkedin", "markdown", "mermaid", "mit", "ndjson", "ok", "openai", "pdf",
     "polyform", "pr", "readme", "rss", "sse", "ssh", "tmux", "toml", "tsv", "url", "websocket", "worktree", "xml", "yaml", "yo!agent",
-    "yo!info", "yo!share", "yo!stats", "yolo", "yolomux",
+    "yo!info", "yo!stats", "yolo", "yolomux",
 }
 I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "brand.marker",
@@ -711,7 +680,6 @@ I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
-    frozenset({"legend.icon.share.label", "share.create"}): "share legend noun and create-share action are different parts of speech",
     frozenset({"menu.view.theme", "pref.appearance.editor_cursor_color.theme"}): "theme heading and inherit-theme cursor option are different concepts",
     frozenset({"pr.approved", "pr.review.approvedShort"}): "full review state and compact badge have different display constraints",
     frozenset({"state.blocked", "state.short.blocked"}): "full and compact blocked states have different display constraints",
@@ -770,6 +738,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/35_agent_window_activity.js",
+        "static_src/js/yolomux/39_raw_file_media.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
         "static_src/js/yolomux/45_file_explorer_actions.js",
         "static_src/js/yolomux/46_file_drop_actions.js",
@@ -779,13 +748,14 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/75_dockview_layout.js",
         "static_src/js/yolomux/76_panel_dom_actions.js",
         "static_src/js/yolomux/78_panel_shell.js",
-        "static_src/js/yolomux/79_conversation_shared.js",
+        "static_src/js/yolomux/79_conversation_common.js",
         "static_src/js/yolomux/80_info_panel.js",
         "static_src/js/yolomux/81_yoagent_panel.js",
         "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/83_preferences_panel.js",
         "static_src/js/yolomux/84_stats_current.js",
         "static_src/js/yolomux/84_debug_runtime_facade.js",
+        "static_src/js/yolomux/84_debug_observation.js",
         "static_src/js/yolomux/85_debug_panel.js",
         "static_src/js/yolomux/86_changes_editor.js",
         "static_src/js/yolomux/87_editor_nav.js",
@@ -794,11 +764,10 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/90_pane_popout.js",
         "static_src/js/yolomux/91_preview_popout.js",
         "static_src/js/yolomux/92_codemirror_editor.js",
-        "static_src/js/yolomux/93_share_state.js",
-        "static_src/js/yolomux/94_share_replay.js",
-        "static_src/js/yolomux/95_share_admin.js",
         "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
+        "static_src/js/yolomux/99_client_event_transport.js",
+        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
     ],
     "yolomux.css": [
         "static_src/css/yolomux/00_tokens_base.css",
@@ -2065,6 +2034,95 @@ def lint_direct_button_construction() -> list[str]:
     return errors
 
 
+def lint_framed_panel_construction() -> list[str]:
+    """Keep framed article creation behind the one registered panel-shell factory."""
+    errors: list[str] = []
+    owner = "static_src/js/yolomux/78_panel_shell.js"
+    js_sources = ASSETS.get("yolomux.js", [])
+    owner_registrations = js_sources.count(owner)
+    if owner_registrations != 1:
+        errors.append(
+            f"{owner}: createFramedPanel() owner must be registered exactly once in "
+            f"ASSETS['yolomux.js']; found {owner_registrations}"
+        )
+
+    function_re = re.compile(r"^function\s+(\w+)\s*\(")
+    article_re = re.compile(r"document\.createElement\(\s*(['\"])article\1\s*\)")
+    panel_head_res = (
+        re.compile(r"<[^>\n]*\bclass\s*=\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\1"),
+        re.compile(r"\.className\s*=\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\1"),
+        re.compile(r"\.classList\.add\([^\n)]*(['\"])panel-head\1"),
+        re.compile(r"\.setAttribute\(\s*(['\"])class\1\s*,\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\2"),
+    )
+    frame_call_re = re.compile(r"\bpanelFrameHtml\s*\(")
+    shell_bind_re = re.compile(r"\bbindPanelShell\s*\(")
+    expected_owner_functions = {"renderEmptyPane", "panelFrameHtml", "createFramedPanel", "bindPanelShell"}
+    owner_function_counts = {name: 0 for name in expected_owner_functions}
+    owner_loaded = False
+
+    for part in js_sources:
+        path = repo_path(part)
+        try:
+            lines = read_text(path).splitlines()
+        except FileNotFoundError:
+            errors.append(
+                f"{part}: registered yolomux.js partial is missing; "
+                "framed-panel ownership cannot be verified"
+            )
+            continue
+        except (OSError, UnicodeError) as error:
+            errors.append(
+                f"{part}: registered yolomux.js partial is unreadable "
+                f"({type(error).__name__}); framed-panel ownership cannot be verified"
+            )
+            continue
+        if part == owner:
+            owner_loaded = True
+        current_function = ""
+        for line_number, line in enumerate(lines, start=1):
+            function_match = function_re.match(line)
+            if function_match:
+                current_function = function_match.group(1)
+                if part == owner and current_function in owner_function_counts:
+                    owner_function_counts[current_function] += 1
+            if line.lstrip().startswith("//"):
+                continue
+            if article_re.search(line) and not (
+                part == owner and current_function in {"createFramedPanel", "renderEmptyPane"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: raw article panel construction; use createFramedPanel()"
+                )
+            if any(pattern.search(line) for pattern in panel_head_res) and not (
+                part == owner and current_function == "panelFrameHtml"
+            ):
+                errors.append(
+                    f"{part}:{line_number}: raw panel-head construction; use createFramedPanel()"
+                )
+            if frame_call_re.search(line) and not (
+                part == owner and current_function in {"panelFrameHtml", "createFramedPanel"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: panelFrameHtml() is private to createFramedPanel()"
+                )
+            if shell_bind_re.search(line) and not (
+                part == owner and current_function in {"bindPanelShell", "createFramedPanel"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: bindPanelShell() is private to createFramedPanel()"
+                )
+            if line == "}":
+                current_function = ""
+
+    if owner_loaded:
+        for function_name, count in sorted(owner_function_counts.items()):
+            if count != 1:
+                errors.append(
+                    f"{owner}: {function_name}() must have exactly one top-level owner; found {count}"
+                )
+    return errors
+
+
 def lint_shared_ui_ownership() -> list[str]:
     """Reject a second owner for the refactored panel/control/editor/chart contracts."""
     errors: list[str] = []
@@ -2705,6 +2763,7 @@ def _main(argv: list[str] | None = None) -> int:
             lint_errors = (
                 lint_duplicate_functions()
                 + lint_direct_button_construction()
+                + lint_framed_panel_construction()
                 + lint_shared_ui_ownership()
                 + lint_normalized_production_clones()
                 + lint_source_control_characters()

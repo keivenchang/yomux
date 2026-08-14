@@ -816,6 +816,7 @@ def request_with_envelope(
     level higher would miss a caller and produce a second, divergent count of the same
     requests.  Every exit records exactly once.
     """
+    socket_path = safe_socket_path(Path(socket_path), prefix=f"yolomux-{envelope.service}")
     ledger = local_service_traffic_ledger(envelope.service)
     traffic_class = local_service_traffic_class(envelope.method, probe)
     started = monotonic_clock()

@@ -1217,12 +1217,6 @@ function activatePaneTab(side, session, options = {}) {
     activeFile = fileItemPath(session);
     updateFileExplorerCurrentFileHighlight();
   }
-  if (!shareViewMode && isTmuxSession(session)) {
-    const item = terminals.get(session);
-    if (item?.term) sharePublish('host-resize', {session, rows: item.term.rows, cols: item.term.cols});
-  }
-  sharePublish('active-tab', {slot: side, item: session});
-  scheduleShareTopologySnapshot('tab-activation');
   if (activeItemForSide(side) === session) {
     // A user-initiated tab switch is navigation. Record focus only after the layout already names
     // this item active so Tabber never renders the transient old-active/new-focus combination.
@@ -2443,24 +2437,6 @@ function focusPanel(session, options = {}) {
   activateTab(session, 'terminal', options);
 }
 
-function shareHostTerminalSize(session) {
-  if (!shareViewMode) return null;
-  const dims = shareSenderRecord(session, {create: false})?.dimensions;
-  const rawRows = Math.floor(Number(dims?.rows) || 0);
-  const rawCols = Math.floor(Number(dims?.cols) || 0);
-  if (rawRows <= 0 || rawCols <= 0) return null;
-  return {rows: Math.max(10, rawRows), cols: Math.max(40, rawCols)};
-}
-
-function updateShareHostTerminalSize(session, rows, cols) {
-  if (!shareViewMode || !session) return;
-  shareSenderRecord(session).dimensions = {
-    rows: Math.max(10, Math.floor(Number(rows) || 0)),
-    cols: Math.max(40, Math.floor(Number(cols) || 0)),
-  };
-  fitTerminal(session);
-}
-
 function terminalFitMetricKey(value, scale = 1000) {
   const number = Number(value);
   if (!Number.isFinite(number)) return 0;
@@ -2489,7 +2465,7 @@ function terminalFitIsUnchanged(item, size) {
 }
 
 function terminalCanPublishRemoteSize() {
-  return !shareViewMode && document.visibilityState !== 'hidden';
+  return document.visibilityState !== 'hidden';
 }
 
 let lastTerminalResizeAuthoritySignature = '';
@@ -2521,7 +2497,7 @@ function claimVisibleTerminalResizeAuthority(reason = '', options = {}) {
 }
 
 function installTerminalResizeAuthorityHandlers() {
-  if (terminalResizeAuthorityHandlersInstalled || shareViewMode) return;
+  if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
   window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
   window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
@@ -2533,20 +2509,6 @@ function installTerminalResizeAuthorityHandlers() {
 function fitTerminal(session, options = {}) {
   const item = terminals.get(session);
   if (!item || !item.term || !item.container) return;
-  const hostSize = shareHostTerminalSize(session);
-  if (shareViewMode) {
-    if (!hostSize) return;
-    const changed = item.term.cols !== hostSize.cols || item.term.rows !== hostSize.rows;
-    item.term.resize(hostSize.cols, hostSize.rows);
-    if (changed && item.shareTerminalBytesReceived === true) {
-      item.shareTerminalSkippedResetCount = Math.max(0, Math.round(Number(item.shareTerminalSkippedResetCount) || 0)) + 1;
-    } else if (changed) {
-      item.shareTerminalLastResetAt = Date.now();
-      try { item.term.reset(); } catch (_) {}
-    }
-    refreshTerminal(session);
-    return;
-  }
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
   const signature = terminalFitSignature(size);
@@ -2566,7 +2528,7 @@ function sendRemoteResize(session, options = {}) {
   if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return false;
   const message = {type: 'resize', cols: item.term.cols, rows: item.term.rows, foreground: true};
   if (options.activate === true) message.activate = true;
-  if (shareClientId) message.client = shareClientId;
+  if (browserClientId) message.client = browserClientId;
   item.socket.send(JSON.stringify(message));
   item.remoteResizePending = false;
   return true;
@@ -3111,7 +3073,7 @@ function terminalRenderedContentPresentMeasured(session, item = terminals.get(se
 }
 
 function requestTerminalScreenRefresh(session, item = terminals.get(session), reason = 'terminal-refresh') {
-  if (shareViewMode || item?.socket?.readyState !== WebSocket.OPEN) return false;
+  if (item?.socket?.readyState !== WebSocket.OPEN) return false;
   try {
     const refreshReason = String(reason || 'terminal-refresh');
     item.socket.send(JSON.stringify({type: 'refresh', reason: refreshReason}));
@@ -3148,7 +3110,7 @@ function runTerminalBlankScreenRefresh(session, item = terminals.get(session), l
 
 function scheduleTerminalBlankScreenRefresh(session, options = {}) {
   const item = terminals.get(session);
-  if (!item || shareViewMode || !terminalIsVisible(session, item.container)) return;
+  if (!item || !terminalIsVisible(session, item.container)) return;
   const reason = String(options.reason || 'blank-risk');
   if (!terminalBlankScreenRefreshAllowed(reason)) return;
   if (item.socket?.readyState !== WebSocket.OPEN) return;
@@ -3638,15 +3600,6 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
   if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
     noteTerminalRemovalLatencyStart('session', session, closeDetails);
     pruneDeadSession(session);
-    return;
-  }
-  // A share-scoped viewer cannot confirm liveness against the host roster: /api/tmux-session-exists
-  // is host-only (share_access=none) and the server forbids it for a share token. Reconnect the
-  // share-view socket directly -- the same outcome as an unknown (null) roster answer -- instead of
-  // issuing a request the scope forbids. Gated on the shared scope owner every host-only producer uses.
-  if (!clientCanUseUnscopedHostRequests()) {
-    noteTerminalRemovalLatencyStart('session', session, closeDetails);
-    scheduleTerminalReconnect(session, item, lifecycleToken);
     return;
   }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several

@@ -63,8 +63,6 @@ class RouteFixture:
     text_file: Path
     html_file: Path
     session: str
-    share_token: str
-    share_short_id: str
 
 
 @dataclass(frozen=True)
@@ -144,10 +142,6 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
         "get_context_stream": f"session={session}&messages=5",
         "get_summary_stream": "session=route-sweep-missing",
         "get_websocket": f"session={session}&client=route-sweep",
-        "get_share_shell": fixture.share_short_id,
-        "get_share_host_websocket": f"share={quote(fixture.share_token, safe='')}&client=route-sweep-host",
-        "get_share_ui_websocket": f"token={quote(fixture.share_token, safe='')}&client=route-sweep-ui&viewer=route-sweep-ui",
-        "get_share_view_websocket": f"token={quote(fixture.share_token, safe='')}&session={session}&viewer=route-sweep-view",
         "post_self_update": "dryrun=1",
         "post_ensure_session": f"session={session}",
         "post_create_session": "agent=route-sweep-invalid",
@@ -164,9 +158,6 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
     query = query_by_handler.get(handler, "")
     if handler == "get_static_asset":
         path = "/static/brand.css"
-    elif handler == "get_share_shell":
-        path = f"/share/{query}"
-        query = ""
     if query:
         path = f"{path}?{query}"
 
@@ -181,10 +172,6 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
         "post_settings": _json_body({"settings": {}}),
         "post_watch_roots": _json_body({"client_id": "route-sweep", "roots": [str(fixture.repo)]}),
         "post_drop_action": _json_body({}),
-        "post_share_create": _json_body({"session": fixture.session, "ttl_seconds": 600}),
-        "post_share_stop": _json_body({"token": "route-sweep-missing"}),
-        "post_share_extend": _json_body({"token": "route-sweep-missing", "add_seconds": 60}),
-        "post_share_debug_profile": _json_body({}),
         "post_yoagent_chat": _json_body({}),
         "post_yoagent_chat_cancel": _json_body({}),
         "post_yoagent_preview_send": _json_body({}),
@@ -216,10 +203,7 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
     content_type = "application/x-www-form-urlencoded" if handler == "post_login" else "application/json"
     websocket = route.path.startswith("/ws")
     stream = handler in {"get_client_events", "get_context_stream", "get_summary_stream"}
-    headers: tuple[tuple[str, str], ...] = ()
-    if handler in {"get_share_ui_websocket", "get_share_view_websocket"}:
-        headers = (("X-Share-Token", fixture.share_token),)
-    return RouteRequest(path, body, content_type, stream, websocket, headers)
+    return RouteRequest(path, body, content_type, stream, websocket)
 
 
 def _json_shape(value: Any) -> str:
@@ -715,20 +699,11 @@ def route_fixture(gate_runtime_paths, gate_tmux, gate_authenticated_live_server:
         join_wrapped_lines=True,
     )
     assert observed, panes
-    share, share_status = gate_authenticated_live_server.app.create_share_token(
-        session,
-        600,
-        base_url=gate_authenticated_live_server.base_url,
-        created_by="route-sweep",
-    )
-    assert int(share_status) == 200, share
     return RouteFixture(
         repo=repo,
         text_file=text_file,
         html_file=html_file,
         session=session,
-        share_token=str(share["token"]),
-        share_short_id=str(share["short_id"]),
     )
 
 

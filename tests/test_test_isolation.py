@@ -1,6 +1,5 @@
 from pathlib import Path
 import re
-import ast
 import subprocess
 import sys
 
@@ -134,17 +133,6 @@ def test_live_port_guard_scans_nested_python_and_top_level_javascript():
     paths = {path.relative_to(REPO_ROOT).as_posix() for path in automated_test_source_paths()}
     assert "tests/browser_helpers/browser_layout.py" in paths
     assert "tests/layout_url.test.js" in paths
-
-
-def test_generated_share_browser_tests_use_isolated_tmux_runtime():
-    tree = ast.parse((REPO_ROOT / "tests" / "test_browser_share.py").read_text(encoding="utf-8"))
-    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_generated_share_link_")]
-    assert functions
-    for function in functions:
-        calls = {node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
-        assert "start_isolated_browser_share_app" in calls, function.name
-        constants = {node.value for node in ast.walk(function) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-        assert "ensureTerminalRunning('1')" not in constants and "sessions: ['1']" not in constants, function.name
 
 
 def _spawn_fixture_page_path(worker: str, filename: str, sentinel: str) -> str:

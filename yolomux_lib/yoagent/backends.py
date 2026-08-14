@@ -34,6 +34,7 @@ from ..locales import normalize_locale
 from ..observability.transcripts import codex_event_text
 from ..web import server_string
 from ..workdir import AGENT_LOGIN_COMMANDS
+from ..workdir import agent_auth_entry_available
 from ..workdir import agent_auth_status
 from . import conversation as yoagent_conversation
 from .transports import ClaudeStreamJsonTransport
@@ -194,7 +195,7 @@ def resolve_yoagent_backend(backend: str, auth_status: dict[str, dict[str, Any]]
     status = agent_auth_status() if auth_status is None else auth_status
     for agent in ("codex", "claude"):
         entry = status.get(agent, {})
-        if entry.get("installed") and entry.get("logged_in") is not False:
+        if entry.get("installed") and agent_auth_entry_available(entry):
             return agent
     return "deterministic"
 

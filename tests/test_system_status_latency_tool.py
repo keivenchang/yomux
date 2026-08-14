@@ -13,17 +13,25 @@ from tests.tmux_runtime import stop_isolated_tmux_runtime
 
 
 def test_probe_fails_zero_or_multiple_listeners(monkeypatch, tmp_path):
+    # Zero or unrelated multiple owners remain hard setup failures.
     for pids in ([], [1, 2]):
         monkeypatch.setattr(probe, "listener_pids", lambda _port, pids=pids: pids)
         assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(tmp_path / "out.json")]) == 2
+    # A fork-before-exec child momentarily retains the parent's close-on-exec socket and command.
+    # Only that exact ancestor/command relationship collapses; an unrelated listener stays visible.
+    # This exercises the canonical owner without retrying the listener observation.
+    parents = {101: 1, 202: 101, 303: 1}
+    commands = {101: "python yolomux.py --port 49152", 202: "python yolomux.py --port 49152", 303: "foreign"}
+    assert probe.canonical_listener_pids([101, 202], parent_reader=parents.get, command_reader=commands.get) == [101]
+    assert probe.canonical_listener_pids([101, 303], parent_reader=parents.get, command_reader=commands.get) == [101, 303]
 
 
 def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
     output = tmp_path / "out.json"
     monkeypatch.setattr(probe, "listener_pids", lambda _port: [123])
-    monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_ticks": 1, "cwd": "/repo", "sha": "a" * 40})
+    monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40})
     monkeypatch.setattr(probe, "process_environment", lambda _pid: {"YOLOMUX_CONFIG_DIR": str(tmp_path)})
-    monkeypatch.setattr(probe, "config_dir_from_process", lambda _env: tmp_path)
+    monkeypatch.setattr(probe, "config_dir_from_process", lambda _env, _port: tmp_path)
     monkeypatch.setattr(probe, "auth_cookie", lambda _root, _port: "cookie")
     values = [5.0] * 197 + [25.0, 25.5, 26.0]
     markers = iter(f"capture-{index:032x}" for index in range(probe.SAMPLES))
@@ -54,11 +62,8 @@ def test_config_root_rejects_auth_root_escape(tmp_path):
 
 
 def test_process_identity_rejects_missing_sha(monkeypatch, tmp_path):
-    proc = tmp_path / "123"
-    proc.mkdir()
-    (proc / "stat").write_text("123 (probe) " + " ".join(["S"] + ["0"] * 18 + ["99"] + ["0"] * 5))
-    (proc / "cwd").symlink_to(tmp_path)
-    monkeypatch.setattr(probe, "Path", lambda value: Path(str(value).replace("/proc/123", str(proc))))
+    monkeypatch.setattr(probe, "process_start_identity", lambda _pid: "proc:99")
+    monkeypatch.setattr(probe, "process_cwd", lambda _pid: str(tmp_path))
     monkeypatch.setattr(probe.subprocess, "run", lambda *args, **kwargs: probe.subprocess.CompletedProcess(args[0], 1, "", "not git"))
     try:
         probe.process_identity(123)
@@ -94,17 +99,9 @@ def test_standalone_probe_drives_an_ephemeral_authenticated_daemon(monkeypatch, 
             if probe.time.monotonic() >= deadline:
                 raise AssertionError(f"ephemeral server snapshot did not publish: {status} {body}")
         output = tmp_path / "latency.json"
+        arguments = [sys.executable, str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"), "--port", str(server.port), "--scheme", "http", "--output", str(output)]
         completed = subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).resolve().parents[1] / "tools" / "system_status_latency_probe.py"),
-                "--port",
-                str(server.port),
-                "--scheme",
-                "http",
-                "--output",
-                str(output),
-            ],
+            arguments,
             capture_output=True,
             text=True,
             timeout=60,

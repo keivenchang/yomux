@@ -168,7 +168,6 @@ function showAboutModal() {
     <div class="about-license"><a class="about-author about-license-link" href="${esc(aboutLicenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(t('menu.help.about.license'))}</a></div>
   </div>`;
   modal.classList.add(CLS.open);
-  scheduleSharePopupLayerPublish();
 }
 
 function currentActiveMenuItem() {
@@ -755,23 +754,14 @@ function refreshOpenTabsMenuRows() {
   if (!tabsMenu) return false;
   const focusedCommand = document.activeElement?.closest?.('.app-menu-command');
   const focusedCommandKey = popover.contains(focusedCommand) ? appMenuCommandIdentity(focusedCommand) : '';
-  // A metadata refresh replaces only this menu's command rows. Preserve the host-owned hover/focus
-  // marker on its matching command so DOM replay does not send an open Tabs menu without its active row.
-  const activeCommandKeys = new Set(
-    Array.from(popover.querySelectorAll('.app-menu-command.share-mirror-active'))
-      .map(appMenuCommandIdentity)
-      .filter(Boolean)
-  );
   popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
   for (const command of popover.querySelectorAll('.app-menu-command')) {
     const commandKey = appMenuCommandIdentity(command);
-    if (activeCommandKeys.has(commandKey)) command.classList.add('share-mirror-active');
     if (focusedCommandKey && commandKey === focusedCommandKey) {
       command.focus({preventScroll: true});
     }
   }
   fitAppMenuPopover(popover);
-  scheduleSharePopupLayerPublish({immediate: true});
   return true;
 }
 
@@ -842,21 +832,13 @@ function fileMenuPanelCommands() {
 
 function appMenuTree() {
   const activeTmux = currentTmuxMenuTarget();
-  const shareSessions = shareSessionsFromLayout();
-  const shareCanOpen = shareSessions.length > 0 || Boolean(activeTmux);
-  const shareMenuActive = shareViewMode || shareHasActiveShare();
   const openItems = orderedPaneItems(activePaneItems());
   const fileDestinationCommands = sortMenuCommandsByLabel([
     menuCommand(t('common.openFile'), openFileQuickOpen, {
       detail: appShortcutText('P'),
       iconHtml: appMenuUiIcon('document'),
     }),
-    ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
-    ...(!shareFeatureQuarantined ? [menuCommand(t('menu.file.share'), () => showShareModal(), {
-      disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
-      detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
-      iconHtml: appMenuUiIcon('share', shareMenuActive),
-    })] : []),
+    ...fileMenuPanelCommands(),
     menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
       checked: itemInLayout(prefsItemId),
       detail: compactHomePath(settingsConfigPath()),
@@ -1270,7 +1252,6 @@ function renderSessionButtonsMeasured(options = {}) {
   scheduleTopbarMetricsUpdate();
   installTopbarNavigationFitObserver();
   scheduleTopbarNavigationFitCheck();
-  if (openAppMenuId) requestAnimationFrame(() => scheduleSharePopupLayerPublish({immediate: true}));
 }
 
 // #52: the wordmark is server-rendered (YO/LO/m/u/x); localize the YO/LO glyphs client-side so a
@@ -1392,7 +1373,7 @@ function createTopbarRightTools() {
 
 // Phase 1: a top-right language switcher (entry point #2). It writes the SAME general.language
 // setting as the Preferences picker and applies the locale optimistically (no settings-poll round-trip).
-// A native <select> cannot be mirrored to YO!share viewers, so this uses the app-menu popup owner.
+// The app-menu popup owner keeps this control consistent with the rest of the topbar.
 function createTopbarLanguageSwitcher() {
   const pref = String(initialSetting('general.language', 'system'));
   const choices = i18nLocaleChoices();
@@ -1404,11 +1385,9 @@ function createTopbarLanguageSwitcher() {
       label: choice.label,
       detail: '',
       checked: choice.value === pref,
-      disabled: shareViewMode,
       action: () => {
         const value = choice.value;
         applyLocale(resolveLocalePref(value));
-        scheduleShareAppearancePublish();
         if (readOnlyMode) return;
         saveSettingsPatch(settingPatch('general.language', value))
           .catch(error => { statusErr(localizedHtml('status.settingsSaveFailed', {error: userMessageText(error, t('common.requestFailed'))})); refreshSettings({force: true}); });
@@ -1768,43 +1747,7 @@ function createAppSubmenu(item) {
   button.setAttribute('aria-haspopup', 'true');
   button.setAttribute('aria-expanded', 'false');
   wrapper.append(button, submenu);
-  bindAppMenuCommandMirrorActive(button, wrapper);
   return wrapper;
-}
-
-function appMenuCommandMirrorActiveStillApplies(button, owner = button) {
-  const active = document.activeElement;
-  return Boolean(
-    button?.matches?.(':hover')
-      || owner?.matches?.(':hover')
-      || (active && (button?.contains?.(active) || owner?.contains?.(active)))
-  );
-}
-
-function setAppMenuCommandMirrorActive(button, active) {
-  if (!button) return;
-  button.classList.toggle('share-mirror-active', active === true);
-  scheduleSharePopupLayerPublish({immediate: true});
-}
-
-function bindAppMenuCommandMirrorActive(button, owner = button) {
-  if (!button) return;
-  const bindKey = owner === button ? 'shareMirrorActiveBound' : 'shareMirrorOwnerActiveBound';
-  if (button.dataset[bindKey] === 'true') return;
-  button.dataset[bindKey] = 'true';
-  const activate = () => setAppMenuCommandMirrorActive(button, true);
-  const deactivate = () => {
-    requestAnimationFrame(() => {
-      if (!appMenuCommandMirrorActiveStillApplies(button, owner)) setAppMenuCommandMirrorActive(button, false);
-    });
-  };
-  const targets = owner === button ? [button] : [owner];
-  for (const target of targets.filter(Boolean)) {
-    target.addEventListener('pointerenter', activate);
-    target.addEventListener('focusin', activate);
-    target.addEventListener('pointerleave', deactivate);
-    target.addEventListener('focusout', deactivate);
-  }
 }
 
 function createAppMenuCommand(item, options = {}) {
@@ -1849,7 +1792,6 @@ function createAppMenuCommand(item, options = {}) {
     });
   }
   button.addEventListener('keydown', event => handleAppMenuCommandKeydown(event, button, item, options));
-  bindAppMenuCommandMirrorActive(button);
   return button;
 }
 
@@ -1997,8 +1939,6 @@ function openAppMenu(wrapper, options = {}) {
   openAppMenuPinned = options.pinned === true;
   openAppMenuOpenedAt = Date.now();
   wrapper.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'true');
-  scheduleSharePopupLayerPublish({immediate: true});
-  scheduleShareTopologySnapshot('popup-open');
   if (openAppMenuId === 'tabs') refreshTabsMenuMetadataOnOpen();
   if (options.focusFirst) requestAnimationFrame(() => focusFirstAppMenuCommand(wrapper));
 }
@@ -2009,9 +1949,6 @@ function closeAppMenus(keepOpen = null) {
     menu.classList.remove(CLS.open);
     menu.querySelector('.app-menu-button')?.setAttribute('aria-expanded', 'false');
   }
-  document.querySelectorAll('.app-menu-command.share-mirror-active').forEach(command => {
-    if (!keepOpen?.contains?.(command)) command.classList.remove('share-mirror-active');
-  });
   for (const submenu of document.querySelectorAll('.app-menu-submenu-wrap.open')) {
     if (keepOpen?.contains(submenu)) continue;
     submenu.classList.remove(CLS.open);
@@ -2022,6 +1959,4 @@ function closeAppMenus(keepOpen = null) {
     openAppMenuPinned = false;
     openAppMenuOpenedAt = 0;
   }
-  scheduleSharePopupLayerPublish({immediate: true});
-  scheduleShareTopologySnapshot('popup-close');
 }

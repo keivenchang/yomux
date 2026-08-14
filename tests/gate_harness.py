@@ -220,7 +220,6 @@ class GateRuntimePaths:
     start_lock_dir: Path
     tool_lock_path: Path
     ca_dir: Path
-    share_debug_dir: Path
     log_dir: Path
     workspace_dir: Path
     upload_dir: Path
@@ -240,7 +239,6 @@ GATE_WRITABLE_ENV_VARS = (
     "YOLOMUX_START_LOCK_DIR",
     "YOLOMUX_TOOL_LOCK_PATH",
     "YOLOMUX_CA_DIR",
-    "YOLOMUX_SHARE_DEBUG_DIR",
     "YOLOMUX_LOG_DIR",
     "YOLOMUX_WORKSPACE_BASE",
 )
@@ -349,7 +347,6 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
     start_lock_dir = root / "locks" / "start.lock"
     tool_lock_path = root / "locks" / "expensive-tools.lock"
     ca_dir = root / "ca"
-    share_debug_dir = root / "share-debug"
     log_dir = root / "logs"
     workspace_dir = root / "workspaces"
     upload_dir = root / "uploads"
@@ -362,7 +359,6 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         codex_home,
         start_lock_dir.parent,
         ca_dir,
-        share_debug_dir,
         log_dir,
         workspace_dir,
         upload_dir,
@@ -385,7 +381,6 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         "YOLOMUX_START_LOCK_DIR": start_lock_dir,
         "YOLOMUX_TOOL_LOCK_PATH": tool_lock_path,
         "YOLOMUX_CA_DIR": ca_dir,
-        "YOLOMUX_SHARE_DEBUG_DIR": share_debug_dir,
         "YOLOMUX_LOG_DIR": log_dir,
         "YOLOMUX_WORKSPACE_BASE": workspace_dir,
         GATE_TMUX_SOCKET_ENV_VAR: tmux_socket_path,
@@ -430,7 +425,6 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
         start_lock_dir=start_lock_dir,
         tool_lock_path=tool_lock_path,
         ca_dir=ca_dir,
-        share_debug_dir=share_debug_dir,
         log_dir=log_dir,
         workspace_dir=workspace_dir,
         upload_dir=upload_dir,

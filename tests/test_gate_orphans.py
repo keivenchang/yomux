@@ -202,6 +202,23 @@ def test_preflight_does_not_reap_a_reused_pid_with_a_different_start_time(tmp_pa
     assert kills == []
 
 
+def test_stale_orphan_fence_preserves_darwin_member_identity(tmp_path):
+    record = FixtureLeaseRecordBuilder(
+        pid=400,
+        pgid=400,
+        port=18991,
+        members=({"pid": 410, "start_time": 1000},),
+    ).build()
+    table = {
+        410: ProcessTableEntry(1, 400, 1.0, "tmux -C attach-session -t x", 1000, 400, "darwin:1000"),
+    }
+
+    orphans = preflight_module.stale_orphans_of_dead_owner(record, table)
+
+    assert orphans[410]["process_start_identity"] == "darwin:1000"
+    assert registry_mod.process_record_diagnostic(orphans[410], table=table).current is True
+
+
 def test_live_owner_snapshots_exact_member_start_times_into_its_lease(tmp_path):
     """The owner snapshots identity before a later death makes its group ambiguous."""
     owner_pid = os.getpid()
