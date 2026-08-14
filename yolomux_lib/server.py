@@ -375,6 +375,17 @@ class _HandlerAdapter:
 class FilesystemHttpAdapter(_HandlerAdapter):
     """Composed owner for FilesystemHttpAdapter."""
 
+    def handle_fs_fast_list(self, parsed: Any) -> None:
+        """Return one non-recursive directory snapshot without entering jobd."""
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "/") or "/")
+        try:
+            payload = filesystem.list_directory(raw_path, include_repo_info=False)
+        except filesystem.FilesystemError as error:
+            self.write_json(error.payload(), status=HTTPStatus(error.status))
+            return
+        self.write_json(payload, status=HTTPStatus.OK)
+
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "/") or "/")
@@ -1820,6 +1831,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_list(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_list(self, parsed)
+
+    def handle_fs_fast_list(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_fast_list(self, parsed)
 
     def handle_fs_search(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_search(self, parsed)

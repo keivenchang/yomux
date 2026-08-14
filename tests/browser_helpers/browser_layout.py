@@ -78,6 +78,12 @@ from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
+
+BROWSER_BOOT_ROUTES = (
+    *BROWSER_BOOT_ROUTES,
+    BrowserBootRoute("/api/fs/fast/list", ("GET",)),
+)
+
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
 
 pytest.importorskip("selenium")
@@ -3018,7 +3024,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
         if (url.pathname === '/api/events') return jsonResponse({events: []});
         if (url.pathname === '/api/logs') return jsonResponse(window.__fixtureServerLogsPayload);
         if (url.pathname === '/api/tmux-window') return jsonResponse({ok: true, session: url.searchParams.get('session'), window: url.searchParams.get('window')});
-        if (url.pathname === '/api/fs/list') {
+        if (url.pathname === '/api/fs/list' || url.pathname === '/api/fs/fast/list') {
           const path = url.searchParams.get('path') || '/home/test';
           const entries = (window.__fixtureFsEntries || {})[path] || [];
           return jsonResponse({path, entries});
@@ -3027,9 +3033,6 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           const entriesByPath = window.__fixtureFsEntries || {};
           const responses = (body?.requests || []).map((request, index) => {
             const path = request.path || '/home/test';
-            if (request.type === 'list') {
-              return {id: request.id ?? index, ok: true, status: 200, payload: {path, entries: entriesByPath[path] || []}};
-            }
             if (request.type === 'info') {
               return {id: request.id ?? index, ok: true, status: 200, payload: {path, name: path.split('/').filter(Boolean).pop() || '/', kind: entriesByPath[path] ? 'dir' : 'file'}};
             }

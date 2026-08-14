@@ -173,11 +173,14 @@ def _entry_info(
             except OSError:
                 pass
     if kind == "dir":
-        started = _timing_started(performance_details)
-        repo_path = inspection_path or resolved or path
-        info["is_repo"] = _directory_is_repo(repo_path, directory_descriptor=inspection_descriptor)
-        _record_elapsed(performance_details, "repo_probe_ms", started)
-        if info["is_repo"] and include_repo_info:
+        if not include_repo_info:
+            info["repo_info_deferred"] = True
+        else:
+            started = _timing_started(performance_details)
+            repo_path = inspection_path or resolved or path
+            info["is_repo"] = _directory_is_repo(repo_path, directory_descriptor=inspection_descriptor)
+            _record_elapsed(performance_details, "repo_probe_ms", started)
+        if info.get("is_repo") is True:
             repo_key = resolved if resolved is not None else paths._normalized_scope_path(path)
             remaining = None if repo_info_deadline is None else repo_info_deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
@@ -457,6 +460,7 @@ def _list_directory_from_pinned_root(
     display_path: Path | None = None,
     root_stat: os.stat_result | None = None,
     watch_signature_child_limit: int = 0,
+    include_repo_info: bool = True,
 ) -> dict[str, Any]:
     if performance_details is not None:
         performance_details.update({
@@ -491,6 +495,7 @@ def _list_directory_from_pinned_root(
         names, truncated = _visible_directory_names(
             path,
             performance_details=performance_details,
+            include_repo_info=include_repo_info,
             requested_path=display_path,
         )
     finally:
@@ -505,8 +510,9 @@ def _list_directory_from_pinned_root(
             if isinstance(name, _ResolvedDirectoryName) and name.info is not None:
                 info = name.info
                 entries.append(info)
-                if performance_details is not None and info.get("is_repo") is True:
-                    performance_details["repo_count"] += 1
+                if performance_details is not None:
+                    if info.get("is_repo") is True:
+                        performance_details["repo_count"] += 1
                     if info.get("repo_info_deferred") is True:
                         performance_details["repo_deferred_count"] += 1
                 continue
@@ -529,10 +535,12 @@ def _list_directory_from_pinned_root(
                 symlink_target_stat=(name.symlink_target_stat if isinstance(name, _ResolvedDirectoryName) else None),
                 symlink_target_text=(name.symlink_target_text if isinstance(name, _ResolvedDirectoryName) else None),
                 symlink_target_pinned=(name.symlink_target_pinned if isinstance(name, _ResolvedDirectoryName) else False),
+                include_repo_info=include_repo_info,
             )
             entries.append(info)
-            if performance_details is not None and info.get("is_repo") is True:
-                performance_details["repo_count"] += 1
+            if performance_details is not None:
+                if info.get("is_repo") is True:
+                    performance_details["repo_count"] += 1
                 if info.get("repo_info_deferred") is True:
                     performance_details["repo_deferred_count"] += 1
     finally:
@@ -577,6 +585,7 @@ def list_directory(
     *,
     performance_details: dict[str, float] | None = None,
     watch_signature_child_limit: int = 0,
+    include_repo_info: bool = True,
 ) -> dict[str, Any]:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_path, flags=directory_flags, operation="list_directory") as handle:
@@ -586,6 +595,7 @@ def list_directory(
             display_path=handle.requested,
             root_stat=handle.stat_result,
             watch_signature_child_limit=watch_signature_child_limit,
+            include_repo_info=include_repo_info,
         )
 
 

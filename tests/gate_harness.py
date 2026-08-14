@@ -3252,7 +3252,7 @@ FINDER_JOURNEY_INSTRUMENT_SOURCE = """
           const path = String(request.path || '');
           counts[path] = (counts[path] || 0) + 1;
         }
-      } else if (fetchRecord.path === '/api/fs/list') {
+      } else if (fetchRecord.path === '/api/fs/list' || fetchRecord.path === '/api/fs/fast/list') {
         const path = new URLSearchParams(fetchRecord.search).get('path') || '';
         counts[path] = (counts[path] || 0) + 1;
       }

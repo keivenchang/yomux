@@ -9,6 +9,7 @@ from http import HTTPStatus
 from pathlib import Path
 from types import MethodType
 from types import SimpleNamespace
+from urllib.parse import quote
 from urllib.parse import urlparse
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
+from yolomux_lib import jobd
 from yolomux_lib import server as server_module
 from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib import web
@@ -1116,6 +1118,8 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert route_by_path("POST", "/api/yoagent/jobs/*/confirm").handler is http_routes.post_yoagent_job_confirm
     assert route_by_path("POST", "/api/yoagent/waits/*/clear").handler is http_routes.post_yoagent_wait_clear
     assert route_by_path("POST", "/api/fs/batch").role == "admin"
+    assert route_by_path("GET", "/api/fs/fast/list").handler is http_routes.get_fs_fast_list
+    assert route_by_path("GET", "/api/fs/fast/list").role == "readonly"
     assert route_by_path("POST", "/api/operations/ack").role == "readonly"
     assert route_by_path("GET", "/api/fs/watch-diff").handler is http_routes.get_fs_watch_diff
     assert route_by_path("GET", "/api/fs/zip").handler is http_routes.get_fs_zip
@@ -1242,6 +1246,12 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.ACCEPTED, {"state": "queued", "operation": {"id": "op-fixture"}})]
+
+    handler, calls, writes = route_handler("/api/fs/fast/list?path=/repo", app)
+    handler.handle_fs_fast_list = lambda parsed: writes.append(("fs-fast-list", parsed.path))
+    Handler.do_GET(handler)
+    assert calls == [("require_auth", "readonly")]
+    assert writes == [("fs-fast-list", "/api/fs/fast/list")]
 
     handler, calls, writes = route_handler("/api/summary-stream", app)
     handler.stream_codex_summary = lambda parsed: writes.append(("summary-stream", parsed.path))
@@ -1777,6 +1787,67 @@ def batch_handler(payload, app=None):
     return handler, writes
 
 
+def test_handle_fs_fast_list_returns_one_level_without_jobd_or_git(monkeypatch, tmp_path):
+    (tmp_path / "first").mkdir()
+    (tmp_path / "first" / "nested.txt").write_text("nested\n", encoding="utf-8")
+    (tmp_path / "top.txt").write_text("top\n", encoding="utf-8")
+    real_list_directory = server_module.filesystem.list_directory
+    calls = []
+
+    def direct_list(path, *, include_repo_info=True):
+        calls.append((path, include_repo_info))
+        return real_list_directory(path, include_repo_info=include_repo_info)
+
+    monkeypatch.setattr(server_module.filesystem, "list_directory", direct_list)
+    handler, _auth_calls, writes = route_handler(
+        f"/api/fs/fast/list?path={quote(str(tmp_path), safe='')}",
+        SimpleNamespace(),
+    )
+
+    Handler.handle_fs_fast_list(handler, urlparse(handler.path))
+
+    assert calls == [(str(tmp_path), False)]
+    assert len(writes) == 1
+    assert writes[0][0:2] == ("json", HTTPStatus.OK)
+    payload = writes[0][2]
+    assert {entry["name"] for entry in payload["entries"]} == {"first", "top.txt"}
+    assert all(entry["name"] != "nested.txt" for entry in payload["entries"])
+
+
+def test_handle_fs_list_preserves_legacy_jobd_request_without_repo_opt_out():
+    calls = []
+    handler = object.__new__(Handler)
+    handler.submit_filesystem_operation = lambda *args: calls.append(args)
+
+    Handler.handle_fs_list(handler, urlparse("/api/fs/list?path=%2Frepo"))
+
+    assert calls == [("GET /api/fs/list", "list", "/repo")]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_include_repo_info"),
+    [({}, True), ({"include_repo_info": False}, False)],
+)
+def test_jobd_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
+    monkeypatch,
+    args,
+    expected_include_repo_info,
+):
+    calls = []
+
+    def list_directory(path, *, include_repo_info=True):
+        calls.append((path, include_repo_info))
+        return {"path": path, "include_repo_info": include_repo_info}
+
+    monkeypatch.setattr(jobd.filesystem, "list_directory", list_directory)
+
+    descriptor = app_module.filesystem_operation_descriptor("list", "/repo", args=args)
+    result = jobd._filesystem_operation_authorized(descriptor)
+
+    assert calls == [("/repo", expected_include_repo_info)]
+    assert json.loads(result) == {"path": "/repo", "include_repo_info": expected_include_repo_info}
+
+
 def test_handle_fs_batch_submits_one_product_without_request_thread_filesystem(monkeypatch):
     calls = []
     receipt = {
@@ -1827,7 +1898,7 @@ def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
     monkeypatch.setattr(
         server_module.filesystem,
         "list_directory",
-        lambda path, *, performance_details=None, watch_signature_child_limit=0: {"path": path, "entries": [{"name": "a"}]},
+        lambda path, *, performance_details=None, watch_signature_child_limit=0, include_repo_info=True: {"path": path, "entries": [{"name": "a"}]},
     )
 
     def path_info(path, *, operation):
@@ -1866,6 +1937,31 @@ def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
         response["user_message"]["key"] == "request.error.unsupportedFsBatchOperation"
         for response in responses[3:]
     )
+
+
+@pytest.mark.parametrize(
+    ("request_options", "expected_include_repo_info"),
+    [({}, True), ({"include_repo_info": False}, False)],
+)
+def test_filesystem_batch_list_preserves_repo_metadata_by_default_and_allows_explicit_opt_out(
+    monkeypatch,
+    request_options,
+    expected_include_repo_info,
+):
+    calls = []
+
+    def list_directory(path, *, performance_details=None, watch_signature_child_limit=0, include_repo_info=True):
+        calls.append((path, include_repo_info))
+        return {"path": path, "entries": []}
+
+    monkeypatch.setattr(server_module.filesystem, "list_directory", list_directory)
+    result = server_module.filesystem.filesystem_batch_result({
+        "requests": [{"id": "root", "type": "list", "path": "/repo", **request_options}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
+    })
+
+    assert result["responses"][0]["ok"] is True
+    assert calls == [("/repo", expected_include_repo_info)]
 
 
 def test_filesystem_batch_product_returns_typed_permission_failure_without_raising(monkeypatch):
@@ -1950,7 +2046,7 @@ def test_filesystem_batch_product_preserves_bounded_coalesced_trigger_counts(mon
     monkeypatch.setattr(
         server_module.filesystem,
         "list_directory",
-        lambda path, *, performance_details=None, watch_signature_child_limit=0: {"path": path, "entries": []},
+        lambda path, *, performance_details=None, watch_signature_child_limit=0, include_repo_info=True: {"path": path, "entries": []},
     )
     result = server_module.filesystem.filesystem_batch_result({
         "requests": [{"id": "root", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 2, "watch-diff-fallback": 3}}],
@@ -1961,6 +2057,42 @@ def test_filesystem_batch_product_preserves_bounded_coalesced_trigger_counts(mon
     assert result["performance"]["triggers"] == {"tree-render": 2, "watch-diff-fallback": 3}
     assert result["performance"]["client_revision"] == "unknown"
     assert result["performance"]["client_scope"] == "legacy"
+
+
+def test_filesystem_batch_accepts_deferred_repo_enrichment_info(monkeypatch):
+    repo = {
+        "root": "/repo",
+        "name": "repo",
+        "branch": "feature/backfill",
+        "dirty_count": 2,
+        "upstream": "origin/main",
+        "ahead": 1,
+        "behind": 0,
+    }
+    monkeypatch.setattr(
+        server_module.filesystem,
+        "path_info",
+        lambda path, *, operation: {"path": path, "kind": "dir", "repo": repo},
+    )
+
+    result = server_module.filesystem.filesystem_batch_result({
+        "requests": [{
+            "id": "repo",
+            "type": "info",
+            "path": "/repo",
+            "trigger_counts": {"repo-enrichment": 1},
+        }],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
+    })
+
+    assert result["responses"] == [{
+        "id": "repo",
+        "ok": True,
+        "status": HTTPStatus.OK,
+        "payload": {"path": "/repo", "kind": "dir", "repo": repo},
+    }]
+    assert result["performance"]["operations"] == {"info": 1}
+    assert result["performance"]["triggers"] == {"repo-enrichment": 1}
 
 
 def test_filesystem_batch_product_rejects_arbitrary_trigger_without_recording_it(monkeypatch):

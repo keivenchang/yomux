@@ -22,13 +22,17 @@ async function openFileExplorerAt(path, options = {}) {
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
-    setFileExplorerPathDisplay(root);
+    setFileExplorerPathDisplay(root, {deferRepoInfo: true});
     renderFileExplorerRootModeControls();
     renderFileExplorerTreeSearching(root);
   } else if (options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true, trigger: options.trigger});
+  const entries = await fetchDirectory(root, {
+    user: options.user === true || options.manualSelection === true,
+    trigger: options.trigger,
+    enrichRoot: true,
+  });
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -43,7 +47,7 @@ async function openFileExplorerAt(path, options = {}) {
   if (rootChanged) pruneFileExplorerSelectionForRoot(fileExplorerRoot);
   if (options.manualSelection === true) setFileExplorerSelectionPin(true);
   if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});
-  setFileExplorerPathDisplay(fileExplorerRoot);
+  setFileExplorerPathDisplay(fileExplorerRoot, {deferRepoInfo: true});
   renderFileExplorerRootModeControls();
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
@@ -75,13 +79,26 @@ async function saveFileExplorerRootMode(mode) {
 }
 
 // Short-TTL cache of directory listings. A live Differ/Finder of a busy session re-renders many times a
-// second and each render walks every expanded dir, which without this fans out into a /api/fs/list storm
+// second and each render walks every expanded dir, which without this fans out into a /api/fs/fast/list storm
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
+const fileExplorerRepoInfoEnrichmentState = {
+  pending: new Set(),
+  inFlight: new Set(),
+  resolved: new Set(),
+  globalGeneration: 0,
+  pathGenerations: new Map(),
+  nextGeneration: 1,
+  frame: null,
+};
+// Git/path INFO can spend real subprocess time per directory. Keep each deferred wave small enough
+// to finish inside the browser operation watchdog, then schedule the remaining visible rows in later
+// frames. This is a UI-work budget, distinct from the server's larger request-refusal ceiling.
+const fileExplorerRepoInfoEnrichmentChunkLimit = 8;
 // A generation can publish before its matching 202 reaches the browser. Keep
 // the bounded completion so the queued item can repair immediately on arrival.
 const fileExplorerFsBatchReadyGenerations = new Map();
@@ -102,7 +119,7 @@ const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileE
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
-  'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation',
+  'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation', 'repo-enrichment',
 ]);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
@@ -239,7 +256,7 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
   // directory.  Give it one successor batch; later clicks share that user-owned request so this
   // is a priority handoff, not an unbounded duplicate-request path.
   const supersedeBackgroundRequest = options.user === true && record.request && record.requestUserInitiated !== true;
-  if (canReuse && record.request && !supersedeBackgroundRequest) {
+  if ((canReuse || lifecycle.coalesceFresh === true) && record.request && !supersedeBackgroundRequest) {
     lifecycle.onCoalesce?.();
     return record.request;
   }
@@ -541,11 +558,10 @@ async function flushFileExplorerFsBatch() {
   fileExplorerFsBatchTimer = null;
   const items = fileExplorerFsBatchQueue.splice(0);
   if (!items.length) return {ok: true, chunks: 0};
-  // The whole queue used to go into ONE body. A Differ pointed at a worktree that was deleted
-  // re-lists every open directory at once, which is routinely more than the server accepts, and the
-  // server refused the entire body with a 400 invalid_request — so an operation touching more than
-  // the bound failed outright rather than being split. Chunks are posted in order, one at a time,
-  // so a mass re-list does not turn into a simultaneous fan-out of requests either.
+  // The whole queue used to go into ONE body. Deferred Git enrichment can inspect more visible
+  // paths than the server accepts in one batch; the server then refused the entire body with a 400
+  // invalid_request. Chunks are posted in order, one at a time, so detail backfill cannot become an
+  // unbounded simultaneous fan-out either.
   const results = [];
   for (const chunk of fileExplorerFsBatchChunks(items)) results.push(await postFileExplorerFsBatchChunk(chunk));
   return {
@@ -557,39 +573,55 @@ async function flushFileExplorerFsBatch() {
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  return requestFileExplorerFsResource('list', root, options, async requestOptions => {
+  return requestFileExplorerFsResource('list', root, options, async () => {
       hydrateFileExplorerRepoInfoCache();
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
-      // in the same batch window.
-      const payload = await fetchFilesystemBatchItem('list', root, {...requestOptions, trigger: fileExplorerFsBatchTrigger(requestOptions)});
+      // in the same render window. LIST is intentionally a one-level direct
+      // request; only deferred detailed INFO work enters /api/fs/batch.
+      const payload = await apiFetchJson(`/api/fs/fast/list?path=${encodeURIComponent(root)}`);
       return payload.entries || [];
     }, {
-      onReuse: () => clearFileExplorerListError(root),
-      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('list', root, options),
+      onReuse: entries => {
+        clearFileExplorerListError(root);
+        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+          includeRoot: options.enrichRoot === true,
+          refresh: options.fresh === true,
+        });
+      },
+      coalesceFresh: true,
       skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
       onSkip: () => clearFileExplorerListError(root),
       skipValue: null,
       onPublish: entries => {
-      clearFileExplorerListError(root);
-      cacheFileExplorerRepoInfoEntries(root, entries);
-      markNewDirectoryEntries(root, entries);
-      if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+        clearFileExplorerListError(root);
+        cacheFileExplorerRepoInfoEntries(root, entries);
+        markNewDirectoryEntries(root, entries);
+        if (options.recordSignature !== false) recordDirectorySignature(root, entries);
+        scheduleFileExplorerRepoInfoEnrichment(root, entries, {
+          includeRoot: options.enrichRoot === true,
+          refresh: options.fresh === true,
+        });
       },
       onError: err => {
-      const status = Number(err?.status) || 0;
-      const openFailed = t('preview.openFailed', {path: root});
-      fileExplorerPathError = status
-        ? err.message || `${openFailed} (${status})`
-        : `${openFailed}: ${err}`;
-      setFileExplorerListError(root, err, status);
-      console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
+        const status = Number(err?.status) || 0;
+        const openFailed = t('preview.openFailed', {path: root});
+        fileExplorerPathError = status
+          ? err.message || `${openFailed} (${status})`
+          : `${openFailed}: ${err}`;
+        setFileExplorerListError(root, err, status);
+        console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       },
       errorValue: null,
     });
 }
 
 function invalidateFileExplorerFsCaches() {
+  const enrichmentState = fileExplorerRepoInfoEnrichmentState;
+  enrichmentState.globalGeneration += 1;
+  enrichmentState.pathGenerations.clear();
+  enrichmentState.resolved.clear();
+  for (const path of enrichmentState.inFlight) enrichmentState.pending.add(path);
   for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
     invalidateFileExplorerFsResourceRecord(key, record);
   }
@@ -605,6 +637,19 @@ function invalidateFileExplorerRoots(roots = []) {
     .map(root => normalizeDirectoryPath(root));
   if (!normalizedRoots.length) return false;
   const shouldDrop = path => normalizedRoots.some(root => pathIsInsideDirectory(path, root));
+  const enrichmentState = fileExplorerRepoInfoEnrichmentState;
+  const enrichmentPaths = new Set([
+    ...enrichmentState.pending,
+    ...enrichmentState.inFlight,
+    ...enrichmentState.resolved,
+    ...enrichmentState.pathGenerations.keys(),
+  ]);
+  for (const path of enrichmentPaths) {
+    if (!shouldDrop(path)) continue;
+    enrichmentState.pathGenerations.set(path, enrichmentState.nextGeneration++);
+    enrichmentState.resolved.delete(path);
+    if (enrichmentState.inFlight.has(path)) enrichmentState.pending.add(path);
+  }
   for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
     if (shouldDrop(normalizeDirectoryPath(key.split('\x1f').at(-1)))) invalidateFileExplorerFsResourceRecord(key, record);
   }
@@ -628,6 +673,7 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     markNewDirectoryEntries(path, entries);
     recordDirectorySignature(path, entries);
     setFileExplorerFsResourceValue('list', path, entries);
+    scheduleFileExplorerRepoInfoEnrichment(path, entries, {includeRoot: path === currentFileExplorerRoot()});
   }
   return entriesByDir;
 }
@@ -942,6 +988,27 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   return true;
 }
 
+function clearFileExplorerRepoInfo(path, options = {}) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path);
+  if (!normalized) return false;
+  let changed = false;
+  for (const [cachedPath, repo] of Array.from(fileExplorerRepoInfoCache.entries())) {
+    if (cachedPath !== normalized && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
+    fileExplorerRepoInfoCache.delete(cachedPath);
+    changed = true;
+  }
+  if (changed && options.persist !== false) persistFileExplorerRepoInfoCache();
+  return changed;
+}
+
+function exactFileExplorerRepoInfo(path) {
+  hydrateFileExplorerRepoInfoCache();
+  const normalized = normalizeDirectoryPath(path);
+  const repo = fileExplorerRepoInfoCache.get(normalized);
+  return normalizeDirectoryPath(repo?.root || '') === normalized ? repo : null;
+}
+
 function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
   if (!Array.isArray(entries)) return;
   hydrateFileExplorerRepoInfoCache();
@@ -952,6 +1019,80 @@ function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
     changed = cacheFileExplorerRepoInfo(fullPath, entry.repo, {persist: false}) || changed;
   }
   if (changed) persistFileExplorerRepoInfoCache();
+}
+
+function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {}) {
+  const root = normalizeDirectoryPath(parentPath);
+  const state = fileExplorerRepoInfoEnrichmentState;
+  const candidates = [];
+  if (options.includeRoot === true && root) candidates.push(root);
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (entry?.kind !== 'dir' || entry.repo_info_deferred !== true || entry.repo) continue;
+    candidates.push(childPath(root, entry.name));
+  }
+  for (const path of candidates) {
+    if (options.refresh === true) {
+      state.pathGenerations.set(path, state.nextGeneration++);
+      state.resolved.delete(path);
+    }
+    if (!state.resolved.has(path) && (!state.inFlight.has(path) || options.refresh === true)) state.pending.add(path);
+  }
+  if (!state.pending.size || state.frame !== null || state.inFlight.size) return false;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
+  state.frame = schedule(() => {
+    state.frame = null;
+    void enrichFileExplorerRepoInfoEntries();
+  });
+  return true;
+}
+
+async function enrichFileExplorerRepoInfoEntries() {
+  const state = fileExplorerRepoInfoEnrichmentState;
+  const requests = [];
+  for (const path of Array.from(state.pending)) {
+    if (requests.length >= fileExplorerRepoInfoEnrichmentChunkLimit) break;
+    if (state.inFlight.has(path)) continue;
+    state.pending.delete(path);
+    state.inFlight.add(path);
+    requests.push({
+      path,
+      globalGeneration: state.globalGeneration,
+      pathGeneration: state.pathGenerations.get(path) || 0,
+    });
+  }
+  if (!requests.length) return;
+  const results = await Promise.allSettled(requests.map(async request => ({
+    ...request,
+    info: await fetchFilePathInfo(request.path, {fresh: true, force: true, trigger: 'repo-enrichment'}),
+  })));
+  let changed = false;
+  const enrichedPaths = new Set();
+  for (let index = 0; index < requests.length; index += 1) {
+    const request = requests[index];
+    state.inFlight.delete(request.path);
+    const result = results[index];
+    if (result?.status !== 'fulfilled') continue;
+    if (request.globalGeneration !== state.globalGeneration
+        || request.pathGeneration !== (state.pathGenerations.get(request.path) || 0)) continue;
+    const path = normalizeDirectoryPath(result.value.path);
+    state.resolved.add(path);
+    enrichedPaths.add(path);
+    changed = result.value.info?.repo
+      ? cacheFileExplorerRepoInfo(path, result.value.info.repo, {persist: false}) || changed
+      : clearFileExplorerRepoInfo(path, {persist: false}) || changed;
+  }
+  if (changed) {
+    persistFileExplorerRepoInfoCache();
+    const mountedRows = fileExplorerTreeContainers().flatMap(container => Array.from(
+      container.querySelectorAll?.('.file-tree-row[data-path]') || [],
+    )).filter(row => !row.dataset.tabberType && enrichedPaths.has(normalizeDirectoryPath(row.dataset.path || '')));
+    updateFileTreeGitStatusRows(mountedRows);
+    const root = currentFileExplorerRoot();
+    if (enrichedPaths.has(root) && !currentFileExplorerListError(root)) {
+      setFileExplorerRepoSummary(root, fileExplorerRepoInfoCache.get(root) || null);
+    }
+  }
+  if (state.pending.size) scheduleFileExplorerRepoInfoEnrichment('', []);
 }
 
 function currentFileExplorerRoot() {
@@ -1682,7 +1823,7 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
   document.querySelectorAll('.file-explorer-head, .file-explorer-toolbar').forEach(node => {
     node.title = error || normalized;
   });
-  refreshFileExplorerRepoDisplay(normalized, {error});
+  refreshFileExplorerRepoDisplay(normalized, {error, cacheOnly: options.deferRepoInfo === true});
 }
 
 function displayedFileExplorerRoot() {
@@ -1751,6 +1892,10 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
   const cached = fileExplorerRepoInfoCache.get(normalized);
   if (cached) {
     setFileExplorerRepoSummary(normalized, cached);
+    return;
+  }
+  if (options.cacheOnly === true) {
+    setFileExplorerRepoSummary(normalized, null);
     return;
   }
   try {
@@ -1994,6 +2139,11 @@ function fileExplorerSyncPlanTargetStillCurrent(plan, options = {}) {
   return true;
 }
 
+function fileExplorerSyncTransactionStillCurrent(plan, signature, options = {}) {
+  return fileExplorerSyncState.inFlightSignature === signature
+    && fileExplorerSyncPlanTargetStillCurrent(plan, options);
+}
+
 function cancelPendingFileExplorerActiveSync(options = {}) {
   fileWorkspaceState.invalidateInteraction({invalidateOpen: options.invalidateOpen !== false});
   fileExplorerSyncState.generation += 1;
@@ -2069,7 +2219,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   return true;
 }
 
-async function fetchFileExplorerSyncListings(directories = [], options = {}) {
+async function fetchFileExplorerSyncListings(directories = [], options = {}, onListing = null) {
   const entriesByDir = new Map();
   const queue = [...directories];
   const workerCount = Math.min(8, queue.length);
@@ -2077,7 +2227,10 @@ async function fetchFileExplorerSyncListings(directories = [], options = {}) {
     while (queue.length) {
       const directory = queue.shift();
       const entries = await fetchDirectory(directory, options);
-      if (Array.isArray(entries)) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+      if (Array.isArray(entries)) {
+        entriesByDir.set(normalizeDirectoryPath(directory), entries);
+        onListing?.(directory, entries, entriesByDir);
+      }
     }
   }));
   return entriesByDir;
@@ -2140,18 +2293,31 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
       scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature);
       return changed;
     }
-    const fetchedListings = await fetchFileExplorerSyncListings(listingDirectories, {force: true, user: options.force === true});
-    if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
-    if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
-      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
-      restoreFileExplorerSyncCursorState(plan.session, plan.root);
-      setFileExplorerVisibleSyncTarget(plan.session, plan.root);
-      rememberFileExplorerSyncExpandedState(plan.session, plan.root);
-      markFileExplorerSyncPlanApplied(plan);
-      updateFileExplorerSessionHighlightRows(preferredItem);
-      return changed;
-    }
-    return false;
+    const normalizedRoot = normalizeDirectoryPath(plan.root);
+    const rootEntries = await fetchDirectory(normalizedRoot, {force: true, user: options.force === true});
+    if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return false;
+    if (!Array.isArray(rootEntries)) return false;
+    const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
+    changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
+    restoreFileExplorerSyncCursorState(plan.session, plan.root);
+    setFileExplorerVisibleSyncTarget(plan.session, plan.root);
+    rememberFileExplorerSyncExpandedState(plan.session, plan.root);
+    markFileExplorerSyncPlanApplied(plan);
+    updateFileExplorerSessionHighlightRows(preferredItem);
+
+    const descendantDirectories = listingDirectories.filter(directory => normalizeDirectoryPath(directory) !== normalizedRoot);
+    await fetchFileExplorerSyncListings(
+      descendantDirectories,
+      {force: true, user: options.force === true},
+      (directory, entries) => {
+        if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return;
+        fetchedListings.set(normalizeDirectoryPath(directory), entries);
+        changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: true}) || changed;
+        restoreFileExplorerSyncCursorState(plan.session, plan.root);
+        updateFileExplorerSessionHighlightRows(preferredItem);
+      },
+    );
+    return changed;
   } finally {
     if (fileExplorerSyncState.inFlightSignature === signature) fileExplorerSyncState.inFlightSignature = '';
   }
@@ -3023,6 +3189,8 @@ function applyFileTreeRowDerivedState(row, state) {
 }
 
 function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
+  const cachedRepo = entry.kind === 'dir' ? exactFileExplorerRepoInfo(fullPath) : null;
+  if (cachedRepo && entry.is_repo !== true) entry = {...entry, is_repo: true, repo: entry.repo || cachedRepo};
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
@@ -3497,17 +3665,23 @@ function scheduleFileExplorerActiveFileReveal(path = activeFile) {
   });
 }
 
-function updateFileTreeGitStatusRows() {
+function updateFileTreeGitStatusRows(targetRows = null) {
   const changedAncestorStats = fileTreeChangedAncestorStats();
   // Exclude Tabber rows: their data-path is a synthetic node path (/s_<id>...), so the finder's
   // git-status/name refresh would rewrite the label to the path basename (s_1/w_0/r_00000) and clobber
   // the Tabber's own render. The Tabber owns its rows via updateTabberRow / refreshTabberPanels.
-  document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])').forEach(row => {
+  const rows = targetRows === null
+    ? document.querySelectorAll('.file-tree-row[data-path]:not([data-tabber-type])')
+    : targetRows;
+  for (const row of rows) {
+    if (!row?.dataset?.path || row.dataset.tabberType) continue;
     const fullPath = row.dataset.path || '';
+    const isRepo = Boolean(exactFileExplorerRepoInfo(fullPath));
+    row.dataset.isRepo = isRepo ? 'true' : 'false';
     const entry = {
       kind: row.dataset.kind,
       name: row.dataset.name || basenameOf(fullPath),
-      is_repo: row.dataset.isRepo === 'true',
+      is_repo: isRepo,
       is_symlink: row.dataset.isSymlink === 'true',
       symlink_target: row.dataset.symlinkTarget || '',
     };
@@ -3523,7 +3697,15 @@ function updateFileTreeGitStatusRows() {
       preserveDiff: true,
       preserveDirCount: inDiffer,
     }));
-  });
+    if (!inDiffer && isRepo) {
+      row.removeAttribute('title');
+      fileTreeRepoHoverController(row, fullPath);
+    } else if (!inDiffer && row.__yolomuxRepoHoverController) {
+      row.__yolomuxRepoHoverController.dispose();
+      delete row.__yolomuxRepoHoverController;
+      if (row.dataset.repoTitleLoaded) delete row.dataset.repoTitleLoaded;
+    }
+  }
   updateFileExplorerSessionHighlightRows();
 }
 

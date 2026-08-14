@@ -272,6 +272,7 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
         "tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
         "tests/test_hot_path_owner.py::test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation",
         "tests/test_jobd.py::test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window",
+        "tests/test_jobd.py::test_jobd_control_plane_is_ready_before_blocked_data_plane_setup",
         "tests/test_jobd.py::test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay",
     }
 

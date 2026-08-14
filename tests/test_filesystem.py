@@ -1075,7 +1075,7 @@ def test_filesystem_mutation_invalidates_canonical_security_policy(monkeypatch, 
     assert invalidations == [None]
 
 
-def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
+def test_list_directory_eagerly_returns_git_repo_info_by_default(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init")
@@ -1088,6 +1088,30 @@ def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     assert entries["repo"]["repo"]["root"] == str(repo)
     assert entries["repo"]["repo"]["name"] == "repo"
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
+
+
+def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    monkeypatch.setattr(
+        git_ops,
+        "git",
+        lambda *_args, **_kwargs: pytest.fail("base directory listing must not spawn Git"),
+    )
+    monkeypatch.setattr(
+        filesystem.listing,
+        "_directory_is_repo",
+        lambda *_args, **_kwargs: pytest.fail("base directory listing must not probe repository markers"),
+    )
+
+    payload = filesystem.list_directory(str(tmp_path), include_repo_info=False)
+
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+    assert entries["repo"]["repo_info_deferred"] is True
+    assert "is_repo" not in entries["repo"]
+    assert "repo" not in entries["repo"]
+    assert entries["repo"]["mtime"] > 0
 
 
 def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation(tmp_path, monkeypatch):
@@ -1316,6 +1340,36 @@ def test_list_directory_bounds_slow_repo_enrichment_without_dropping_repo_row(tm
     assert all(entry["is_repo"] is True for entry in repo_rows)
     assert sum("repo" in entry for entry in repo_rows) == 1
     assert sum(entry.get("repo_info_deferred") is True for entry in repo_rows) == 1
+
+
+def test_list_directory_returns_fifty_directory_rows_without_git_or_repo_probes(tmp_path, monkeypatch):
+    repos = [tmp_path / f"repo-{index:02d}" for index in range(50)]
+    for repo in repos:
+        repo.mkdir()
+        marker = repo / ".git"
+        marker.mkdir()
+        (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    monkeypatch.setattr(
+        git_ops,
+        "git",
+        lambda *_args, **_kwargs: pytest.fail("base directory listing must not spawn Git"),
+    )
+    monkeypatch.setattr(
+        filesystem.listing,
+        "_directory_is_repo",
+        lambda *_args, **_kwargs: pytest.fail("base directory listing must not probe repository markers"),
+    )
+
+    started = time.perf_counter()
+    entries = {
+        entry["name"]: entry
+        for entry in filesystem.list_directory(str(tmp_path), include_repo_info=False)["entries"]
+    }
+    assert time.perf_counter() - started < 0.25
+    directory_rows = [entries[repo.name] for repo in repos]
+    assert all(entry.get("repo_info_deferred") is True for entry in directory_rows)
+    assert all("is_repo" not in entry for entry in directory_rows)
+    assert all("repo" not in entry for entry in directory_rows)
 
 
 def test_list_directory_allows_root_by_default(monkeypatch):
@@ -1572,8 +1626,8 @@ def test_package_path_info_normalizes_required_stat_permission_failure(monkeypat
 
 
 def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path):
-    def denied_list(_path, *, performance_details=None, requested_path=None, operation="list_directory"):
-        del requested_path, operation
+    def denied_list(_path, *, performance_details=None, include_repo_info=True, requested_path=None, operation="list_directory"):
+        del include_repo_info, requested_path, operation
         raise PermissionError(13, "list denied", str(tmp_path))
 
     monkeypatch.setattr(filesystem.listing, "_visible_directory_names", denied_list)

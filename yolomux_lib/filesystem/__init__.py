@@ -61,6 +61,7 @@ BATCH_ALLOWED_TRIGGERS = frozenset({
     "watch-diff",
     "watch-diff-fallback",
     "deferred-interaction",
+    "repo-enrichment",
     "sync-revalidation",
 })
 BATCH_CLIENT_SCOPE_LEGACY = "legacy"
@@ -171,12 +172,14 @@ def list_directory(
     *,
     performance_details: dict[str, float] | None = None,
     watch_signature_child_limit: int = 0,
+    include_repo_info: bool = True,
 ) -> dict[str, Any]:
     _sync_package_overrides()
     result = listing.list_directory(
         raw_path,
         performance_details=performance_details,
         watch_signature_child_limit=watch_signature_child_limit,
+        include_repo_info=include_repo_info,
     )
     # Item 6: a directory the user is viewing in Finder is concrete visibility evidence -- promote its
     # indexed root's frontier to user-visible-demand (debounced, non-blocking; never a second crawl).
@@ -324,6 +327,7 @@ def _filesystem_batch_result_authorized(payload: dict[str, Any]) -> dict[str, An
                         raw_path,
                         performance_details=item_list_details,
                         watch_signature_child_limit=(WATCH_SIGNATURE_CHILD_LIMIT if include_watch_signature else 0),
+                        include_repo_info=item.get("include_repo_info") is not False,
                     )
                     if include_watch_signature:
                         item_watch_signature = result.pop("watch_signature", None)

@@ -46,8 +46,8 @@ def _load_finder(browser, tmp_path) -> None:
 
 
 @pytest.mark.browser
-def test_b1_five_reexpansions_render_cached_children_without_a_network_round_trip(browser, tmp_path):
-    """Five collapse/re-expand cycles render in the cache turn and issue no new filesystem request."""
+def test_b1_five_reexpansions_render_cached_children_before_fast_refresh_settles(browser, tmp_path):
+    """Cached children paint synchronously while a direct fast refresh runs in the background."""
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(
         """
@@ -58,8 +58,7 @@ def test_b1_five_reexpansions_render_cached_children_without_a_network_round_tri
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
           const directoryRequests = () => window.__bootFetches.filter(item => (
-            (item.path === '/api/fs/batch' && item.body?.requests?.some(request => request.type === 'list' && request.path === directory))
-            || (item.path === '/api/fs/list' && new URLSearchParams(item.search).get('path') === directory)
+            item.path === '/api/fs/fast/list' && new URLSearchParams(item.search).get('path') === directory
           )).length;
 
           row().click();
@@ -103,7 +102,6 @@ def test_b1_five_reexpansions_render_cached_children_without_a_network_round_tri
     assert metrics["coldRequests"] == 1, metrics
     assert len(metrics["cycles"]) == 5, metrics
     assert all(cycle["expanded"] == "true" and cycle["childVisible"] and not cycle["loading"] for cycle in metrics["cycles"]), metrics
-    assert all(cycle["requestsAfter"] == cycle["requestsBefore"] == 1 for cycle in metrics["cycles"]), metrics
     assert all(cycle["elapsedMs"] < 100 for cycle in metrics["cycles"]), metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
@@ -147,7 +145,7 @@ def test_b2_expansion_remains_rendered_after_its_disclosure_animation_settles(br
 
 
 @pytest.mark.browser
-def test_transient_fs_batch_failure_falls_back_to_direct_list_and_renders_children(browser, tmp_path):
+def test_expansion_uses_one_direct_fast_list_and_never_batches_list_work(browser, tmp_path):
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(
         """
@@ -158,30 +156,26 @@ def test_transient_fs_batch_failure_falls_back_to_direct_list_and_renders_childr
           const childPath = '/home/test/project/nested.txt';
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
-          let failedBatchCount = 0;
           let directListCount = 0;
+          let batchListCount = 0;
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             const body = options.body ? JSON.parse(options.body) : null;
-            const ownsExpansion = url.pathname === '/api/fs/batch'
-              && body?.requests?.some(request => request.type === 'list' && request.path === directory);
-            if (ownsExpansion && failedBatchCount === 0) {
-              failedBatchCount += 1;
-              return Promise.reject(new TypeError('Failed to fetch'));
-            }
-            if (url.pathname === '/api/fs/list' && url.searchParams.get('path') === directory) directListCount += 1;
+            if (url.pathname === '/api/fs/fast/list' && url.searchParams.get('path') === directory) directListCount += 1;
+            if (url.pathname === '/api/fs/batch'
+                && body?.requests?.some(request => request.type === 'list' && request.path === directory)) batchListCount += 1;
             return originalFetch(input, options);
           };
 
           row().click();
           await window.__yolomuxTestWaitFor(
             () => child() && row()?.getAttribute('aria-expanded') === 'true' && !row()?.classList.contains('loading-children'),
-            {timeoutMs: 2000, description: 'Finder direct-list recovery after failed batch'},
+            {timeoutMs: 2000, description: 'Finder direct fast-list expansion'},
           );
           window.fetch = originalFetch;
           done({
-            failedBatchCount,
             directListCount,
+            batchListCount,
             childVisible: Boolean(child()),
             expanded: row()?.getAttribute('aria-expanded') || '',
             pending: fileExplorerPendingExpansions.has(directory),
@@ -198,15 +192,116 @@ def test_transient_fs_batch_failure_falls_back_to_direct_list_and_renders_childr
     )
 
     assert not metrics.get("error"), metrics
-    assert metrics["failedBatchCount"] == 1 and metrics["directListCount"] == 1, metrics
+    assert metrics["directListCount"] == 1 and metrics["batchListCount"] == 0, metrics
     assert metrics["childVisible"] is True and metrics["expanded"] == "true", metrics
     assert metrics["pending"] is False and metrics["loading"] is False and metrics["errorText"] == "", metrics
-    expected_api_errors = consume_only_expected_js_debug_api_errors(
+    assert consume_only_expected_js_debug_api_errors(browser, ()) == (), metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_deferred_git_info_patches_after_fast_paint_in_bounded_waves(browser, tmp_path):
+    entries = [
+        {"name": f"repo-{index:02d}", "kind": "dir", "mtime": 1786640000 + index, "repo_info_deferred": True}
+        for index in range(18)
+    ]
+    load_live_runtime_boot_fixture(
         browser,
-        ({"path": "/api/fs/batch", "method": "POST", "query": {}, "error": "Failed to fetch"},),
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed", "dir_cache_ms": 5000}},
+        fs_entries={FINDER_ROOT: entries},
     )
-    assert len(expected_api_errors) == metrics["failedBatchCount"], metrics
-    assert metrics["errors"] == list(expected_api_errors) and metrics["rejections"] == [], metrics
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return fileExplorerRepoInfoEnrichmentState.pending.size === 0 && fileExplorerRepoInfoEnrichmentState.inFlight.size === 0 && fileExplorerRepoInfoEnrichmentState.frame === null"
+        )
+    )
+    browser.execute_script("setFileExplorerTreeDateMode('date', 'finder')")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return fileExplorerTreeDateModeForView('finder') === 'date' && fileExplorerRepoInfoEnrichmentState.pending.size === 0 && fileExplorerRepoInfoEnrichmentState.inFlight.size === 0 && fileExplorerRepoInfoEnrichmentState.frame === null"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const batchSizes = [];
+        (async () => {
+          const root = '/home/test';
+          fileExplorerRepoInfoCache.clear();
+          fileExplorerRepoInfoEnrichmentState.resolved.clear();
+          invalidateFileExplorerFsCaches();
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/fs/batch') return originalFetch(input, options);
+            const requests = JSON.parse(options.body || '{}').requests || [];
+            if (!requests.every(request => request.type === 'info')) throw new Error('deferred detail batch contains non-INFO work');
+            batchSizes.push(requests.length);
+            return new Response(JSON.stringify({responses: requests.map(request => ({
+              id: request.id,
+              ok: true,
+              status: 200,
+              payload: {
+                path: request.path,
+                kind: 'dir',
+                repo: {root: request.path, name: request.path.split('/').at(-1), branch: `feature-${request.path.split('/').at(-1)}`},
+              },
+            }))}), {status: 200, headers: {'Content-Type': 'application/json'}});
+          };
+
+          await openFileExplorerAt(root, {user: true, manualSelection: true, refreshPanels: false});
+          const finderRows = () => [...new Map(
+            [...document.querySelectorAll('.file-tree-row[data-path]')]
+              .filter(row => row.dataset.path.startsWith(root + '/'))
+              .map(row => [row.dataset.path, row])
+          ).values()];
+          const firstPaint = {
+            rows: finderRows().length,
+            dates: finderRows().filter(row => !row.querySelector(':scope > .file-tree-date')?.hidden).length,
+            repoRows: finderRows().filter(row => row.dataset.isRepo === 'true').length,
+            batchSizes: batchSizes.slice(),
+          };
+          await window.__yolomuxTestWaitFor(
+            () => batchSizes.reduce((sum, size) => sum + size, 0) === 19
+              && fileExplorerRepoInfoEnrichmentState.pending.size === 0
+              && fileExplorerRepoInfoEnrichmentState.inFlight.size === 0
+              && fileExplorerRepoInfoEnrichmentState.frame === null,
+            {timeoutMs: 3000, description: 'bounded deferred Git-info waves'},
+          );
+          window.fetch = originalFetch;
+          done({
+            firstPaint,
+            batchSizes,
+            repoRows: finderRows().filter(row => row.dataset.isRepo === 'true').length,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({
+            error: String(error?.stack || error),
+            batchSizes,
+            repoRows: [...document.querySelectorAll('.file-tree-row[data-is-repo="true"]')].length,
+            enrichmentState: {
+              pending: fileExplorerRepoInfoEnrichmentState.pending.size,
+              inFlight: fileExplorerRepoInfoEnrichmentState.inFlight.size,
+              resolved: fileExplorerRepoInfoEnrichmentState.resolved.size,
+              framed: fileExplorerRepoInfoEnrichmentState.frame !== null,
+            },
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        });
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["firstPaint"] == {"rows": 18, "dates": 18, "repoRows": 0, "batchSizes": []}, metrics
+    assert metrics["batchSizes"] == [8, 8, 3], metrics
+    assert metrics["repoRows"] == 18, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
 @pytest.mark.browser
@@ -221,19 +316,17 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
           const childPath = '/home/test/project/nested.txt';
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
-          let failedBatchCount = 0;
-          let failedDirectListCount = 0;
+          let failedFastListCount = 0;
+          let batchListCount = 0;
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             const body = options.body ? JSON.parse(options.body) : null;
-            const ownsExpansionBatch = url.pathname === '/api/fs/batch'
-              && body?.requests?.some(request => request.type === 'list' && request.path === directory);
-            if (ownsExpansionBatch && failedBatchCount === 0) {
-              failedBatchCount += 1;
-              return Promise.reject(new TypeError('Failed to fetch'));
-            }
-            if (url.pathname === '/api/fs/list' && url.searchParams.get('path') === directory && failedDirectListCount === 0) {
-              failedDirectListCount += 1;
+            if (url.pathname === '/api/fs/batch'
+                && body?.requests?.some(request => request.type === 'list' && request.path === directory)) batchListCount += 1;
+            if (url.pathname === '/api/fs/fast/list'
+                && url.searchParams.get('path') === directory
+                && failedFastListCount === 0) {
+              failedFastListCount += 1;
               return Promise.reject(new TypeError('Failed to fetch'));
             }
             return originalFetch(input, options);
@@ -241,7 +334,7 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
 
           row().click();
           await window.__yolomuxTestWaitFor(
-            () => failedDirectListCount === 1 && !fileExplorerPendingExpansions.has(directory),
+            () => failedFastListCount === 1 && !fileExplorerPendingExpansions.has(directory),
             {timeoutMs: 2000, description: 'Finder expansion settles after network outage'},
           );
           const failed = {
@@ -259,8 +352,8 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
             {timeoutMs: 3000, description: 'Finder expansion recovers after network restore'},
           );
           done({
-            failedBatchCount,
-            failedDirectListCount,
+            failedFastListCount,
+            batchListCount,
             failed,
             recovered: {
               childVisible: Boolean(child()),
@@ -280,7 +373,7 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
     )
 
     assert not metrics.get("error"), metrics
-    assert metrics["failedBatchCount"] == 1 and metrics["failedDirectListCount"] == 1, metrics
+    assert metrics["failedFastListCount"] == 1 and metrics["batchListCount"] == 0, metrics
     assert metrics["failed"]["childVisible"] is False and metrics["failed"]["expanded"] == "false", metrics
     assert metrics["failed"]["pending"] is False and metrics["failed"]["loading"] is False, metrics
     assert metrics["failed"]["errorText"], metrics
@@ -293,18 +386,14 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
     }, metrics
     expected_api_errors = consume_only_expected_js_debug_api_errors(
         browser,
-        (
-            {"path": "/api/fs/batch", "method": "POST", "query": {}, "error": "Failed to fetch"},
-            {
-                "path": "/api/fs/list",
-                "method": "GET",
-                "query": {"path": FINDER_DIRECTORY},
-                "error": "Failed to fetch",
-            },
-        ),
+        ({
+            "path": "/api/fs/fast/list",
+            "method": "GET",
+            "query": {"path": FINDER_DIRECTORY},
+            "error": "Failed to fetch",
+        },),
     )
-    expected_count = metrics["failedBatchCount"] + metrics["failedDirectListCount"]
-    assert len(expected_api_errors) == expected_count, metrics
+    assert len(expected_api_errors) == metrics["failedFastListCount"], metrics
     assert metrics["errors"] == list(expected_api_errors) and metrics["rejections"] == [], metrics
     assert_only_expected_browser_warning(
         browser,
@@ -314,8 +403,8 @@ def test_network_restore_retries_a_directory_expansion_lost_during_the_outage(br
 
 
 @pytest.mark.browser
-def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, tmp_path):
-    """Hold the real ``/api/fs/batch`` response; ``fetchDirectory`` itself is never replaced."""
+def test_b3_second_click_cancels_a_pending_direct_fast_list_expansion(browser, tmp_path):
+    """Hold the real fast LIST response; ``fetchDirectory`` itself is never replaced."""
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(
         """
@@ -327,26 +416,25 @@ def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, t
           const childPath = '/home/test/project/nested.txt';
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
-          let releaseBatch = null;
-          let heldBatchCount = 0;
+          let releaseList = null;
+          let heldListCount = 0;
           let heldRequest = null;
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
-            const body = options.body ? JSON.parse(options.body) : null;
-            const ownsExpansion = url.pathname === '/api/fs/batch'
-              && body?.requests?.some(request => request.type === 'list' && request.path === directory);
+            const ownsExpansion = url.pathname === '/api/fs/fast/list'
+              && url.searchParams.get('path') === directory;
             if (!ownsExpansion) return originalFetch(input, options);
-            heldBatchCount += 1;
-            heldRequest = body.requests.find(request => request.type === 'list' && request.path === directory);
+            heldListCount += 1;
+            heldRequest = {path: url.pathname, method: String(options.method || 'GET').toUpperCase(), queryPath: url.searchParams.get('path')};
             return new Promise((resolve, reject) => {
-              releaseBatch = () => Promise.resolve(originalFetch(input, options)).then(resolve, reject);
+              releaseList = () => Promise.resolve(originalFetch(input, options)).then(resolve, reject);
             });
           };
 
           row().click();
           await window.__yolomuxTestWaitFor(
-            () => releaseBatch && fileExplorerPendingExpansions.has(directory) && row()?.classList.contains('loading-children'),
-            {timeoutMs: 2000, description: 'pending production Finder batch'},
+            () => releaseList && fileExplorerPendingExpansions.has(directory) && row()?.classList.contains('loading-children'),
+            {timeoutMs: 2000, description: 'pending production Finder fast LIST'},
           );
           const afterFirst = {
             expanded: row()?.getAttribute('aria-expanded') || '',
@@ -361,10 +449,10 @@ def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, t
             loading: row()?.classList.contains('loading-children') === true,
             childVisible: Boolean(child()),
           };
-          releaseBatch();
+          releaseList();
           await window.__yolomuxTestWaitFor(
             () => !fileExplorerPendingExpansions.has(directory),
-            {timeoutMs: 2000, description: 'settled cancelled Finder batch'},
+            {timeoutMs: 2000, description: 'settled cancelled Finder fast LIST'},
           );
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const final = {
@@ -377,7 +465,7 @@ def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, t
           window.fetch = originalFetch;
           done({
             fetchDirectoryPreserved: fetchDirectory === originalFetchDirectory,
-            heldBatchCount,
+            heldListCount,
             heldRequest,
             eventSourceCount: window.__eventSources.length,
             afterFirst,
@@ -395,8 +483,12 @@ def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, t
 
     assert not metrics.get("error"), metrics
     assert metrics["fetchDirectoryPreserved"] is True, metrics
-    assert metrics["heldBatchCount"] == 1, metrics
-    assert metrics["heldRequest"]["trigger_counts"]["explicit-user"] == 1, metrics
+    assert metrics["heldListCount"] == 1, metrics
+    assert metrics["heldRequest"] == {
+        "path": "/api/fs/fast/list",
+        "method": "GET",
+        "queryPath": FINDER_DIRECTORY,
+    }, metrics
     assert metrics["eventSourceCount"] >= 1, metrics
     assert metrics["afterFirst"] == {"expanded": "true", "pending": True, "loading": True}, metrics
     assert metrics["afterSecond"] == {"expanded": "false", "pending": False, "loading": False, "childVisible": False}, metrics
@@ -405,30 +497,8 @@ def test_b3_second_click_cancels_a_pending_production_batch_expansion(browser, t
 
 
 @pytest.mark.browser
-def test_b5_queued_directory_expansion_clears_spinner_and_renders_typed_error(browser, tmp_path):
-    _load_finder(browser, tmp_path)
-    metrics = browser.execute_async_script("""
-      const done=arguments[0], originalFetch=window.fetch, directory='/home/test/project';
-      const row=()=>document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
-      (async()=>{
-        window.fetch=async(input,options={})=>{const url=new URL(String(input),location.href);const body=options.body?JSON.parse(options.body):null;const request=body?.requests?.find(value=>value.type==='list'&&value.path===directory);if(url.pathname!=='/api/fs/batch'||!request)return originalFetch(input,options);return new Response(JSON.stringify({responses:[{id:request.id,ok:false,status:202,error:'QUEUED'}]}),{status:200,headers:{'Content-Type':'application/json'}});};
-        row().click();await window.__yolomuxTestWaitFor(()=>fileExplorerPendingExpansions.has(directory),{timeoutMs:2000,description:'queued Finder expansion starts'});await window.__yolomuxTestWaitFor(()=>!fileExplorerPendingExpansions.has(directory)&&!row()?.classList.contains('loading-children'),{timeoutMs:2000,description:'queued Finder expansion settles'});const errorText=row()?.nextElementSibling?.querySelector?.('.file-tree-status-error')?.textContent.trim()||'';window.fetch=originalFetch;done({loading:row()?.classList.contains('loading-children')===true,pending:fileExplorerPendingExpansions.has(directory),errorText,errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')});
-      })().catch(error=>{window.fetch=originalFetch;done({error:String(error?.stack||error),errors:jsDebugFailureEvents('error'),rejections:jsDebugFailureEvents('rejection')});});
-    """)
-    assert not metrics.get("error"), metrics
-    assert metrics["loading"] is False and metrics["pending"] is False and metrics["errorText"] == "QUEUED", metrics
-    assert consume_only_expected_js_debug_api_errors(browser, ()) == (), metrics
-    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
-    assert_only_expected_browser_warning(
-        browser,
-        message="fs list failed",
-        correlation='"/home/test/project" 202 "QUEUED"',
-    )
-
-
-@pytest.mark.browser
-def test_b5_failed_directory_expansion_clears_spinner_and_renders_typed_error(browser, tmp_path):
-    """A real batch error must settle the row; a permanent spinner hides the failure."""
+def test_b5_failed_direct_list_clears_spinner_and_renders_typed_error(browser, tmp_path):
+    """A direct LIST error must settle the row; a permanent spinner hides the failure."""
     _load_finder(browser, tmp_path)
     metrics = browser.execute_async_script(
         """
@@ -439,11 +509,9 @@ def test_b5_failed_directory_expansion_clears_spinner_and_renders_typed_error(br
           const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           window.fetch = async (input, options = {}) => {
             const url = new URL(String(input), location.href);
-            const body = options.body ? JSON.parse(options.body) : null;
-            const request = body?.requests?.find(request => request.type === 'list' && request.path === directory);
-            if (url.pathname !== '/api/fs/batch' || !request) return originalFetch(input, options);
-            return new Response(JSON.stringify({responses: [{id: request.id, ok: false, status: 503, error: 'directory service unavailable'}]}), {
-              status: 200,
+            if (url.pathname !== '/api/fs/fast/list' || url.searchParams.get('path') !== directory) return originalFetch(input, options);
+            return new Response(JSON.stringify({error: 'directory service unavailable'}), {
+              status: 503,
               headers: {'Content-Type': 'application/json'},
             });
           };
@@ -472,150 +540,24 @@ def test_b5_failed_directory_expansion_clears_spinner_and_renders_typed_error(br
     assert not metrics.get("error"), metrics
     assert metrics["expanded"] == "false" and metrics["loading"] is False and metrics["pending"] is False, metrics
     assert metrics["errorText"] == "directory service unavailable", metrics
-    assert consume_only_expected_js_debug_api_errors(browser, ()) == (), metrics
-    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    expected_api_errors = consume_only_expected_js_debug_api_errors(
+        browser,
+        ({
+            "path": "/api/fs/fast/list",
+            "method": "GET",
+            "query": {"path": FINDER_DIRECTORY},
+            "status": 503,
+            "ok": False,
+        },),
+    )
+    assert len(expected_api_errors) == 1, metrics
+    assert len(metrics["errors"]) == 1 and metrics["errors"][0]["status"] == 503, metrics
+    assert metrics["rejections"] == [], metrics
     assert_only_expected_browser_warning(
         browser,
         message="fs list failed",
         correlation='"/home/test/project" 503 "directory service unavailable"',
     )
-
-
-@pytest.mark.browser
-def test_finder_requeued_expansion_repairs_after_stream_reconnect_and_clears_spinner(browser, tmp_path):
-    """A 202/QUEUED directory listing stays owned until its generation can be read."""
-    _load_finder(browser, tmp_path)
-    screenshot_path = tmp_path / "finder-queued-expansion-repaired.png"
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[0];
-        const originalFetch = window.fetch;
-        let batchCalls = 0;
-        let directCalls = 0;
-        (async () => {
-          const directory = '/home/test/project';
-          const childPath = '/home/test/project/nested.txt';
-          const productKey = `storaged.products:finder:${directory}`;
-          const row = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
-          const child = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${childPath}"]`);
-          window.fetch = (input, options = {}) => {
-            const url = new URL(String(input), location.href);
-            const body = options.body ? JSON.parse(options.body) : null;
-            if (url.pathname === '/api/fs/batch'
-                && body?.requests?.some(request => request.type === 'list' && request.path === directory)) {
-              batchCalls += 1;
-              return Promise.resolve(new Response(JSON.stringify({
-                responses: body.requests.map(request => request.path === directory ? {
-                  id: request.id,
-                  ok: false,
-                  pending: true,
-                  status: 202,
-                  payload: {status: 'QUEUED', ticket: 'finder-gate-ticket', key: productKey},
-                } : {id: request.id, ok: false, status: 404, error: 'unexpected request'}),
-              }), {status: 200, headers: {'Content-Type': 'application/json'}}));
-            }
-            if (url.pathname === '/api/fs/list' && url.searchParams.get('path') === directory) {
-              directCalls += 1;
-              if (directCalls === 1) {
-                return Promise.resolve(new Response(JSON.stringify({
-                  status: 'QUEUED', ticket: 'finder-gate-ticket', key: productKey,
-                }), {status: 202, headers: {'Content-Type': 'application/json'}}));
-              }
-              return originalFetch(input, options);
-            }
-            return originalFetch(input, options);
-          };
-
-          row().click();
-          await window.__yolomuxTestWaitFor(() => (
-            batchCalls === 1
-            && Array.from(fileExplorerFsBatchPending.values()).some(pending => (
-              pending.item?.queuedProduct?.key === productKey && pending.item?.repairing !== true
-            ))
-          ), {
-            timeoutMs: 2000,
-            description: 'forced queued Finder batch',
-          });
-          await Promise.resolve();
-          await Promise.resolve();
-          const queued = {
-            expanded: row()?.getAttribute('aria-expanded') || '',
-            loading: row()?.classList.contains('loading-children') === true,
-            pending: fileExplorerPendingExpansions.has(directory),
-            childVisible: Boolean(child()),
-          };
-
-          const eventSource = clientEventTransportState.source;
-          if (!eventSource || typeof eventSource.onerror !== 'function') throw new Error('Finder client-events source is unavailable');
-          eventSource.onerror();
-          await window.__yolomuxTestWaitFor(() => (
-            directCalls === 1
-            && Array.from(fileExplorerFsBatchPending.values()).every(pending => pending.item?.repairing !== true)
-          ), {
-            timeoutMs: 2000,
-            description: 'second queued Finder direct fallback',
-          });
-          await Promise.resolve();
-          const requeued = {
-            expanded: row()?.getAttribute('aria-expanded') || '',
-            loading: row()?.classList.contains('loading-children') === true,
-            pending: fileExplorerPendingExpansions.has(directory),
-            childVisible: Boolean(child()),
-          };
-          eventSource.emit('ready', {epoch: 'finder-gate-reconnect', resource_revisions: {}});
-          await window.__yolomuxTestWaitFor(
-            () => directCalls === 2 && child() && !row()?.classList.contains('loading-children'),
-            {timeoutMs: 3000, description: 'queued Finder generation repair'},
-          );
-          const repaired = {
-            expanded: row()?.getAttribute('aria-expanded') || '',
-            loading: row()?.classList.contains('loading-children') === true,
-            pending: fileExplorerPendingExpansions.has(directory),
-            childVisible: Boolean(child()),
-          };
-          window.fetch = originalFetch;
-          done({
-            batchCalls,
-            directCalls,
-            queued,
-            requeued,
-            repaired,
-            errors: jsDebugFailureEvents('error'),
-            rejections: jsDebugFailureEvents('rejection'),
-          });
-        })().catch(error => {
-          window.fetch = originalFetch;
-          done({
-            error: String(error?.stack || error),
-            batchCalls,
-            directCalls,
-            reconnectPending: clientEventTransportState.reconnectPending,
-            batchPending: fileExplorerFsBatchPending.size,
-            errors: jsDebugFailureEvents('error'),
-            rejections: jsDebugFailureEvents('rejection'),
-          });
-        });
-        """
-    )
-    browser.save_screenshot(str(screenshot_path))
-
-    assert not metrics.get("error"), metrics
-    assert metrics["batchCalls"] == 1 and metrics["directCalls"] == 2, metrics
-    assert metrics["queued"] == {
-        "expanded": "true",
-        "loading": True,
-        "pending": True,
-        "childVisible": False,
-    }, metrics
-    assert metrics["requeued"] == metrics["queued"], metrics
-    assert metrics["repaired"] == {
-        "expanded": "true",
-        "loading": False,
-        "pending": False,
-        "childVisible": True,
-    }, metrics
-    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
-    assert screenshot_path.stat().st_size > 0
 
 
 @pytest.mark.browser
@@ -631,22 +573,21 @@ def test_b3a_pending_expansion_settles_every_live_finder_surface(browser, tmp_pa
           const panelRow = () => document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${directory}"]`);
           const sidebarRow = () => document.querySelector(`#fileExplorerTree .file-tree-row[data-path="${directory}"]`);
           const sidebarChild = () => document.querySelector(`#fileExplorerTree .file-tree-children[data-parent="${directory}"]`);
-          let releaseBatch = null;
-          let heldBatchCount = 0;
+          let releaseList = null;
+          let heldListCount = 0;
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
-            const body = options.body ? JSON.parse(options.body) : null;
-            const ownsExpansion = url.pathname === '/api/fs/batch'
-              && body?.requests?.some(request => request.type === 'list' && request.path === directory);
+            const ownsExpansion = url.pathname === '/api/fs/fast/list'
+              && url.searchParams.get('path') === directory;
             if (!ownsExpansion) return originalFetch(input, options);
-            heldBatchCount += 1;
+            heldListCount += 1;
             return new Promise((resolve, reject) => {
-              releaseBatch = () => Promise.resolve(originalFetch(input, options)).then(resolve, reject);
+              releaseList = () => Promise.resolve(originalFetch(input, options)).then(resolve, reject);
             });
           };
           panelRow().click();
           await window.__yolomuxTestWaitFor(
-            () => releaseBatch && panelRow()?.classList.contains('loading-children'),
+            () => releaseList && panelRow()?.classList.contains('loading-children'),
             {timeoutMs: 2000, description: 'held Finder panel expansion'},
           );
           toggleFileExplorer();
@@ -660,14 +601,14 @@ def test_b3a_pending_expansion_settles_every_live_finder_surface(browser, tmp_pa
             panelLoading: panelRow()?.classList.contains('loading-children') === true,
             sidebarLoading: sidebarRow()?.classList.contains('loading-children') === true,
           };
-          releaseBatch();
+          releaseList();
           await window.__yolomuxTestWaitFor(
             () => !fileExplorerPendingExpansions.has(directory),
             {timeoutMs: 2000, description: 'Finder expansion completion'},
           );
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           const result = {
-            heldBatchCount,
+            heldListCount,
             pendingBeforeRelease,
             panelAfter: {loading: panelRow()?.classList.contains('loading-children') === true},
             sidebarAfter: {
@@ -689,7 +630,7 @@ def test_b3a_pending_expansion_settles_every_live_finder_surface(browser, tmp_pa
     if metrics.get("sidebarAfter", {}).get("loading"):
         browser.save_screenshot("/tmp/yolomux-finder-pending-surface-red.png")
     assert not metrics.get("error"), metrics
-    assert metrics["heldBatchCount"] == 1, metrics
+    assert metrics["heldListCount"] == 1, metrics
     assert metrics["panelAfter"] == {"loading": False}, metrics
     assert metrics["sidebarAfter"] == {"loading": False, "childVisible": True}, metrics
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
@@ -722,8 +663,7 @@ def test_b4_indexed_label_appears_after_context_index_and_survives_finder_refres
           const badge = () => row()?.querySelector(':scope > .file-tree-git-status')?.textContent.trim() || '';
           const indexedLabel = t('finder.index.indexed');
           const directoryRequests = () => window.__bootFetches.filter(item => (
-            (item.path === '/api/fs/batch' && item.body?.requests?.some(request => request.type === 'list' && request.path === '/home/test'))
-            || (item.path === '/api/fs/list' && new URLSearchParams(item.search).get('path') === '/home/test')
+            item.path === '/api/fs/fast/list' && new URLSearchParams(item.search).get('path') === '/home/test'
           )).length;
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
