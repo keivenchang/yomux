@@ -151,9 +151,12 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
         ("search-history controls", "function searchHistoryResultHtml", "toolbarButtonHtml(", "bindActionDispatcher(panel, {"),
         ("search-history panel close", "panelDetailCloseButtonHtml(searchHistoryItemId)"),
     ),
+    "static_src/js/yolomux/84_debug_observation.js": (
+        ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml("),
+    ),
     "static_src/js/yolomux/85_debug_panel.js": (
-        ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml(", "'debug-subtab':"),
         ("debug panel close controls", "panelDetailCloseButtonHtml(yocostItemId)", "panelDetailCloseButtonHtml(debugPaneItemId)"),
+        ("debug subtab dispatch", "'debug-subtab':"),
     ),
     "static_src/js/yolomux/98_terminal_runtime_facade.js": (
         ("pane-frame controls", "function paneFrameControlsHtml", "toolbarButtonHtml("),
@@ -752,6 +755,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/83_preferences_panel.js",
         "static_src/js/yolomux/84_stats_current.js",
         "static_src/js/yolomux/84_debug_runtime_facade.js",
+        "static_src/js/yolomux/84_debug_observation.js",
         "static_src/js/yolomux/85_debug_panel.js",
         "static_src/js/yolomux/86_changes_editor.js",
         "static_src/js/yolomux/87_editor_nav.js",
@@ -762,6 +766,8 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/92_codemirror_editor.js",
         "static_src/js/yolomux/98_terminal_runtime_facade.js",
         "static_src/js/yolomux/99_terminal_boot.js",
+        "static_src/js/yolomux/99_client_event_transport.js",
+        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
     ],
     "yolomux.css": [
         "static_src/css/yolomux/00_tokens_base.css",
@@ -2028,6 +2034,95 @@ def lint_direct_button_construction() -> list[str]:
     return errors
 
 
+def lint_framed_panel_construction() -> list[str]:
+    """Keep framed article creation behind the one registered panel-shell factory."""
+    errors: list[str] = []
+    owner = "static_src/js/yolomux/78_panel_shell.js"
+    js_sources = ASSETS.get("yolomux.js", [])
+    owner_registrations = js_sources.count(owner)
+    if owner_registrations != 1:
+        errors.append(
+            f"{owner}: createFramedPanel() owner must be registered exactly once in "
+            f"ASSETS['yolomux.js']; found {owner_registrations}"
+        )
+
+    function_re = re.compile(r"^function\s+(\w+)\s*\(")
+    article_re = re.compile(r"document\.createElement\(\s*(['\"])article\1\s*\)")
+    panel_head_res = (
+        re.compile(r"<[^>\n]*\bclass\s*=\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\1"),
+        re.compile(r"\.className\s*=\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\1"),
+        re.compile(r"\.classList\.add\([^\n)]*(['\"])panel-head\1"),
+        re.compile(r"\.setAttribute\(\s*(['\"])class\1\s*,\s*(['\"])[^'\"]*\bpanel-head\b[^'\"]*\2"),
+    )
+    frame_call_re = re.compile(r"\bpanelFrameHtml\s*\(")
+    shell_bind_re = re.compile(r"\bbindPanelShell\s*\(")
+    expected_owner_functions = {"renderEmptyPane", "panelFrameHtml", "createFramedPanel", "bindPanelShell"}
+    owner_function_counts = {name: 0 for name in expected_owner_functions}
+    owner_loaded = False
+
+    for part in js_sources:
+        path = repo_path(part)
+        try:
+            lines = read_text(path).splitlines()
+        except FileNotFoundError:
+            errors.append(
+                f"{part}: registered yolomux.js partial is missing; "
+                "framed-panel ownership cannot be verified"
+            )
+            continue
+        except (OSError, UnicodeError) as error:
+            errors.append(
+                f"{part}: registered yolomux.js partial is unreadable "
+                f"({type(error).__name__}); framed-panel ownership cannot be verified"
+            )
+            continue
+        if part == owner:
+            owner_loaded = True
+        current_function = ""
+        for line_number, line in enumerate(lines, start=1):
+            function_match = function_re.match(line)
+            if function_match:
+                current_function = function_match.group(1)
+                if part == owner and current_function in owner_function_counts:
+                    owner_function_counts[current_function] += 1
+            if line.lstrip().startswith("//"):
+                continue
+            if article_re.search(line) and not (
+                part == owner and current_function in {"createFramedPanel", "renderEmptyPane"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: raw article panel construction; use createFramedPanel()"
+                )
+            if any(pattern.search(line) for pattern in panel_head_res) and not (
+                part == owner and current_function == "panelFrameHtml"
+            ):
+                errors.append(
+                    f"{part}:{line_number}: raw panel-head construction; use createFramedPanel()"
+                )
+            if frame_call_re.search(line) and not (
+                part == owner and current_function in {"panelFrameHtml", "createFramedPanel"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: panelFrameHtml() is private to createFramedPanel()"
+                )
+            if shell_bind_re.search(line) and not (
+                part == owner and current_function in {"bindPanelShell", "createFramedPanel"}
+            ):
+                errors.append(
+                    f"{part}:{line_number}: bindPanelShell() is private to createFramedPanel()"
+                )
+            if line == "}":
+                current_function = ""
+
+    if owner_loaded:
+        for function_name, count in sorted(owner_function_counts.items()):
+            if count != 1:
+                errors.append(
+                    f"{owner}: {function_name}() must have exactly one top-level owner; found {count}"
+                )
+    return errors
+
+
 def lint_shared_ui_ownership() -> list[str]:
     """Reject a second owner for the refactored panel/control/editor/chart contracts."""
     errors: list[str] = []
@@ -2668,6 +2763,7 @@ def _main(argv: list[str] | None = None) -> int:
             lint_errors = (
                 lint_duplicate_functions()
                 + lint_direct_button_construction()
+                + lint_framed_panel_construction()
                 + lint_shared_ui_ownership()
                 + lint_normalized_production_clones()
                 + lint_source_control_characters()

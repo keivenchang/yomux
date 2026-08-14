@@ -9,7 +9,10 @@ const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./browser_h
 const source = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
 const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
 const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
-const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const terminalSource = [
+  'static_src/js/yolomux/99_terminal_boot.js',
+  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const englishCatalog = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 
 class ChromeNode {

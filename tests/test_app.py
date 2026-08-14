@@ -33,6 +33,7 @@ from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
 from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
 from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
 from tests.subsystems import app_darwin_memory
+from tests.subsystems import app_jobd_product
 from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
@@ -77,81 +78,10 @@ def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeyp
 def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected): app_darwin_memory.assert_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected)
 
 
-def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-    responses = iter([
-        ({"ok": True, "state": "pending", "generation": 1}, None),
-        ({"ok": True, "state": "ready", "generation": 2}, b"ready"),
-    ])
-
-    class Client:
-        def product(self, key):
-            assert key == "product-key"
-            return next(responses)
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
-
-    assert (meta["generation"], body, state) == (2, b"ready", "ready")
-    assert sleeps == [app_module.JOBD_PRODUCT_POLL_INITIAL_SECONDS]
-
-
-def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-
-    class Client:
-        def product(self, key):
-            return {"ok": True, "state": "pending", "generation": 1}, None
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-    monkeypatch.setattr(app_module, "JOBD_PRODUCT_POLL_INITIAL_SECONDS", 0.25)
-
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 0.3)
-
-    assert (meta, body, state) == (None, None, "pending")
-    assert sleeps == [0.25, pytest.approx(0.05)]
-    assert sum(sleeps) == pytest.approx(0.3)
-
-
-def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch):
-    clock = [100.0]
-    sleeps = []
-
-    class Client:
-        def product(self, key):
-            return ({"ok": True, "state": "ready", "generation": 2}, b"ready") if len(sleeps) == 3 else ({"ok": True, "state": "pending", "generation": 1}, None)
-
-    def fake_sleep(seconds):
-        sleeps.append(seconds)
-        clock[0] += seconds
-
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
-    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
-    assert (meta["generation"], body, state) == (2, b"ready", "ready")
-    assert sleeps == [0.25, 0.5, 1.0]
-
-
-def test_wait_for_jobd_product_keeps_broker_failure_distinct():
-    class Client:
-        def product(self, key):
-            return {"ok": False}, None
-
-    with pytest.raises(app_module.JobdProductRpcUnavailable, match="rpc unavailable"):
-        app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch)
+def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch)
+def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch)
+def test_wait_for_jobd_product_keeps_broker_failure_distinct(): app_jobd_product.assert_wait_for_jobd_product_keeps_broker_failure_distinct()
 
 
 class StatsRoleOwner:

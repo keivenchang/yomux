@@ -1942,7 +1942,6 @@ class FileWorkspaceState {
   }
 }
 const fileWorkspaceState = new FileWorkspaceState();
-let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;
@@ -6403,6 +6402,7 @@ function reconcilePanelBody({body, html, anchors = [], replace = null, afterRepl
   }));
   if (typeof replace === 'function') replace(body, html);
   else body.innerHTML = html;
+  normalizeAppOwnedControls(body);
   for (const {anchor, value} of captured) anchor.restore?.(body, value);
   afterReplace?.(body);
   return true;
@@ -7504,6 +7504,18 @@ function bindOnce(root, key, installer) {
   return dispose;
 }
 
+function bindScopedOnce(root, key, installer) {
+  return bindOnce(root, key, () => {
+    const scope = createLifecycleScope();
+    const uninstall = installer(scope, root);
+    return () => {
+      if (typeof uninstall === 'function') uninstall();
+      else uninstall?.dispose?.();
+      scope.dispose(`bind-once:${String(key)}`);
+    };
+  });
+}
+
 function createLifecycleScope(options = {}) {
   const resources = new Map();
   let disposed = false;
@@ -7911,14 +7923,15 @@ function showLinkContextMenu(anchor, x, y) {
 }
 
 function installLinkContextMenu(container) {
-  if (!container || container.dataset.linkContextMenuBound === '1') return;
-  container.dataset.linkContextMenuBound = '1';
-  container.addEventListener('contextmenu', event => {
-    const anchor = event.target?.closest?.('a[href]');
-    if (!anchor || !container.contains(anchor)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showLinkContextMenu(anchor, event.clientX, event.clientY);
+  if (!container) return null;
+  return bindScopedOnce(container, 'link-context-menu', scope => {
+    scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const anchor = event.target?.closest?.('a[href]');
+      if (!anchor || !container.contains(anchor)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showLinkContextMenu(anchor, event.clientX, event.clientY);
+    });
   });
 }
 
@@ -21222,9 +21235,9 @@ async function commitFileExplorerPathInput(input) {
 }
 
 function bindFileExplorerPathInput(input) {
-  if (!input || input.dataset.pathInputBound === 'true') return;
-  input.dataset.pathInputBound = 'true';
-  input.addEventListener('keydown', event => {
+  if (!input) return null;
+  return bindScopedOnce(input, 'file-explorer-path-input', scope => {
+  scope.ownEvent('keydown', input, 'keydown', event => {
     if (event.key === 'Enter') {
       event.preventDefault();
       event.stopPropagation();
@@ -21236,7 +21249,8 @@ function bindFileExplorerPathInput(input) {
       input.blur?.();
     }
   });
-  input.addEventListener('focus', () => input.select?.());
+  scope.ownEvent('focus', input, 'focus', () => input.select?.());
+  });
 }
 
 function pathIsInsideDirectory(path, root) {
@@ -22782,8 +22796,8 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
 }
 
 function bindFileImagePreview(anchor, path, entry, options = {}) {
-  if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
-  anchor.dataset.imagePreviewBound = 'true';
+  if (!anchor) return null;
+  return bindScopedOnce(anchor, 'file-image-preview', scope => {
   let pointer = null;
   const updatePointer = event => {
     pointer = {x: event.clientX, y: event.clientY};
@@ -22808,11 +22822,13 @@ function bindFileImagePreview(anchor, path, entry, options = {}) {
       if (fileImagePreviewController === controller) fileImagePreviewController = null;
     },
   });
-  anchor.addEventListener('pointerenter', event => {
+  scope.ownEvent('pointerenter', anchor, 'pointerenter', event => {
     fileImagePreviewController = controller;
     updatePointer(event);
   });
-  anchor.addEventListener('pointermove', updatePointer);
+  scope.ownEvent('pointermove', anchor, 'pointermove', updatePointer);
+  return () => controller?.dispose?.();
+  });
 }
 
 function selectableFileTreeRows(container = document) {
@@ -24387,8 +24403,8 @@ function tabberNativeDragImageForRow(row) {
 
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
-  if (!tab || tab.dataset.tabberChromeBound === 'true') return;
-  tab.dataset.tabberChromeBound = 'true';
+  if (!tab) return null;
+  return bindScopedOnce(tab, 'tabber-session-chrome', scope => {
   tab.dataset.paneTab = session;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
@@ -24398,7 +24414,7 @@ function bindTabberSessionChrome(row, session) {
     ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
     dragImage: () => tabberNativeDragImageForRow(row),
   });
-  tab.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', tab, 'pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
     if (!autoTarget) return;
     event.preventDefault();
@@ -24410,6 +24426,7 @@ function bindTabberSessionChrome(row, session) {
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (session === currentSessionActionTarget()) focusPanel(session);
     },
+  });
   });
 }
 
@@ -24762,15 +24779,16 @@ function scheduleTabberTreeLayoutStateSync() {
 }
 
 function bindTabberPanel(panel) {
-  if (!panel || panel.dataset.tabberBound === 'true') return;
-  panel.dataset.tabberBound = 'true';
-  panel.addEventListener('click', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'tabber-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('click', panel, 'click', event => {
     if (!itemInLayout(tabberItemId)) return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type]');
     if (!row || !panel.contains(row)) return;
     tabberTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     if (!itemInLayout(tabberItemId)) return;
     if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
@@ -24781,13 +24799,13 @@ function bindTabberPanel(panel) {
     event.stopPropagation();
     openTabberSession(session);
   });
-  panel.addEventListener('change', event => {
+  scope.ownEvent('change', panel, 'change', event => {
     if (!itemInLayout(tabberItemId)) return;
     const lookback = event.target.closest?.('[data-tabber-lookback]');
     if (!lookback || !panel.contains(lookback)) return;
     setTabberSessionFileLookbackHours(lookback.value);
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     if (!itemInLayout(tabberItemId)) return;
     const tabRow = event.target.closest?.('.file-tree-row[data-tabber-type="session"], .file-tree-row[data-tabber-type="window"], .file-tree-row[data-tabber-type="tab"]');
     const tabItem = tabRow?.dataset.tabberType === 'tab' ? tabRow.dataset.tabberItem : tabRow?.dataset.tabberSession;
@@ -24807,6 +24825,7 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+  });
   });
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
@@ -25342,9 +25361,10 @@ function handleFileExplorerTreeToolbarChange(container, event) {
 }
 
 function bindFileExplorerHeaderActions(container = document) {
-  if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
-  if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
-  container.addEventListener('click', event => {
+  if (!container) return null;
+  return bindScopedOnce(container, 'file-explorer-header-actions', scope => {
+  normalizeAppOwnedControls(container);
+  scope.ownEvent('click', container, 'click', event => {
     if (handleFileExplorerTreeToolbarAction(container, event)) return;
     const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
@@ -25369,8 +25389,9 @@ function bindFileExplorerHeaderActions(container = document) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
     }
   });
-  container.addEventListener('change', event => {
+  scope.ownEvent('change', container, 'change', event => {
     handleFileExplorerTreeToolbarChange(container, event);
+  });
   });
 }
 
@@ -31044,7 +31065,13 @@ function popoverStillActive(anchor, popover) {
   );
 }
 
-function bindPopoverHover(anchor, popover, handlers) {
+function bindPopoverHover(anchor, popover, handlers, options = {}) {
+  const cleanup = [];
+  const bind = (target, type, listener) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, listener);
+    cleanup.push(() => target.removeEventListener(type, listener));
+  };
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
@@ -31055,38 +31082,45 @@ function bindPopoverHover(anchor, popover, handlers) {
     closeSoon(event);
   };
 
-  anchor.addEventListener('pointerenter', event => {
-    if (browserHasCursorHover(event)) queueOpen(event);
-  });
-  anchor.addEventListener('pointerleave', closeIfOutside);
-  anchor.addEventListener('focusin', event => {
-    // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
-    // should expose a hover-only popover when no cursor is present.
-    if (anchor.matches?.(':focus-visible')) queueOpen(event);
-  });
-  anchor.addEventListener('focusout', closeIfOutside);
-  anchor.addEventListener('pointerdown', event => {
-    if (!browserHasCursorHover(event)) closeNow?.(event);
-  });
-  if (!popover) return;
-  popover.addEventListener('pointerenter', event => {
+  if (options.includeAnchor !== false) {
+    bind(anchor, 'pointerenter', event => {
+      if (browserHasCursorHover(event)) queueOpen(event);
+    });
+    bind(anchor, 'pointerleave', closeIfOutside);
+    bind(anchor, 'focusin', event => {
+      // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
+      // should expose a hover-only popover when no cursor is present.
+      if (anchor.matches?.(':focus-visible')) queueOpen(event);
+    });
+    bind(anchor, 'focusout', closeIfOutside);
+    bind(anchor, 'pointerdown', event => {
+      if (!browserHasCursorHover(event)) closeNow?.(event);
+    });
+  }
+  if (!popover) return () => cleanup.splice(0).reverse().forEach(dispose => dispose());
+  bind(popover, 'pointerenter', event => {
     if (browserHasCursorHover(event)) keepOpen(event);
   });
-  popover.addEventListener('pointerleave', closeIfOutside);
-  popover.addEventListener('click', stopPopoverEvent);
-  popover.addEventListener('dragstart', stopPopoverEvent);
+  bind(popover, 'pointerleave', closeIfOutside);
+  bind(popover, 'click', stopPopoverEvent);
+  bind(popover, 'dragstart', stopPopoverEvent);
   popover.querySelectorAll('a').forEach(link => {
-    link.addEventListener('pointerenter', event => {
+    bind(link, 'pointerenter', event => {
       if (browserHasCursorHover(event)) keepOpen(event);
     });
-    link.addEventListener('click', stopPopoverEvent);
+    bind(link, 'click', stopPopoverEvent);
   });
+  return () => cleanup.splice(0).reverse().forEach(dispose => dispose());
 }
 
 function createHoverPopover(options) {
   const anchor = options.anchor;
   if (!anchor) return null;
-  if (typeof options.onPointerMove === 'function') anchor.addEventListener('pointermove', options.onPointerMove);
+  const disposers = [];
+  if (typeof options.onPointerMove === 'function') {
+    anchor.addEventListener('pointermove', options.onPointerMove);
+    disposers.push(() => anchor.removeEventListener('pointermove', options.onPointerMove));
+  }
   const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
   let showTimer = null;
   let hideTimer = null;
@@ -31127,9 +31161,11 @@ function createHoverPopover(options) {
     if (stateClass) anchor.classList.add(stateClass);
     markState('open');
     const activePopover = popover();
-    if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
-      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
-      activePopover.dataset.hoverPopoverBound = 'true';
+    if (activePopover) {
+      const dispose = bindOnce(activePopover, 'hover-popover-child', () => (
+        bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow}, {includeAnchor: false})
+      ));
+      if (dispose) disposers.push(dispose);
     }
   };
   function queueOpen(event) {
@@ -31170,15 +31206,30 @@ function createHoverPopover(options) {
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
-  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
-  if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
-  return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
+  disposers.push(bindPopoverHover(anchor, null, {queueOpen, keepOpen: openNow, closeSoon, closeNow}));
+  if (initialPopover) {
+    disposers.push(bindOnce(initialPopover, 'hover-popover-child', () => (
+      bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow}, {includeAnchor: false})
+    )));
+  }
+  return {
+    queueOpen,
+    openNow,
+    closeSoon,
+    closeNow,
+    cancelTimers,
+    dispose() {
+      cancelTimers();
+      for (const dispose of disposers.splice(0).reverse()) dispose?.();
+    },
+  };
 }
 
 function tabInteractionControllerForApp() {
   if (tabInteractionController) return tabInteractionController;
   let touchPress = null;
   let suppressContextUntil = 0;
+  const bindings = new WeakMap();
   const cancelCurrentTouchPress = event => {
     if (!touchPress) return;
     const opened = touchPress.opened;
@@ -31256,9 +31307,11 @@ function tabInteractionControllerForApp() {
     const anchor = descriptor?.anchor;
     if (!anchor) return null;
     anchor.__yolomuxTabInteractionDescriptor = descriptor;
-    if (anchor.dataset?.tabInteractionBound === 'true') return {showActions: event => showActions(descriptor, event), close};
-    if (anchor.dataset) anchor.dataset.tabInteractionBound = 'true';
-    const detail = bindDetail(descriptor);
+    const existing = bindings.get(anchor);
+    if (existing) return existing;
+    let detail = null;
+    const dispose = bindScopedOnce(anchor, 'tab-interaction', scope => {
+    detail = bindDetail(descriptor);
     const cancelTouchPress = () => {
       if (!touchPress || touchPress.anchor !== anchor) return;
       cancelCurrentTouchPress();
@@ -31267,7 +31320,7 @@ function tabInteractionControllerForApp() {
       if (!touchPress || touchPress.anchor !== anchor) return false;
       return Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > tabTouchLongPressMoveThresholdPx;
     };
-    anchor.addEventListener('contextmenu', event => {
+    scope.ownEvent('contextmenu', anchor, 'contextmenu', event => {
       if (Date.now() < suppressContextUntil) {
         event.preventDefault();
         event.stopPropagation();
@@ -31277,13 +31330,13 @@ function tabInteractionControllerForApp() {
       event.stopPropagation();
       showActions(descriptor, event);
     });
-    anchor.addEventListener('keydown', event => {
+    scope.ownEvent('keydown', anchor, 'keydown', event => {
       if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
       event.preventDefault();
       event.stopPropagation();
       showActions(descriptor);
     }, true);
-    anchor.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', anchor, 'pointerdown', event => {
       if (event.pointerType !== 'touch' && event.button === 0) detail?.closeNow?.(event);
       if (event.pointerType !== 'touch' || event.button !== 0) return;
       cancelTouchPress();
@@ -31314,10 +31367,10 @@ function tabInteractionControllerForApp() {
       }, tabTouchLongPressDelayMs);
       touchPress = record;
     }, true);
-    anchor.addEventListener('pointermove', event => {
+    scope.ownEvent('pointermove', anchor, 'pointermove', event => {
       if (event.pointerType === 'touch' && movedBeyondThreshold(event)) cancelTouchPress();
     }, true);
-    anchor.addEventListener('pointerup', event => {
+    scope.ownEvent('pointerup', anchor, 'pointerup', event => {
       if (event.pointerType !== 'touch' || !touchPress || touchPress.anchor !== anchor) return;
       const opened = touchPress.opened;
       cancelTouchPress();
@@ -31325,9 +31378,16 @@ function tabInteractionControllerForApp() {
       event.preventDefault();
       event.stopImmediatePropagation();
     }, true);
-    anchor.addEventListener('pointercancel', cancelTouchPress, true);
-    anchor.addEventListener('dragstart', cancelTouchPress, true);
-    return {detail, showActions: event => showActions(descriptor, event), close};
+    scope.ownEvent('pointercancel', anchor, 'pointercancel', cancelTouchPress, true);
+    scope.ownEvent('dragstart', anchor, 'dragstart', cancelTouchPress, true);
+    return () => {
+      detail?.dispose?.();
+      bindings.delete(anchor);
+    };
+    });
+    const binding = {detail, showActions: event => showActions(descriptor, event), close, dispose};
+    bindings.set(anchor, binding);
+    return binding;
   };
   tabInteractionController = {bind, close, showActions};
   return tabInteractionController;
@@ -37993,9 +38053,9 @@ function dockviewPaneChromeDragExcluded(target) {
 }
 
 function dockviewBindTabContainerContextMenu(tabsContainer, group) {
-  if (!tabsContainer || tabsContainer.__yolomuxEmptySpaceContextMenuBound) return;
-  tabsContainer.__yolomuxEmptySpaceContextMenuBound = true;
-  tabsContainer.addEventListener('contextmenu', event => {
+  if (!tabsContainer) return null;
+  return bindScopedOnce(tabsContainer, 'dockview-empty-space-context-menu', scope => {
+    scope.ownEvent('contextmenu', tabsContainer, 'contextmenu', event => {
     // Tab context menus retain their own target and inline-rename behavior. This handler owns only
     // the blank portion of a pane's Dockview tab strip, where the browser menu has no app meaning.
     if (event.target.closest('.dv-tab, .dockview-pane-tab')) return;
@@ -38005,6 +38065,7 @@ function dockviewBindTabContainerContextMenu(tabsContainer, group) {
     event.preventDefault();
     event.stopPropagation();
     showTabContextMenu(activeItem, event.clientX, event.clientY);
+    });
   });
 }
 
@@ -38021,15 +38082,15 @@ function dockviewSyncHeaderBackgroundDragSources() {
       if (!element) return;
       element.dataset.paneDragSlot = draggable ? slot : '';
       element.classList.toggle('pane-drag-source', draggable);
-      if (element.__yolomuxPaneDragBound) return;
-      element.__yolomuxPaneDragBound = true;
-      const begin = event => {
-        if (dockviewPaneChromeDragExcluded(event.target)) return;
-        const sourceSlot = element.dataset.paneDragSlot || dockviewSlotForGroupElement(group);
-        dockviewBeginPanePointerDrag(event, sourceSlot);
-      };
-      element.addEventListener('pointerdown', begin);
-      element.addEventListener('mousedown', begin);
+      bindScopedOnce(element, 'dockview-pane-drag', scope => {
+        const begin = event => {
+          if (dockviewPaneChromeDragExcluded(event.target)) return;
+          const sourceSlot = element.dataset.paneDragSlot || dockviewSlotForGroupElement(group);
+          dockviewBeginPanePointerDrag(event, sourceSlot);
+        };
+        scope.ownEvent('pointerdown', element, 'pointerdown', begin);
+        scope.ownEvent('mousedown', element, 'mousedown', begin);
+      });
     };
     syncDragSource(header);
     syncDragSource(infoBar);
@@ -39346,7 +39407,17 @@ function segmentedControlHtml(options = {}) {
   return domBuilderElementHtml(createSegmentedControl(options));
 }
 
+function normalizeAppOwnedControls(root) {
+  if (!root) return [];
+  const controls = [];
+  if (root.matches?.('button, [role="button"]')) controls.push(root);
+  controls.push(...Array.from(root.querySelectorAll?.('button, [role="button"]') || []));
+  for (const control of controls) control.classList?.add('btn-base');
+  return controls;
+}
+
 function bindActionDispatcher(parent, handlers = {}, options = {}) {
+  normalizeAppOwnedControls(parent);
   const type = options.type || 'click';
   const listenerOptions = options.listenerOptions || {};
   const listener = delegate(parent, type, options.selector || '[data-action]', async (event, target) => {
@@ -40838,13 +40909,15 @@ function bindPaneFrameControls(panel, session) {
 
 function bindPanelPopover(panel) {
   const zone = panel.querySelector('.panel-popover-zone');
-  if (!zone || zone.dataset.popoverBound === 'true') return;
-  zone.dataset.popoverBound = 'true';
-  createHoverPopover({
-    anchor: zone,
-    popover: () => zone.querySelector(':scope > .session-popover'),
-    showDelay: 0,
-    hideDelay: () => popoverHideDelayMs,
+  if (!zone) return null;
+  return bindOnce(zone, 'panel-popover', () => {
+    const controller = createHoverPopover({
+      anchor: zone,
+      popover: () => zone.querySelector(':scope > .session-popover'),
+      showDelay: 0,
+      hideDelay: () => popoverHideDelayMs,
+    });
+    return () => controller?.dispose?.();
   });
 }
 
@@ -42161,35 +42234,42 @@ function syncInfoTreeScrolledState(root = document) {
 }
 
 function bindInfoPanel(panel) {
-  if (!panel || panel.__yolomuxInfoPanelBound === true) return;
-  panel.__yolomuxInfoPanelBound = true;
-  const treeScroller = panel.querySelector('.info-tree-list');
-  if (treeScroller) {
-    treeScroller.addEventListener('scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
-    syncInfoTreeScrolledState(panel);
-  }
-  delegate(panel, 'click', '[data-info-refresh]', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'info-panel', scope => {
+    const treeScroller = panel.querySelector('.info-tree-list');
+    if (treeScroller) {
+      scope.ownEvent('tree-scroll', treeScroller, 'scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
+      syncInfoTreeScrolledState(panel);
+    }
+    normalizeAppOwnedControls(panel);
+    let delegateIndex = 0;
+    const ownDelegate = (type, selector, handler) => {
+      const listener = delegate(panel, type, selector, handler);
+      if (listener) scope.replace(`delegate-${delegateIndex++}`, listener, value => panel.removeEventListener(type, value));
+      return listener;
+    };
+  ownDelegate('click', '[data-info-refresh]', event => {
     event.preventDefault();
     refreshTranscripts({force: true});
     refreshActivitySummary({force: true});
   });
-  delegate(panel, 'click', '[data-info-preset]', (event, button) => {
+  ownDelegate('click', '[data-info-preset]', (event, button) => {
     event.preventDefault();
     if (typeof setInfoGroupingPreset === 'function') setInfoGroupingPreset(button.dataset.infoPreset || '');
   });
-  delegate(panel, 'click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
+  ownDelegate('click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation?.();
     if (typeof toggleAutoApprove === 'function') await toggleAutoApprove(button.dataset.autoSession || '');
   });
-  delegate(panel, 'click', '[data-info-open-tab]', (event, button) => {
+  ownDelegate('click', '[data-info-open-tab]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const session = button.dataset.infoOpenTab || '';
     if (session) selectSession(session, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-info-open-ai-window]', (event, button) => {
+  ownDelegate('click', '[data-info-open-ai-window]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const session = button.dataset.infoOpenAiTab || '';
@@ -42200,7 +42280,7 @@ function bindInfoPanel(panel) {
     }
     selectSession(session, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-info-open-path]', (event, button) => {
+  ownDelegate('click', '[data-info-open-path]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const path = button.dataset.infoOpenPath || '';
@@ -42216,7 +42296,7 @@ function bindInfoPanel(panel) {
       statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
     });
   });
-  panel.addEventListener('change', event => {
+  scope.ownEvent('change', panel, 'change', event => {
     const select = event.target.closest('[data-info-group-level]');
     if (select && panel.contains(select) && typeof setInfoGroupingLevel === 'function') {
       setInfoGroupingLevel(select.dataset.infoGroupLevel, select.value || '');
@@ -42225,14 +42305,15 @@ function bindInfoPanel(panel) {
     const sortMode = event.target.closest('[data-info-sort-mode]');
     if (sortMode && panel.contains(sortMode) && typeof setInfoSortMode === 'function') setInfoSortMode(sortMode.value || '');
   });
-  panel.addEventListener('toggle', event => {
+  scope.ownEvent('toggle', panel, 'toggle', event => {
     const details = event.target.closest?.('details[data-info-group-key]');
     if (!details || !panel.contains(details) || typeof setInfoTreeGroupCollapsed !== 'function') return;
     setInfoTreeGroupCollapsed(details.dataset.infoGroupKey || '', !details.open);
   }, true);
-  panel.addEventListener('input', event => {
+  scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-info-search]');
     if (search && panel.contains(search) && typeof setInfoSearch === 'function') setInfoSearch(search.value || '');
+  });
   });
 }
 
@@ -46383,7 +46464,10 @@ function renderPreferencesPanels(options = {}) {
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+        if (pathRows) {
+          pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+          normalizeAppOwnedControls(pathRows);
+        }
       } else {
         reconcilePanelBody({
           body,
@@ -49378,7 +49462,7 @@ function jsDebugGraphRangeLabel(seconds = debugRuntimeState.graphRangeSeconds, n
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// JavaScript debug panel rendering and controls.
+// Debug telemetry state, durable history ingestion, and current-observation upload.
 
 const jsDebugGraphDefaultRangeSeconds = 15 * 60;
 const jsDebugGraphGeometry = (() => {
@@ -51839,11 +51923,14 @@ function recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleT
 function installJsDebugCurrentObservationLiveness() {
   const state = jsDebugCurrentObservationState;
   if (!clientCanUseUnscopedHostRequests() || state.livenessTimer !== null || typeof setInterval !== 'function') return;
+  const scope = currentObservationLifecycleScope();
   recordJsDebugClientHealthObservation(0, 0);
-  state.livenessTimer = setInterval(() => {
+  const timer = setInterval(() => {
+    if (!scope.current() || state.livenessTimer !== timer) return;
     recordJsDebugClientHealthObservation(0, 0);
   }, jsDebugCurrentObservationHeartbeatMs);
-  currentObservationLifecycleScope().ownTimer('liveness', state.livenessTimer, clearInterval);
+  state.livenessTimer = timer;
+  scope.ownTimer('liveness', timer, clearInterval);
 }
 
 function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
@@ -51851,6 +51938,7 @@ function disposeJsDebugCurrentObservationLifecycle(reason = 'disposed') {
   jsDebugCurrentObservationLifecycleScope.dispose(reason);
   state.timer = null;
   state.livenessTimer = null;
+  state.inFlight = null;
 }
 
 installJsDebugCurrentObservationLiveness();
@@ -52046,15 +52134,18 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
     currentObservationLifecycleScope().release('flush', state.timer);
     state.timer = null;
   }
-  state.timer = setTimeout(() => {
-    currentObservationLifecycleScope().relinquish('flush', state.timer);
+  const scope = currentObservationLifecycleScope();
+  const timer = setTimeout(() => {
+    if (!scope.current() || state.timer !== timer) return;
+    scope.relinquish('flush', timer);
     state.timer = null;
-    void flushJsDebugCurrentObservations();
+    void flushJsDebugCurrentObservations(scope);
   }, delay);
-  currentObservationLifecycleScope().ownTimer('flush', state.timer);
+  state.timer = timer;
+  scope.ownTimer('flush', timer);
 }
 
-async function flushJsDebugCurrentObservations() {
+async function flushJsDebugCurrentObservations(scope = currentObservationLifecycleScope()) {
   const state = jsDebugCurrentObservationState;
   if (!clientCanUseUnscopedHostRequests()) return;
   if (statsWriterFence === null) {
@@ -52088,6 +52179,7 @@ async function flushJsDebugCurrentObservations() {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(batch),
       });
+      if (!scope.current()) return;
       const accepted = receipt?.accepted;
       const duplicates = receipt?.duplicates;
       const observationReceipts = receipt?.observation_receipts;
@@ -52125,6 +52217,7 @@ async function flushJsDebugCurrentObservations() {
       state.retryMs = jsDebugCurrentObservationBatchDelayMs;
       batchRetired = true;
     } catch (error) {
+      if (!scope.current()) return;
       if ([400, 404, 405, 410, 413, 422, 426].includes(Number(error?.status))) {
         for (const {entry} of validEntries) {
           const index = state.queue.indexOf(entry);
@@ -52140,8 +52233,8 @@ async function flushJsDebugCurrentObservations() {
         setJsDebugCurrentObservationReceipt(validEntries.map(item => item.entry), 'retrying');
       }
     } finally {
-      state.inFlight = null;
-      if (state.queue.length) {
+      if (state.inFlight === inFlight) state.inFlight = null;
+      if (scope.current() && state.queue.length) {
         const releaseBlockingPending = state.queue.some(entry => entry.releaseBlocking);
         const delay = releaseBlockingPending && batchRetired ? 0 : state.retryMs;
         if (!(releaseBlockingPending && batchRetired)) {
@@ -52276,6 +52369,19 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
   compactJsDebugGraphBuckets();
   if (scheduleRefresh) scheduleJsDebugPanelRefresh({force: firstSampleApplied || forceGraphRefresh});
 }
+
+registerDebugRuntimeFacade('observation', {
+  disposeJsDebugCurrentObservationLifecycle,
+  flushJsDebugCurrentObservations,
+  installJsDebugCurrentObservationLiveness,
+  queueJsDebugCurrentObservation,
+  recordJsDebugClientEventsConnectionState,
+  recordJsDebugStatsSample,
+  scheduleJsDebugCurrentObservationFlush,
+});
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Debug stats projection, rendering, panels, and graph interaction.
 
 // `stats_sample` arrives on the shared client-events EventSource.  Its record
 // is the durable one-second owner delta, so the visible graph advances without
@@ -55933,12 +56039,14 @@ function debugGraphCostSummaryHtml(buckets, domain) {
 
 async function refreshDebugCostPricing() {
   if (readOnlyMode || jsDebugPricingRefreshState.inFlight) return;
+  const scope = debugPricingRefreshLifecycleScope();
   jsDebugPricingRefreshState.inFlight = true;
   jsDebugPricingRefreshState.error = '';
   jsDebugPricingRefreshState.lastRequestedAtMs = Date.now();
   refreshDebugGraphSurfaces();
   try {
     const payload = await apiFetchJson('/api/pricing-catalog/refresh', {method: 'POST'});
+    if (!scope.current()) return;
     jsDebugPricingRefreshState.status = String(payload?.status || 'running');
     if (jsDebugPricingRefreshState.status === 'running') {
       scheduleDebugCostPricingStatusRefresh();
@@ -55946,21 +56054,25 @@ async function refreshDebugCostPricing() {
       jsDebugPricingRefreshState.inFlight = false;
     }
   } catch (error) {
+    if (!scope.current()) return;
     jsDebugPricingRefreshState.inFlight = false;
     jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
   } finally {
-    refreshDebugGraphSurfaces();
+    if (scope.current()) refreshDebugGraphSurfaces();
   }
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
   if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
-  jsDebugPricingRefreshState.timer = setTimeout(() => {
-    debugPricingRefreshLifecycleScope().relinquish('status', jsDebugPricingRefreshState.timer);
+  const scope = debugPricingRefreshLifecycleScope();
+  const timer = setTimeout(() => {
+    if (!scope.current() || jsDebugPricingRefreshState.timer !== timer) return;
+    scope.relinquish('status', timer);
     jsDebugPricingRefreshState.timer = null;
-    void refreshDebugCostPricingStatus();
+    void refreshDebugCostPricingStatus(scope);
   }, 750);
-  debugPricingRefreshLifecycleScope().ownTimer('status', jsDebugPricingRefreshState.timer);
+  jsDebugPricingRefreshState.timer = timer;
+  scope.ownTimer('status', timer);
 }
 
 function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
@@ -55968,9 +56080,10 @@ function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
   jsDebugPricingRefreshState.timer = null;
 }
 
-async function refreshDebugCostPricingStatus() {
+async function refreshDebugCostPricingStatus(scope = debugPricingRefreshLifecycleScope()) {
   try {
     const payload = await apiFetchJson('/api/pricing-catalog', {cache: 'no-store'});
+    if (!scope.current()) return false;
     const refresh = payload?.refresh && typeof payload.refresh === 'object' ? payload.refresh : {};
     const status = String(refresh.status || 'idle');
     jsDebugPricingRefreshState.status = status;
@@ -55978,10 +56091,12 @@ async function refreshDebugCostPricingStatus() {
     jsDebugPricingRefreshState.inFlight = status === 'running';
     if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
   } catch (error) {
+    if (!scope.current()) return false;
     jsDebugPricingRefreshState.inFlight = false;
     jsDebugPricingRefreshState.error = userMessageText(error, t('common.requestFailed'));
   }
-  refreshDebugGraphSurfaces();
+  if (scope.current()) refreshDebugGraphSurfaces();
+  return true;
 }
 
 function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true} = {}) {
@@ -59106,8 +59221,9 @@ function stopDebugGraphLiveTicker() {
   jsDebugGraphLiveTimer = 0;
 }
 
-function debugGraphLiveTimerTick() {
-  debugGraphLifecycleScope().relinquish('live-ticker', jsDebugGraphLiveTimer);
+function debugGraphLiveTimerTick(scope = debugGraphLifecycleScope(), timer = jsDebugGraphLiveTimer) {
+  if (!scope.current() || jsDebugGraphLiveTimer !== timer) return;
+  scope.relinquish('live-ticker', timer);
   jsDebugGraphLiveTimer = 0;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const nowMs = Date.now();
@@ -59122,8 +59238,10 @@ function syncDebugGraphLiveTicker() {
     return;
   }
   if (jsDebugGraphLiveTimer) return;
-  jsDebugGraphLiveTimer = setTimeout(debugGraphLiveTimerTick, Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
-  debugGraphLifecycleScope().ownTimer('live-ticker', jsDebugGraphLiveTimer);
+  const scope = debugGraphLifecycleScope();
+  const timer = setTimeout(() => debugGraphLiveTimerTick(scope, timer), Math.max(0, debugGraphLiveTickerNextDueMs() - Date.now()));
+  jsDebugGraphLiveTimer = timer;
+  scope.ownTimer('live-ticker', timer);
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
@@ -62287,9 +62405,10 @@ function openDiffRefPickerForInput(input, controls) {
 }
 
 function bindChangesPanel(panel) {
-  if (!panel || panel.dataset.changesBound === 'true') return;
-  panel.dataset.changesBound = 'true';
-  panel.addEventListener('change', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'changes-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('change', panel, 'change', event => {
     if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
@@ -62306,23 +62425,23 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('input', event => {
+  scope.ownEvent('input', panel, 'input', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
     renderDiffRefPopover(diffRefInput, {showAll: false});
   });
-  panel.addEventListener('focusin', event => {
+  scope.ownEvent('focusin', panel, 'focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
       if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
@@ -62342,7 +62461,7 @@ function bindChangesPanel(panel) {
     }
     differTreeInteractionController.handleKeydown(event, panel);
   });
-  panel.addEventListener('click', async event => {
+  scope.ownEvent('actions-click', panel, 'click', async event => {
     if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
@@ -62392,7 +62511,7 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('dragstart', event => {
+  scope.ownEvent('dragstart', panel, 'dragstart', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
     if (!event.dataTransfer) return;
@@ -62406,18 +62525,18 @@ function bindChangesPanel(panel) {
     event.dataTransfer.setData('text/plain', path);
     startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
   });
-  panel.addEventListener('dragend', () => {
+  scope.ownEvent('dragend', panel, 'dragend', () => {
     cancelDragOperationState();
   });
   // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
   // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
-  panel.addEventListener('click', event => {
+  scope.ownEvent('tree-click', panel, 'click', event => {
     if (event.__sharedTreeInteractionHandled) return;
     const row = event.target.closest('.file-tree-row[data-path]');
     if (!row || !panel.contains(row)) return;
     differTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
@@ -62460,6 +62579,7 @@ function bindChangesPanel(panel) {
     if (!directoryRow || !panel.contains(directoryRow)) return;
     event.preventDefault();
     showChangedDirectoryContextMenu(directoryRow, event.clientX, event.clientY);
+  });
   });
 }
 
@@ -63046,9 +63166,9 @@ function activateFileExplorerSurface(item) {
 function bindFileExplorerChangesResizer(panel) {
   const handle = panel?.querySelector?.('[data-file-explorer-changes-resizer]');
   const pane = panel?.querySelector?.('.file-explorer-pane');
-  if (!handle || !pane || handle.dataset.bound === 'true') return;
-  handle.dataset.bound = 'true';
-  handle.addEventListener('pointerdown', event => {
+  if (!handle || !pane) return null;
+  return bindScopedOnce(handle, 'file-explorer-changes-resizer', scope => {
+  scope.ownEvent('pointerdown', handle, 'pointerdown', event => {
     event.preventDefault();
     event.stopPropagation();
     const pointerId = event.pointerId;
@@ -63076,6 +63196,7 @@ function bindFileExplorerChangesResizer(panel) {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', done);
     window.addEventListener('pointercancel', done);
+  });
   });
 }
 
@@ -64420,16 +64541,15 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
       input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
-  if (markdownPath && !container.dataset.mdTaskBound) {
-    container.dataset.mdTaskBound = '1';
-    container.addEventListener('change', event => {
+  if (markdownPath) {
+    bindScopedOnce(container, 'markdown-task-checkboxes', scope => scope.ownEvent('change', container, 'change', event => {
       const input = event.target?.closest?.('input[type="checkbox"].markdown-task-checkbox[data-source-line]');
       if (!input || !container.contains(input)) return;
       event.preventDefault();
       event.stopPropagation();
       const updated = updateMarkdownTaskFromPreview(container, input);
       if (!updated) input.checked = !input.checked;
-    });
+    }));
   }
 }
 
@@ -64748,10 +64868,9 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   if (markdownPath) {
     container.dataset.mdPath = markdownPath;
     container.dataset.basePath = dirnameOf(markdownPath);
-    if (!container.dataset.mdLinkBound) {
-      container.dataset.mdLinkBound = '1';
-      container.addEventListener('click', handleMarkdownPreviewLinkClick);
-    }
+    bindScopedOnce(container, 'markdown-preview-links', scope => (
+      scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
+    ));
   }
   if (fileEditorPreviewDisplayMode !== 'vanilla') {
     container.querySelectorAll('pre code').forEach(block => {
@@ -67527,7 +67646,6 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     bodyHtml: filePreviewPopoutBodyHtml(path, snapshot),
   });
   if (!written) return false;
-  doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
 }
@@ -67544,27 +67662,21 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
 
 function bindFilePreviewPopoutControls(path, previewWindow) {
   const doc = previewWindow?.document;
-  if (!doc || doc._yolomuxPreviewControlsBound) return;
-  doc._yolomuxPreviewControlsBound = true;
+  if (!doc) return null;
   if (typeof previewWindow._yolomuxPreviewControlsCleanup === 'function') {
     previewWindow._yolomuxPreviewControlsCleanup();
   }
-  const cleanup = [];
+  const dispose = bindScopedOnce(doc, 'file-preview-popout-controls', scope => {
   const bind = (target, type, handler) => {
     if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, {passive: true});
-    cleanup.push(() => target.removeEventListener?.(type, handler));
+    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, {passive: true});
+    scope.replace('event-index', Number(scope.value('event-index') || 0) + 1);
   };
-  previewWindow._yolomuxPreviewControlsCleanup = () => {
-    while (cleanup.length) {
-      try { cleanup.pop()(); } catch (_) {}
-    }
-  };
-  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
+  bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {
     event.preventDefault();
     cycleEditorThemeMode({includeVanilla: true});
   });
-  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+  bind(doc.querySelector('.file-editor-preview-font-panel'), 'click', event => {
     const button = event.target?.closest?.('[data-editor-preview-font-step]');
     if (!button) return;
     event.preventDefault();
@@ -67594,6 +67706,9 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   bind(scroller, 'scroll', syncScroll);
   bind(scroller, 'wheel', scheduleUserScrollSync);
   updateFilePreviewPopoutControls(path, previewWindow);
+  });
+  previewWindow._yolomuxPreviewControlsCleanup = dispose;
+  return dispose;
 }
 
 function updateFilePreviewPopout(path, text) {
@@ -71573,10 +71688,9 @@ function linkYoagentSessionCodeReferences(container) {
 function installYoagentSessionLinks(container) {
   if (!container) return;
   linkYoagentSessionCodeReferences(container);
-  if (container.dataset.yoagentSessionLinksBound !== 'true') {
-    container.dataset.yoagentSessionLinksBound = 'true';
-    container.addEventListener('click', handleYoagentSessionLinkClick);
-  }
+  return bindScopedOnce(container, 'yoagent-session-links', scope => (
+    scope.ownEvent('click', container, 'click', handleYoagentSessionLinkClick)
+  ));
 }
 
 function renderConversationMessageMarkdown(node = document.getElementById('yoagent-content')) {
@@ -73811,9 +73925,7 @@ function insertFileDragPayloadIntoTerminal(session, payload) {
 
 function bindClipboardPaste() {
   if (readOnlyMode) return;
-  if (clipboardPasteBound) return;
-  clipboardPasteBound = true;
-  document.addEventListener('paste', event => {
+  return bindScopedOnce(document, 'clipboard-image-paste', scope => scope.ownEvent('paste', document, 'paste', event => {
     if (!dataTransferHasImagePayload(event.clipboardData)) return;
     const editorTarget = markdownEditorPasteTarget(event);
     // Image-bearing paste: ALWAYS claim it (preventDefault + stopPropagation) so the raw image can never
@@ -73849,7 +73961,7 @@ function bindClipboardPaste() {
     uploadFiles(session, files, {source: 'paste'}).finally(() => {
       pasteUploadInFlight = false;
     });
-  }, {capture: true});
+  }, {capture: true}));
 }
 
 function markdownEditorPasteTarget(event) {
@@ -75242,8 +75354,8 @@ function processTerminalSocketFrame(session, item, data) {
 
 function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
-  if (container.dataset?.terminalHandlersBound === session) return;
-  if (container.dataset) container.dataset.terminalHandlersBound = session;
+  return bindScopedOnce(container, `terminal-container:${session}`, scope => {
+  normalizeAppOwnedControls(container);
   installTerminalMobileAccessoryResizeSync();
   installTerminalMobileAccessorySurfaceSync();
   installTerminalContextMenu(session, term, container);
@@ -75251,24 +75363,25 @@ function bindTerminalContainerForSession(session, term, container) {
   installTerminalFileDrop(session, container);
   enableTerminalScroll(session, term, container);
   observeTerminalResize(session, container);
-  container.addEventListener('focusin', () => {
+  scope.ownEvent('focusin', container, 'focusin', () => {
     setFocusedTerminal(session);
   });
-  container.addEventListener('focusout', () => {
+  scope.ownEvent('focusout', container, 'focusout', () => {
     clearFocusedTerminal(session);
   });
-  container.addEventListener('copy', event => {
+  scope.ownEvent('copy', container, 'copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  container.addEventListener('keydown', () => {
+  scope.ownEvent('keydown', container, 'keydown', () => {
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  container.addEventListener('paste', () => {
+  scope.ownEvent('paste', container, 'paste', () => {
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  container.addEventListener('beforeinput', () => {
+  scope.ownEvent('beforeinput', container, 'beforeinput', () => {
     noteTerminalExplicitInput(session);
   }, {capture: true});
+  });
 }
 
 function terminalUnicode11AddonCtor() {
@@ -76991,12 +77104,15 @@ function refreshAll() {
 
 function scheduleReconnectResync(reason = '') {
   if (clientEventTransportState.resyncTimer) currentClientEventTransportLifecycleScope().release('resync', clientEventTransportState.resyncTimer);
-  clientEventTransportState.resyncTimer = setTimeout(() => {
-    currentClientEventTransportLifecycleScope().relinquish('resync', clientEventTransportState.resyncTimer);
+  const scope = currentClientEventTransportLifecycleScope();
+  const timer = setTimeout(() => {
+    if (!scope.current() || clientEventTransportState.resyncTimer !== timer) return;
+    scope.relinquish('resync', timer);
     clientEventTransportState.resyncTimer = null;
     refreshAll();
   }, reconnectResyncDebounceMs);
-  currentClientEventTransportLifecycleScope().ownTimer('resync', clientEventTransportState.resyncTimer);
+  clientEventTransportState.resyncTimer = timer;
+  scope.ownTimer('resync', timer);
 }
 
 function resyncVisibleTerminalRemoteSizes(reason = '') {
@@ -77095,6 +77211,9 @@ async function boot() {
   checkForUpdateOnce();
   schedulePageLoadProfileCompletion();
 }
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Shared browser client-event stream, demand, repair, and lifecycle ownership.
 
 function clientEventEnvelope(event) {
   const parsed = safeJsonParse(event?.data, {});
@@ -77472,17 +77591,26 @@ function queueClientPushEvent(type, payload = {}, envelope = {}) {
   // before the user returns to YOLOmux.
   if (document.visibilityState === 'hidden') {
     if (clientEventTransportState.frame) currentClientEventTransportLifecycleScope().release('dispatch-frame', clientEventTransportState.frame);
+    currentClientEventTransportLifecycleScope().release('dispatch-generation');
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
     return;
   }
   if (clientEventTransportState.frame) return;
-  clientEventTransportState.frame = requestAnimationFrame(() => {
-    currentClientEventTransportLifecycleScope().relinquish('dispatch-frame', clientEventTransportState.frame);
+  const scope = currentClientEventTransportLifecycleScope();
+  const generation = {};
+  scope.replace('dispatch-generation', generation, () => {});
+  let frame = 0;
+  frame = requestAnimationFrame(() => {
+    if (!scope.current() || scope.value('dispatch-generation') !== generation) return;
+    scope.relinquish('dispatch-generation', generation);
+    if (frame) scope.relinquish('dispatch-frame', frame);
     clientEventTransportState.frame = 0;
     flushQueuedClientPushEvents();
   });
-  currentClientEventTransportLifecycleScope().replace('dispatch-frame', clientEventTransportState.frame, cancelAnimationFrame);
+  if (scope.value('dispatch-generation') !== generation) return;
+  clientEventTransportState.frame = frame;
+  scope.replace('dispatch-frame', frame, cancelAnimationFrame);
 }
 
 function flushQueuedClientPushEvents() {
@@ -77810,8 +77938,10 @@ function scheduleClientEventDisconnectEpisode(source) {
     reported: false,
   };
   clientEventTransportState.disconnectEpisode = episode;
-  clientEventTransportState.disconnectTimer = setTimeout(() => {
-    currentClientEventTransportLifecycleScope().relinquish('disconnect-episode', clientEventTransportState.disconnectTimer);
+  const scope = currentClientEventTransportLifecycleScope();
+  const timer = setTimeout(() => {
+    if (!scope.current() || clientEventTransportState.disconnectTimer !== timer) return;
+    scope.relinquish('disconnect-episode', timer);
     clientEventTransportState.disconnectTimer = null;
     if ((source !== null && clientEventTransportState.source !== source)
         || (source === null && clientEventTransportState.source !== null)
@@ -77824,7 +77954,8 @@ function scheduleClientEventDisconnectEpisode(source) {
       diagnosticFailure: true,
     });
   }, clientEventDisconnectGraceMs);
-  currentClientEventTransportLifecycleScope().ownTimer('disconnect-episode', clientEventTransportState.disconnectTimer);
+  clientEventTransportState.disconnectTimer = timer;
+  scope.ownTimer('disconnect-episode', timer);
   return true;
 }
 
@@ -78006,8 +78137,9 @@ function openClientEventStream(descriptor, options = {}) {
   return source;
 }
 
-function applyClientEventDemand() {
-  currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
+function applyClientEventDemand(timer = clientEventTransportState.demandTimer, scope = currentClientEventTransportLifecycleScope()) {
+  if (timer !== null && (!scope.current() || clientEventTransportState.demandTimer !== timer)) return false;
+  scope.release('demand', timer);
   clientEventTransportState.demandTimer = null;
   if (!clientEventTransportState.enabled) return false;
   const descriptor = clientEventDemandDescriptor();
@@ -78028,9 +78160,11 @@ function applyClientEventDemand() {
 function syncClientEventDemand(options = {}) {
   if (!clientEventTransportState.enabled) return false;
   if (clientEventTransportState.demandTimer) currentClientEventTransportLifecycleScope().release('demand', clientEventTransportState.demandTimer);
-  if (options.immediate === true) return applyClientEventDemand();
-  clientEventTransportState.demandTimer = setTimeout(applyClientEventDemand, clientEventDemandDebounceMs);
-  currentClientEventTransportLifecycleScope().ownTimer('demand', clientEventTransportState.demandTimer);
+  if (options.immediate === true) return applyClientEventDemand(null, currentClientEventTransportLifecycleScope());
+  const scope = currentClientEventTransportLifecycleScope();
+  const timer = setTimeout(() => applyClientEventDemand(timer, scope), clientEventDemandDebounceMs);
+  clientEventTransportState.demandTimer = timer;
+  scope.ownTimer('demand', timer);
   return true;
 }
 
@@ -78046,6 +78180,7 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportState.connected = false;
   clientEventTransportState.disconnectTimer = null;
   clientEventTransportState.disconnectEpisode = null;
+  clientEventTransportState.candidateEpisode = null;
   clientEventTransportState.demandTimer = null;
   clientEventTransportState.frame = 0;
   clientEventTransportState.resyncTimer = null;
@@ -78057,6 +78192,17 @@ if (typeof window !== 'undefined' && window?.addEventListener) {
     if (event?.persisted === true && clientEventTransportState.enabled) syncClientEventDemand({immediate: true});
   });
 }
+
+registerTerminalRuntimeFacade('client-events', {
+  disposeClientEventTransportLifecycle,
+  handleClientPushEvent,
+  installClientEventStream,
+  queueClientPushEvent,
+  syncClientEventDemand,
+});
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Development reload, modal, global shortcut, and final terminal boot wiring.
 
 // Dev-velocity #1b: in --dev mode, reload the page when the static bundle changes (ends the recurring
 // "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
@@ -78218,7 +78364,11 @@ registerTerminalRuntimeFacade('transport', {
   startSummaryStream,
   startTranscriptStream,
 });
-
+registerTerminalRuntimeFacade('boot', {
+  boot,
+  installDevAutoReload,
+  installReconnectResyncHandlers,
+});
 if (refreshMeta) {
   refreshMetaButtonChrome();
   refreshMeta.onclick = refreshAll;
@@ -78369,6 +78519,11 @@ function handleGlobalShortcutKeydown(event) {
     closeAppMenus();
   }
 }
+registerTerminalRuntimeFacade('shortcuts', {
+  handleFocusedPanelSearchShortcut,
+  handleGlobalShortcutKeydown,
+  handlePendingGlobalShortcutChord,
+});
 installTerminalResizeAuthorityHandlers();
 window.addEventListener('keydown', handleGlobalShortcutKeydown, true);
 window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {

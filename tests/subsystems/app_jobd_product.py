@@ -1,0 +1,82 @@
+"""Job-product polling contracts retained under tests.test_app node IDs."""
+
+import pytest
+
+from yolomux_lib import app as app_module
+
+
+def assert_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+    responses = iter([
+        ({"ok": True, "state": "pending", "generation": 1}, None),
+        ({"ok": True, "state": "ready", "generation": 2}, b"ready"),
+    ])
+
+    class Client:
+        def product(self, key):
+            assert key == "product-key"
+            return next(responses)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+
+    assert (meta["generation"], body, state) == (2, b"ready", "ready")
+    assert sleeps == [app_module.JOBD_PRODUCT_POLL_INITIAL_SECONDS]
+
+
+def assert_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+
+    class Client:
+        def product(self, key):
+            return {"ok": True, "state": "pending", "generation": 1}, None
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(app_module, "JOBD_PRODUCT_POLL_INITIAL_SECONDS", 0.25)
+
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 0.3)
+
+    assert (meta, body, state) == (None, None, "pending")
+    assert sleeps == [0.25, pytest.approx(0.05)]
+    assert sum(sleeps) == pytest.approx(0.3)
+
+
+def assert_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+
+    class Client:
+        def product(self, key):
+            return ({"ok": True, "state": "ready", "generation": 2}, b"ready") if len(sleeps) == 3 else ({"ok": True, "state": "pending", "generation": 1}, None)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+    assert (meta["generation"], body, state) == (2, b"ready", "ready")
+    assert sleeps == [0.25, 0.5, 1.0]
+
+
+def assert_wait_for_jobd_product_keeps_broker_failure_distinct():
+    class Client:
+        def product(self, key):
+            return {"ok": False}, None
+
+    with pytest.raises(app_module.JobdProductRpcUnavailable, match="rpc unavailable"):
+        app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)

@@ -5,7 +5,11 @@ const {makeCatalogT, sourceBetween} = require('./browser_helpers/layout_test_hel
 
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
-const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const terminalSource = [
+  'static_src/js/yolomux/99_terminal_boot.js',
+  'static_src/js/yolomux/99_client_event_transport.js',
+  'static_src/js/yolomux/99_terminal_shortcuts_boot.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
 const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
 const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');

@@ -167,11 +167,11 @@
     "static_src/css/yolomux/30_preferences_changes.css": 3577,
     "static_src/css/yolomux/50_terminal_file_tree.css": 4264,
     "static_src/css/yolomux/60_editor_file_panels.css": 3327,
-    "static_src/js/yolomux/10_core_utils.js": 6348,
+    "static_src/js/yolomux/10_core_utils.js": 6362,
     "static_src/js/yolomux/20_layout_state.js": 6952,
-    "static_src/js/yolomux/40_file_explorer_files.js": 5449,
-    "static_src/js/yolomux/85_debug_panel.js": 10704,
-    "static_src/js/yolomux/99_terminal_boot.js": 8132,
+    "static_src/js/yolomux/40_file_explorer_files.js": 5455,
+    "static_src/js/yolomux/85_debug_panel.js": 7819,
+    "static_src/js/yolomux/99_terminal_boot.js": 6844,
     "yolomux_lib/app.py": 16730,
     "yolomux_lib/search/file_index.py": 4468,
     "yolomux_lib/server.py": 3077,
@@ -1341,6 +1341,60 @@
     },
     {
       "count": 2,
+      "name": "jsDebugCostAgeNextRefreshAtMs",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugCostPanelNextRefreshAtMs",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 6,
+      "name": "jsDebugGraphLastPointerType",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 3,
+      "name": "jsDebugGraphLiveTimer",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 2,
+      "name": "jsDebugGraphPendingResolutionChange",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 4,
+      "name": "jsDebugGraphRangeSliderDragging",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 3,
+      "name": "jsDebugGraphSelectionState",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 2,
+      "name": "jsDebugGraphTouchCandidateState",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 2,
+      "name": "jsDebugGraphZoomDomain",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 2,
       "name": "jsDebugRenderDragDeferred",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/85_debug_panel.js"
@@ -1349,6 +1403,36 @@
       "count": 2,
       "name": "jsDebugRenderForce",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugStatsServerPid",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugStatsServerRssBytes",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 3,
+      "name": "jsDebugStatsServerSequence",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugStatsServerStartedAt",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
+      "writer": "static_src/js/yolomux/85_debug_panel.js"
+    },
+    {
+      "count": 1,
+      "name": "jsDebugStatsServerUptimeSeconds",
+      "owner": "static_src/js/yolomux/84_debug_observation.js",
       "writer": "static_src/js/yolomux/85_debug_panel.js"
     },
     {
@@ -1473,9 +1557,15 @@
     },
     {
       "count": 1,
-      "name": "clipboardPasteBound",
+      "name": "selfUpdateAvailableTarget",
+      "owner": "static_src/js/yolomux/99_terminal_boot.js",
+      "writer": "static_src/js/yolomux/99_client_event_transport.js"
+    },
+    {
+      "count": 1,
+      "name": "tmuxSignalState",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/99_terminal_boot.js"
+      "writer": "static_src/js/yolomux/99_client_event_transport.js"
     },
     {
       "count": 1,
@@ -1490,18 +1580,6 @@
       "writer": "static_src/js/yolomux/99_terminal_boot.js"
     },
     {
-      "count": 2,
-      "name": "pendingGlobalShortcutChord",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/99_terminal_boot.js"
-    },
-    {
-      "count": 2,
-      "name": "pendingGlobalShortcutChordTimer",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/99_terminal_boot.js"
-    },
-    {
       "count": 3,
       "name": "serverVersionReloadHandled",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
@@ -1510,12 +1588,6 @@
     {
       "count": 1,
       "name": "sessions",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/99_terminal_boot.js"
-    },
-    {
-      "count": 1,
-      "name": "tmuxSignalState",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/99_terminal_boot.js"
     },
@@ -1536,6 +1608,18 @@
       "name": "yoloRulesPayload",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/99_terminal_boot.js"
+    },
+    {
+      "count": 2,
+      "name": "pendingGlobalShortcutChord",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/99_terminal_shortcuts_boot.js"
+    },
+    {
+      "count": 2,
+      "name": "pendingGlobalShortcutChordTimer",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/99_terminal_shortcuts_boot.js"
     }
   ],
   "source_text_assertions": {
@@ -1868,28 +1952,31 @@
     "validation_errors": []
   },
   "test_owner_lines": {
-    "tests/backend_health_indicator.test.js": 371,
-    "tests/browser_helpers/editor_preview_suite.js": 8708,
-    "tests/cross_surface_state.test.js": 6173,
+    "tests/backend_health_indicator.test.js": 374,
+    "tests/browser_helpers/cross_surface_quick_open_suite.js": 70,
+    "tests/browser_helpers/editor_preview_info_graph_suite.js": 72,
+    "tests/browser_helpers/editor_preview_suite.js": 8648,
+    "tests/cross_surface_state.test.js": 6115,
     "tests/diagnostic_redaction.test.js": 146,
     "tests/drop_action_result.test.js": 58,
     "tests/editor_preview_core.test.js": 4,
     "tests/editor_preview_settings.test.js": 4,
     "tests/editor_preview_tmux.test.js": 4,
-    "tests/file_surface_menu.test.js": 139,
+    "tests/file_surface_menu.test.js": 140,
     "tests/helpers/fixture_http_server.py": 161,
-    "tests/i18n_locale_registry.test.js": 267,
-    "tests/i18n_structured_message.test.js": 263,
-    "tests/layout_async.test.js": 7488,
-    "tests/layout_restore.test.js": 3813,
+    "tests/i18n_locale_registry.test.js": 270,
+    "tests/i18n_structured_message.test.js": 267,
+    "tests/layout_async.test.js": 7525,
+    "tests/layout_restore.test.js": 3926,
     "tests/open_file_missing_guard.test.js": 368,
     "tests/side_panes.test.js": 728,
-    "tests/stats_current_panel.test.js": 3098,
+    "tests/stats_current_panel.test.js": 3228,
     "tests/stats_current_ui.test.js": 2827,
     "tests/subsystems/app_darwin_memory.py": 68,
-    "tests/subsystems/browser_harness_lifecycle.py": 95,
+    "tests/subsystems/app_jobd_product.py": 82,
+    "tests/subsystems/browser_harness_lifecycle.py": 218,
     "tests/subsystems/stats_24h_http.py": 510,
-    "tests/system_health_panel.test.js": 2186,
+    "tests/system_health_panel.test.js": 2189,
     "tests/tabber.test.js": 2169,
     "tests/test_activity.py": 281,
     "tests/test_activity_summary.py": 841,
@@ -1897,7 +1984,7 @@
     "tests/test_aged_state.py": 111,
     "tests/test_agent_tui.py": 613,
     "tests/test_api_response_parent.py": 1050,
-    "tests/test_app.py": 17283,
+    "tests/test_app.py": 17213,
     "tests/test_approvald.py": 178,
     "tests/test_architecture_budgets.py": 316,
     "tests/test_atomic_file.py": 16,
@@ -1924,7 +2011,7 @@
     "tests/test_browser_finder.py": 3508,
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
-    "tests/test_browser_layout.py": 16655,
+    "tests/test_browser_layout.py": 16603,
     "tests/test_browser_ring_landing_verify.py": 783,
     "tests/test_browser_stats_coverage.py": 676,
     "tests/test_browser_stats_widen.py": 1261,
@@ -2062,7 +2149,7 @@
     "tests/test_shared_config_lock.py": 121,
     "tests/test_source_inventory.py": 32,
     "tests/test_state_services.py": 141,
-    "tests/test_static_build.py": 1584,
+    "tests/test_static_build.py": 1698,
     "tests/test_stats_current_app.py": 965,
     "tests/test_stats_current_client.py": 565,
     "tests/test_stats_current_collectors.py": 267,

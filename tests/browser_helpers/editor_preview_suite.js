@@ -34,70 +34,7 @@ const {
   finishSuite,
 } = require('./layout_test_helper');
 
-
-registerTest('YO!info prefers the normalized work graph without duplicating a shared worktree branch inventory', () => {
-  const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-  assert.ok(source.includes('function infoHasWorkGraph(info = {})'), 'YO!info recognizes a schema-valid canonical graph explicitly');
-  assert.ok(source.includes('if (!infoHasWorkGraph(info)) return [];'), 'YO!info returns no Git sources without a normalized graph');
-  assert.equal(source.includes('info?.project'), false, 'YO!info has no legacy project projection fallback');
-  assert.ok(source.includes('function infoSourceBranches(source = {})'), 'graph branches use a shared graph-native selector');
-  assert.ok(source.includes('source.workGraph\n          ? `${source.localRepositoryId}'), 'graph rows deduplicate using canonical local repository and branch IDs');
-  assert.ok(source.includes('function infoGraphTabAgentsForSource(source = {})'), 'YO!info derives tab/actor attribution from graph associations');
-  assert.ok(source.includes('workGraph.path_observations?.[id]?.git_worktree_id === worktreeId'), 'actor attribution uses canonical observation-to-worktree edges');
-});
-
-registerTest('YO!info canonical relationship records ignore conflicting legacy projections and keep an empty graph empty', () => {
-  const api = loadYolomux('', ['graph-session']);
-  const graph = {
-    version: 1,
-    generation: 7,
-    tmux_sessions: {'tmux-session:graph-session': {id: 'tmux-session:graph-session', name: 'graph-session'}},
-    tmux_windows: {'tmux-window:graph-session:0': {id: 'tmux-window:graph-session:0', tmux_session_id: 'tmux-session:graph-session', index: '0', name: 'claude'}},
-    tmux_panes: {'tmux-pane:graph-session:0.0': {id: 'tmux-pane:graph-session:0.0', tmux_window_id: 'tmux-window:graph-session:0', index: '0', target: '%graph', active: true, window_active: true}},
-    runtime_actors: {'actor:graph': {id: 'actor:graph', tmux_pane_id: 'tmux-pane:graph-session:0.0', kind: 'claude', cwd: '/canonical/right', status: 'working', path_observation_ids: ['observation:graph']}},
-    path_observations: {'observation:graph': {id: 'observation:graph', runtime_actor_id: 'actor:graph', git_worktree_id: 'worktree:graph', path: '/canonical/right', source: 'transcript', last_observed_at: 42}},
-    git_worktrees: {'worktree:graph': {id: 'worktree:graph', root: '/canonical/right', git_dir: '/canonical/right/.git', local_repository_id: 'local:graph', hosted_repository_id: 'hosted:graph', current_branch_id: 'branch:graph'}},
-    local_repositories: {'local:graph': {id: 'local:graph', common_git_dir: '/canonical/.git', local_branch_ids: ['branch:graph']}},
-    hosted_repositories: {'hosted:graph': {id: 'hosted:graph', url: 'https://github.test/canonical/right'}},
-    local_branches: {'branch:graph': {id: 'branch:graph', local_repository_id: 'local:graph', name: 'canonical-branch', subject: 'canonical subject', pull_request_ids: ['pr:80'], linear_issue_ids: ['linear:CAN-1'], pull_request_lookup_state: 'ready'}},
-    pull_requests: {'pr:80': {id: 'pr:80', hosted_repository_id: 'hosted:graph', number: 80, title: 'canonical PR', state: 'open', url: 'https://github.test/canonical/right/pull/80', linear_ids: ['CAN-1'], local_branch_ids: ['branch:graph']}},
-    linear_issues: {'linear:CAN-1': {id: 'linear:CAN-1', identifier: 'CAN-1', title: 'canonical issue', url: 'https://linear.test/CAN-1'}},
-    worktree_branch_activity: {},
-  };
-  const legacyProject = {
-    git: {root: '/legacy/wrong', branch: 'legacy-branch', other_branches: {branches: [{name: 'legacy-branch', current: true, pull_request: {number: 999, url: 'https://legacy.test/pull/999'}}]}},
-    repos: [],
-  };
-  api.setTranscriptInfoForTest('graph-session', {work_graph: graph, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
-  api.setTranscriptSessionOrderForTest(['graph-session']);
-  const records = api.infoRelationshipRecords();
-  assert.equal(records.length, 1, 'one canonical graph branch creates one relationship record');
-  const [record] = records;
-  assert.equal(record.pathKey, '/canonical/right');
-  assert.equal(record.branchKey, 'canonical-branch');
-  assert.equal(record.prNumber, 80);
-  assert.equal(record.gitWorktreeKey, 'worktree:graph');
-  assert.equal(record.localRepositoryKey, 'local:graph');
-  assert.equal(record.hostedRepositoryKey, 'hosted:graph');
-  assert.equal(JSON.stringify(records).includes('/legacy/wrong'), false, 'legacy path projection cannot leak into a graph-backed result');
-  assert.equal(JSON.stringify(records).includes('legacy-branch'), false, 'legacy branch projection cannot leak into a graph-backed result');
-  assert.equal(JSON.stringify(records).includes('#999'), false, 'legacy PR projection cannot leak into a graph-backed result');
-
-  const empty = {...graph, git_worktrees: {}, local_repositories: {}, local_branches: {}, hosted_repositories: {}, pull_requests: {}, linear_issues: {}, path_observations: {}, runtime_actors: {}, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, worktree_branch_activity: {}};
-  api.setTranscriptInfoForTest('graph-session', {work_graph: empty, project: legacyProject, window_metadata: [{git: legacyProject.git}]});
-  assert.deepStrictEqual(canonical(api.infoRelationshipRecords()), [], 'a schema-valid empty graph does not revive stale legacy rows');
-});
-
-registerTestAsync('metadata refresh retains a complete graph during lightweight payloads and rejects an older graph generation', async () => {
-  const api = loadYolomux('', ['graph-refresh']);
-  const completeGraph = {version: 1, generation: 20, tmux_sessions: {}, tmux_windows: {}, tmux_panes: {}, runtime_actors: {}, path_observations: {}, git_worktrees: {'worktree:complete': {id: 'worktree:complete', root: '/complete', local_repository_id: 'repo:complete'}}, local_repositories: {'repo:complete': {id: 'repo:complete', local_branch_ids: []}}, hosted_repositories: {}, local_branches: {}, pull_requests: {}, linear_issues: {}, worktree_branch_activity: {}};
-  await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: completeGraph, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  await api.applySessionMetadataPayloadForTest({metadata_loading: true, session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {version: 1, generation: 0, loading: true}, metadata_loading: true}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'a lightweight refresh retains the last complete canonical graph instead of reviving a legacy projection');
-  const accepted = await api.applySessionMetadataPayloadForTest({session_order: ['graph-refresh'], sessions: {'graph-refresh': {work_graph: {...completeGraph, generation: 19}, metadata_loading: false}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
-  assert.equal(accepted, false, 'a late older graph generation cannot overwrite the newer canonical session graph');
-  assert.equal(api.transcriptMetadataStateForTest().payload.sessions['graph-refresh'].work_graph.generation, 20, 'the newer graph remains active after stale delivery');
-});
+require('./editor_preview_info_graph_suite');
 
 registerTest('YO!info focus changes only select a different canonical worktree and do not mutate graph membership', () => {
   const api = loadYolomux('', ['focus-graph']);
@@ -768,7 +705,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function applyTopbarPackingSteps\(steps = \[\]\)[\s\S]*topbarPackingSyncNavigation\(steps\)[\s\S]*updateTopbarActivityStatus\(\)/.test(source) && /function syncTopbarPacking\(\)[\s\S]*const applied = \[\];[\s\S]*applyTopbarPackingSteps\(applied\)[\s\S]*while \(topbarPackingOverflows\(\) && applied\.length < topbarPackingStepOrder\.length\)[\s\S]*applied\.push\(topbarPackingStepOrder\[applied\.length\]\)/.test(source), 'topbar packing starts from the full representation on every pass, then reduces in one contiguous priority prefix');
     assert.ok(/function renderSessionButtonsMeasured\(options = \{\}\)[\s\S]*document\.querySelectorAll\('\.actions > #topbarActivity'\)\.forEach\(activity => activity\.remove\(\)\)[\s\S]*sessionButtons\.innerHTML = ''/.test(source), 'a re-render removes the phone-reparented activity control before replacing the menu subtree, preventing duplicate status balls');
     assert.ok(/function menuCommand\(label, action, options = \{\}\)[\s\S]*return \{type: 'command', label, action, \.\.\.options\};/.test(source) && /function fileSurfaceMenuItems\(\)[\s\S]*menuCommand\(itemLabel\(item\), \(\) => openFileSurfaceFromMenu\(item\), \{[\s\S]*checked:[\s\S]*targetItem:[\s\S]*\}\)/.test(source) && !/function menuCommand\(label, action, options = \{\}\)[\s\S]{0,320}command\.keepOpen/.test(source), 'checked File navigation commands close the menu by default; only actual View toggles opt into keep-open');
-    assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
+    assert.ok(/function installTopbarNavigationFitObserver\(\)[\s\S]*ResizeObserver\(\(\) => scheduleTopbarPacking\(\)\)[\s\S]*window\.addEventListener\(APP_VIEWPORT_CHANGE_EVENT, \(\) => \{[\s\S]*scheduleTopbarNavigationFitCheck\(\)/.test(source + fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8')), 'topbar packing is remeasured after both viewport and rendered-width changes instead of preserving a prior state');
     assert.ok(/nestedRoot: true[\s\S]*function openAppMenu\(wrapper, options = \{\}\)[\s\S]*app-menu--nested-root/.test(source), 'compact Menus exposes File/View/tmux/Tabs/Help first and opens their command layers only on demand');
     assert.ok(/function createAppSubmenu\(item\)[\s\S]*const compactRoot[\s\S]*app-menu--nested-root[\s\S]*app-menu-submenu-wrap\.open[\s\S]*if \(compactRoot\(\) && wrapper\.classList\.contains\(CLS\.open\)\)[\s\S]*setOpen\(false\)/.test(source), 'first-level File/View/tmux/Tabs/Help entries in compact Menus are collapsible disclosures rather than one-way popovers');
     const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
@@ -1294,7 +1231,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
-    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
     assert.ok(/function renderErrorEditor[\s\S]*fileErrorText\(state\.error/.test(editorSource), 'file error panes resolve their stored descriptor at render time');
     assert.equal(/fileErrorState\([^)]*t\(/.test(fileSource), false, 'file error state constructors do not receive translated fallback prose');
     assert.ok(/function yoagentJobNotificationTitle\([^)]*\)[\s\S]*t\('brand\.tab\.agent'\)/.test(terminalSource), 'YO!agent notifications reuse the current localized brand key');
@@ -5413,16 +5350,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.info-tree-search-control input\s*\{[\s\S]*height:\s*24px/.test(infoTreeCss), 'YO!info toolbar includes a compact search input');
     assert.ok(/\.info-tree-search-match\s*\{[\s\S]*color:\s*var\(--info-tree-search-match-text\)[\s\S]*background:\s*var\(--info-tree-search-match-bg\)/.test(infoTreeCss), 'YO!info search matches have a dedicated non-red/non-purple highlight style');
     assert.ok(/\.info-tree-sort-controls\s*\{[\s\S]*margin-inline-start:\s*auto[\s\S]*justify-content:\s*flex-end/.test(infoTreeCss), 'YO!info Sort control is right-aligned on the selector toolbar line');
-    assert.ok(/delegate\(panel, 'click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
+    assert.ok(/ownDelegate\('click', '\[data-auto-session\]\[data-action="pane-tab-auto-approve"\]'[\s\S]*toggleAutoApprove\(button\.dataset\.autoSession/.test(infoPanelSource), 'YO!info Tab(tmux session) YO marker clicks toggle YO before the surrounding tab-open handler runs');
     assert.ok(infoPanelSource.includes('data-info-search') && infoPanelSource.includes('setInfoSearch'), 'YO!info toolbar exposes a search box that filters relationship records');
     assert.ok(infoPanelSource.includes('data-info-refresh title="${esc(t(\'common.refresh\'))}"') && infoPanelSource.includes('setMetadataRefreshButtonLoading(refresh, transcriptMetadataState.loading, t(\'common.refresh\'), t(\'common.refresh\'))'), 'YO!info metadata refresh button uses the compact Refresh label');
     assert.ok(/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = idleLabel;/.test(infoSource) && !/function setMetadataRefreshButtonLoading\(button, loading, idleLabel, idleTitle\)[\s\S]*button\.textContent = loading \?/.test(infoSource), 'YO!info metadata loading keeps the Refresh button label footprint stable');
     assert.ok(infoPanelSource.includes("info-tree-order-label\">${esc(t('info.group.orderBy'))}</span>") && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render their localized Order by: label before select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
-    assert.ok(/delegate\(panel, 'click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
-    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*delegate\(panel, 'click', '\[data-info-refresh\]'[\s\S]*delegate\(panel, 'click', '\[data-info-preset\]'[\s\S]*delegate\(panel, 'click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
-    assert.ok(/panel\.addEventListener\('toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
+    assert.ok(/ownDelegate\('click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.ok(/function bindInfoPanel\(panel\)[\s\S]*bindScopedOnce\(panel, 'info-panel'[\s\S]*ownDelegate\('click', '\[data-info-refresh\]'[\s\S]*ownDelegate\('click', '\[data-info-preset\]'[\s\S]*ownDelegate\('click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
+    assert.ok(/scope\.ownEvent\('toggle', panel, 'toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
     assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(infoSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
     assert.equal(/function bindInfoColumnResizers/.test(infoSource), false, 'old YO!info table column resizer owner is removed');
     assert.equal(/dataset\.bound/.test(infoSource), false, 'YO!info column resizers do not use the dead per-handle dataset.bound guard');
@@ -6718,7 +6655,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const preferencesSource = fs.readFileSync('static_src/js/yolomux/83_preferences_panel.js', 'utf8');
     const notificationSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     const activitySource = fs.readFileSync('static_src/js/yolomux/35_agent_window_activity.js', 'utf8');
-    const autoApproveSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const autoApproveSource = [
+      'static_src/js/yolomux/99_terminal_boot.js',
+      'static_src/js/yolomux/99_client_event_transport.js',
+    ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
     const locale = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
     assert.ok(/"notify_working_attention": True,[\s\S]*"notify_working_done": False,/.test(settingsSource), 'working-to-attention notification defaults on while working-to-done defaults off');
     assert.ok(preferencesSource.includes("preferenceSettingItem('notifications.notify_working_attention', {type: 'boolean'})") && preferencesSource.includes("preferenceSettingItem('notifications.notify_working_done', {type: 'boolean'})"), 'Notifications preferences expose separate working-attention and working-done toggles');

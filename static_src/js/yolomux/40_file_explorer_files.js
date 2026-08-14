@@ -1860,9 +1860,9 @@ async function commitFileExplorerPathInput(input) {
 }
 
 function bindFileExplorerPathInput(input) {
-  if (!input || input.dataset.pathInputBound === 'true') return;
-  input.dataset.pathInputBound = 'true';
-  input.addEventListener('keydown', event => {
+  if (!input) return null;
+  return bindScopedOnce(input, 'file-explorer-path-input', scope => {
+  scope.ownEvent('keydown', input, 'keydown', event => {
     if (event.key === 'Enter') {
       event.preventDefault();
       event.stopPropagation();
@@ -1874,7 +1874,8 @@ function bindFileExplorerPathInput(input) {
       input.blur?.();
     }
   });
-  input.addEventListener('focus', () => input.select?.());
+  scope.ownEvent('focus', input, 'focus', () => input.select?.());
+  });
 }
 
 function pathIsInsideDirectory(path, root) {
@@ -3420,8 +3421,8 @@ function openFileImagePreview(anchor, path, entry, point = null, options = {}) {
 }
 
 function bindFileImagePreview(anchor, path, entry, options = {}) {
-  if (!anchor || anchor.dataset.imagePreviewBound === 'true') return;
-  anchor.dataset.imagePreviewBound = 'true';
+  if (!anchor) return null;
+  return bindScopedOnce(anchor, 'file-image-preview', scope => {
   let pointer = null;
   const updatePointer = event => {
     pointer = {x: event.clientX, y: event.clientY};
@@ -3446,11 +3447,13 @@ function bindFileImagePreview(anchor, path, entry, options = {}) {
       if (fileImagePreviewController === controller) fileImagePreviewController = null;
     },
   });
-  anchor.addEventListener('pointerenter', event => {
+  scope.ownEvent('pointerenter', anchor, 'pointerenter', event => {
     fileImagePreviewController = controller;
     updatePointer(event);
   });
-  anchor.addEventListener('pointermove', updatePointer);
+  scope.ownEvent('pointermove', anchor, 'pointermove', updatePointer);
+  return () => controller?.dispose?.();
+  });
 }
 
 function selectableFileTreeRows(container = document) {
@@ -5025,8 +5028,8 @@ function tabberNativeDragImageForRow(row) {
 
 function bindTabberSessionChrome(row, session) {
   const tab = row?.querySelector?.('.tabber-session-tab');
-  if (!tab || tab.dataset.tabberChromeBound === 'true') return;
-  tab.dataset.tabberChromeBound = 'true';
+  if (!tab) return null;
+  return bindScopedOnce(tab, 'tabber-session-chrome', scope => {
   tab.dataset.paneTab = session;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
   const state = sessionState(session, info);
@@ -5036,7 +5039,7 @@ function bindTabberSessionChrome(row, session) {
     ignore: event => Boolean(event.target.closest?.('[data-auto-session], [data-pane-tab-close], button, input, textarea, select, a')),
     dragImage: () => tabberNativeDragImageForRow(row),
   });
-  tab.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', tab, 'pointerdown', event => {
     const autoTarget = event.target.closest?.('[data-auto-session]');
     if (!autoTarget) return;
     event.preventDefault();
@@ -5048,6 +5051,7 @@ function bindTabberSessionChrome(row, session) {
       await toggleAutoApprove(autoTarget.dataset.autoSession);
       if (session === currentSessionActionTarget()) focusPanel(session);
     },
+  });
   });
 }
 
@@ -5400,15 +5404,16 @@ function scheduleTabberTreeLayoutStateSync() {
 }
 
 function bindTabberPanel(panel) {
-  if (!panel || panel.dataset.tabberBound === 'true') return;
-  panel.dataset.tabberBound = 'true';
-  panel.addEventListener('click', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'tabber-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('click', panel, 'click', event => {
     if (!itemInLayout(tabberItemId)) return;
     const row = event.target.closest?.('.file-tree-row[data-tabber-type]');
     if (!row || !panel.contains(row)) return;
     tabberTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     if (!itemInLayout(tabberItemId)) return;
     if (tabberTreeInteractionController.handleKeydown(event, panel)) return;
     if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
@@ -5419,13 +5424,13 @@ function bindTabberPanel(panel) {
     event.stopPropagation();
     openTabberSession(session);
   });
-  panel.addEventListener('change', event => {
+  scope.ownEvent('change', panel, 'change', event => {
     if (!itemInLayout(tabberItemId)) return;
     const lookback = event.target.closest?.('[data-tabber-lookback]');
     if (!lookback || !panel.contains(lookback)) return;
     setTabberSessionFileLookbackHours(lookback.value);
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     if (!itemInLayout(tabberItemId)) return;
     const tabRow = event.target.closest?.('.file-tree-row[data-tabber-type="session"], .file-tree-row[data-tabber-type="window"], .file-tree-row[data-tabber-type="tab"]');
     const tabItem = tabRow?.dataset.tabberType === 'tab' ? tabRow.dataset.tabberItem : tabRow?.dataset.tabberSession;
@@ -5445,5 +5450,6 @@ function bindTabberPanel(panel) {
     event.preventDefault();
     event.stopPropagation();
     showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+  });
   });
 }

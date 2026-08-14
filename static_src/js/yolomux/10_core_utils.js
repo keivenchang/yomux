@@ -4022,6 +4022,7 @@ function reconcilePanelBody({body, html, anchors = [], replace = null, afterRepl
   }));
   if (typeof replace === 'function') replace(body, html);
   else body.innerHTML = html;
+  normalizeAppOwnedControls(body);
   for (const {anchor, value} of captured) anchor.restore?.(body, value);
   afterReplace?.(body);
   return true;
@@ -5123,6 +5124,18 @@ function bindOnce(root, key, installer) {
   return dispose;
 }
 
+function bindScopedOnce(root, key, installer) {
+  return bindOnce(root, key, () => {
+    const scope = createLifecycleScope();
+    const uninstall = installer(scope, root);
+    return () => {
+      if (typeof uninstall === 'function') uninstall();
+      else uninstall?.dispose?.();
+      scope.dispose(`bind-once:${String(key)}`);
+    };
+  });
+}
+
 function createLifecycleScope(options = {}) {
   const resources = new Map();
   let disposed = false;
@@ -5530,14 +5543,15 @@ function showLinkContextMenu(anchor, x, y) {
 }
 
 function installLinkContextMenu(container) {
-  if (!container || container.dataset.linkContextMenuBound === '1') return;
-  container.dataset.linkContextMenuBound = '1';
-  container.addEventListener('contextmenu', event => {
-    const anchor = event.target?.closest?.('a[href]');
-    if (!anchor || !container.contains(anchor)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    showLinkContextMenu(anchor, event.clientX, event.clientY);
+  if (!container) return null;
+  return bindScopedOnce(container, 'link-context-menu', scope => {
+    scope.ownEvent('contextmenu', container, 'contextmenu', event => {
+      const anchor = event.target?.closest?.('a[href]');
+      if (!anchor || !container.contains(anchor)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      showLinkContextMenu(anchor, event.clientX, event.clientY);
+    });
   });
 }
 

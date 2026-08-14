@@ -31,124 +31,8 @@ def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch): 
 def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch): browser_harness_lifecycle.assert_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch)
 
 
-def test_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch):
-    class Driver:
-        current_url = "about:blank"
-        ring_requests = 0
-
-        def execute_script(self, source):
-            if source == "return location.origin;":
-                return "http://fixture.test"
-            if "const isArray = Array.isArray(jsDebugEvents)" in source:
-                warning = {
-                    "id": 17,
-                    "level": "warning",
-                    "message": "mock retained JS warning",
-                    "source": "browser",
-                }
-                js_debug = {
-                    "reachable": True,
-                    "isArray": True,
-                    "events": [warning],
-                    "errors": [warning],
-                    "receiptBarrier": {
-                        "epoch": "all",
-                        "accepted": 0,
-                        "pending": 0,
-                        "retrying": 0,
-                        "rejected": 0,
-                        "dropped": 0,
-                        "quiescent": True,
-                        "blocking": [],
-                    },
-                }
-                if "window.location.replace('about:blank')" in source:
-                    return {
-                        "jsDebug": js_debug,
-                        "journey": {"reachable": False, "visitedSurfaces": []},
-                    }
-                return js_debug
-            if "const state = window.__yolomuxBrowserJourneyGate" in source:
-                return {"reachable": False, "visitedSurfaces": []}
-            raise AssertionError(f"unexpected browser script: {source}")
-
-        def execute_async_script(self, source):
-            if "/api/logs" in source:
-                self.ring_requests += 1
-                raise AssertionError("generic browser teardown requested /api/logs")
-            raise AssertionError(f"unexpected async browser script: {source}")
-
-        def get_log(self, kind):
-            assert kind == "browser"
-            return [{"level": "SEVERE", "message": "mock retained Chrome failure"}]
-
-    class Node:
-        funcargs = {"browser": Driver()}
-
-    class Request:
-        node = Node()
-
-    monkeypatch.setattr(browser_layout_module, "_reset_reused_browser_state", lambda *_args, **_kwargs: None)
-    teardown = _reset_browser_state.__wrapped__(Request())
-    next(teardown)
-    with pytest.raises(AssertionError) as raised:
-        next(teardown)
-
-    assert "mock retained JS warning" in str(raised.value)
-    assert "mock retained Chrome failure" in str(raised.value)
-    assert Node.funcargs["browser"].ring_requests == 0
-
-
-def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path):
-    page = tmp_path / "browser-wait-helper.html"
-    load_static_html_fixture(
-        browser,
-        page.parent,
-        page.name,
-        page_html('<main id="ready">ready</main>'),
-    )
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[arguments.length - 1];
-        (async () => {
-          const immediate = await window.__yolomuxTestWaitFor(
-            () => document.getElementById('ready')?.textContent,
-            {description: 'immediate fixture value'}
-          );
-          let delayedValue = '';
-          setTimeout(() => { delayedValue = 'delayed-value'; }, 20);
-          const delayed = await window.__yolomuxTestWaitFor(
-            () => delayedValue,
-            {timeoutMs: 500, intervalMs: 5, description: 'delayed fixture value'}
-          );
-          let asyncAttempts = 0;
-          const asyncValue = await window.__yolomuxTestWaitFor(
-            async () => {
-              await Promise.resolve();
-              asyncAttempts += 1;
-              return asyncAttempts >= 2 ? {ready: true} : false;
-            },
-            {timeoutMs: 500, intervalMs: 5, description: 'async fixture value'}
-          );
-          let timeout = '';
-          try {
-            await window.__yolomuxTestWaitFor(
-              () => false,
-              {timeoutMs: 15, intervalMs: 4, description: 'missing fixture state'}
-            );
-          } catch (error) {
-            timeout = String(error?.message || error);
-          }
-          done({immediate, delayed, asyncValue, asyncAttempts, timeout});
-        })().catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert metrics.get("error") is None, metrics
-    assert metrics["immediate"] == "ready", metrics
-    assert metrics["delayed"] == "delayed-value", metrics
-    assert metrics["asyncValue"] == {"ready": True}, metrics
-    assert metrics["asyncAttempts"] == 2, metrics
-    assert metrics["timeout"] == "Timed out after 15ms waiting for missing fixture state", metrics
+def test_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch): browser_harness_lifecycle.assert_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch)
+def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path): browser_harness_lifecycle.assert_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path)
 
 
 def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(browser, tmp_path):
@@ -172,6 +56,70 @@ def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(bro
     )
     assert paint["scoped"] == "rgb(18, 52, 86)", paint
     assert paint["root"] in ("rgba(0, 0, 0, 0)", "transparent"), paint
+
+
+def test_classified_custom_radii_keep_computed_geometry_in_both_themes(browser, tmp_path):
+    page = tmp_path / "browser-custom-radius-parity.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html("""
+          <span id="transport" class="transport-warning" data-tip="warning"></span>
+          <div id="drag" class="app-menu-area drag-over"></div>
+          <div id="submenu" class="app-submenu-popover"></div>
+          <span id="status-inline" class="status-indicator--inline"></span>
+          <span id="status-text" class="status-indicator--text"></span>
+          <span id="status-label" class="status-indicator--label"></span>
+          <span id="agent-icon" class="agent-window-agent-icon--active"></span>
+          <div class="session-agent-window-block"><div id="session-row" class="session-agent-row"></div></div>
+          <input id="preferences-search" class="preferences-search">
+          <input id="history-search" class="search-history-input">
+          <button id="preferences-search-button" class="preferences-search-button"></button>
+          <button id="preferences-reset-all" class="preferences-reset-all"></button>
+          <button id="preferences-reset-continue" class="preferences-reset-continue"></button>
+          <button id="preferences-reset-cancel" class="preferences-reset-cancel"></button>
+          <button id="command-row" class="command-palette-row"></button>
+          <button id="tab" class="tab"></button>
+          <div id="rename-dialog" class="session-rename-dialog"></div>
+          <div class="session-rename-actions"><button id="rename-action"></button></div>
+          <div id="image-popover" class="file-image-preview-popover"></div>
+          <article id="transcript" class="transcript-item"></article>
+          <article id="conversation" class="conversation-message"></article>
+          <span id="file-date" class="file-tree-date"></span>
+        """),
+    )
+    expected = {
+        "transport": "7px", "drag": "7px", "submenu": "7px",
+        "status-inline": "5px", "status-text": "5px", "status-label": "5px",
+        "agent-icon": "5px", "session-row": "5px", "preferences-search": "5px",
+        "history-search": "5px", "preferences-search-button": "5px",
+        "preferences-reset-all": "5px", "preferences-reset-continue": "5px",
+        "preferences-reset-cancel": "5px", "command-row": "5px", "tab": "5px",
+        "rename-dialog": "7px", "rename-action": "5px", "image-popover": "7px",
+        "transcript": "5px", "conversation": "5px", "file-date": "5px",
+    }
+    snapshots = {}
+    for theme in ("dark", "light"):
+        snapshots[theme] = browser.execute_script(
+            """
+            const [theme, ids] = arguments;
+            document.body.classList.toggle('theme-dark', theme === 'dark');
+            document.body.classList.toggle('theme-light', theme === 'light');
+            return Object.fromEntries(ids.map(id => {
+              const node = document.getElementById(id);
+              const style = getComputedStyle(node, id === 'transport' ? '::after' : null);
+              const rect = node.getBoundingClientRect();
+              return [id, {radius: style.borderRadius, rect: [rect.x, rect.y, rect.width, rect.height]}];
+            }));
+            """,
+            theme,
+            list(expected),
+        )
+        assert {key: value["radius"] for key, value in snapshots[theme].items()} == expected
+    assert {key: value["rect"] for key, value in snapshots["dark"].items()} == {
+        key: value["rect"] for key, value in snapshots["light"].items()
+    }
 
 
 def test_live_runtime_bundle_readiness_has_one_ready_and_error_owner():

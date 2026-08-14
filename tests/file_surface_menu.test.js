@@ -17,6 +17,7 @@ function test(label, fn) {
 const menus = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
 const terminalFacade = fs.readFileSync('static_src/js/yolomux/98_terminal_runtime_facade.js', 'utf8');
 const terminalBoot = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const terminalShortcuts = fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
 const filePanelCss = fs.readFileSync('static_src/css/yolomux/60_editor_file_panels.css', 'utf8');
 const panel = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
@@ -53,7 +54,7 @@ test('File navigation destinations share one localized alphabetical sort owner',
 });
 
 test('Cmd/Ctrl+B delegates the triplet transaction without terminal fallback placement', () => {
-  const shortcut = terminalBoot.slice(terminalBoot.indexOf('function toggleFileExplorerShortcut()'), terminalBoot.indexOf('function handleFocusedTerminalCopyShortcut()'));
+  const shortcut = terminalShortcuts.slice(terminalShortcuts.indexOf('function toggleFileExplorerShortcut()'), terminalShortcuts.indexOf('function handleFocusedTerminalCopyShortcut()'));
   assert.match(shortcut, /typeof toggleAllFileSurfaces === 'function'\) return toggleAllFileSurfaces\(\)/);
   assert.doesNotMatch(shortcut, /applyLayoutSlots\(|selectSession\(fileExplorerItemId\)|layoutWithoutItem/);
 });

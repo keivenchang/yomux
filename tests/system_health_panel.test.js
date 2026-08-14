@@ -24,7 +24,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
+const source = [
+  'static_src/js/yolomux/84_debug_observation.js',
+  'static_src/js/yolomux/85_debug_panel.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');

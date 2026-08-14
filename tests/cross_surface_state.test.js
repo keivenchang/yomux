@@ -32,6 +32,7 @@ const {
   runSuites,
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
+const {registerCrossSurfaceQuickOpenSuite} = require('./browser_helpers/cross_surface_quick_open_suite');
 
 async function runCrossSurfaceStateSuite() {
   test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
@@ -525,7 +526,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(emptySessionRepoHtml.includes('1 repo, 0 files'), 'empty selected-tab repo still counts as a repo in the Differ summary');
     assert.ok(emptySessionRepoHtml.includes('No Differ results for this session.'), 'empty selected-tab repo explains that it has no visible file rows');
     assert.equal(changedFilesSource.includes("panel.addEventListener('dblclick', async event => {"), false, 'modified-file rows no longer require double-click to open');
-    assert.ok(/panel\.addEventListener\('click', async event => \{[\s\S]*?data-open-change-file[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'single-clicking a Differ file row routes through the shared controller');
+    assert.ok(/scope\.ownEvent\('actions-click', panel, 'click', async event => \{[\s\S]*?data-open-change-file[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'single-clicking a Differ file row routes through the shared controller');
     assert.ok(/const differTreeInteractionController = createSharedTreeInteractionController\(\{[\s\S]*selectFromClick\(row, id, event\)[\s\S]*updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)[\s\S]*activateRow\(row, event\)[\s\S]*openChangedFileInDiff/.test(changedFilesSource), 'the shared Differ controller selects first and opens the reusable diff tab unless it is a modifier-selection click');
     const compactChangeHtml = api.changesGroupsSnapshotHtmlForTest([
       {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'README.md', abs_path: '/repo/app/README.md', mtime: 100, added: 2, removed: 1},
@@ -678,7 +679,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function bindChangedFileRowBehaviors\([\s\S]*?bindFileImagePreview\(row, path/.test(changedFilesSource), 'C5: image rows get the Finder hover preview');
     assert.equal(changedFilesSource.includes('function selectChangedFileRow('), false, 'Differ no longer has bespoke single-row selected state');
     assert.equal(changedFilesSource.includes('function showChangedFileContextMenu('), false, 'Differ file rows no longer fork a safe-only context menu');
-    assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,620}panel\.addEventListener\('click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
+    assert.ok(/Single-clicks route through the shared tree controller[\s\S]{0,680}scope\.ownEvent\('tree-click', panel, 'click', event => \{[\s\S]*?const row = event\.target\.closest\('\.file-tree-row\[data-path\]'\)[\s\S]*?differTreeInteractionController\.handleClick\(event, panel, \{row\}\)/.test(changedFilesSource), 'Differ click selection routes through the shared tree controller');
     assert.ok(/selectFromClick\(row, id, event\)[\s\S]{0,180}updateFileTreeSelectionFromClick\(row, id \|\| differTreeRowPath\(row\), event\)/.test(changedFilesSource), 'Differ shared controller selection routes through the Finder selection parent');
     assert.equal(/Open file in editor|Open file in diff/.test(changedFilesSource), false, 'Differ file context menu no longer hardcodes the old labels');
     assert.ok(/async function showFileTreeContextMenu\([\s\S]*?const actionContext = \{fullPath, entry, selectedPaths, infos, primaryInfo: infos\[0\] \|\| null, menuState\};[\s\S]*?for \(const action of openInNewTabActions\)[\s\S]*?typeof action\.label === 'function'[\s\S]*?appendContextMenuButton\(menu, label \|\| t\('contextmenu\.openNewTab'\)[\s\S]*?appendContextMenuButton\(menu, t\(multiple \? 'contextmenu\.copyRelativePaths' : 'contextmenu\.copyRelativePath'\)/.test(fileExplorerSource), 'Finder/Differ file context menu lists localized Open actions first and resolves dynamic Open labels before localized Copy actions');
@@ -1690,8 +1691,8 @@ async function runCrossSurfaceStateSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('keydown'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
-    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('paste'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('keydown', container, 'keydown', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('keydown'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('paste', container, 'paste', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('paste'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -3470,7 +3471,7 @@ async function runCrossSurfaceStateSuite() {
     assert.ok(/function selectAdjacentPaneTab\(direction, options = \{\}\)[\s\S]*adjacentPaneTabPosition\(direction, options\)[\s\S]*activatePaneTab\(target\.slot, target\.item, activationOptions\)/.test(source), 'terminal/global Meta+Arrow navigation shares the pane-tab activation parent');
     assert.ok(/const paneTabShortcutDirection = terminalTmuxWindowShortcutDirection\(event\);[\s\S]*if \(paneTabShortcutDirection && globalShortcutTargetAllowsAppAction\(event\.target\)\) \{[\s\S]*selectAdjacentPaneTab\(paneTabShortcutDirection, \{userInitiated: true\}\)/.test(source), 'global Meta+Arrow handler routes Finder/Differ/Tabber focus through the same pane-tab selector');
     assert.equal(source.includes('function selectAdjacentTmuxSession('), false, 'old tmux-session-only Meta+Arrow shortcut path is removed');
-    assert.ok(source.includes("container.addEventListener('copy', event => {"), 'terminal container handles browser copy events');
+    assert.ok(source.includes("scope.ownEvent('copy', container, 'copy', event => {"), 'terminal container handles browser copy events');
     assert.ok(source.includes("event.clipboardData.setData('text/plain', selected);"), 'terminal copy-event fallback writes the xterm selection to clipboardData');
     assert.ok(source.includes('function copyTextToClipboardViaCopyEvent(text)'), 'terminal shortcut copy has a synchronous copy-event clipboard path');
     // the sync-then-async clipboard chain lives in ONE shared parent (writeTerminalTextToClipboard)
@@ -4244,66 +4245,7 @@ async function runCrossSurfaceStateSuite() {
     assert.equal(api.commandPaletteMatches(quickItem, 'xy'), true, 'file quick-open uses fuzzy matching');
   });
 
-  test('search-progress scope digest matches the server-side opaque root digest', () => {
-    const api = loadYolomux('', ['1']);
-    // Known SHA-256 test vector proves the synchronous implementation, then the 16-hex scope digest
-    // must equal yolomux_lib/search/file_index.py::_root_scope_id = sha256(canonical_root)[:16].
-    assert.equal(api.sha256HexForTest('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad', 'sha256 matches the published abc vector');
-    assert.equal(api.fileSearchScopeIdForTest('/home/keivenc/dev'), 'c41cbfc443440bf6', 'the scope digest matches the backend _root_scope_id for /home/keivenc/dev');
-    assert.equal(api.fileSearchScopeIdForTest(''), '', 'an empty realpath yields no scope digest');
-  });
-
-  test('a delta merge upserts, deletes, dedupes by realpath, and keeps roots isolated', () => {
-    const api = loadYolomux('', ['1']);
-    const start = [
-      {path: '/repo/a.md', name: 'a.md', relative_path: 'a.md', realpath: '/repo/a.md'},
-      {path: '/repo/b.md', name: 'b.md', relative_path: 'b.md', realpath: '/repo/b.md'},
-    ];
-    // An upsert REPLACES the row for its path; a delete REMOVES it; a brand-new upsert is appended.
-    const merged = api.mergeFileQuickOpenChangesForTest(start, [
-      {operation: 'delete', path: '/repo/b.md'},
-      {operation: 'upsert', path: '/repo/a.md', name: 'a.md', relative_path: 'a.md', realpath: '/repo/a.md', size: 99},
-      {operation: 'upsert', path: '/repo/c.md', name: 'c.md', relative_path: 'c.md', realpath: '/repo/c.md'},
-    ], '/repo');
-    assert.deepStrictEqual(canonical(merged.map(file => file.path)), ['/repo/a.md', '/repo/c.md'], 'delete drops b, upsert adds c, a survives');
-    assert.equal(merged.find(file => file.path === '/repo/a.md').size, 99, 'an upsert replaces the prior row for its path');
-    assert.equal(merged.every(file => file.indexed_root === '/repo'), true, 'every merged upsert is stamped with the producing root');
-
-    // Two rows resolving to the SAME realpath (symlink/mirror) fold to one after rank-and-prune.
-    const withMirror = api.mergeFileQuickOpenChangesForTest([], [
-      {operation: 'upsert', path: '/repo/x.md', realpath: '/shared/x.md', name: 'x.md', relative_path: 'x.md'},
-      {operation: 'upsert', path: '/link/x.md', realpath: '/shared/x.md', name: 'x.md', relative_path: 'x.md'},
-    ], '/repo');
-    const deduped = api.rankAndPruneFileQuickOpenCandidatesForTest(withMirror, 'x', 500);
-    assert.equal(deduped.length, 1, 'two paths sharing one realpath fold to a single candidate');
-
-    // A delete for one root cannot remove another root's identically-named-but-distinct-path row.
-    const twoRoots = api.mergeFileQuickOpenChangesForTest(
-      [{path: '/rootA/dup.md', name: 'dup.md', relative_path: 'dup.md', realpath: '/rootA/dup.md', indexed_root: '/rootA'}],
-      [{operation: 'delete', path: '/rootB/dup.md'}], '/rootB');
-    assert.deepStrictEqual(canonical(twoRoots.map(file => file.path)), ['/rootA/dup.md'], 'a delete only removes its own root\'s path');
-  });
-
-  test('a late exact-name delta can rank above earlier rows', () => {
-    const api = loadYolomux('', ['1']);
-    api.setFileQuickOpenCandidatesForTest('/repo', [
-      {path: '/repo/deep/other/t5t-notes.md', name: 't5t-notes.md', relative_path: 'deep/other/t5t-notes.md', realpath: '/repo/deep/other/t5t-notes.md'},
-    ]);
-    api.setCommandPaletteStateForTest('files', 't5t.md');
-    // A later delta publishes the exact-name file; after the merge it must rank ABOVE the earlier
-    // fuzzy row (the render path re-ranks, so a late high-rank upsert is not stuck at the bottom).
-    const merged = api.mergeFileQuickOpenChangesForTest(api.fileQuickOpenStateForTest().candidates, [
-      {operation: 'upsert', path: '/repo/t5t.md', name: 't5t.md', relative_path: 't5t.md', realpath: '/repo/t5t.md'},
-    ], '/repo');
-    api.setFileQuickOpenCandidatesForTest('/repo', merged);
-    const ranked = api.commandPaletteItems()
-      .filter(item => item.category === 'file')
-      .map(item => ({...item, score: api.commandPaletteItemScore(item, 't5t.md', {surface: 'files'})}))
-      .filter(item => Number.isFinite(item.score))
-      .sort((left, right) => right.score - left.score)
-      .map(item => item.label);
-    assert.equal(ranked[0], 't5t.md', 'the late exact-name match ranks first');
-  });
+  registerCrossSurfaceQuickOpenSuite(test);
 
   test('the redundant per-tick full re-query is retired for one delta path plus one explicit repair', () => {
     const source = fs.readFileSync('static/yolomux.js', 'utf8');

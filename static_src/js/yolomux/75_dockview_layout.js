@@ -1143,9 +1143,9 @@ function dockviewPaneChromeDragExcluded(target) {
 }
 
 function dockviewBindTabContainerContextMenu(tabsContainer, group) {
-  if (!tabsContainer || tabsContainer.__yolomuxEmptySpaceContextMenuBound) return;
-  tabsContainer.__yolomuxEmptySpaceContextMenuBound = true;
-  tabsContainer.addEventListener('contextmenu', event => {
+  if (!tabsContainer) return null;
+  return bindScopedOnce(tabsContainer, 'dockview-empty-space-context-menu', scope => {
+    scope.ownEvent('contextmenu', tabsContainer, 'contextmenu', event => {
     // Tab context menus retain their own target and inline-rename behavior. This handler owns only
     // the blank portion of a pane's Dockview tab strip, where the browser menu has no app meaning.
     if (event.target.closest('.dv-tab, .dockview-pane-tab')) return;
@@ -1155,6 +1155,7 @@ function dockviewBindTabContainerContextMenu(tabsContainer, group) {
     event.preventDefault();
     event.stopPropagation();
     showTabContextMenu(activeItem, event.clientX, event.clientY);
+    });
   });
 }
 
@@ -1171,15 +1172,15 @@ function dockviewSyncHeaderBackgroundDragSources() {
       if (!element) return;
       element.dataset.paneDragSlot = draggable ? slot : '';
       element.classList.toggle('pane-drag-source', draggable);
-      if (element.__yolomuxPaneDragBound) return;
-      element.__yolomuxPaneDragBound = true;
-      const begin = event => {
-        if (dockviewPaneChromeDragExcluded(event.target)) return;
-        const sourceSlot = element.dataset.paneDragSlot || dockviewSlotForGroupElement(group);
-        dockviewBeginPanePointerDrag(event, sourceSlot);
-      };
-      element.addEventListener('pointerdown', begin);
-      element.addEventListener('mousedown', begin);
+      bindScopedOnce(element, 'dockview-pane-drag', scope => {
+        const begin = event => {
+          if (dockviewPaneChromeDragExcluded(event.target)) return;
+          const sourceSlot = element.dataset.paneDragSlot || dockviewSlotForGroupElement(group);
+          dockviewBeginPanePointerDrag(event, sourceSlot);
+        };
+        scope.ownEvent('pointerdown', element, 'pointerdown', begin);
+        scope.ownEvent('mousedown', element, 'mousedown', begin);
+      });
     };
     syncDragSource(header);
     syncDragSource(infoBar);

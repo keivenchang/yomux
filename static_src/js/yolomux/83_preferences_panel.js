@@ -842,7 +842,10 @@ function renderPreferencesPanels(options = {}) {
       const scroller = () => body.querySelector('.preferences-scroll') || body;
       if (shouldKeepDom) {
         const pathRows = body.querySelector('.preferences-path-rows');
-        if (pathRows) pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+        if (pathRows) {
+          pathRows.innerHTML = `${preferencesPathRowsHtml()}${readOnlyMode ? `<span class="preferences-readonly">${esc(t('pref.readonly'))}</span>` : ''}`;
+          normalizeAppOwnedControls(pathRows);
+        }
       } else {
         reconcilePanelBody({
           body,

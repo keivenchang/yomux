@@ -276,16 +276,31 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
   });
 
   test('client-event pagehide disposes active and candidate streams exactly once and bfcache resumes demand', () => {
-    const api = loadYolomux('', ['1']);
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = {callback, delay, cleared: false};
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout(timer) { if (timer) timer.cleared = true; },
+    });
+    api.clearJsDebugEventsForTest();
     api.installClientEventStreamForTest();
     const active = api.clientEventTransportStateForTest().source;
     api.setEventLogTabActiveForTest('1', true);
     api.syncClientEventDemandForTest({immediate: true});
     const candidate = api.clientEventTransportStateForTest().replacementSource;
+    active.onerror();
+    const disconnectTimer = api.clientEventTransportStateForTest().disconnectTimer;
+    assert.ok(disconnectTimer, 'an active-stream error owns one disconnect watchdog before page retirement');
     for (const listener of api.windowListenersForTest('pagehide')) listener({type: 'pagehide', persisted: true});
     assert.equal(active.closeCount, 1, 'pagehide closes the active stream once');
     assert.equal(candidate.closeCount, 1, 'pagehide closes the candidate stream once');
     assert.equal(api.clientEventTransportStateForTest().source, null);
+    assert.equal(api.clientEventTransportStateForTest().disconnectTimer, null, 'pagehide restores the disconnect timer null sentinel');
+    disconnectTimer.callback();
+    assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'a disposed disconnect watchdog cannot emit the production failure diagnostic');
     for (const listener of api.windowListenersForTest('pageshow')) listener({type: 'pageshow', persisted: true});
     const resumed = api.clientEventTransportStateForTest().source;
     assert.ok(resumed && resumed !== active && resumed !== candidate, 'bfcache pageshow opens one fresh demanded stream');
@@ -2104,8 +2119,18 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.equal(api.clientEventTransportStateForTest().frame, 0, 'hidden delivery clears the frame field');
 
     api.setDocumentVisibilityForTest('visible');
+    api.queueClientPushEventForTest('noop-c', {session: '1'});
+    const replacementFrame = api.clientEventTransportStateForTest().frame;
+    frames[1].callback();
+    assert.equal(api.clientEventTransportStateForTest().frame, replacementFrame, 'a cancelled frame callback cannot clear its replacement frame');
+    assert.equal(api.clientEventTransportStateForTest().queued, 1, 'a cancelled frame callback cannot consume replacement-generation events');
+    frames[2].callback();
+    assert.equal(api.clientEventTransportStateForTest().queued, 0);
+    assert.equal(api.clientEventTransportStateForTest().frame, 0);
+
     api.installClientEventStreamForTest();
     const source = api.clientEventTransportStateForTest().source;
+    assert.equal(api.installClientEventStreamForTest(), false, 'starting an already-serving transport does not create a second stream');
     source.listeners.get('ready')[0]({data: '{}', type: 'ready', lastEventId: ''});
     assert.equal(api.clientEventTransportStateForTest().connected, true, 'ready marks the record connected');
     source.onerror();
@@ -2113,13 +2138,25 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     source.listeners.get('ping')[0]({data: '{}', type: 'ping', lastEventId: ''});
     assert.equal(api.clientEventTransportStateForTest().connected, true, 'later traffic marks the record connected again');
 
+    api.syncClientEventDemandForTest();
+    const firstDemandTimerId = api.clientEventTransportStateForTest().demandTimer;
+    api.syncClientEventDemandForTest();
+    const secondDemandTimerId = api.clientEventTransportStateForTest().demandTimer;
+    timers.find(timer => timer.id === firstDemandTimerId).callback();
+    assert.equal(api.clientEventTransportStateForTest().demandTimer, secondDemandTimerId, 'a replaced demand debounce cannot clear its replacement');
+    timers.find(timer => timer.id === secondDemandTimerId).callback();
+    assert.equal(api.clientEventTransportStateForTest().demandTimer, null, 'the current demand debounce consumes the null sentinel exactly once');
+
     const reconnectTimerStart = timers.length;
+    const clearedBeforeReconnect = clearedTimers.length;
     api.scheduleReconnectResyncForTest('visible');
     api.scheduleReconnectResyncForTest('online');
     const firstReconnectTimer = timers[reconnectTimerStart];
     const secondReconnectTimer = timers[reconnectTimerStart + 1];
-    assert.deepStrictEqual(clearedTimers, [firstReconnectTimer.id], 'replacement reconnect debounce clears the prior record timer');
+    assert.deepStrictEqual(clearedTimers.slice(clearedBeforeReconnect), [firstReconnectTimer.id], 'replacement reconnect debounce clears the prior record timer');
     assert.equal(api.clientEventTransportStateForTest().resyncTimer, secondReconnectTimer.id, 'the record owns the replacement reconnect timer');
+    firstReconnectTimer.callback();
+    assert.equal(api.clientEventTransportStateForTest().resyncTimer, secondReconnectTimer.id, 'a replaced reconnect callback cannot clear or run over the current timer');
     secondReconnectTimer.callback();
     assert.equal(api.clientEventTransportStateForTest().resyncTimer, null, 'firing consumes the reconnect timer');
     await flushAsyncWork();
@@ -2377,7 +2414,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
   });
 
   test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {
-    const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const source = fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8');
     assert.ok(/function clientEventRepairChannels\(resources = \[\]\)[\s\S]*fs_changed[\s\S]*channels\.add\('files'\)[\s\S]*event_log_changed[\s\S]*channels\.add\('events'\)[\s\S]*return channels/.test(source), 'overflow maps files/event logs to their own repair channels');
     assert.ok(/function handleClientPushEvent\(type, payload = \{\}, envelope = \{\}\)[\s\S]*repairClientEventResources\(repairResources, envelope\)[\s\S]*clientEventEnvelopeIsCurrent\(envelope, payload\)/.test(source), 'the delivered overflow metadata is consumed before stale-frame filtering');
   });
@@ -6161,7 +6198,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     // detector so a new entry point can't reintroduce a divergent leak path.
     {
       const imgSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      assert.ok(/document\.addEventListener\('paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
+      assert.ok(/scope\.ownEvent\('paste', document, 'paste', event => \{\s*if \(!dataTransferHasImagePayload\(event\.clipboardData\)\) return;[\s\S]*markdownEditorPasteTarget\(event\)/.test(imgSource), '78.6: the document paste handler claims via the shared dataTransferHasImagePayload detector before editor or terminal routing');
       assert.ok(imgSource.includes('function hasUploadableDrag(event)') && /addEventListener\('drop', event => \{\s*if \(!hasUploadableDrag\(event\)\) return;/.test(imgSource), '78.6: the file-drop handler claims via hasUploadableDrag (file OR image rich-data)');
       assert.ok(imgSource.includes('function dataTransferImageFiles(dt)') && imgSource.includes('function dataTransferHasImagePayload(dt)'), '78.6: the shared image-payload parent exists');
       assert.ok(/const files = dataTransferImageFiles\(event\.clipboardData\);[\s\S]*uploadEditorFiles\(editorTarget, files\)/.test(imgSource), '78.6: Markdown editor paste uploads through the shared image-payload extractor');
@@ -7477,7 +7514,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       assert.equal([...core.matchAll(/copyTextToClipboard\(/g)].length, 2, 'only the shared feedback parent may invoke the raw text clipboard writer');
       assert.match(files, /navigator\.clipboard\.write\(\[new ClipboardItem[\s\S]*showCopyFeedback\(/, 'image clipboard writes report through the shared feedback parent');
       assert.match(core, /function copyTerminalSelectionToClipboardEvent[\s\S]*showCopyFeedback\(/, 'the synchronous terminal copy-event path keeps activation while reporting feedback');
-      assert.match(terminalBoot, /addEventListener\('copy', event => \{\s*copyTerminalSelectionToClipboardEvent/, 'the real terminal copy listener stays on the synchronous shared path');
+      assert.match(terminalBoot, /scope\.ownEvent\('copy', container, 'copy', event => \{\s*copyTerminalSelectionToClipboardEvent/, 'the real terminal copy listener stays on the synchronous shared path');
     });
 }
 

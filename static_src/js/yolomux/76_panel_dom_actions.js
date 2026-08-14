@@ -146,7 +146,17 @@ function segmentedControlHtml(options = {}) {
   return domBuilderElementHtml(createSegmentedControl(options));
 }
 
+function normalizeAppOwnedControls(root) {
+  if (!root) return [];
+  const controls = [];
+  if (root.matches?.('button, [role="button"]')) controls.push(root);
+  controls.push(...Array.from(root.querySelectorAll?.('button, [role="button"]') || []));
+  for (const control of controls) control.classList?.add('btn-base');
+  return controls;
+}
+
 function bindActionDispatcher(parent, handlers = {}, options = {}) {
+  normalizeAppOwnedControls(parent);
   const type = options.type || 'click';
   const listenerOptions = options.listenerOptions || {};
   const listener = delegate(parent, type, options.selector || '[data-action]', async (event, target) => {

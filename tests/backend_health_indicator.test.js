@@ -25,7 +25,10 @@ const {
 
 const EN = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
 const CORE_SOURCE = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
-const BOOT_SOURCE = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+const BOOT_SOURCE = [
+  'static_src/js/yolomux/99_terminal_boot.js',
+  'static_src/js/yolomux/99_client_event_transport.js',
+].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 
 function topbarHost() {
   const host = new TestElement('', 'div');

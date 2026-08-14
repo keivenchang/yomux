@@ -877,16 +877,122 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
             assert '<div class="panel-head' not in source
 
 
+def test_framed_panel_construction_lint_tree_is_clean():
+    assert sb.lint_framed_panel_construction() == []
+
+
+def _write_synthetic_framed_panel_owner(path: Path, *, extra_source: str = "") -> None:
+    path.write_text(
+        "function renderEmptyPane() {\n  return document.createElement('article');\n}\n"
+        f"{extra_source}"
+        "function panelFrameHtml() {\n  return `<div class=\"panel-head\"></div>`;\n}\n"
+        "function createFramedPanel() {\n"
+        "  const panel = document.createElement('article');\n"
+        "  panel.innerHTML = panelFrameHtml({});\n"
+        "  bindPanelShell(panel, 'item');\n"
+        "  return panel;\n"
+        "}\n"
+        "function bindPanelShell() {}\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("parallel_body", "message"),
+    (
+        (
+            "function createParallelPanel() {\n  return document.createElement('article');\n}\n",
+            "20_parallel.js:2: raw article panel construction; use createFramedPanel()",
+        ),
+        (
+            'function createParallelPanel() {\n  return `<div class="panel-head">bad</div>`;\n}\n',
+            "20_parallel.js:2: raw panel-head construction; use createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  head.className = 'panel-head';\n}\n",
+            "20_parallel.js:2: raw panel-head construction; use createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  return panelFrameHtml({item: 'bad'});\n}\n",
+            "20_parallel.js:2: panelFrameHtml() is private to createFramedPanel()",
+        ),
+        (
+            "function createParallelPanel() {\n  bindPanelShell(panel, 'bad');\n}\n",
+            "20_parallel.js:2: bindPanelShell() is private to createFramedPanel()",
+        ),
+    ),
+)
+def test_framed_panel_construction_lint_rejects_registered_parallel_owners(monkeypatch, tmp_path, parallel_body, message):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(owner)
+    (tmp_path / "20_parallel.js").write_text(parallel_body, encoding="utf-8")
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js", "20_parallel.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [message]
+
+
+def test_framed_panel_construction_lint_rejects_raw_article_outside_owner_functions(monkeypatch, tmp_path):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(
+        owner,
+        extra_source="const strayPanel = document.createElement('article');\n",
+    )
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [
+        "static_src/js/yolomux/78_panel_shell.js:4: raw article panel construction; use createFramedPanel()"
+    ]
+
+
+def test_framed_panel_construction_lint_fails_closed_for_missing_registered_partial(monkeypatch, tmp_path):
+    owner = tmp_path / "78_panel_shell.js"
+    _write_synthetic_framed_panel_owner(owner)
+    monkeypatch.setitem(
+        sb.ASSETS,
+        "yolomux.js",
+        ["static_src/js/yolomux/78_panel_shell.js", "missing.js"],
+    )
+    monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
+
+    assert sb.lint_framed_panel_construction() == [
+        "missing.js: registered yolomux.js partial is missing; framed-panel ownership cannot be verified"
+    ]
+
+
 def test_frontend_orchestration_facade_partials_load_before_their_owners():
     parts = sb.ASSETS["yolomux.js"]
     debug_facade = "static_src/js/yolomux/84_debug_runtime_facade.js"
-    debug_owner = "static_src/js/yolomux/85_debug_panel.js"
+    debug_owners = [
+        "static_src/js/yolomux/84_debug_observation.js",
+        "static_src/js/yolomux/85_debug_panel.js",
+    ]
     terminal_facade = "static_src/js/yolomux/98_terminal_runtime_facade.js"
-    terminal_owner = "static_src/js/yolomux/99_terminal_boot.js"
-    assert parts.count(debug_facade) == parts.count(debug_owner) == 1
-    assert parts.count(terminal_facade) == parts.count(terminal_owner) == 1
-    assert parts.index(debug_facade) < parts.index(debug_owner)
-    assert parts.index(terminal_facade) < parts.index(terminal_owner)
+    terminal_owners = [
+        "static_src/js/yolomux/99_terminal_boot.js",
+        "static_src/js/yolomux/99_client_event_transport.js",
+        "static_src/js/yolomux/99_terminal_shortcuts_boot.js",
+    ]
+    assert all(parts.count(path) == 1 for path in [debug_facade, *debug_owners, terminal_facade, *terminal_owners])
+    assert [parts.index(path) for path in [debug_facade, *debug_owners]] == sorted(parts.index(path) for path in [debug_facade, *debug_owners])
+    assert [parts.index(path) for path in [terminal_facade, *terminal_owners]] == sorted(parts.index(path) for path in [terminal_facade, *terminal_owners])
+    registrations = {
+        debug_owners[0]: "registerDebugRuntimeFacade('observation'",
+        debug_owners[1]: "registerDebugRuntimeFacade('panel'",
+        terminal_owners[1]: "registerTerminalRuntimeFacade('client-events'",
+        terminal_owners[2]: "registerTerminalRuntimeFacade('shortcuts'",
+    }
+    for path, registration in registrations.items():
+        assert registration in repo_path(path).read_text(encoding="utf-8")
 
 
 def test_direct_button_construction_lint_rejects_parallel_builders(monkeypatch, tmp_path):
@@ -1017,6 +1123,14 @@ def test_repeated_semantic_declaration_set_lint_ignores_order_and_extra_properti
 def test_standard_border_radius_lint_tree_is_clean():
     assert lint_raw_standard_border_radii() == []
     assert lint_custom_border_radius_classifications() == []
+
+
+def test_custom_border_radius_inventory_stays_scoped_and_complete():
+    inventory = sb.CUSTOM_BORDER_RADIUS_CLASSIFICATIONS
+    assert len(inventory) == 19
+    assert sum(key.endswith(":5px") for key in inventory) == 14
+    assert sum(key.endswith(":7px") for key in inventory) == 5
+    assert all(reason.strip() for reason in inventory.values())
 
 
 def test_custom_border_radius_lint_rejects_unclassified_and_stale_entries(monkeypatch, tmp_path):

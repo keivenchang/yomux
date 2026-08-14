@@ -317,7 +317,13 @@ function popoverStillActive(anchor, popover) {
   );
 }
 
-function bindPopoverHover(anchor, popover, handlers) {
+function bindPopoverHover(anchor, popover, handlers, options = {}) {
+  const cleanup = [];
+  const bind = (target, type, listener) => {
+    if (!target?.addEventListener) return;
+    target.addEventListener(type, listener);
+    cleanup.push(() => target.removeEventListener(type, listener));
+  };
   const queueOpen = handlers.queueOpen || handlers.keepOpen;
   const keepOpen = handlers.keepOpen || queueOpen;
   const closeSoon = handlers.closeSoon;
@@ -328,38 +334,45 @@ function bindPopoverHover(anchor, popover, handlers) {
     closeSoon(event);
   };
 
-  anchor.addEventListener('pointerenter', event => {
-    if (browserHasCursorHover(event)) queueOpen(event);
-  });
-  anchor.addEventListener('pointerleave', closeIfOutside);
-  anchor.addEventListener('focusin', event => {
-    // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
-    // should expose a hover-only popover when no cursor is present.
-    if (anchor.matches?.(':focus-visible')) queueOpen(event);
-  });
-  anchor.addEventListener('focusout', closeIfOutside);
-  anchor.addEventListener('pointerdown', event => {
-    if (!browserHasCursorHover(event)) closeNow?.(event);
-  });
-  if (!popover) return;
-  popover.addEventListener('pointerenter', event => {
+  if (options.includeAnchor !== false) {
+    bind(anchor, 'pointerenter', event => {
+      if (browserHasCursorHover(event)) queueOpen(event);
+    });
+    bind(anchor, 'pointerleave', closeIfOutside);
+    bind(anchor, 'focusin', event => {
+      // Touching a tab may focus it, but a keyboard-visible focus is the only focus state that
+      // should expose a hover-only popover when no cursor is present.
+      if (anchor.matches?.(':focus-visible')) queueOpen(event);
+    });
+    bind(anchor, 'focusout', closeIfOutside);
+    bind(anchor, 'pointerdown', event => {
+      if (!browserHasCursorHover(event)) closeNow?.(event);
+    });
+  }
+  if (!popover) return () => cleanup.splice(0).reverse().forEach(dispose => dispose());
+  bind(popover, 'pointerenter', event => {
     if (browserHasCursorHover(event)) keepOpen(event);
   });
-  popover.addEventListener('pointerleave', closeIfOutside);
-  popover.addEventListener('click', stopPopoverEvent);
-  popover.addEventListener('dragstart', stopPopoverEvent);
+  bind(popover, 'pointerleave', closeIfOutside);
+  bind(popover, 'click', stopPopoverEvent);
+  bind(popover, 'dragstart', stopPopoverEvent);
   popover.querySelectorAll('a').forEach(link => {
-    link.addEventListener('pointerenter', event => {
+    bind(link, 'pointerenter', event => {
       if (browserHasCursorHover(event)) keepOpen(event);
     });
-    link.addEventListener('click', stopPopoverEvent);
+    bind(link, 'click', stopPopoverEvent);
   });
+  return () => cleanup.splice(0).reverse().forEach(dispose => dispose());
 }
 
 function createHoverPopover(options) {
   const anchor = options.anchor;
   if (!anchor) return null;
-  if (typeof options.onPointerMove === 'function') anchor.addEventListener('pointermove', options.onPointerMove);
+  const disposers = [];
+  if (typeof options.onPointerMove === 'function') {
+    anchor.addEventListener('pointermove', options.onPointerMove);
+    disposers.push(() => anchor.removeEventListener('pointermove', options.onPointerMove));
+  }
   const stateClass = options.stateClass === undefined ? 'popover-open' : options.stateClass;
   let showTimer = null;
   let hideTimer = null;
@@ -400,9 +413,11 @@ function createHoverPopover(options) {
     if (stateClass) anchor.classList.add(stateClass);
     markState('open');
     const activePopover = popover();
-    if (activePopover && activePopover.dataset.hoverPopoverBound !== 'true') {
-      bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
-      activePopover.dataset.hoverPopoverBound = 'true';
+    if (activePopover) {
+      const dispose = bindOnce(activePopover, 'hover-popover-child', () => (
+        bindPopoverHover(anchor, activePopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow}, {includeAnchor: false})
+      ));
+      if (dispose) disposers.push(dispose);
     }
   };
   function queueOpen(event) {
@@ -443,15 +458,30 @@ function createHoverPopover(options) {
     }, Math.max(0, delay));
   }
   const initialPopover = popover();
-  bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow});
-  if (initialPopover) initialPopover.dataset.hoverPopoverBound = 'true';
-  return {queueOpen, openNow, closeSoon, closeNow, cancelTimers};
+  disposers.push(bindPopoverHover(anchor, null, {queueOpen, keepOpen: openNow, closeSoon, closeNow}));
+  if (initialPopover) {
+    disposers.push(bindOnce(initialPopover, 'hover-popover-child', () => (
+      bindPopoverHover(anchor, initialPopover, {queueOpen, keepOpen: openNow, closeSoon, closeNow}, {includeAnchor: false})
+    )));
+  }
+  return {
+    queueOpen,
+    openNow,
+    closeSoon,
+    closeNow,
+    cancelTimers,
+    dispose() {
+      cancelTimers();
+      for (const dispose of disposers.splice(0).reverse()) dispose?.();
+    },
+  };
 }
 
 function tabInteractionControllerForApp() {
   if (tabInteractionController) return tabInteractionController;
   let touchPress = null;
   let suppressContextUntil = 0;
+  const bindings = new WeakMap();
   const cancelCurrentTouchPress = event => {
     if (!touchPress) return;
     const opened = touchPress.opened;
@@ -529,9 +559,11 @@ function tabInteractionControllerForApp() {
     const anchor = descriptor?.anchor;
     if (!anchor) return null;
     anchor.__yolomuxTabInteractionDescriptor = descriptor;
-    if (anchor.dataset?.tabInteractionBound === 'true') return {showActions: event => showActions(descriptor, event), close};
-    if (anchor.dataset) anchor.dataset.tabInteractionBound = 'true';
-    const detail = bindDetail(descriptor);
+    const existing = bindings.get(anchor);
+    if (existing) return existing;
+    let detail = null;
+    const dispose = bindScopedOnce(anchor, 'tab-interaction', scope => {
+    detail = bindDetail(descriptor);
     const cancelTouchPress = () => {
       if (!touchPress || touchPress.anchor !== anchor) return;
       cancelCurrentTouchPress();
@@ -540,7 +572,7 @@ function tabInteractionControllerForApp() {
       if (!touchPress || touchPress.anchor !== anchor) return false;
       return Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > tabTouchLongPressMoveThresholdPx;
     };
-    anchor.addEventListener('contextmenu', event => {
+    scope.ownEvent('contextmenu', anchor, 'contextmenu', event => {
       if (Date.now() < suppressContextUntil) {
         event.preventDefault();
         event.stopPropagation();
@@ -550,13 +582,13 @@ function tabInteractionControllerForApp() {
       event.stopPropagation();
       showActions(descriptor, event);
     });
-    anchor.addEventListener('keydown', event => {
+    scope.ownEvent('keydown', anchor, 'keydown', event => {
       if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
       event.preventDefault();
       event.stopPropagation();
       showActions(descriptor);
     }, true);
-    anchor.addEventListener('pointerdown', event => {
+    scope.ownEvent('pointerdown', anchor, 'pointerdown', event => {
       if (event.pointerType !== 'touch' && event.button === 0) detail?.closeNow?.(event);
       if (event.pointerType !== 'touch' || event.button !== 0) return;
       cancelTouchPress();
@@ -587,10 +619,10 @@ function tabInteractionControllerForApp() {
       }, tabTouchLongPressDelayMs);
       touchPress = record;
     }, true);
-    anchor.addEventListener('pointermove', event => {
+    scope.ownEvent('pointermove', anchor, 'pointermove', event => {
       if (event.pointerType === 'touch' && movedBeyondThreshold(event)) cancelTouchPress();
     }, true);
-    anchor.addEventListener('pointerup', event => {
+    scope.ownEvent('pointerup', anchor, 'pointerup', event => {
       if (event.pointerType !== 'touch' || !touchPress || touchPress.anchor !== anchor) return;
       const opened = touchPress.opened;
       cancelTouchPress();
@@ -598,9 +630,16 @@ function tabInteractionControllerForApp() {
       event.preventDefault();
       event.stopImmediatePropagation();
     }, true);
-    anchor.addEventListener('pointercancel', cancelTouchPress, true);
-    anchor.addEventListener('dragstart', cancelTouchPress, true);
-    return {detail, showActions: event => showActions(descriptor, event), close};
+    scope.ownEvent('pointercancel', anchor, 'pointercancel', cancelTouchPress, true);
+    scope.ownEvent('dragstart', anchor, 'dragstart', cancelTouchPress, true);
+    return () => {
+      detail?.dispose?.();
+      bindings.delete(anchor);
+    };
+    });
+    const binding = {detail, showActions: event => showActions(descriptor, event), close, dispose};
+    bindings.set(anchor, binding);
+    return binding;
   };
   tabInteractionController = {bind, close, showActions};
   return tabInteractionController;

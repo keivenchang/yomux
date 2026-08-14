@@ -550,16 +550,15 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
       input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
-  if (markdownPath && !container.dataset.mdTaskBound) {
-    container.dataset.mdTaskBound = '1';
-    container.addEventListener('change', event => {
+  if (markdownPath) {
+    bindScopedOnce(container, 'markdown-task-checkboxes', scope => scope.ownEvent('change', container, 'change', event => {
       const input = event.target?.closest?.('input[type="checkbox"].markdown-task-checkbox[data-source-line]');
       if (!input || !container.contains(input)) return;
       event.preventDefault();
       event.stopPropagation();
       const updated = updateMarkdownTaskFromPreview(container, input);
       if (!updated) input.checked = !input.checked;
-    });
+    }));
   }
 }
 
@@ -878,10 +877,9 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   if (markdownPath) {
     container.dataset.mdPath = markdownPath;
     container.dataset.basePath = dirnameOf(markdownPath);
-    if (!container.dataset.mdLinkBound) {
-      container.dataset.mdLinkBound = '1';
-      container.addEventListener('click', handleMarkdownPreviewLinkClick);
-    }
+    bindScopedOnce(container, 'markdown-preview-links', scope => (
+      scope.ownEvent('click', container, 'click', handleMarkdownPreviewLinkClick)
+    ));
   }
   if (fileEditorPreviewDisplayMode !== 'vanilla') {
     container.querySelectorAll('pre code').forEach(block => {

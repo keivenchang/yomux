@@ -1941,7 +1941,6 @@ class FileWorkspaceState {
   }
 }
 const fileWorkspaceState = new FileWorkspaceState();
-let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
 let layoutResizeState = null;
 let responsiveLayoutPruneTimer = null;

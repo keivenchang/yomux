@@ -531,9 +531,10 @@ function handleFileExplorerTreeToolbarChange(container, event) {
 }
 
 function bindFileExplorerHeaderActions(container = document) {
-  if (!container || container.dataset?.fileExplorerHeaderActionsBound === 'true') return;
-  if (container.dataset) container.dataset.fileExplorerHeaderActionsBound = 'true';
-  container.addEventListener('click', event => {
+  if (!container) return null;
+  return bindScopedOnce(container, 'file-explorer-header-actions', scope => {
+  normalizeAppOwnedControls(container);
+  scope.ownEvent('click', container, 'click', event => {
     if (handleFileExplorerTreeToolbarAction(container, event)) return;
     const action = event.target.closest('[data-file-explorer-new-file], [data-file-explorer-new-folder], [data-file-explorer-refresh], [data-file-explorer-collapse], [data-file-explorer-tree-dates], [data-file-tree-expand-collapse-all]');
     if (!action || !container.contains(action)) return;
@@ -558,8 +559,9 @@ function bindFileExplorerHeaderActions(container = document) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
     }
   });
-  container.addEventListener('change', event => {
+  scope.ownEvent('change', container, 'change', event => {
     handleFileExplorerTreeToolbarChange(container, event);
+  });
   });
 }
 

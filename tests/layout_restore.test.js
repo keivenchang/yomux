@@ -58,6 +58,7 @@ async function runLayoutRestoreSuite() {
       fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8'),
       fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/99_client_event_transport.js', 'utf8'),
     ].join('\n');
     for (const trigger of ['localeChange', 'setInfoSessionFileLookbackHours', 'createYoagentPanel', 'activateYoagentPanel', 'clearYoagentConversation', 'repairClientEventReadyChannels', "type === 'activity_summary_ready'", "type === 'yoagent_skills_changed'"]) {
       assert.ok(sources.includes(trigger), `missing activity-summary trigger coverage for ${trigger}`);
@@ -338,11 +339,118 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(events, ['install', 'dispose', 'install']);
   });
 
+  test('scoped bind-once owns listeners across double-bind, dispose, and reconstructed DOM', () => {
+    const api = loadYolomux();
+    const bind = root => api.bindScopedOnceForTest(root, 'click-owner', scope => (
+      scope.ownEvent('click', root, 'click', () => { root.clickCount = (root.clickCount || 0) + 1; })
+    ));
+    const root = new TestElement('scoped-bind-root');
+    const first = bind(root);
+    assert.strictEqual(bind(root), first);
+    assert.equal(root.listeners.get('click').length, 1);
+    root.listeners.get('click')[0]();
+    assert.equal(root.clickCount, 1);
+    assert.deepStrictEqual({...root.dataset}, {});
+    assert.equal(first(), true);
+    assert.equal(root.listeners.get('click').length, 0);
+    const reconstructed = new TestElement('scoped-bind-root');
+    bind(reconstructed);
+    assert.equal(reconstructed.listeners.get('click').length, 1);
+    assert.deepStrictEqual({...reconstructed.dataset}, {}, 'replayed DOM carries no ownership sentinel');
+  });
+
+  test('shared control normalization covers raw app buttons without replacing component classes', () => {
+    const api = loadYolomux();
+    const root = new TestElement('control-root');
+    const primary = new TestElement('primary', 'button');
+    primary.classList.add('component-action');
+    const secondary = new TestElement('secondary', 'button');
+    root.append(primary, secondary);
+    assert.equal(api.normalizeAppOwnedControlsForTest(root).length, 2);
+    assert.equal(primary.className, 'component-action btn-base');
+    assert.equal(secondary.className, 'btn-base');
+    api.normalizeAppOwnedControlsForTest(root);
+    assert.equal(primary.className, 'component-action btn-base', 'normalization is idempotent');
+  });
+
+  test('panel-body reconciliation normalizes reconstructed controls before afterReplace', () => {
+    const api = loadYolomux();
+    const body = new TestElement('reconstructed-panel-body');
+    let observed = '';
+    api.reconcilePanelBodyForTest({
+      body,
+      html: '<button>rebuilt</button>',
+      replace(root) {
+        root.children = [];
+        root.appendChild(new TestElement('rebuilt-action', 'button'));
+      },
+      afterReplace(root) { observed = root.querySelector('button').className; },
+    });
+    assert.equal(observed, 'btn-base');
+    assert.equal(body.querySelector('button').className, 'btn-base');
+  });
+
+  test('hover popovers use one child binding and dispose anchor plus child listeners', () => {
+    const api = loadYolomux();
+    const anchor = new TestElement('hover-anchor');
+    const popover = new TestElement('hover-child');
+    const controller = api.createHoverPopoverForTest({anchor, popover, showDelay: 0, hideDelay: 0});
+    assert.equal(anchor.listeners.get('pointerenter').length, 1);
+    assert.equal(popover.listeners.get('pointerenter').length, 1);
+    controller.openNow({});
+    assert.equal(popover.listeners.get('pointerenter').length, 1, 'first open reuses the initial child binding');
+    controller.dispose();
+    assert.equal(anchor.listeners.get('pointerenter').length, 0);
+    assert.equal(popover.listeners.get('pointerenter').length, 0);
+  });
+
+  test('panel popover bind-once disposal removes listeners before remount', () => {
+    const api = loadYolomux();
+    const panel = new TestElement('panel-popover-owner');
+    const zone = new TestElement('panel-popover-zone');
+    zone.classList.add('panel-popover-zone');
+    panel.appendChild(zone);
+    const first = api.bindPanelPopoverForTest(panel);
+    assert.strictEqual(api.bindPanelPopoverForTest(panel), first);
+    assert.equal(zone.listeners.get('pointerenter').length, 1);
+    first();
+    assert.equal(zone.listeners.get('pointerenter').length, 0);
+    api.bindPanelPopoverForTest(panel);
+    assert.equal(zone.listeners.get('pointerenter').length, 1);
+  });
+
+  test('legacy DOM and expando binding sentinels cannot return', () => {
+    const sources = fs.readdirSync('static_src/js/yolomux')
+      .filter(name => name.endsWith('.js'))
+      .map(name => fs.readFileSync(`static_src/js/yolomux/${name}`, 'utf8'))
+      .join('\n');
+    const retired = [
+      'mdTaskBound', 'mdLinkBound', '_yolomuxPreviewControlsBound', '__yolomuxInfoPanelBound',
+      '__yolomuxEmptySpaceContextMenuBound', '__yolomuxPaneDragBound', 'linkContextMenuBound',
+      'fileExplorerHeaderActionsBound', 'clipboardPasteBound', 'hoverPopoverBound',
+      'tabInteractionBound', 'pathInputBound', 'imagePreviewBound', 'tabberChromeBound',
+      'tabberBound', 'popoverBound', 'changesBound', 'yoagentSessionLinksBound', 'terminalHandlersBound',
+    ];
+    for (const sentinel of retired) assert.equal(sources.includes(sentinel), false, `${sentinel} stays retired`);
+    assert.equal((sources.match(/document\.createElement\(['"]button['"]\)/g) || []).length, 1, 'makeButton remains the only raw DOM button constructor');
+    const dispatcher = fs.readFileSync('static_src/js/yolomux/76_panel_dom_actions.js', 'utf8');
+    assert.match(dispatcher, /function bindActionDispatcher[\s\S]*?normalizeAppOwnedControls\(parent\)/, 'delegated action roots normalize their controls');
+  });
+
   test('frontend orchestration facades expose the registered runtime families', () => {
     const api = loadYolomux();
     const debugPanel = api.debugRuntimeFacadeForTest('panel');
     assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'createYoCostPanel', 'renderDebugPanels', 'renderYoCostPanels']);
     assert.ok(Object.values(debugPanel).every(value => typeof value === 'function'));
+    assert.deepStrictEqual(Object.keys(api.debugRuntimeFacadeForTest('observation')).sort(), [
+      'disposeJsDebugCurrentObservationLifecycle',
+      'flushJsDebugCurrentObservations',
+      'installJsDebugCurrentObservationLiveness',
+      'queueJsDebugCurrentObservation',
+      'recordJsDebugClientEventsConnectionState',
+      'recordJsDebugStatsSample',
+      'scheduleJsDebugCurrentObservationFlush',
+    ]);
 
     const mobileActions = api.terminalRuntimeFacadeForTest('mobile-accessory-actions');
     assert.deepStrictEqual(canonical(mobileActions), {
@@ -352,6 +460,8 @@ async function runLayoutRestoreSuite() {
     });
     assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('panel')).sort(), ['createPanel', 'panelControlsHtml', 'relocalizeTerminalPanelChrome']);
     assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('transport')).sort(), ['connectTerminalSocket', 'installClientEventStream', 'startSummaryStream', 'startTranscriptStream']);
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('client-events')).sort(), ['disposeClientEventTransportLifecycle', 'handleClientPushEvent', 'installClientEventStream', 'queueClientPushEvent', 'syncClientEventDemand']);
+    assert.deepStrictEqual(Object.keys(api.terminalRuntimeFacadeForTest('boot')).sort(), ['boot', 'installDevAutoReload', 'installReconnectResyncHandlers']);
   });
 
   test('migrated framed-panel binders dispose and remount one listener without DOM sentinels', () => {
@@ -429,7 +539,10 @@ async function runLayoutRestoreSuite() {
     const markdownSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
     const previewSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
     const panePopoutSource = fs.readFileSync('static_src/js/yolomux/90_pane_popout.js', 'utf8');
-    const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const terminalBootSource = [
+      fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/99_terminal_shortcuts_boot.js', 'utf8'),
+    ].join('\n');
 
     for (const key of ['hidden', 'minimized', 'expanded', 'autoClosed', 'swapped']) {
       assert.ok(layoutSource.includes(`t('layout.status.${key}'`), `layout status ${key} resolves through the active locale`);

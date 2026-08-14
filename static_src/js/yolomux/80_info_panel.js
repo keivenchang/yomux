@@ -60,35 +60,42 @@ function syncInfoTreeScrolledState(root = document) {
 }
 
 function bindInfoPanel(panel) {
-  if (!panel || panel.__yolomuxInfoPanelBound === true) return;
-  panel.__yolomuxInfoPanelBound = true;
-  const treeScroller = panel.querySelector('.info-tree-list');
-  if (treeScroller) {
-    treeScroller.addEventListener('scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
-    syncInfoTreeScrolledState(panel);
-  }
-  delegate(panel, 'click', '[data-info-refresh]', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'info-panel', scope => {
+    const treeScroller = panel.querySelector('.info-tree-list');
+    if (treeScroller) {
+      scope.ownEvent('tree-scroll', treeScroller, 'scroll', () => syncInfoTreeScrolledState(panel), {passive: true});
+      syncInfoTreeScrolledState(panel);
+    }
+    normalizeAppOwnedControls(panel);
+    let delegateIndex = 0;
+    const ownDelegate = (type, selector, handler) => {
+      const listener = delegate(panel, type, selector, handler);
+      if (listener) scope.replace(`delegate-${delegateIndex++}`, listener, value => panel.removeEventListener(type, value));
+      return listener;
+    };
+  ownDelegate('click', '[data-info-refresh]', event => {
     event.preventDefault();
     refreshTranscripts({force: true});
     refreshActivitySummary({force: true});
   });
-  delegate(panel, 'click', '[data-info-preset]', (event, button) => {
+  ownDelegate('click', '[data-info-preset]', (event, button) => {
     event.preventDefault();
     if (typeof setInfoGroupingPreset === 'function') setInfoGroupingPreset(button.dataset.infoPreset || '');
   });
-  delegate(panel, 'click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
+  ownDelegate('click', '[data-auto-session][data-action="pane-tab-auto-approve"]', async (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation?.();
     if (typeof toggleAutoApprove === 'function') await toggleAutoApprove(button.dataset.autoSession || '');
   });
-  delegate(panel, 'click', '[data-info-open-tab]', (event, button) => {
+  ownDelegate('click', '[data-info-open-tab]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const session = button.dataset.infoOpenTab || '';
     if (session) selectSession(session, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-info-open-ai-window]', (event, button) => {
+  ownDelegate('click', '[data-info-open-ai-window]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const session = button.dataset.infoOpenAiTab || '';
@@ -99,7 +106,7 @@ function bindInfoPanel(panel) {
     }
     selectSession(session, {userInitiated: true});
   });
-  delegate(panel, 'click', '[data-info-open-path]', (event, button) => {
+  ownDelegate('click', '[data-info-open-path]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
     const path = button.dataset.infoOpenPath || '';
@@ -115,7 +122,7 @@ function bindInfoPanel(panel) {
       statusErr(localizedHtml('status.expandDirectoryFailed', {error}));
     });
   });
-  panel.addEventListener('change', event => {
+  scope.ownEvent('change', panel, 'change', event => {
     const select = event.target.closest('[data-info-group-level]');
     if (select && panel.contains(select) && typeof setInfoGroupingLevel === 'function') {
       setInfoGroupingLevel(select.dataset.infoGroupLevel, select.value || '');
@@ -124,14 +131,15 @@ function bindInfoPanel(panel) {
     const sortMode = event.target.closest('[data-info-sort-mode]');
     if (sortMode && panel.contains(sortMode) && typeof setInfoSortMode === 'function') setInfoSortMode(sortMode.value || '');
   });
-  panel.addEventListener('toggle', event => {
+  scope.ownEvent('toggle', panel, 'toggle', event => {
     const details = event.target.closest?.('details[data-info-group-key]');
     if (!details || !panel.contains(details) || typeof setInfoTreeGroupCollapsed !== 'function') return;
     setInfoTreeGroupCollapsed(details.dataset.infoGroupKey || '', !details.open);
   }, true);
-  panel.addEventListener('input', event => {
+  scope.ownEvent('input', panel, 'input', event => {
     const search = event.target.closest('[data-info-search]');
     if (search && panel.contains(search) && typeof setInfoSearch === 'function') setInfoSearch(search.value || '');
+  });
   });
 }
 

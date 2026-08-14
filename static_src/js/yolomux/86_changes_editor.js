@@ -2205,9 +2205,10 @@ function openDiffRefPickerForInput(input, controls) {
 }
 
 function bindChangesPanel(panel) {
-  if (!panel || panel.dataset.changesBound === 'true') return;
-  panel.dataset.changesBound = 'true';
-  panel.addEventListener('change', event => {
+  if (!panel) return null;
+  return bindScopedOnce(panel, 'changes-panel', scope => {
+  normalizeAppOwnedControls(panel);
+  scope.ownEvent('change', panel, 'change', event => {
     if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
@@ -2224,23 +2225,23 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('input', event => {
+  scope.ownEvent('input', panel, 'input', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     refreshDiffRefToDatalist(diffRefInput.closest('[data-diff-ref-controls]'));
     renderDiffRefPopover(diffRefInput, {showAll: false});
   });
-  panel.addEventListener('focusin', event => {
+  scope.ownEvent('focusin', panel, 'focusin', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('pointerdown', event => {
+  scope.ownEvent('pointerdown', panel, 'pointerdown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-input]');
     if (!diffRefInput || !panel.contains(diffRefInput)) return;
     openDiffRefPickerForInput(diffRefInput, diffRefInput.closest('[data-diff-ref-controls]'));
   });
-  panel.addEventListener('keydown', event => {
+  scope.ownEvent('keydown', panel, 'keydown', event => {
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
     if (diffRefInput && panel.contains(diffRefInput)) {
       if (handleDiffRefPopoverKeydown(event, diffRefInput)) return;
@@ -2260,7 +2261,7 @@ function bindChangesPanel(panel) {
     }
     differTreeInteractionController.handleKeydown(event, panel);
   });
-  panel.addEventListener('click', async event => {
+  scope.ownEvent('actions-click', panel, 'click', async event => {
     if (handleFileExplorerTreeToolbarAction(panel, event)) return;
     const collapseToggle = event.target.closest('[data-session-files-collapse-toggle]');
     if (collapseToggle && panel.contains(collapseToggle)) {
@@ -2310,7 +2311,7 @@ function bindChangesPanel(panel) {
       return;
     }
   });
-  panel.addEventListener('dragstart', event => {
+  scope.ownEvent('dragstart', panel, 'dragstart', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (!fileRow || !panel.contains(fileRow)) return;
     if (!event.dataTransfer) return;
@@ -2324,18 +2325,18 @@ function bindChangesPanel(panel) {
     event.dataTransfer.setData('text/plain', path);
     startFileDragPreview(event, [path], {kind: 'file', name: basenameOf(path)});
   });
-  panel.addEventListener('dragend', () => {
+  scope.ownEvent('dragend', panel, 'dragend', () => {
     cancelDragOperationState();
   });
   // Single-clicks route through the shared tree controller. Modifier clicks keep Finder-style
   // multi-select without opening a diff; disclosure clicks toggle folders without opening files.
-  panel.addEventListener('click', event => {
+  scope.ownEvent('tree-click', panel, 'click', event => {
     if (event.__sharedTreeInteractionHandled) return;
     const row = event.target.closest('.file-tree-row[data-path]');
     if (!row || !panel.contains(row)) return;
     differTreeInteractionController.handleClick(event, panel, {row});
   });
-  panel.addEventListener('contextmenu', event => {
+  scope.ownEvent('contextmenu', panel, 'contextmenu', event => {
     const fileRow = event.target.closest('[data-open-change-file]');
     if (fileRow && panel.contains(fileRow)) {
       event.preventDefault();
@@ -2378,6 +2379,7 @@ function bindChangesPanel(panel) {
     if (!directoryRow || !panel.contains(directoryRow)) return;
     event.preventDefault();
     showChangedDirectoryContextMenu(directoryRow, event.clientX, event.clientY);
+  });
   });
 }
 
@@ -2964,9 +2966,9 @@ function activateFileExplorerSurface(item) {
 function bindFileExplorerChangesResizer(panel) {
   const handle = panel?.querySelector?.('[data-file-explorer-changes-resizer]');
   const pane = panel?.querySelector?.('.file-explorer-pane');
-  if (!handle || !pane || handle.dataset.bound === 'true') return;
-  handle.dataset.bound = 'true';
-  handle.addEventListener('pointerdown', event => {
+  if (!handle || !pane) return null;
+  return bindScopedOnce(handle, 'file-explorer-changes-resizer', scope => {
+  scope.ownEvent('pointerdown', handle, 'pointerdown', event => {
     event.preventDefault();
     event.stopPropagation();
     const pointerId = event.pointerId;
@@ -2994,6 +2996,7 @@ function bindFileExplorerChangesResizer(panel) {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', done);
     window.addEventListener('pointercancel', done);
+  });
   });
 }
 

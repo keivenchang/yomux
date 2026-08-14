@@ -1476,13 +1476,15 @@ function bindPaneFrameControls(panel, session) {
 
 function bindPanelPopover(panel) {
   const zone = panel.querySelector('.panel-popover-zone');
-  if (!zone || zone.dataset.popoverBound === 'true') return;
-  zone.dataset.popoverBound = 'true';
-  createHoverPopover({
-    anchor: zone,
-    popover: () => zone.querySelector(':scope > .session-popover'),
-    showDelay: 0,
-    hideDelay: () => popoverHideDelayMs,
+  if (!zone) return null;
+  return bindOnce(zone, 'panel-popover', () => {
+    const controller = createHoverPopover({
+      anchor: zone,
+      popover: () => zone.querySelector(':scope > .session-popover'),
+      showDelay: 0,
+      hideDelay: () => popoverHideDelayMs,
+    });
+    return () => controller?.dispose?.();
   });
 }
 

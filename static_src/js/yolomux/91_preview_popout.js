@@ -837,7 +837,6 @@ function writeFilePreviewPopoutDocument(path, previewWindow, snapshot) {
     bodyHtml: filePreviewPopoutBodyHtml(path, snapshot),
   });
   if (!written) return false;
-  doc._yolomuxPreviewControlsBound = false;
   bindFilePreviewPopoutControls(path, previewWindow);
   return true;
 }
@@ -854,27 +853,21 @@ function updateFilePreviewPopoutControls(path, previewWindow) {
 
 function bindFilePreviewPopoutControls(path, previewWindow) {
   const doc = previewWindow?.document;
-  if (!doc || doc._yolomuxPreviewControlsBound) return;
-  doc._yolomuxPreviewControlsBound = true;
+  if (!doc) return null;
   if (typeof previewWindow._yolomuxPreviewControlsCleanup === 'function') {
     previewWindow._yolomuxPreviewControlsCleanup();
   }
-  const cleanup = [];
+  const dispose = bindScopedOnce(doc, 'file-preview-popout-controls', scope => {
   const bind = (target, type, handler) => {
     if (!target?.addEventListener) return;
-    target.addEventListener(type, handler, {passive: true});
-    cleanup.push(() => target.removeEventListener?.(type, handler));
+    scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, {passive: true});
+    scope.replace('event-index', Number(scope.value('event-index') || 0) + 1);
   };
-  previewWindow._yolomuxPreviewControlsCleanup = () => {
-    while (cleanup.length) {
-      try { cleanup.pop()(); } catch (_) {}
-    }
-  };
-  doc.querySelector('[data-preview-popout-theme]')?.addEventListener('click', event => {
+  bind(doc.querySelector('[data-preview-popout-theme]'), 'click', event => {
     event.preventDefault();
     cycleEditorThemeMode({includeVanilla: true});
   });
-  doc.querySelector('.file-editor-preview-font-panel')?.addEventListener('click', event => {
+  bind(doc.querySelector('.file-editor-preview-font-panel'), 'click', event => {
     const button = event.target?.closest?.('[data-editor-preview-font-step]');
     if (!button) return;
     event.preventDefault();
@@ -904,6 +897,9 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   bind(scroller, 'scroll', syncScroll);
   bind(scroller, 'wheel', scheduleUserScrollSync);
   updateFilePreviewPopoutControls(path, previewWindow);
+  });
+  previewWindow._yolomuxPreviewControlsCleanup = dispose;
+  return dispose;
 }
 
 function updateFilePreviewPopout(path, text) {

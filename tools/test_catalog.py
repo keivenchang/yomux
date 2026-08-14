@@ -164,6 +164,8 @@ NODE_LAYOUT_FILES: Final[tuple[str, ...]] = discover_node_layout_files()
 # registered shard. Keeping them explicit makes architecture budgets recursive
 # without mistaking generic DOM helpers for assertion owners.
 NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
+    "tests/browser_helpers/cross_surface_quick_open_suite.js",
+    "tests/browser_helpers/editor_preview_info_graph_suite.js",
     "tests/browser_helpers/editor_preview_suite.js",
 )
 
@@ -173,6 +175,7 @@ NODE_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
 PYTHON_TEST_HELPER_OWNERS: Final[tuple[str, ...]] = (
     "tests/helpers/fixture_http_server.py",
     "tests/subsystems/app_darwin_memory.py",
+    "tests/subsystems/app_jobd_product.py",
     "tests/subsystems/browser_harness_lifecycle.py",
     "tests/subsystems/stats_24h_http.py",
 )
