@@ -1062,6 +1062,14 @@ def require_qualified_host(
     return qualification
 
 
+def complete_owned_writeback() -> float:
+    """Finish filesystem writeback produced by one certification owner."""
+
+    started = time.monotonic()
+    os.sync()
+    return time.monotonic() - started
+
+
 def certification_phase_requested(request: Any, *, env_name: str = LATENCY_CERTIFICATION_ENV) -> bool:
     """True only when this unit was asked for deliberately, by env flag or by explicit node id.
 
@@ -1102,10 +1110,17 @@ def certification_phase_fixture(env_name: str = LATENCY_CERTIFICATION_ENV) -> An
     """
 
     @pytest.fixture
-    def certification_phase_only(request: Any) -> dict[str, Any]:
+    def certification_phase_only(request: Any) -> Any:
         if not certification_phase_requested(request, env_name=env_name):
             pytest.skip(certification_phase_skip_reason(env_name))
-        return require_qualified_host(nodeid=request.node.nodeid, label=request.node.name)
+        qualification = require_qualified_host(nodeid=request.node.nodeid, label=request.node.name)
+        try:
+            yield qualification
+        finally:
+            # This fixture is deliberately requested first. Its finalizer therefore runs after the
+            # unit's browser, server, and tmp-path owners have retired, and completes any writeback
+            # they caused before the next certification unit qualifies the host.
+            complete_owned_writeback()
 
     return certification_phase_only
 
