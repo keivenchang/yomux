@@ -854,12 +854,13 @@ def retire_owned_processes(
         container_probe = running_test_containers()
     joined_seconds = time.monotonic() - started
     docker_unobservable = unproved(container_probe)
-    sync_seconds = latency_calibration.complete_owned_writeback()
+    sync_started = time.monotonic()
+    os.sync()
     return {
         "owner_pid": owner,
         "retired": not survivors and not container_probe["containers"] and not docker_unobservable,
         "seconds": round(joined_seconds, 6),
-        "sync_seconds": round(sync_seconds, 6),
+        "sync_seconds": round(time.monotonic() - sync_started, 6),
         "deadline_seconds": deadline_seconds,
         "expected_containers": expected_containers,
         "docker_unobservable": docker_unobservable,
