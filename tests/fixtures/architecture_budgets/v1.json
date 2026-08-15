@@ -2019,7 +2019,7 @@
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 2435,
+    "tests/test_check_runner.py": 2463,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_events.py": 410,
     "tests/test_common.py": 229,
