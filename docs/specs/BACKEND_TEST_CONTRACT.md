@@ -4,6 +4,8 @@ How backend process/browser work in YOLOmux is verified: resource ownership per 
 
 These rules exist because specific failures cost real time: parallel-only failures traced to undeclared shared resources, and retries/reconnects masking lost first deliveries. Companion: [`BACKEND_ARCHITECTURE.md`](BACKEND_ARCHITECTURE.md).
 
+Implementation status: the fixture conventions below are in use, but no executable production/test symbol named `BackendCohortManifest` or shared `cohort_id` parent exists. Until that parent lands, the manifest block is a required review record rather than a type the gate can validate; the 0.7.7 discrepancy guide records the implementation gap.
+
 ### Mandatory Work-Unit Preflight
 
 Every implementation or test slice must record the following before editing source. If any field is unknown, discovery for that field is the work; do not start a speculative repair.

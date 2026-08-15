@@ -66,7 +66,7 @@ Terminal bytes remain a direct browser-WebSocket-to-web-process-to-tmux path. Sh
 | `statsd` | Original metric observations and usage atoms, retention, derived in-memory layers, and encoded snapshot/delta products. |
 | `jobd` | Deferred or CPU-heavy typed work, bounded queues and spawn workers, coalescing, cancellation, and last-known-good materialized products. |
 | `statusd` | Shared tmux session inventory, pane classification, immutable status generations, and encoded auto-approve status bytes. |
-| `watchd` | Native filesystem watch descriptors, polling fallback, revisions, and changed-path evidence used by browser refresh and index invalidation. |
+| `watchd` | Shallow native filesystem watch descriptors, whole-configuration polling fallback after native-backend failure/unavailability, revisions, and changed-path evidence used by browser refresh and index invalidation. Per-root local/network mount partitioning is not implemented yet. |
 | `approvald` | Per-target auto-approval workers, target locks, lifecycle actions, and approved tmux input. |
 
 Services may start on demand and retire after their lease/client/work idle condition is met. Expected demand-scoped absence is not itself a failure. The service's runtime row owns that distinction; health projection must not duplicate a second rule for it.
@@ -81,7 +81,7 @@ The background owner is a role elected among web processes sharing one local `YO
 
 ## Filesystem boundaries
 
-`filesystem.list_directory()` is the shared safe listing owner. It validates the requested path through the descriptor-based access policy, filters secret or credential-blocked paths, stats direct children, applies the entry bound, sorts the result, and can omit repository enrichment. Search/index exclusion rules are separate from directory listing. A listing is one directory level; it does not recursively enumerate descendants.
+`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the current path policy and partial descriptor protections, filters secret or credential-blocked paths, stats direct children, applies the entry bound, sorts the result, and can omit repository enrichment. It does not yet pin every listed child generation from authorization through consumption; listing, recursive ZIP, diff, and indexed-search metadata remain in [`DOIT.p0.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.filesystem-descriptor-authorization.md). Search/index exclusion rules are separate from directory listing. A listing is one directory level; it does not recursively enumerate descendants.
 
 | Surface | Execution path | Current use |
 | --- | --- | --- |

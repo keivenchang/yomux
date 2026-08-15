@@ -1,6 +1,6 @@
 # Filesystem indexing interactivity target
 
-> **IMPLEMENTED, FINAL GATE PENDING.** The breadth-first Quick Open lifecycle, frontier, hot-path cadence, safety refresh, and status projection described here are landed in `yolomux_lib/search/bfs_index.py`, `file_index.py` (`INDEX_FORMAT_VERSION=5`), `search_indexer.py`, `filesystem/search.py`, and `app.py`, proven by the focused suites named in [`../DONE/2026-08/DONE.fs-interactivity.md`](../../DOIT.fs-interactivity.md) items 1-8. The final validation item (the full `python3 tools/check.py` gate plus a live dev-server restart) is not yet complete, and the feature is not released. State only what the cited mechanism and tests prove; two behaviors are still open questions and are flagged inline below (a jobd-executed mutation reaching `indexd` in a multi-server topology, and the read-path connect timeout). [`SEARCH_INDEXER.md`](SEARCH_INDEXER.md) describes the same single-writer SQLite architecture as shipped.
+> **SHIPPED IN 0.7.3.** The breadth-first Quick Open lifecycle, frontier, hot-path cadence, safety refresh, and status projection described here are implemented in `yolomux_lib/search/bfs_index.py`, `file_index.py` (`INDEX_FORMAT_VERSION=5`), `search_indexer.py`, `filesystem/search.py`, and `app.py`. The focused, gate, and release evidence is retained in [`../DONE/2026-08/DONE.fs-interactivity.md`](../DONE/2026-08/DONE.fs-interactivity.md). Two implementation caveats remain recorded inline below: a jobd-executed mutation reaching `indexd` in a multi-server topology, and the read-path connect timeout. [`SEARCH_INDEXER.md`](SEARCH_INDEXER.md) describes the same single-writer SQLite architecture.
 
 ## User outcome
 
@@ -31,7 +31,7 @@ The queue entry is one bounded typed record with at least `root`, `directory`, `
 For one dequeued directory, the worker must:
 
 1. Revalidate that the root is still configured, the generation is current, the canonical directory remains beneath the root, and the shared exclusion/symlink policy permits background traversal.
-2. List only that directory with the existing descriptor-based path authorization and configured entry/file limits.
+2. List only that directory with the existing path policy, partial descriptor protections, and configured entry/file limits. The current implementation does not yet retain an authorized descriptor generation through every listing/index metadata consumer; that security gap belongs to [`DOIT.p0.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.filesystem-descriptor-authorization.md).
 3. Publish file rows and directory metadata for that directory in one bounded transaction; publish removals or renames from the previous directory snapshot in the same generation.
 4. Enqueue eligible child directories at `depth + 1` without opening them.
 5. Check cancellation and yield to higher-priority work before taking another frontier item.
@@ -75,7 +75,7 @@ Persisted state must distinguish configuration/policy signature, active generati
 
 ## Bounds and path policy
 
-- Preserve the existing single-writer database fence, per-root build lock, tombstone behavior, descriptor-based authorization, exclusion signature, `index_max_files`, persistence byte/file limits, and network-filesystem rejection.
+- Preserve the existing single-writer database fence, per-root build lock, tombstone behavior, current path policy and partial descriptor protections, exclusion signature, `index_max_files`, persistence byte/file limits, and network-filesystem rejection. Do not claim full descriptor-generation authorization until the P0 consumer matrix passes.
 - Bound frontier entries, retries, per-directory entries, transaction rows/bytes, total indexed entries, and concurrent directory scans. Report truncation explicitly instead of presenting incomplete coverage as full.
 - Apply one shared exclusion and symlink predicate to startup, hot repair, breadth expansion, and safety refresh. A symlink root covers only its resolved subtree; discovered links cannot escape the configured root or create cycles.
 - Treat permission failures, disappearing paths, rename races, and transient I/O errors as per-directory outcomes. They must not discard the last-known-good root snapshot or wedge later frontier work.

@@ -1,6 +1,6 @@
 # API response contract
 
-> **STATUS: 0.7.1 design, not current implementation.** Every route must comply before the version freezes. On the current release line, `/api/session-files` is the only browser-visible route using the complete `202` receipt → terminal SSE → retained `200` result pattern. Forced session metadata still builds synchronously, activity-summary callers can wait on a shared `Future`, and `Route.normal_session_local_service` is only a test-inventory marker. This design replaces those blocking handlers and the remaining ad-hoc status/error shapes; do not cite it as evidence that they are already gone.
+> **STATUS: PARTIALLY IMPLEMENTED CONTRACT.** `QueuedDeliveryLedger` now persists accepted operations, `GET /api/operations/{id}` and `POST /api/operations/ack` provide status/acknowledgment, the shared `/api/client-events` stream publishes and replays `operation_terminal`, and session/filesystem product paths use that machinery. The route catalog does not yet enforce this envelope for every JSON route: forced session metadata still builds synchronously, `Route.normal_session_local_service` remains a test-inventory marker, and the legacy activity-summary route is disabled with typed `503 feature_disabled` until its asynchronous replacement lands. Qualified browser observations are durably uploaded through `POST /api/stats-observations`, but the aggregated failure-query endpoint below does not exist. Treat the envelope, route-wide timing bound, and diagnostic query as target contract, not evidence of global conformance; current gaps are inventoried in [`V0.7.7_IMPLEMENTATION_DISCREPANCIES.md`](V0.7.7_IMPLEMENTATION_DISCREPANCIES.md).
 
 ## Why this exists
 
@@ -99,13 +99,13 @@ Speculative operations declare themselves (`speculative: true`) and their failur
 
 ### 8. Client-side failures are persisted server-side
 
-The browser posts its error records to an ingest endpoint. Client errors currently live only in `jsDebugEvents` in page memory and are lost on reload — which is why a reported error panel could never be correlated with anything afterwards.
+The browser posts qualified error and lifecycle observations through `POST /api/stats-observations`. `jsDebugEvents` remains a bounded page-local diagnostic ring, but it is no longer the only record: accepted observations are retained through the current YO!stats storage path and survive a page reload.
 
 Ingest is best-effort and must never itself produce a user-visible error.
 
 ## Diagnostics surface
 
-One authenticated endpoint, available in production and test:
+Target contract, not a current route: one authenticated endpoint available in production and test:
 
 ```
 GET /api/diagnostics/failures?since=<ts>&limit=100
@@ -128,4 +128,4 @@ Each guard must be proven to fail: break the contract deliberately, confirm red,
 
 ## Migration
 
-The envelope lands first as an additive wrapper so existing clients keep working; routes convert in batches with the conformance guard allowlisting unconverted ones, and the allowlist must shrink to zero before 0.7.1 freezes. Rule 2 (`queued` only when schedulable) and rule 5 (typed errors) are the highest-value first steps — they close the two defect classes that produced hangs.
+The additive accepted-operation parent has landed so existing clients can migrate without a flag day. Route conversion, the route-derived conformance guard, and the aggregated diagnostic query remain incomplete; the 0.7.7 discrepancy guide keeps those gaps separate from already-shipped receipt/status/replay and browser-observation plumbing. Rule 2 (`queued` only when schedulable) and rule 5 (typed errors) remain the highest-value migration checks because they close the two defect classes that produced hangs.

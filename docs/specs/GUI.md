@@ -31,16 +31,16 @@ Section order follows the reading path: capabilities and terms, layout and tab m
 - [x] Code editor shortcuts include save, find, replace, go-to-line, comment toggle, indent/outdent, undo/redo, and editor back/forward.
 - [x] Inline git blame can annotate the current caret line, with an option to annotate all lines.
 - [x] Editor themes include dark/light mode switching, separate dark/light scheme defaults, caret style, and caret color.
-- [ ] Partial: pinned-tab behavior is per browser profile through local storage, not yet a shareable URL or server-side preference.
+- Tracked gap: pinned-tab behavior is per browser profile through local storage, not yet a shareable URL or server-side preference. Persistence ownership is in [`DOIT.p2.layout-render-reconciliation.md`](../../queues/backlog/DOIT.p2.layout-render-reconciliation.md).
 - [x] Generic and Vertical Side Pane roles are explicit, and tab placement is capability-based. Finder/Differ/Tabber remain Vertical-Side-only, ordinary tabs remain Generic-only, and YO!info/YO!stats/YO!agent/YO!chat/YO!cost may move or be adopted across the role boundary; edge position alone never changes a pane's role.
 - [x] Identity-only changes, including tmux-session and file-path renames, preserve the complete pane topology: split tree, pane role, tab membership, active tab, and pane sizes may not change except for the renamed item ID.
-- [ ] Partial: preview/edit interactions are implemented for Markdown task checkboxes, not for every possible rendered widget.
-- [ ] Keyboard-only tab reordering and pane splitting are not implemented.
-- [ ] Multi-root project workspaces are represented through Finder roots and companion directories, not a full workspace model.
-- [ ] Extension/plugin APIs for editor behavior are not implemented.
-- [ ] Integrated source-control side panels are partial: Differ and inline blame exist, but a full branch/commit workbench is not implemented.
-- [ ] Problems/debug/test runner panels are not implemented as first-class workbench panels.
-- [ ] Terminal/profile management is tmux-session based, not a full shell-profile workbench.
+- Current product boundary: rendered Preview editing is limited to explicitly supported controls such as Markdown task checkboxes; arbitrary rendered widgets are not implicitly editable.
+- Tracked gap: keyboard-only tab reordering and pane splitting are not implemented. Keyboard ownership is in [`DOIT.p2.layout-render-reconciliation.md`](../../queues/backlog/DOIT.p2.layout-render-reconciliation.md).
+- Current product boundary: Finder roots and companion directories represent multiple roots; a full project-workspace model is not planned without a separately approved queue.
+- Decision pending: editor extension/plugin APIs are not implemented. The dependency and extension-boundary decision belongs to [`DOIT.p2.js-framework.md`](../../queues/backlog/DOIT.p2.js-framework.md).
+- Current product boundary: Differ and inline blame provide the supported source-control surfaces; a full branch/commit workbench is not planned without a separately approved queue.
+- Current product boundary: problems, debugger, and test-runner panels are not first-class workbench panels and are not planned without a separately approved queue.
+- Current product boundary: terminal and launch configuration remains tmux-session based; a full shell-profile workbench is not planned without a separately approved queue.
 
 ## Terms
 
