@@ -171,6 +171,25 @@ def list_tmux_session_names() -> tuple[list[str], str | None]:
     return sorted(set(sessions), key=session_sort_key), None
 
 
+def list_tmux_session_activity() -> tuple[dict[str, int], str | None]:
+    """Read every session's last tmux activity timestamp in one subprocess."""
+
+    fmt = "\t".join(("#{session_name}", "#{session_activity}"))
+    result = tmux(["list-sessions", "-F", fmt], timeout=3.0)
+    if result.returncode != 0:
+        return {}, cmd_error(result, "tmux list-sessions failed")
+    activity: dict[str, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2 or not parts[0].strip():
+            continue
+        try:
+            activity[parts[0].strip()] = int(parts[1])
+        except ValueError:
+            continue
+    return activity, None
+
+
 def tmux_session_names() -> list[str]:
     sessions, error = list_tmux_session_names()
     return [] if error else sessions

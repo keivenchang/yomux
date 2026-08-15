@@ -3894,12 +3894,25 @@ function jsDebugCurrentStatsStreamEvidence() {
   };
 }
 
+function commitJsDebugCurrentStatsPaint() {
+  const key = String(jsDebugCurrentStatsClientState.pendingGenerationKey || '');
+  if (!key) return '';
+  jsDebugCurrentStatsClientState.paintedGenerationKey = key;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+  return key;
+}
+
 function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true} = {}) {
   if (!snapshot || !jsDebugStatsPanelVisible()) return false;
   const key = jsDebugCurrentStatsGenerationKey(snapshot);
-  if (key && key === jsDebugCurrentStatsClientState.paintedGenerationKey) return false;
-  applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
-  jsDebugCurrentStatsClientState.paintedGenerationKey = key;
+  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) return false;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = key;
+  try {
+    applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
+  } catch (error) {
+    if (jsDebugCurrentStatsClientState.pendingGenerationKey === key) jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+    throw error;
+  }
   return true;
 }
 
@@ -6570,6 +6583,7 @@ function renderYoCostPanels({force = false} = {}) {
     rendered = true;
   }
   if (!rendered) return false;
+  commitJsDebugCurrentStatsPaint();
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
   jsDebugCostAgeNextRefreshAtMs = nowMs + delayMs;
@@ -6870,7 +6884,11 @@ function flushDeferredDebugGraphRefresh(graph) {
 }
 
 function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
-  if (!graph || jsDebugGraphRangeSliderDragging) return false;
+  if (!graph) return false;
+  if (jsDebugGraphRangeSliderDragging) {
+    graph.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
+  }
   if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel, .js-yocost-panel'))) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
@@ -6904,6 +6922,8 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName();
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
+    commitJsDebugCurrentStatsPaint();
+    graph.dataset.jsDebugStatsGenerationKey = String(jsDebugCurrentStatsClientState.paintedGenerationKey || '');
     delete graph.dataset.jsDebugGraphRefreshPending;
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
     resolveDebugGraphResolutionChange(jsDebugHistoryReadiness, {painted: true});

@@ -62,6 +62,29 @@ def test_tmux_command_uses_configured_socket(monkeypatch):
     assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yolomux-test-tmux.sock", "list-sessions"]
 
 
+def test_list_tmux_session_activity_reads_the_roster_in_one_bulk_call(monkeypatch):
+    calls = []
+
+    def fake_tmux(args, timeout):
+        calls.append((args, timeout))
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="active\t123\ncold\t45\ninvalid\tnot-a-timestamp\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(tmux_utils, "tmux", fake_tmux)
+
+    activity, error = tmux_utils.list_tmux_session_activity()
+
+    assert activity == {"active": 123, "cold": 45}
+    assert error is None
+    assert calls == [
+        (["list-sessions", "-F", "#{session_name}\t#{session_activity}"], 3.0),
+    ]
+
+
 def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
     monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
     monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)

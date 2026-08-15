@@ -2062,17 +2062,19 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
     return {committed: false, superseded: true, transaction, metadata: null};
   }
   let payload;
-  let committed = false;
+  let requestSucceeded = false;
+  let clientCommitted = false;
   let failure = null;
   try {
     payload = await request(transaction);
+    requestSucceeded = true;
     if (tmuxSessionLifecycleMutationIsCurrent(transaction)) {
       commitTmuxSessionLifecycleMutation(transaction, {
         session: payload?.session || options?.session,
         newName: payload?.new_session || options?.newName,
       });
+      clientCommitted = true;
       await commit(payload, transaction);
-      committed = true;
     }
   } catch (error) {
     // Only a PRE-commit failure may roll back. Past the commit there is a real session on the
@@ -2085,7 +2087,17 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
     failure = error;
   }
   const metadata = await refreshTmuxSessionMutationState();
-  if (committed) return {committed: true, transaction, payload, metadata};
+  if (requestSucceeded) {
+    return {
+      committed: true,
+      clientCommitted,
+      superseded: !clientCommitted,
+      transaction,
+      payload,
+      metadata,
+      ...(failure ? {error: failure} : {}),
+    };
+  }
   return {committed: false, superseded: true, transaction, payload, metadata, ...(failure ? {error: failure} : {})};
 }
 
@@ -2243,11 +2255,14 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, option
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {
+  const layoutOptions = {
     focusSession: newSession,
     prune: false,
-    completionGeneration: options.completionGeneration,
-  });
+  };
+  if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
+    layoutOptions.completionGeneration = options.completionGeneration;
+  }
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), layoutOptions);
   renderUploadResult(newSession);
 }
 
@@ -2353,7 +2368,7 @@ async function renameTmuxSession(session, proposedName) {
         replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
         await Promise.all([
           waitForLayoutMutationCompletion(layoutGeneration),
-          ensureTerminalRunning(renamed),
+          promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
       },
     );
@@ -2361,7 +2376,19 @@ async function renameTmuxSession(session, proposedName) {
     const renamed = mutation.payload.new_session || newName;
     closeSessionRenameDialog();
     renderAutoApproveButtons();
-    statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
+    if (mutation.error) {
+      const message = `${t('common.renamed', {oldName: session, newName: renamed})} — ${mutation.error.message || String(mutation.error)}`;
+      showLayoutStatus(message, 'advisory');
+      recordJsDebugEvent('client_failure', {
+        failure: 'session_rename_client_convergence',
+        message,
+        reason: String(mutation.error.code || mutation.error.name || 'client_convergence_failed'),
+        session,
+        renamed,
+      });
+    } else {
+      statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
+    }
     return true;
   } catch (error) {
     const errorText = error?.status

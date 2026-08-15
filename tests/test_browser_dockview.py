@@ -4366,6 +4366,52 @@ def test_dockview_rename_dialog_survives_fresh_roster_then_stale_socket_close(br
     assert "55" not in metrics["inactive"], metrics
 
 
+def test_dockview_successful_rename_closes_dialog_after_generationless_render_merge(browser, tmp_path):
+    load_dockview_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=5,6&layout=left&tabs=left:5,6",
+        sessions=["5", "6"],
+        available_agents=["term"],
+    )
+    wait_for_dockview(browser, min_tabs=2)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+        (async () => {
+          renameTmuxSession('5');
+          await wait(0);
+          const input = document.querySelector('.session-rename-input');
+          const form = document.querySelector('.session-rename-dialog');
+          if (!input || !form) throw new Error('rename dialog did not open');
+          dragState.item = 'rename-render-hold';
+          input.value = '55';
+          form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
+          for (let index = 0; index < 50 && !paneTabs('left').includes('55'); index += 1) await wait(10);
+          applyLayoutSlots(layoutSlots);
+          const mergedGeneration = pendingLayoutRender?.options?.completionGeneration ?? null;
+          endSessionDrag({});
+          for (let index = 0; index < 100 && document.querySelector('.session-rename-dialog'); index += 1) await wait(20);
+          done({
+            tabs: paneTabs('left'),
+            mergedGeneration,
+            dialogOpen: Boolean(document.querySelector('.session-rename-dialog')),
+            dialogError: document.querySelector('.session-rename-error')?.textContent || '',
+            status: document.querySelector('#status')?.textContent || '',
+            mutation: runtimeState.layoutMutationSnapshot(),
+          });
+        })().catch(error => done({error: String(error && error.stack || error)}));
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["tabs"] == ["55", "6"], metrics
+    assert metrics["dialogOpen"] is False, metrics
+    assert metrics["dialogError"] == "", metrics
+    assert "renamed" in metrics["status"], metrics
+    assert metrics["mutation"]["completed"] == metrics["mutation"]["generation"], metrics
+
+
 def test_dockview_rename_dialog_surfaces_canonicalized_name_collision(browser, tmp_path):
     load_dockview_runtime_boot_fixture(
         browser,

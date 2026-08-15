@@ -11,6 +11,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TypeAlias
 
+from ..polling_policy import quiet_poll_interval
 from . import browser_family
 
 
@@ -61,7 +62,13 @@ class FamilySpec:
     def cadence_seconds(self, *, watched: bool) -> float | None:
         """Return the real collection cadence; ``None`` means event-driven."""
 
-        return self.active_cadence_seconds if watched else self.idle_cadence_seconds
+        if self.active_cadence_seconds is None or self.idle_cadence_seconds is None:
+            return None
+        return quiet_poll_interval(
+            self.active_cadence_seconds,
+            self.idle_cadence_seconds,
+            0.0 if watched else 1.0,
+        )
 
     def validate_payload(self, payload: object) -> Mapping[str, object]:
         """Validate one original payload without aggregating or rewriting it."""

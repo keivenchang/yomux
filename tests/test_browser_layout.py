@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from tests.helpers.browser_scenarios import assert_terminal_wheel_observation, terminal_wheel_observation
 from tests.helpers.journey_phases import JourneySentinel, STATS_LOGS_PHASES, YOCHAT_PHASES
+from tests.helpers.terminal_navigation import assert_terminal_navigation_ack_semantics
+from tests.helpers.terminal_navigation import terminal_navigation_ack_metrics
 from tests.helpers.agent_status_fixtures import agent_status_glyph_html as _agent_status_glyph_html
 from tests.helpers.agent_status_fixtures import tabber_window_button_html as _tabber_window_button_html
 from tests.helpers.agent_status_fixtures import working_agent_glyph_html as _working_agent_glyph_html
@@ -9281,158 +9283,8 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
 
 
 def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_or_fails(browser, tmp_path):
-    load_live_runtime_boot_fixture(
-        browser,
-        tmp_path,
-        "?sessions=1,2&layout=slot1&tabs=slot1:1",
-        sessions=["1", "2"],
-    )
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            "return typeof selectSession === 'function' && typeof tmuxWindow === 'function' && document.querySelector('#panel-1 .terminal .xterm')"
-        )
-    )
-    ownership = claim_fixture_client_event_demand(browser)
-    assert ownership["bound"]["sourceOrigin"] == ownership["bound"]["pageOrigin"]
-    metrics = browser.execute_async_script(
-        """
-        const done = arguments[0];
-        (async () => {
-          const originalEnsureSession = ensureSession;
-          const originalEnsureTerminalRunning = ensureTerminalRunning;
-          const originalUpdatePanelSlot = updatePanelSlot;
-          const originalRenderAutoApproveButtons = renderAutoApproveButtons;
-          const originalUpdatePanelInactiveOverlays = updatePanelInactiveOverlays;
-          const originalApiFetchJson = apiFetchJson;
-          const originalFetch = window.fetch;
-          try {
-            const topologyCounts = {
-              slotUpdates: {},
-              autoApproveRenders: 0,
-              inactiveOverlayReconciliations: 0,
-              terminalStarts: {},
-            };
-            updatePanelSlot = (panel, session, slot) => {
-              topologyCounts.slotUpdates[session] = (topologyCounts.slotUpdates[session] || 0) + 1;
-              return originalUpdatePanelSlot(panel, session, slot);
-            };
-            renderAutoApproveButtons = () => {
-              topologyCounts.autoApproveRenders += 1;
-              return originalRenderAutoApproveButtons();
-            };
-            updatePanelInactiveOverlays = () => {
-              topologyCounts.inactiveOverlayReconciliations += 1;
-              return originalUpdatePanelInactiveOverlays();
-            };
-            ensureTerminalRunning = session => {
-              topologyCounts.terminalStarts[session] = (topologyCounts.terminalStarts[session] || 0) + 1;
-              return originalEnsureTerminalRunning(session);
-            };
-            let resolveEnsure;
-            ensureSession = () => new Promise(resolve => { resolveEnsure = resolve; });
-            transcriptMetadataState.loaded = false;
-            if (transcriptMetadataState.payload?.sessions) delete transcriptMetadataState.payload.sessions['2'];
-            const tabStarted = performance.now();
-            void selectSession('2', {userInitiated: true});
-            const tabState = document.querySelector('#term-2 [data-terminal-connection-state]');
-            const tabAck = {
-              elapsedMs: performance.now() - tabStarted,
-              visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
-              state: tabState?.dataset.terminalConnectionState || '',
-            };
-            await new Promise(resolve => requestAnimationFrame(resolve));
-            const tabFrameState = document.querySelector('#term-2 [data-terminal-connection-state]');
-            const tabFrameAck = {
-              visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
-              state: tabFrameState?.dataset.terminalConnectionState || '',
-            };
-            const topologyTransactionCounts = structuredClone(topologyCounts);
-            resolveEnsure(false);
-            await window.__yolomuxTestWaitFor(
-              () => document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]'),
-              {timeoutMs: 2000, intervalMs: 20, description: 'cold tmux unavailable state'}
-            );
-            const unavailable = document.querySelector('#term-2 [data-terminal-connection-state="unavailable"]');
-            const failedTab = {
-              stillVisible: activeSessions.includes('2'),
-              retry: Boolean(unavailable?.querySelector('[data-terminal-connection-retry]')),
-            };
-
-            activatePaneTab(slotForItem('1'), '1', {userInitiated: true});
-            let rejectWindow;
-            apiFetchJson = (url, options) => String(url).startsWith('/api/tmux-window?')
-              ? new Promise((_resolve, reject) => { rejectWindow = reject; })
-              : originalApiFetchJson(url, options);
-            const windowStarted = performance.now();
-            tmuxWindow('1', {windowIndex: 2}, 'window 2');
-            const switching = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
-            const windowAck = {
-              elapsedMs: performance.now() - windowStarted,
-              state: switching?.dataset.terminalConnectionState || '',
-              dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
-            };
-            await new Promise(resolve => requestAnimationFrame(resolve));
-            const windowFrameState = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
-            const windowFrameAck = {
-              state: windowFrameState?.dataset.terminalConnectionState || '',
-              dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
-            };
-            rejectWindow(new Error('switch failed'));
-            await window.__yolomuxTestWaitFor(
-              () => !document.querySelector('#term-1 [data-terminal-connection-state="switching"]'),
-              {timeoutMs: 2000, intervalMs: 20, description: 'failed tmux switch rollback'}
-            );
-            window.fetch = () => Promise.reject(new TypeError('server unavailable'));
-            await Promise.allSettled([apiFetch('/api/test-a'), apiFetch('/api/test-b'), apiFetch('/api/test-c')]);
-            const degraded = document.querySelector('[data-backend-health="unresponsive"]');
-            window.fetch = () => Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
-            await apiFetch('/api/test-recovery');
-            return {
-              tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck, topologyTransactionCounts,
-              windowCleared: !terminalConnectionStateNode('1'),
-              // Permanently-mounted control (GUI.md invariant): healthy is data-backend-health="" on the
-              // same node, never its absence. "cleared" therefore means recovered to the empty/inert state.
-              backendHealth: {shown: Boolean(degraded), cleared: document.querySelector('[data-backend-health]')?.dataset.backendHealth === ''},
-            };
-          } finally {
-            ensureSession = originalEnsureSession;
-            ensureTerminalRunning = originalEnsureTerminalRunning;
-            updatePanelSlot = originalUpdatePanelSlot;
-            renderAutoApproveButtons = originalRenderAutoApproveButtons;
-            updatePanelInactiveOverlays = originalUpdatePanelInactiveOverlays;
-            apiFetchJson = originalApiFetchJson;
-            window.fetch = originalFetch;
-          }
-        })().then(done).catch(error => done({error: String(error?.stack || error)}));
-        """
-    )
-    assert "error" not in metrics, metrics
-    expected_api_errors = consume_only_expected_js_debug_api_errors(
-        browser,
-        tuple(
-            {"path": f"/api/test-{suffix}", "method": "GET", "query": {}, "error": "server unavailable"}
-            for suffix in ("a", "b", "c")
-        ),
-    )
-    assert len(expected_api_errors) == 3, metrics
-    assert metrics["tabAck"]["elapsedMs"] <= 50, metrics
-    assert metrics["tabAck"]["visible"] is True, metrics
-    assert metrics["tabAck"]["state"] == "connecting", metrics
-    assert metrics["tabFrameAck"] == {"visible": True, "state": "connecting"}, metrics
-    assert metrics["topologyTransactionCounts"] == {
-        "slotUpdates": {"2": 1},
-        "autoApproveRenders": 1,
-        "inactiveOverlayReconciliations": 1,
-        "terminalStarts": {"2": 1},
-    }, metrics
-    assert metrics["failedTab"] == {"stillVisible": True, "retry": True}, metrics
-    assert metrics["windowAck"]["elapsedMs"] <= 50, metrics
-    assert metrics["windowAck"]["state"] == "switching", metrics
-    assert metrics["windowAck"]["dimmed"] is True, metrics
-    assert metrics["windowFrameAck"] == {"state": "switching", "dimmed": True}, metrics
-    assert metrics["windowCleared"] is True, metrics
-    assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
-    assert_fixture_client_event_demand_claimed(browser)
+    metrics = terminal_navigation_ack_metrics(browser, tmp_path)
+    assert_terminal_navigation_ack_semantics(metrics)
 
 
 TMUX_WINDOW_SWITCH_FIXTURE_PANES = [
@@ -9485,6 +9337,87 @@ TMUX_WINDOW_SWITCH_TEST_PRELUDE = """
       document.body.insertAdjacentHTML('beforeend', tmuxWindowBarHtml('1', transcriptMetadataState.payload.sessions['1']));
     };
 """
+
+
+def test_tmux_window_strip_survives_last_window_signal_patch(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=strip-repro&layout=slot1&tabs=slot1:strip-repro",
+        sessions=["strip-repro"],
+        transcript_sessions={
+            "strip-repro": {
+                "panes": [
+                    {
+                        "target": "strip-repro:0.0",
+                        "window": "0",
+                        "pane": "0",
+                        "window_name": "claude",
+                        "window_active": True,
+                        "active": True,
+                        "process_label": "claude",
+                        "command": "claude",
+                    }
+                ]
+            }
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof applyTmuxSignalsPayload === 'function'"
+            " && typeof tmuxWindowBarHtml === 'function'"
+            " && transcriptMetadataState.payload.sessions?.['strip-repro']?.panes?.length === 1"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const session = 'strip-repro';
+        const info = transcriptMetadataState.payload.sessions[session];
+        const host = document.createElement('div');
+        host.id = 'strip-repro-host';
+        document.body.appendChild(host);
+        applyTmuxSignalsPayload({data: {
+          ok: true,
+          sessions: {[session]: {windows: [`${session}:0`], activity_ts: 1723670000}},
+          windows: [{
+            key: `${session}:0`,
+            session,
+            window_index: '0',
+            window_name: 'claude',
+            active: true,
+            panes: [{target: `${session}:0.0`, pane_id: `${session}:0.0`, pane_index: '0', active: true, current_command: 'claude'}],
+          }],
+        }});
+        host.innerHTML = tmuxWindowBarHtml(session, info, {infoBar: true});
+        const beforeStrip = Boolean(host.querySelector('[data-tmux-window-bar="strip-repro"]'));
+        applyTmuxSignalsPayload({data: {
+          patch: true,
+          collection: 'windows',
+          changes: {},
+          removed_keys: [`${session}:0`],
+          fields: {ok: true, removed_window_keys: [`${session}:0`], window_count: 0},
+          removed_fields: [],
+        }});
+        host.innerHTML = tmuxWindowBarHtml(session, info, {infoBar: true});
+        return {
+          beforeStrip,
+          afterStrip: Boolean(host.querySelector('[data-tmux-window-bar="strip-repro"]')),
+          buttonText: host.querySelector('[data-window-index="0"]')?.textContent || '',
+          sessionRecord: tmuxSignalState.sessions[session],
+          windows: tmuxSignalState.windows,
+          fallbackPaneCount: info.panes.length,
+          renderedHtml: host.innerHTML,
+          renderDiagnostics: jsDebugEvents.filter(event => event.type === 'render_diagnostic'),
+        };
+        """
+    )
+    assert metrics["beforeStrip"] is True, metrics
+    assert metrics["sessionRecord"] == {"windows": ["strip-repro:0"], "activity_ts": 1723670000}, metrics
+    assert metrics["windows"] == [], metrics
+    assert metrics["fallbackPaneCount"] == 1, metrics
+    assert metrics["afterStrip"] is True, metrics
+    assert "claude" in metrics["buttonText"], metrics
+    assert metrics["renderDiagnostics"] == [], metrics
 
 
 def assert_opaque_switch_mask(mask, label_fragment=None):

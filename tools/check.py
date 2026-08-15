@@ -110,6 +110,7 @@ CERTIFICATION_NODE_IDS = (
     "tests/test_gate_tmux.py::test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
     "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
     "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
+    "tests/test_gate_interaction.py::test_i3c_certification_terminal_navigation_ack_holds_the_fixed_ceiling",
     "tests/test_chat_store.py::test_chat_store_operation_wall_latency_certification",
     "tests/test_gate_stats_range.py::test_stats_24h_http_wall_latency_certification",
     "tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
@@ -207,16 +208,15 @@ def check_cpu_percent(cpu_percent: int | None = None) -> int:
     """Fraction of host CPUs the pytest pools may claim, 1-100.
 
     Precedence: explicit --cpu-percent, then YOLOMUX_CHECK_CPU_PERCENT, then
-    the platform default. Linux takes every core; macOS defaults to half
-    because Chrome trees plus Defender/Spotlight scanning of temporary
-    profiles double the effective per-worker cost there.
+    the shared-box default. Half the host remains available for live servers,
+    browsers, and agent work while the three pytest pools share the rest.
     """
     raw = str(cpu_percent) if cpu_percent is not None else os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "").strip()
     if raw:
         if not raw.isdigit() or not 1 <= int(raw) <= 100:
             raise ValueError("CPU percent must be an integer 1-100")
         return int(raw)
-    return 50 if platform.system() == "Darwin" else 100
+    return 50
 
 
 def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None) -> tuple[str, str, str]:
@@ -1204,7 +1204,7 @@ def main(argv: list[str] | None = None) -> int:
     lane_names = [lane.name for lane in available]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", action="store_true", help="run lanes one at a time instead of in parallel")
-    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 100 on Linux, 50 on macOS; env YOLOMUX_CHECK_CPU_PERCENT)")
+    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 50; env YOLOMUX_CHECK_CPU_PERCENT)")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")

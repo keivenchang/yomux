@@ -3023,9 +3023,7 @@ function tmuxSignalWindowsForSession(session) {
 function tmuxSignalSnapshotAuthoritativeForSession(session) {
   const sessionText = String(session || '').trim();
   if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
-  const sessionRecords = tmuxSignalState.sessions;
-  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
-    || tmuxSignalWindowsForSession(sessionText).length > 0;
+  return tmuxSignalWindowsForSession(sessionText).length > 0;
 }
 
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
@@ -4688,22 +4686,18 @@ function fileQuickOpenOpenFolderItem() {
   };
 }
 
-function fileQuickOpenStrictExternalIndexedQuery(query = commandPaletteSearchQuery()) {
-  const text = String(query || '').trim();
-  if (!text || text.includes('/') || text.startsWith('~')) return false;
-  return /[.]/.test(text);
-}
-
 function fileQuickOpenExternalIndexedMatchAllowed(file, query = commandPaletteSearchQuery()) {
-  if (!fileQuickOpenStrictExternalIndexedQuery(query)) return true;
+  const text = String(query || '').trim();
+  if (!text || text.includes('/') || text.startsWith('~')) return true;
   const path = String(file?.path || '');
   const basename = String(file?.name || basenameOf(path));
   const stem = basename.includes('.') ? basename.slice(0, basename.lastIndexOf('.')) : basename;
-  const needle = fuzzyCanonicalPrefixText(query);
-  if (!needle) return true;
-  return [basename, stem]
-    .map(fuzzyCanonicalPrefixText)
-    .some(value => value && (value.startsWith(needle) || value.includes(needle)));
+  const relativeSegments = String(file?.relative_path || '').split('/').filter(Boolean);
+  // External roots can be very long (for example an iCloud container path). Let the fuzzy matcher
+  // work within a filename or one relative-path segment, but never assemble one apparent match from
+  // isolated characters spread across unrelated directories and the indexed-root prefix.
+  return [basename, stem, ...relativeSegments]
+    .some(value => Number.isFinite(fuzzySubsequenceScore(text, value)));
 }
 
 function fileQuickOpenItems() {
@@ -5068,7 +5062,7 @@ function commandPaletteStatusHtml() {
 function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
-      <span class="command-palette-group">${esc(item.group)}</span>
+      <span class="command-palette-group" title="${esc(item.group)}">${esc(item.group)}</span>
       <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="chip-base command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
@@ -6819,25 +6813,59 @@ function layoutRenderRequest(request = {}) {
   };
 }
 
-function completeLayoutMutationGeneration(value) {
-  const generation = Number(value);
-  if (!runtimeState.completeLayoutMutation(generation)) return;
-  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+function layoutCompletionGeneration(...values) {
+  return values.reduce((highest, value) => {
+    const generation = Number(value);
+    return Number.isSafeInteger(generation) && generation > highest ? generation : highest;
+  }, 0);
 }
 
-function waitForLayoutMutationCompletion(value) {
+function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= 0
-      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+  const accepted = runtimeState.completeLayoutMutation(generation);
+  const detail = {
+    generation: Number.isSafeInteger(generation) ? generation : 0,
+    accepted,
+    reason: accepted ? 'completed' : Number.isSafeInteger(generation) ? 'already_settled' : 'invalid_generation',
+  };
+  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail}));
+  return detail;
+}
+
+const layoutMutationCompletionDeadlineMs = 5000;
+
+function layoutMutationCompletionError(generation, reason) {
+  const error = new Error(`layout mutation ${generation} was not completed: ${reason}`);
+  error.name = 'LayoutMutationCompletionError';
+  error.code = 'layout_mutation_not_completed';
+  error.generation = generation;
+  error.reason = reason;
+  return error;
+}
+
+function waitForLayoutMutationCompletion(value, options = {}) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0) {
+    return Promise.reject(layoutMutationCompletionError(generation, 'invalid_generation'));
+  }
+  if (runtimeState.layoutMutationCompletedGeneration >= generation) {
     return Promise.resolve(generation);
   }
-  return new Promise(resolve => {
-    const complete = event => {
+  let complete = null;
+  const completion = new Promise((resolve, reject) => {
+    complete = event => {
       if (Number(event?.detail?.generation || 0) < generation) return;
-      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      if (event?.detail?.accepted === false && Number(event.detail.generation) === generation) {
+        reject(layoutMutationCompletionError(generation, String(event.detail.reason || 'refused')));
+        return;
+      }
       resolve(generation);
     };
     window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || layoutMutationCompletionDeadlineMs);
+  return promiseWithDeadline(completion, timeoutMs, `layout mutation ${generation}`).finally(() => {
+    if (complete) window.removeEventListener('yolomux:layout-mutation-complete', complete);
   });
 }
 
@@ -6852,11 +6880,18 @@ function beginLayoutMutationCompletion(state = null) {
 
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
+  const options = {...current.options, ...next.options};
+  const completionGeneration = layoutCompletionGeneration(
+    current.options.completionGeneration,
+    next.options.completionGeneration,
+  );
+  if (completionGeneration > 0) options.completionGeneration = completionGeneration;
+  else delete options.completionGeneration;
   return layoutRenderRequest({
     previousActive: current.previousActive,
     prevShape: current.prevShape,
     nextShape: next.nextShape || current.nextShape,
-    options: {...current.options, ...next.options},
+    options,
     reason: [current.reason, next.reason].filter(Boolean).join('+'),
     forceFull: current.forceFull || next.forceFull,
   });

@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from ..polling_policy import quiet_poll_interval
+
 AUTO_APPROVE_QUIET_RAMP_SECONDS = 60.0
 AUTO_APPROVE_QUIET_MAX_INTERVAL_SECONDS = 4.0
 AUTO_APPROVE_QUIET_JITTER_SECONDS = 0.5
@@ -19,5 +21,4 @@ def auto_approve_quiet_poll_interval(base_interval: float, quiet_seconds: float,
     base = max(0.0, float(base_interval))
     cap = max(base, AUTO_APPROVE_QUIET_MAX_INTERVAL_SECONDS)
     ramp = min(max(0.0, float(quiet_seconds)) / AUTO_APPROVE_QUIET_RAMP_SECONDS, 1.0)
-    interval = base + ramp * (cap - base)
-    return max(base, interval + float(jitter_seconds))
+    return quiet_poll_interval(base, cap, ramp, jitter_seconds)

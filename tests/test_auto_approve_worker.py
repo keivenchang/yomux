@@ -5,8 +5,11 @@ import pytest
 
 
 from yolomux_lib import auto_approve_worker
+from yolomux_lib import polling_policy
+from yolomux_lib.approval import auto_approve_policy as auto_approve_policy_module
 from yolomux_lib.auto_approve_policy import auto_approve_poll_is_quiet
 from yolomux_lib.auto_approve_policy import auto_approve_quiet_poll_interval
+from yolomux_lib.stats_current import families as stats_families
 
 
 @pytest.fixture(autouse=True)
@@ -136,6 +139,13 @@ def test_quiet_polling_requires_static_non_working_screen_and_caps_at_four_secon
     assert auto_approve_quiet_poll_interval(0.5, 30, 0) == pytest.approx(2.25)
     assert auto_approve_quiet_poll_interval(0.5, 60, -0.5) == pytest.approx(3.5)
     assert auto_approve_quiet_poll_interval(0.5, 60, 0.5) == pytest.approx(4.5)
+
+
+def test_auto_approve_and_stats_cadence_share_one_quiet_interval_parent():
+    assert auto_approve_policy_module.quiet_poll_interval is polling_policy.quiet_poll_interval
+    assert stats_families.quiet_poll_interval is polling_policy.quiet_poll_interval
+    assert stats_families.FAMILY_BY_NAME["agent_status"].cadence_seconds(watched=True) == 10
+    assert stats_families.FAMILY_BY_NAME["agent_status"].cadence_seconds(watched=False) == 60
 
 
 def test_recurring_work_status_counts_action_no_change_and_failure_without_target_details():
