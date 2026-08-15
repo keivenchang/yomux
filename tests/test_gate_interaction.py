@@ -16,6 +16,9 @@ from tests.browser_helpers.browser_layout import wait_for_dockview_pointer_targe
 from tests.browser_helpers.browser_layout import wait_for_dockview_tab_geometry
 from tests.gate_harness import assert_computed_style
 from tests.gate_harness import run_when_browser_ready
+from tests.helpers.terminal_navigation import TERMINAL_NAVIGATION_ACK_CEILING_MS
+from tests.helpers.terminal_navigation import assert_terminal_navigation_ack_semantics
+from tests.helpers.terminal_navigation import terminal_navigation_ack_metrics
 from tests.latency_calibration import CALIBRATION_ADMISSION_MS
 from tests.latency_calibration import CALIBRATION_REFERENCE_MS
 from tests.latency_calibration import NOT_CERTIFIABLE
@@ -437,6 +440,24 @@ def test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling(certific
         qualification=merged_qualification(certification_phase_only, browser_calibration_qualification(calibration)),
         statistic="max",
         extra_evidence={"sample_count": I3_DRAG_SAMPLE_COUNT, "transitions": observed["transitions"]},
+    )
+
+
+def test_i3c_certification_terminal_navigation_ack_holds_the_fixed_ceiling(certification_phase_only, browser, tmp_path, request):
+    """Certify immediate tab/window acknowledgement against the fixed 50 ms ceiling."""
+
+    calibration = run_browser_latency_calibration(browser)
+    metrics = terminal_navigation_ack_metrics(browser, tmp_path)
+    assert_terminal_navigation_ack_semantics(metrics)
+    samples = [float(metrics[owner]["elapsedMs"]) for owner in ("tabAck", "windowAck")]
+    assert_fixed_ceiling(
+        nodeid=request.node.nodeid,
+        label="I3c terminal_navigation_ack",
+        raw_measured_ms=max(samples),
+        ceiling_ms=TERMINAL_NAVIGATION_ACK_CEILING_MS,
+        qualification=merged_qualification(certification_phase_only, browser_calibration_qualification(calibration)),
+        statistic="max",
+        extra_evidence={"sample_count": len(samples), "samples_ms": samples, "metrics": metrics},
     )
 
 

@@ -2002,6 +2002,36 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload["session_order"] == ["new"]
     assert payload["sessions"] == {"new": {"target": "new"}}
+
+
+def test_auto_approve_status_reuses_cached_quiet_session_payloads(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["active", "cold"], status_service_mode=True)
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["active", "cold"], None))
+    monkeypatch.setattr(app_module, "discover_status_sessions", lambda sessions: ({}, []))
+    captured = []
+
+    def session_status(session, **_kwargs):
+        captured.append(session)
+        return {"target": session, "revision": 2}
+
+    monkeypatch.setattr(webapp, "auto_approve_session_status", session_status)
+    try:
+        payload, status = webapp.build_auto_approve_status(
+            sync_workers=False,
+            session_payload_cache={"cold": {"target": "cold", "revision": 1}},
+            capture_sessions={"active"},
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert captured == ["active"]
+    assert payload["sessions"] == {
+        "active": {"target": "active", "revision": 2},
+        "cold": {"target": "cold", "revision": 1},
+    }
+
+
 def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
     monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")

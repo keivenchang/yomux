@@ -41,7 +41,7 @@ class FakeStatusApp:
     def __init__(self, sessions, **_kwargs):
         self.sessions = list(sessions)
 
-    def build_auto_approve_status(self, *, timings, sync_workers):
+    def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
         assert sync_workers is False
         FakeStatusApp.builds += 1
         if FakeStatusApp.fail:
@@ -61,7 +61,7 @@ class RosterStatusApp(FakeStatusApp):
     gate: Event | None = None
     entered: Event | None = None
 
-    def build_auto_approve_status(self, *, timings, sync_workers):
+    def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
         assert sync_workers is False
         FakeStatusApp.builds += 1
         timings["discover_sessions"] = 0.0
@@ -430,6 +430,67 @@ def test_statusd_rebuilds_after_max_age_without_bumping_an_unchanged_snapshot(mo
         service.lock.notify_all()
 
 
+def test_statusd_cold_session_uses_slow_capture_tier_and_activity_promotes_immediately(monkeypatch, tmp_path):
+    wall = [200_000.0]
+    monotonic = [1_000.0]
+    activity = {"cold": int(wall[0] - 90_000)}
+    captured: list[set[str]] = []
+
+    class CadenceStatusApp(FakeStatusApp):
+        revision = 0
+
+        def build_auto_approve_status(
+            self,
+            *,
+            timings,
+            sync_workers,
+            session_payload_cache=None,
+            capture_sessions=None,
+        ):
+            assert sync_workers is False
+            selected = set(self.sessions if capture_sessions is None else capture_sessions)
+            captured.append(selected)
+            cached = dict(session_payload_cache or {})
+            sessions = {}
+            for name in self.sessions:
+                if name in selected or name not in cached:
+                    CadenceStatusApp.revision += 1
+                    sessions[name] = {"session": name, "revision": CadenceStatusApp.revision}
+                else:
+                    sessions[name] = dict(cached[name])
+            return {"session_order": list(self.sessions), "sessions": sessions, "errors": [], "rules": {}}, 200
+
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", CadenceStatusApp)
+    service = statusd.PersistentStatusService(
+        tmp_path / "statusd.sock",
+        wall_clock=lambda: wall[0],
+        monotonic=lambda: monotonic[0],
+        session_activity_reader=lambda: (dict(activity), None),
+        session_jitter=lambda _lower, _upper: 0.0,
+    )
+
+    service._build(("cold",))
+    assert captured[-1] == {"cold"}
+    assert service.session_capture_due_at["cold"] - monotonic[0] == pytest.approx(
+        statusd.STATUSD_SESSION_COLD_INTERVAL_SECONDS
+    )
+
+    monotonic[0] += statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+    wall[0] += statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+    service._build(("cold",))
+    assert captured[-1] == set(), "cold session was captured again on the fast reconciliation tick"
+
+    activity["cold"] = int(wall[0] + 1)
+    wall[0] += 1
+    monotonic[0] += 1
+    service._build(("cold",))
+    assert captured[-1] == {"cold"}, "new tmux activity waited for the old cold-session deadline"
+    assert service.status()["session_capture_promotions"] == 1
+    assert service.session_capture_due_at["cold"] - monotonic[0] == pytest.approx(
+        statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+    )
+
+
 def _find_claude_case(case_name):
     for case in root_inventory_cases():
         data = case["data"]
@@ -494,6 +555,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
                 StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
                 body,
             )
+            service.session_capture_due_at[session] = 0.0
 
         refresh_completed = Event()
         real_build = service._build
@@ -608,6 +670,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
         with service.lock:
             metadata, body = service.snapshot
             service.snapshot = (StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0), body)
+            service.session_capture_due_at[session] = 0.0
         idle_response, idle_payload = snapshot()
         assert idle_response["generation"] > working_response["generation"]
         idle_rows = identity_rows(idle_payload)
@@ -638,7 +701,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
         shutil.rmtree(socket_path.parent, ignore_errors=True)
 def test_statusd_snapshot_body_carries_the_metadata_generation_for_full_and_session_reads(monkeypatch, tmp_path):
     class SessionStatusApp(FakeStatusApp):
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             timings["discover_sessions"] = 0.0
             return {"session_order": list(self.sessions), "sessions": {"1": {"agent_windows": []}}, "errors": [], "rules": {}}, 200
@@ -700,7 +763,7 @@ def test_statusd_slow_refresh_serves_retained_snapshot_without_waiting(monkeypat
     class BlockingStatusApp(FakeStatusApp):
         builds = 0
 
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             BlockingStatusApp.builds += 1
             if BlockingStatusApp.builds == 2:
@@ -754,7 +817,7 @@ def test_statusd_invalidate_during_build_forces_followup_generation(monkeypatch,
     class InvalidatedBuildStatusApp(FakeStatusApp):
         builds = 0
 
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             InvalidatedBuildStatusApp.builds += 1
             if InvalidatedBuildStatusApp.builds == 2:
@@ -817,7 +880,7 @@ def test_statusd_divergent_snapshot_build_never_misses_rpc_deadline(monkeypatch,
     class BlockingStatusApp(FakeStatusApp):
         builds = 0
 
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             BlockingStatusApp.builds += 1
             if BlockingStatusApp.builds == 2:
@@ -905,7 +968,7 @@ class DivergentRosterBarrierApp(FakeStatusApp):
     entered: dict[tuple[str, ...], Event] = {}
     built: list[tuple[str, ...]] = []
 
-    def build_auto_approve_status(self, *, timings, sync_workers):
+    def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
         assert sync_workers is False
         roster = tuple(self.sessions)
         DivergentRosterBarrierApp.built.append(roster)
@@ -1094,7 +1157,7 @@ def test_statusd_first_snapshot_schedules_build_without_missing_rpc_deadline(mon
     release_build = Event()
 
     class BlockingFirstStatusApp(FakeStatusApp):
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             build_started.set()
             assert release_build.wait(timeout=5)

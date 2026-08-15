@@ -2632,6 +2632,26 @@ function applyApiRequestIdHeader(url, requestOptions) {
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
 
+function promiseDeadlineError(deadlineMs, subject = 'operation') {
+  const error = new Error(`${String(subject || 'operation')} exceeded its ${Math.round(deadlineMs)}ms deadline`);
+  error.name = 'ClientDeadlineError';
+  error.code = 'client_deadline_expired';
+  error.timeoutMs = deadlineMs;
+  error.subject = String(subject || 'operation');
+  return error;
+}
+
+function promiseWithDeadline(promise, deadlineMs, subject = 'operation') {
+  const boundedMs = Math.max(1, Number(deadlineMs) || 1);
+  let timer = null;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(promiseDeadlineError(boundedMs, subject)), boundedMs);
+  });
+  return Promise.race([Promise.resolve(promise), deadline]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
+
 function apiFetchDeadlineMs(url, options = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'deadlineMs')) {
     const override = Number(options.deadlineMs);
@@ -12109,9 +12129,7 @@ function tmuxSignalWindowsForSession(session) {
 function tmuxSignalSnapshotAuthoritativeForSession(session) {
   const sessionText = String(session || '').trim();
   if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
-  const sessionRecords = tmuxSignalState.sessions;
-  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
-    || tmuxSignalWindowsForSession(sessionText).length > 0;
+  return tmuxSignalWindowsForSession(sessionText).length > 0;
 }
 
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
@@ -15905,25 +15923,59 @@ function layoutRenderRequest(request = {}) {
   };
 }
 
-function completeLayoutMutationGeneration(value) {
-  const generation = Number(value);
-  if (!runtimeState.completeLayoutMutation(generation)) return;
-  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+function layoutCompletionGeneration(...values) {
+  return values.reduce((highest, value) => {
+    const generation = Number(value);
+    return Number.isSafeInteger(generation) && generation > highest ? generation : highest;
+  }, 0);
 }
 
-function waitForLayoutMutationCompletion(value) {
+function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= 0
-      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+  const accepted = runtimeState.completeLayoutMutation(generation);
+  const detail = {
+    generation: Number.isSafeInteger(generation) ? generation : 0,
+    accepted,
+    reason: accepted ? 'completed' : Number.isSafeInteger(generation) ? 'already_settled' : 'invalid_generation',
+  };
+  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail}));
+  return detail;
+}
+
+const layoutMutationCompletionDeadlineMs = 5000;
+
+function layoutMutationCompletionError(generation, reason) {
+  const error = new Error(`layout mutation ${generation} was not completed: ${reason}`);
+  error.name = 'LayoutMutationCompletionError';
+  error.code = 'layout_mutation_not_completed';
+  error.generation = generation;
+  error.reason = reason;
+  return error;
+}
+
+function waitForLayoutMutationCompletion(value, options = {}) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0) {
+    return Promise.reject(layoutMutationCompletionError(generation, 'invalid_generation'));
+  }
+  if (runtimeState.layoutMutationCompletedGeneration >= generation) {
     return Promise.resolve(generation);
   }
-  return new Promise(resolve => {
-    const complete = event => {
+  let complete = null;
+  const completion = new Promise((resolve, reject) => {
+    complete = event => {
       if (Number(event?.detail?.generation || 0) < generation) return;
-      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      if (event?.detail?.accepted === false && Number(event.detail.generation) === generation) {
+        reject(layoutMutationCompletionError(generation, String(event.detail.reason || 'refused')));
+        return;
+      }
       resolve(generation);
     };
     window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || layoutMutationCompletionDeadlineMs);
+  return promiseWithDeadline(completion, timeoutMs, `layout mutation ${generation}`).finally(() => {
+    if (complete) window.removeEventListener('yolomux:layout-mutation-complete', complete);
   });
 }
 
@@ -15938,11 +15990,18 @@ function beginLayoutMutationCompletion(state = null) {
 
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
+  const options = {...current.options, ...next.options};
+  const completionGeneration = layoutCompletionGeneration(
+    current.options.completionGeneration,
+    next.options.completionGeneration,
+  );
+  if (completionGeneration > 0) options.completionGeneration = completionGeneration;
+  else delete options.completionGeneration;
   return layoutRenderRequest({
     previousActive: current.previousActive,
     prevShape: current.prevShape,
     nextShape: next.nextShape || current.nextShape,
-    options: {...current.options, ...next.options},
+    options,
     reason: [current.reason, next.reason].filter(Boolean).join('+'),
     forceFull: current.forceFull || next.forceFull,
   });
@@ -35041,17 +35100,19 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
     return {committed: false, superseded: true, transaction, metadata: null};
   }
   let payload;
-  let committed = false;
+  let requestSucceeded = false;
+  let clientCommitted = false;
   let failure = null;
   try {
     payload = await request(transaction);
+    requestSucceeded = true;
     if (tmuxSessionLifecycleMutationIsCurrent(transaction)) {
       commitTmuxSessionLifecycleMutation(transaction, {
         session: payload?.session || options?.session,
         newName: payload?.new_session || options?.newName,
       });
+      clientCommitted = true;
       await commit(payload, transaction);
-      committed = true;
     }
   } catch (error) {
     // Only a PRE-commit failure may roll back. Past the commit there is a real session on the
@@ -35064,7 +35125,17 @@ async function runTmuxSessionMutation(kind, options, request, commit) {
     failure = error;
   }
   const metadata = await refreshTmuxSessionMutationState();
-  if (committed) return {committed: true, transaction, payload, metadata};
+  if (requestSucceeded) {
+    return {
+      committed: true,
+      clientCommitted,
+      superseded: !clientCommitted,
+      transaction,
+      payload,
+      metadata,
+      ...(failure ? {error: failure} : {}),
+    };
+  }
   return {committed: false, superseded: true, transaction, payload, metadata, ...(failure ? {error: failure} : {})};
 }
 
@@ -35222,11 +35293,14 @@ function replaceTmuxSessionInClient(oldSession, newSession, nextSessions, option
   if (focusedTerminal === oldSession) focusedTerminal = newSession;
   if (focusedPanelItem === oldSession) focusedPanelItem = newSession;
   if (lastFocusedTmuxSession === oldSession) lastFocusedTmuxSession = newSession;
-  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), {
+  const layoutOptions = {
     focusSession: newSession,
     prune: false,
-    completionGeneration: options.completionGeneration,
-  });
+  };
+  if (Number.isSafeInteger(options.completionGeneration) && options.completionGeneration > 0) {
+    layoutOptions.completionGeneration = options.completionGeneration;
+  }
+  applyLayoutSlots(layoutWithReplacedItem(oldSession, newSession), layoutOptions);
   renderUploadResult(newSession);
 }
 
@@ -35332,7 +35406,7 @@ async function renameTmuxSession(session, proposedName) {
         replaceTmuxSessionInClient(session, renamed, payload.sessions, {completionGeneration: layoutGeneration});
         await Promise.all([
           waitForLayoutMutationCompletion(layoutGeneration),
-          ensureTerminalRunning(renamed),
+          promiseWithDeadline(ensureTerminalRunning(renamed), 5000, `terminal startup for ${renamed}`),
         ]);
       },
     );
@@ -35340,7 +35414,19 @@ async function renameTmuxSession(session, proposedName) {
     const renamed = mutation.payload.new_session || newName;
     closeSessionRenameDialog();
     renderAutoApproveButtons();
-    statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
+    if (mutation.error) {
+      const message = `${t('common.renamed', {oldName: session, newName: renamed})} — ${mutation.error.message || String(mutation.error)}`;
+      showLayoutStatus(message, 'advisory');
+      recordJsDebugEvent('client_failure', {
+        failure: 'session_rename_client_convergence',
+        message,
+        reason: String(mutation.error.code || mutation.error.name || 'client_convergence_failed'),
+        session,
+        renamed,
+      });
+    } else {
+      statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
+    }
     return true;
   } catch (error) {
     const errorText = error?.status
@@ -41779,10 +41865,26 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
+function recordTmuxWindowRenderDiagnostic(reason, details = {}) {
+  if (typeof recordJsDebugEvent !== 'function') return null;
+  return recordJsDebugEvent('render_diagnostic', {
+    ...details,
+    surface: 'tmux-window-strip',
+    reason: String(reason || 'unknown'),
+  });
+}
+
 function tmuxWindowButtonHtml(options = {}) {
   const tag = options.tag || 'button';
   const visibleName = String(options.visibleName || '').trim();
-  if (!visibleName) return '';
+  if (!visibleName) {
+    recordTmuxWindowRenderDiagnostic('missing-visible-name', {
+      session: String(options.session || ''),
+      numberLabel: String(options.numberLabel || options.indexText || ''),
+      tag: String(tag),
+    });
+    return '';
+  }
   const active = options.active === true;
   const classes = [
     'tab',
@@ -41842,15 +41944,16 @@ function tmuxWindowBarPaneFromSignal(windowRecord) {
 function tmuxWindowBarPanes(session, info) {
   const panes = Array.isArray(info) ? info : info?.panes;
   const signalWindows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
-  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session)) {
-    return signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  const signalPanes = signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session) && signalPanes.length) {
+    return signalPanes;
   }
   const result = Array.isArray(panes) ? [...panes] : [];
   const knownWindows = new Set(result.map(pane => tmuxWindowIndexKey(pane?.window ?? pane?.window_index)).filter(index => index !== null));
-  for (const windowRecord of signalWindows) {
-    const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  for (const signalPane of signalPanes) {
+    const windowIndex = tmuxWindowIndexKey(signalPane?.window);
     if (windowIndex === null || knownWindows.has(windowIndex)) continue;
-    result.push(tmuxWindowBarPaneFromSignal(windowRecord));
+    result.push(signalPane);
     knownWindows.add(windowIndex);
   }
   return result;
@@ -41859,7 +41962,19 @@ function tmuxWindowBarPanes(session, info) {
 function tmuxWindowBarHtml(session, info, options = {}) {
   const panes = tmuxWindowBarPanes(session, info);
   const records = tmuxWindowRecords(panes);
-  if (!records.length) return '';
+  if (!records.length) {
+    const fallbackPanes = Array.isArray(info) ? info : info?.panes;
+    const fallbackPaneCount = Array.isArray(fallbackPanes) ? fallbackPanes.length : 0;
+    const signalWindowCount = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session).length : 0;
+    if (fallbackPaneCount || signalWindowCount) {
+      recordTmuxWindowRenderDiagnostic('no-window-records', {
+        session: String(session || ''),
+        fallbackPaneCount,
+        signalWindowCount,
+      });
+    }
+    return '';
+  }
   const disabled = options.disabled === true || readOnlyMode;
   const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});
@@ -49842,6 +49957,7 @@ const jsDebugCurrentStatsClientState = {
   startPromise: null,
   failureLatched: false,
   paintedGenerationKey: '',
+  pendingGenerationKey: '',
 };
 // Background prefetch of the full retention window into the shared bucket cache so a
 // range/zoom switch renders cached (stale) content instantly while the normal poll
@@ -56520,12 +56636,25 @@ function jsDebugCurrentStatsStreamEvidence() {
   };
 }
 
+function commitJsDebugCurrentStatsPaint() {
+  const key = String(jsDebugCurrentStatsClientState.pendingGenerationKey || '');
+  if (!key) return '';
+  jsDebugCurrentStatsClientState.paintedGenerationKey = key;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+  return key;
+}
+
 function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true} = {}) {
   if (!snapshot || !jsDebugStatsPanelVisible()) return false;
   const key = jsDebugCurrentStatsGenerationKey(snapshot);
-  if (key && key === jsDebugCurrentStatsClientState.paintedGenerationKey) return false;
-  applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
-  jsDebugCurrentStatsClientState.paintedGenerationKey = key;
+  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) return false;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = key;
+  try {
+    applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
+  } catch (error) {
+    if (jsDebugCurrentStatsClientState.pendingGenerationKey === key) jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+    throw error;
+  }
   return true;
 }
 
@@ -59196,6 +59325,7 @@ function renderYoCostPanels({force = false} = {}) {
     rendered = true;
   }
   if (!rendered) return false;
+  commitJsDebugCurrentStatsPaint();
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
   jsDebugCostAgeNextRefreshAtMs = nowMs + delayMs;
@@ -59496,7 +59626,11 @@ function flushDeferredDebugGraphRefresh(graph) {
 }
 
 function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
-  if (!graph || jsDebugGraphRangeSliderDragging) return false;
+  if (!graph) return false;
+  if (jsDebugGraphRangeSliderDragging) {
+    graph.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
+  }
   if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel, .js-yocost-panel'))) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
@@ -59530,6 +59664,8 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
     graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName();
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
+    commitJsDebugCurrentStatsPaint();
+    graph.dataset.jsDebugStatsGenerationKey = String(jsDebugCurrentStatsClientState.paintedGenerationKey || '');
     delete graph.dataset.jsDebugGraphRefreshPending;
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
     resolveDebugGraphResolutionChange(jsDebugHistoryReadiness, {painted: true});

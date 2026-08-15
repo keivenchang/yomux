@@ -252,6 +252,26 @@ function applyApiRequestIdHeader(url, requestOptions) {
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
 
+function promiseDeadlineError(deadlineMs, subject = 'operation') {
+  const error = new Error(`${String(subject || 'operation')} exceeded its ${Math.round(deadlineMs)}ms deadline`);
+  error.name = 'ClientDeadlineError';
+  error.code = 'client_deadline_expired';
+  error.timeoutMs = deadlineMs;
+  error.subject = String(subject || 'operation');
+  return error;
+}
+
+function promiseWithDeadline(promise, deadlineMs, subject = 'operation') {
+  const boundedMs = Math.max(1, Number(deadlineMs) || 1);
+  let timer = null;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(promiseDeadlineError(boundedMs, subject)), boundedMs);
+  });
+  return Promise.race([Promise.resolve(promise), deadline]).finally(() => {
+    if (timer !== null) clearTimeout(timer);
+  });
+}
+
 function apiFetchDeadlineMs(url, options = {}) {
   if (Object.prototype.hasOwnProperty.call(options, 'deadlineMs')) {
     const override = Number(options.deadlineMs);

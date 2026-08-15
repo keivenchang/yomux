@@ -135,6 +135,7 @@ const jsDebugCurrentStatsClientState = {
   startPromise: null,
   failureLatched: false,
   paintedGenerationKey: '',
+  pendingGenerationKey: '',
 };
 // Background prefetch of the full retention window into the shared bucket cache so a
 // range/zoom switch renders cached (stale) content instantly while the normal poll

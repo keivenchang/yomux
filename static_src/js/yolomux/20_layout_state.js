@@ -3023,9 +3023,7 @@ function tmuxSignalWindowsForSession(session) {
 function tmuxSignalSnapshotAuthoritativeForSession(session) {
   const sessionText = String(session || '').trim();
   if (!sessionText || tmuxSignalState?.ok !== true || !Array.isArray(tmuxSignalState.windows)) return false;
-  const sessionRecords = tmuxSignalState.sessions;
-  return Boolean(sessionRecords && typeof sessionRecords === 'object' && sessionRecords[sessionText])
-    || tmuxSignalWindowsForSession(sessionText).length > 0;
+  return tmuxSignalWindowsForSession(sessionText).length > 0;
 }
 
 function tmuxSignalWindowForSessionIndex(session, windowIndex) {
@@ -6819,25 +6817,59 @@ function layoutRenderRequest(request = {}) {
   };
 }
 
-function completeLayoutMutationGeneration(value) {
-  const generation = Number(value);
-  if (!runtimeState.completeLayoutMutation(generation)) return;
-  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+function layoutCompletionGeneration(...values) {
+  return values.reduce((highest, value) => {
+    const generation = Number(value);
+    return Number.isSafeInteger(generation) && generation > highest ? generation : highest;
+  }, 0);
 }
 
-function waitForLayoutMutationCompletion(value) {
+function completeLayoutMutationGeneration(value) {
   const generation = Number(value);
-  if (!Number.isSafeInteger(generation) || generation <= 0
-      || runtimeState.layoutMutationCompletedGeneration >= generation) {
+  const accepted = runtimeState.completeLayoutMutation(generation);
+  const detail = {
+    generation: Number.isSafeInteger(generation) ? generation : 0,
+    accepted,
+    reason: accepted ? 'completed' : Number.isSafeInteger(generation) ? 'already_settled' : 'invalid_generation',
+  };
+  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail}));
+  return detail;
+}
+
+const layoutMutationCompletionDeadlineMs = 5000;
+
+function layoutMutationCompletionError(generation, reason) {
+  const error = new Error(`layout mutation ${generation} was not completed: ${reason}`);
+  error.name = 'LayoutMutationCompletionError';
+  error.code = 'layout_mutation_not_completed';
+  error.generation = generation;
+  error.reason = reason;
+  return error;
+}
+
+function waitForLayoutMutationCompletion(value, options = {}) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= 0) {
+    return Promise.reject(layoutMutationCompletionError(generation, 'invalid_generation'));
+  }
+  if (runtimeState.layoutMutationCompletedGeneration >= generation) {
     return Promise.resolve(generation);
   }
-  return new Promise(resolve => {
-    const complete = event => {
+  let complete = null;
+  const completion = new Promise((resolve, reject) => {
+    complete = event => {
       if (Number(event?.detail?.generation || 0) < generation) return;
-      window.removeEventListener('yolomux:layout-mutation-complete', complete);
+      if (event?.detail?.accepted === false && Number(event.detail.generation) === generation) {
+        reject(layoutMutationCompletionError(generation, String(event.detail.reason || 'refused')));
+        return;
+      }
       resolve(generation);
     };
     window.addEventListener('yolomux:layout-mutation-complete', complete);
+  });
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || layoutMutationCompletionDeadlineMs);
+  return promiseWithDeadline(completion, timeoutMs, `layout mutation ${generation}`).finally(() => {
+    if (complete) window.removeEventListener('yolomux:layout-mutation-complete', complete);
   });
 }
 
@@ -6852,11 +6884,18 @@ function beginLayoutMutationCompletion(state = null) {
 
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
+  const options = {...current.options, ...next.options};
+  const completionGeneration = layoutCompletionGeneration(
+    current.options.completionGeneration,
+    next.options.completionGeneration,
+  );
+  if (completionGeneration > 0) options.completionGeneration = completionGeneration;
+  else delete options.completionGeneration;
   return layoutRenderRequest({
     previousActive: current.previousActive,
     prevShape: current.prevShape,
     nextShape: next.nextShape || current.nextShape,
-    options: {...current.options, ...next.options},
+    options,
     reason: [current.reason, next.reason].filter(Boolean).join('+'),
     forceFull: current.forceFull || next.forceFull,
   });

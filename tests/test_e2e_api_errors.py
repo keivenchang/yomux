@@ -287,7 +287,7 @@ def test_statusd_refreshing_snapshot_is_not_a_browser_api_failure(
             self.sessions = list(sessions)
             self.yoagent_controller = ActivityController()
 
-        def build_auto_approve_status(self, *, timings, sync_workers):
+        def build_auto_approve_status(self, *, timings, sync_workers, **_kwargs):
             assert sync_workers is False
             if block_active_snapshot and self.sessions == blocked_sessions:
                 build_started.set()

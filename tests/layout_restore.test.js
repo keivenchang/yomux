@@ -849,6 +849,13 @@ async function runLayoutRestoreSuite() {
     }, 'rename owns one consumed but incomplete layout receipt while realization is held');
     assert.equal(resolved, false, 'rename does not report success before the shared layout receipt');
 
+    api.applyLayoutSlotsForTest(api.currentSlots());
+    assert.equal(
+      api.pendingLayoutRenderForTest().options.completionGeneration,
+      1,
+      'a generation-less render merged behind rename cannot erase its pending completion receipt',
+    );
+
     api.endSessionDrag({});
     await flushAsyncWork();
     assert.equal(await rename, true, 'rename resolves after the pending layout render completes');
@@ -858,6 +865,86 @@ async function runLayoutRestoreSuite() {
       completed: 1,
       pending: 0,
     }, 'the realized layout publishes the same receipt generation');
+  });
+
+  await testAsync('layout mutation completion reports refusals and bounds every waiter', async () => {
+    const timers = new Map();
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, milliseconds) {
+        const id = nextTimer++;
+        timers.set(id, {callback, milliseconds});
+        return id;
+      },
+      clearTimeout(id) { timers.delete(id); },
+    });
+    const generation = api.beginLayoutMutationCompletionForTest();
+    let resolutions = 0;
+    const completion = api.waitForLayoutMutationCompletionForTest(generation, {timeoutMs: 25}).then(value => {
+      resolutions += 1;
+      return value;
+    });
+    assert.deepStrictEqual(canonical(api.completeLayoutMutationGenerationForTest(generation)), {
+      generation,
+      accepted: true,
+      reason: 'completed',
+    });
+    assert.equal(await completion, generation);
+    assert.equal(resolutions, 1, 'one begun generation resolves its waiter exactly once');
+    assert.deepStrictEqual(canonical(api.completeLayoutMutationGenerationForTest(generation)), {
+      generation,
+      accepted: false,
+      reason: 'already_settled',
+    }, 'a refused duplicate completion is observable');
+    assert.deepStrictEqual(canonical(api.completeLayoutMutationGenerationForTest(undefined)), {
+      generation: 0,
+      accepted: false,
+      reason: 'invalid_generation',
+    }, 'an invalid completion is reported instead of dropped');
+
+    const pendingGeneration = api.beginLayoutMutationCompletionForTest();
+    const layoutTimeout = api.waitForLayoutMutationCompletionForTest(pendingGeneration, {timeoutMs: 25});
+    const layoutTimer = Array.from(timers.values()).find(timer => timer.milliseconds === 25);
+    assert.ok(layoutTimer, 'layout waiter owns a deadline timer');
+    layoutTimer.callback();
+    await assert.rejects(layoutTimeout, error => error?.code === 'client_deadline_expired');
+
+    const terminalTimeout = api.promiseWithDeadlineForTest(new Promise(() => {}), 40, 'terminal startup for renamed');
+    const terminalTimer = Array.from(timers.values()).find(timer => timer.milliseconds === 40);
+    assert.ok(terminalTimer, 'terminal convergence owns an independent deadline timer');
+    terminalTimer.callback();
+    await assert.rejects(terminalTimeout, error => error?.code === 'client_deadline_expired' && error?.subject === 'terminal startup for renamed');
+  });
+
+  await testAsync('server-successful superseded rename remains a committed mutation outcome', async () => {
+    const api = loadYolomux('', ['1', '2']);
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/session-metadata') {
+        return Promise.resolve(jsonResponse({session_order: ['renamed', '2'], sessions: {renamed: {panes: []}, '2': {panes: []}}}));
+      }
+      if (parsed.pathname === '/api/auto-approve') {
+        return Promise.resolve(jsonResponse({session_order: ['renamed', '2'], sessions: {}, rules: {}}));
+      }
+      return Promise.resolve(jsonResponse({ok: true}));
+    });
+    let resolveRequest;
+    let clientCommits = 0;
+    const result = api.runTmuxSessionMutationForTest(
+      'rename',
+      {session: '1', newName: 'renamed'},
+      () => new Promise(resolve => { resolveRequest = resolve; }),
+      async () => { clientCommits += 1; },
+    );
+    await flushAsyncWork();
+    const replacement = api.beginTmuxSessionLifecycleMutationForTest('kill', {session: '2'});
+    api.commitTmuxSessionLifecycleMutationForTest(replacement);
+    resolveRequest({new_session: 'renamed', sessions: ['renamed', '2']});
+    const outcome = await result;
+    assert.equal(outcome.committed, true, 'the successful server response remains committed');
+    assert.equal(outcome.clientCommitted, false, 'the superseded client transaction does not overwrite newer topology');
+    assert.equal(outcome.superseded, true);
+    assert.equal(clientCommits, 0);
   });
 
   test('renaming a tmux tab preserves a YO!stats tab in its existing Vertical Side Pane', () => {

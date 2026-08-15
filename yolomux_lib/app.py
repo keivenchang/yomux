@@ -16630,6 +16630,8 @@ class TmuxWebtermApp:
         timings: dict[str, float] | None = None,
         *,
         sync_workers: bool = True,
+        session_payload_cache: dict[str, Any] | None = None,
+        capture_sessions: set[str] | None = None,
     ) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
         refresh_started = time.perf_counter()
         refresh_errors = self.refresh_sessions(maintenance=False)
@@ -16656,8 +16658,14 @@ class TmuxWebtermApp:
         self.prune_absent_agent_window_transition_state(discovered_sessions)
         add_phase_timing(timings, "discover_sessions", discover_started)
         sessions_started = time.perf_counter()
-        sessions_payload = {
-            name: self.auto_approve_session_status(
+        cached = session_payload_cache or {}
+        sessions_payload = {}
+        for name in self.sessions:
+            cached_payload = cached.get(name)
+            if capture_sessions is not None and name not in capture_sessions and isinstance(cached_payload, dict):
+                sessions_payload[name] = dict(cached_payload)
+                continue
+            sessions_payload[name] = self.auto_approve_session_status(
                 name,
                 discovered_sessions=discovered_sessions,
                 include_live_prompt=False,
@@ -16665,8 +16673,6 @@ class TmuxWebtermApp:
                 activity_snapshot=activity_snapshot,
                 timings=timings,
             )
-            for name in self.sessions
-        }
         add_phase_timing(timings, "sessions", sessions_started)
         payload: AutoApproveStatusPayload = {
             "session_order": self.sessions,

@@ -6,14 +6,18 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import threading
 import time
+from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
 from .app import TmuxWebtermApp
+from .polling_policy import quiet_poll_interval
 from .tmux.sessions import discover_status_sessions
+from .tmux.tmux_utils import list_tmux_session_activity
 from .tmux.tmux_utils import list_tmux_session_names
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import acquire_client_lease
@@ -47,6 +51,13 @@ STATUSD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # status dots stuck on "running" long after the agent actually stopped. Mirrors the pre-statusd
 # AUTO_APPROVE_CACHE_MAX_AGE_SECONDS safety net removed when this daemon replaced that cache.
 STATUSD_SNAPSHOT_MAX_AGE_SECONDS = 5.003
+STATUSD_SESSION_RECENT_INTERVAL_SECONDS = 10.0
+STATUSD_SESSION_QUIET_INTERVAL_SECONDS = 30.0
+STATUSD_SESSION_COLD_INTERVAL_SECONDS = 120.0
+STATUSD_SESSION_ACTIVE_AGE_SECONDS = 5 * 60.0
+STATUSD_SESSION_RECENT_AGE_SECONDS = 60 * 60.0
+STATUSD_SESSION_COLD_AGE_SECONDS = 24 * 60 * 60.0
+STATUSD_SESSION_MAX_JITTER_SECONDS = 5.0
 
 STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
     "ping": "_handle_ping", "status": "_handle_status", "profile": "_handle_status",
@@ -60,8 +71,21 @@ STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
 class PersistentStatusService(LocalRpcServiceState):
     """One per-state-directory status owner with retained immutable bytes."""
 
-    def __init__(self, socket_path: Path, idle_seconds: float = STATUSD_DEFAULT_IDLE_SECONDS):
+    def __init__(
+        self,
+        socket_path: Path,
+        idle_seconds: float = STATUSD_DEFAULT_IDLE_SECONDS,
+        *,
+        wall_clock: Callable[[], float] | None = None,
+        monotonic: Callable[[], float] | None = None,
+        session_activity_reader: Callable[[], tuple[dict[str, int], str | None]] | None = None,
+        session_jitter: Callable[[float, float], float] | None = None,
+    ):
         super().__init__(socket_path, prefix="yolomux-statusd", idle_seconds=idle_seconds)
+        self.wall_clock = wall_clock or time.time
+        self.monotonic = monotonic or time.monotonic
+        self.session_activity_reader = session_activity_reader or list_tmux_session_activity
+        self.session_jitter = session_jitter or random.uniform
         self.lock = threading.Condition(threading.RLock())
         self.build_lock = threading.Lock()
         self.activity_lock = threading.Lock()
@@ -95,6 +119,57 @@ class PersistentStatusService(LocalRpcServiceState):
         self.refresh_requested_sessions: tuple[str, ...] | None = None
         self.refresh_build_sessions: tuple[str, ...] | None = None
         self.refresh_retry_at = 0.0
+        self.session_payload_cache: dict[str, dict[str, Any]] = {}
+        self.session_capture_due_at: dict[str, float] = {}
+        self.session_activity: dict[str, int] = {}
+        self.session_capture_attempts = 0
+        self.session_capture_promotions = 0
+
+    def _session_capture_interval(self, activity_timestamp: int | None) -> float:
+        age = max(0.0, self.wall_clock() - float(activity_timestamp or 0))
+        if activity_timestamp is None or age < STATUSD_SESSION_ACTIVE_AGE_SECONDS:
+            return STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+        if age < STATUSD_SESSION_RECENT_AGE_SECONDS:
+            target = STATUSD_SESSION_RECENT_INTERVAL_SECONDS
+        elif age < STATUSD_SESSION_COLD_AGE_SECONDS:
+            target = STATUSD_SESSION_QUIET_INTERVAL_SECONDS
+        else:
+            target = STATUSD_SESSION_COLD_INTERVAL_SECONDS
+        jitter_bound = min(STATUSD_SESSION_MAX_JITTER_SECONDS, target * 0.1)
+        jitter = self.session_jitter(-jitter_bound, jitter_bound)
+        return quiet_poll_interval(STATUSD_SNAPSHOT_MAX_AGE_SECONDS, target, 1.0, jitter)
+
+    def _capture_sessions(self, sessions: tuple[str, ...], *, force: bool) -> tuple[set[str], str | None]:
+        now = self.monotonic()
+        roster = set(sessions)
+        self.session_payload_cache = {
+            name: payload for name, payload in self.session_payload_cache.items() if name in roster
+        }
+        self.session_capture_due_at = {
+            name: due_at for name, due_at in self.session_capture_due_at.items() if name in roster
+        }
+        self.session_activity = {
+            name: timestamp for name, timestamp in self.session_activity.items() if name in roster
+        }
+        activity, error = self.session_activity_reader()
+        if error:
+            selected = roster
+        else:
+            selected = set()
+            for name in sessions:
+                timestamp = activity.get(name)
+                previous = self.session_activity.get(name)
+                promoted = previous is not None and timestamp != previous
+                if promoted and now < self.session_capture_due_at.get(name, 0.0):
+                    self.session_capture_promotions += 1
+                if force or name not in self.session_payload_cache or promoted or now >= self.session_capture_due_at.get(name, 0.0):
+                    selected.add(name)
+                if timestamp is not None:
+                    self.session_activity[name] = timestamp
+        for name in selected:
+            self.session_capture_due_at[name] = now + self._session_capture_interval(activity.get(name))
+        self.session_capture_attempts += len(selected)
+        return selected, error
 
     def _sessions(self, request: dict[str, Any]) -> tuple[str, ...]:
         raw = request.get("sessions", [])
@@ -123,11 +198,29 @@ class PersistentStatusService(LocalRpcServiceState):
     def _build(self, sessions: tuple[str, ...]) -> tuple[StatusSnapshotMetadata, bytes]:
         with self.lock:
             build_invalidation_generation = self.invalidation_generation
+            force_capture = bool(self.invalidation_reason) or sessions != self.snapshot_session_names
         app = self._ensure_app(sessions)
         timings: dict[str, float] = {}
-        payload, status = app.build_auto_approve_status(timings=timings, sync_workers=False)
+        capture_sessions, activity_error = self._capture_sessions(sessions, force=force_capture)
+        payload, status = app.build_auto_approve_status(
+            timings=timings,
+            sync_workers=False,
+            session_payload_cache=self.session_payload_cache,
+            capture_sessions=capture_sessions,
+        )
         if not isinstance(payload, dict):
             raise StatusProtocolError("invalid status payload")
+        sessions_payload = payload.get("sessions")
+        if isinstance(sessions_payload, dict):
+            self.session_payload_cache = {
+                name: dict(value)
+                for name, value in sessions_payload.items()
+                if name in sessions and isinstance(value, dict)
+            }
+        if activity_error:
+            errors = payload.get("errors")
+            if isinstance(errors, list):
+                errors.append(activity_error)
         payload["timings"] = timings
         source_payload = {key: value for key, value in payload.items() if key != "timings"}
         source_signature = hashlib.sha1(
@@ -144,7 +237,7 @@ class PersistentStatusService(LocalRpcServiceState):
                     metadata.generation,
                     metadata.status,
                     False,
-                    time.time(),
+                    self.wall_clock(),
                     metadata.content_type,
                 )
                 self.snapshot = (refreshed, body)
@@ -163,7 +256,7 @@ class PersistentStatusService(LocalRpcServiceState):
                 generation=self.generation,
                 status=int(status),
                 stale=False,
-                built_at=time.time(),
+                built_at=self.wall_clock(),
             )
             self.snapshot = (metadata, body)
             self.snapshot_session_names = sessions
@@ -455,6 +548,8 @@ class PersistentStatusService(LocalRpcServiceState):
                 "generation": self.generation, "build_count": self.build_count, "encode_count": self.encode_count,
                 "snapshot_build_conflicts": self.snapshot_build_conflicts,
                 "snapshot_refresh_supersessions": self.snapshot_refresh_supersessions,
+                "session_capture_attempts": self.session_capture_attempts,
+                "session_capture_promotions": self.session_capture_promotions,
                 "invalidation_generation": self.invalidation_generation,
                 "inventory_generation": self.inventory_generation,
                 "cache": {"ready": snapshot is not None, "stale": False}, "invalidation_reason": self.invalidation_reason,

@@ -422,8 +422,14 @@ def _graph_state(driver) -> dict[str, object]:
           noData: Array.isArray(generation?.no_data) ? generation.no_data : [],
           cacheGeneration: Number(generation?.cache_generation || 0),
           sourceGeneration: Number(generation?.source_generation || 0),
+          generationCostTokens: Number(generation?.cost_report?.total_tokens || 0),
+          paintedGenerationKey: String(jsDebugCurrentStatsClientState.paintedGenerationKey || ''),
+          graphGenerationKey: graph?.dataset?.jsDebugStatsGenerationKey || '',
+          serverSequence: Number(jsDebugStatsServerSequence || 0),
           historyState: graph?.dataset?.jsDebugHistoryState || '',
           busy: graph?.getAttribute?.('aria-busy') || '',
+          graphRenderedAt: Number(graph?.dataset?.jsDebugGraphRenderedAt || 0),
+          graphRenderPending: graph?.dataset?.jsDebugGraphRefreshPending || '',
           renderPaths: renderNodes.length,
           renderedCharts: document.querySelectorAll('.js-debug-panel .js-debug-chart svg').length,
           zeroBars,
@@ -442,6 +448,8 @@ def _wait_pair(driver, range_seconds: int, resolution_seconds: int) -> dict[str,
     def ready(_driver):
         state = _graph_state(driver)
         if state["range"] != range_seconds or state["resolution"] != resolution_seconds:
+            return False
+        if not state["paintedGenerationKey"] or state["graphGenerationKey"] != state["paintedGenerationKey"]:
             return False
         if state["historyState"] != "ready" or state["busy"] != "false":
             return False
@@ -593,7 +601,7 @@ def _exercise_pairs(driver) -> tuple[list[dict[str, object]], dict[str, object]]
                 if row["label"] == "Total"
             ),
         })
-        assert results[-1]["cost_tokens"] == 12, state
+        assert results[-1]["cost_tokens"] == 12, json.dumps(state, sort_keys=True)
         assert not [
             span
             for span in state["noData"]

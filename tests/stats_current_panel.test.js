@@ -2465,6 +2465,39 @@ test('current stats stream selector exposes exact production client evidence wit
   assert.equal(context.missing.stream, null);
 });
 
+test('accepted current stats generations are not declared painted before a renderer commits', () => {
+  const functionText = sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const snapshot = {
+      range_seconds: 300,
+      requested_resolution: 10,
+      resolution_seconds: 10,
+      source_generation: 12,
+      cache_generation: 13,
+    };
+    const calls = [];
+    const jsDebugCurrentStatsClientState = {
+      paintedGenerationKey: '300:10:10:11:12',
+      pendingGenerationKey: '',
+    };
+    function jsDebugStatsPanelVisible() { return true; }
+    function jsDebugCurrentStatsGenerationKey(value) {
+      return [value.range_seconds, value.requested_resolution, value.resolution_seconds, value.source_generation, value.cache_generation].join(':');
+    }
+    function applyJsDebugCurrentSnapshot(value) { calls.push(value.cache_generation); }
+    ${functionText}
+    const first = paintJsDebugCurrentStatsGeneration(snapshot);
+    const second = paintJsDebugCurrentStatsGeneration(snapshot);
+    result = {first, second, calls, state: jsDebugCurrentStatsClientState};
+  `, context);
+  assert.equal(context.result.first, true);
+  assert.equal(context.result.second, false, 'one pending generation has one apply owner');
+  assert.deepEqual([...context.result.calls], [13]);
+  assert.equal(context.result.state.paintedGenerationKey, '300:10:10:11:12');
+  assert.equal(context.result.state.pendingGenerationKey, '300:10:10:12:13');
+});
+
 test('hidden panels start the document-visible client and paint only when opened', () => {
   const start = source.indexOf('function jsDebugStatsPanelVisible()');
   const end = source.indexOf('\nfunction jsDebugStatsTokenConsumerEnabled()', start);

@@ -2101,10 +2101,26 @@ function tmuxWindowBarLabelMode(records, options = {}) {
   return items.length > fallbackCount || namedChars > charLimit ? 'numbers' : 'names';
 }
 
+function recordTmuxWindowRenderDiagnostic(reason, details = {}) {
+  if (typeof recordJsDebugEvent !== 'function') return null;
+  return recordJsDebugEvent('render_diagnostic', {
+    ...details,
+    surface: 'tmux-window-strip',
+    reason: String(reason || 'unknown'),
+  });
+}
+
 function tmuxWindowButtonHtml(options = {}) {
   const tag = options.tag || 'button';
   const visibleName = String(options.visibleName || '').trim();
-  if (!visibleName) return '';
+  if (!visibleName) {
+    recordTmuxWindowRenderDiagnostic('missing-visible-name', {
+      session: String(options.session || ''),
+      numberLabel: String(options.numberLabel || options.indexText || ''),
+      tag: String(tag),
+    });
+    return '';
+  }
   const active = options.active === true;
   const classes = [
     'tab',
@@ -2164,15 +2180,16 @@ function tmuxWindowBarPaneFromSignal(windowRecord) {
 function tmuxWindowBarPanes(session, info) {
   const panes = Array.isArray(info) ? info : info?.panes;
   const signalWindows = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session) : [];
-  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session)) {
-    return signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  const signalPanes = signalWindows.map(tmuxWindowBarPaneFromSignal).filter(Boolean);
+  if (typeof tmuxSignalSnapshotAuthoritativeForSession === 'function' && tmuxSignalSnapshotAuthoritativeForSession(session) && signalPanes.length) {
+    return signalPanes;
   }
   const result = Array.isArray(panes) ? [...panes] : [];
   const knownWindows = new Set(result.map(pane => tmuxWindowIndexKey(pane?.window ?? pane?.window_index)).filter(index => index !== null));
-  for (const windowRecord of signalWindows) {
-    const windowIndex = tmuxWindowIndexKey(windowRecord?.window_index);
+  for (const signalPane of signalPanes) {
+    const windowIndex = tmuxWindowIndexKey(signalPane?.window);
     if (windowIndex === null || knownWindows.has(windowIndex)) continue;
-    result.push(tmuxWindowBarPaneFromSignal(windowRecord));
+    result.push(signalPane);
     knownWindows.add(windowIndex);
   }
   return result;
@@ -2181,7 +2198,19 @@ function tmuxWindowBarPanes(session, info) {
 function tmuxWindowBarHtml(session, info, options = {}) {
   const panes = tmuxWindowBarPanes(session, info);
   const records = tmuxWindowRecords(panes);
-  if (!records.length) return '';
+  if (!records.length) {
+    const fallbackPanes = Array.isArray(info) ? info : info?.panes;
+    const fallbackPaneCount = Array.isArray(fallbackPanes) ? fallbackPanes.length : 0;
+    const signalWindowCount = typeof tmuxSignalWindowsForSession === 'function' ? tmuxSignalWindowsForSession(session).length : 0;
+    if (fallbackPaneCount || signalWindowCount) {
+      recordTmuxWindowRenderDiagnostic('no-window-records', {
+        session: String(session || ''),
+        fallbackPaneCount,
+        signalWindowCount,
+      });
+    }
+    return '';
+  }
   const disabled = options.disabled === true || readOnlyMode;
   const labelMode = tmuxWindowBarLabelMode(records, options.infoBar === true && !options.labelMode ? {...options, labelMode: 'names'} : options);
   const disabledTitle = readOnlyMode ? t('terminal.window.adminRequired') : t('tab.unavailableFor', {name: itemLabel(session)});

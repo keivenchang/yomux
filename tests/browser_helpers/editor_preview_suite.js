@@ -3326,6 +3326,94 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(indexes, ['1'], 'a successful tmux signal removal prunes the stale 0:codex transcript pane immediately');
   });
 
+  test('last-window tmux signal patches retain the populated transcript fallback', () => {
+    const api = loadYolomux('', ['strip-repro']);
+    const fallbackInfo = {panes: [{
+      target: 'strip-repro:0.0',
+      window: '0',
+      pane: '0',
+      window_name: 'claude',
+      window_active: true,
+      active: true,
+      process_label: 'claude',
+      command: 'claude',
+    }]};
+    api.applyTmuxSignalsPayloadForTest({
+      ok: true,
+      sessions: {'strip-repro': {windows: ['strip-repro:0'], activity_ts: 1723670000}},
+      windows: [{
+        key: 'strip-repro:0',
+        session: 'strip-repro',
+        window_index: '0',
+        window_name: 'claude',
+        active: true,
+        panes: [{target: 'strip-repro:0.0', pane_id: 'strip-repro:0.0', pane_index: '0', active: true, current_command: 'claude'}],
+      }],
+    });
+    api.applyTmuxSignalsPayloadForTest({
+      patch: true,
+      collection: 'windows',
+      changes: {},
+      removed_keys: ['strip-repro:0'],
+      fields: {ok: true, removed_window_keys: ['strip-repro:0'], window_count: 0},
+      removed_fields: [],
+    });
+
+    const signalState = api.tmuxSignalStateForTest();
+    assert.deepStrictEqual(canonical(signalState.sessions['strip-repro']), {windows: ['strip-repro:0'], activity_ts: 1723670000}, 'the patch reproduction retains the session record');
+    assert.deepStrictEqual(canonical(signalState.windows), [], 'the patch reproduction removes the last matching signal window');
+    const html = api.tmuxWindowBarHtml('strip-repro', fallbackInfo);
+    assert.ok(html.includes('data-tmux-window-bar="strip-repro"'), 'an empty signal override never suppresses the populated transcript fallback');
+    assert.ok(html.includes('data-window-index="0"'), 'the fallback keeps the known tmux window visible');
+  });
+
+  test('empty tmux window overrides and rejected button records emit typed render diagnostics', () => {
+    const api = loadYolomux('', ['strip-diagnostic']);
+    const fallbackInfo = {panes: [{target: 'strip-diagnostic:0.0', window: '0', pane: '0', window_name: 'claude', window_active: true, active: true, process_label: 'claude'}]};
+    api.setTmuxSignalStateForTest({
+      ok: true,
+      sessions: {'strip-diagnostic': {windows: ['strip-diagnostic:malformed']}},
+      windows: [{key: 'strip-diagnostic:malformed', session: 'strip-diagnostic', window_index: 'not-a-window', panes: []}],
+    });
+    assert.ok(api.tmuxWindowBarHtml('strip-diagnostic', fallbackInfo).includes('data-window-index="0"'), 'an override that cannot produce a window record retains the populated fallback');
+
+    api.clearJsDebugEventsForTest();
+    assert.equal(api.tmuxWindowButtonHtmlForTest({session: 'strip-diagnostic', numberLabel: '0', visibleName: ''}), '', 'a button without a visible name remains absent rather than rendering a placeholder');
+    assert.equal(api.tmuxWindowBarHtml('strip-diagnostic', {panes: [{window: 'not-a-window'}]}), '', 'a malformed populated bar source remains absent rather than rendering a placeholder');
+    const diagnostics = canonical(api.jsDebugEventsForTest().filter(event => event.type === 'render_diagnostic'));
+    assert.deepStrictEqual(diagnostics.map(event => ({surface: event.surface, reason: event.reason})), [
+      {surface: 'tmux-window-strip', reason: 'missing-visible-name'},
+      {surface: 'tmux-window-strip', reason: 'no-window-records'},
+    ], 'both rejected render paths retain a typed reason in the shared diagnostic owner');
+
+    api.clearJsDebugEventsForTest();
+    api.setTmuxSignalStateForTest({ok: true, sessions: {}, windows: []});
+    assert.equal(api.tmuxWindowBarHtml('strip-diagnostic', {panes: []}), '', 'a genuinely empty source may render nothing');
+    assert.deepStrictEqual(canonical(api.jsDebugEventsForTest().filter(event => event.type === 'render_diagnostic')), [], 'legitimate empty output is distinguishable by the absence of a failure diagnostic');
+  });
+
+  test('tmux signal rename patches replace old window keys without stranding session matches', () => {
+    const api = loadYolomux('', ['strip-old', 'strip-new']);
+    api.applyTmuxSignalsPayloadForTest({
+      ok: true,
+      sessions: {'strip-old': {windows: ['strip-old:0']}},
+      windows: [{key: 'strip-old:0', session: 'strip-old', window_index: '0', window_name: 'claude', active: true, panes: [{target: 'strip-old:0.0', pane_index: '0', active: true, current_command: 'claude'}]}],
+    });
+    api.applyTmuxSignalsPayloadForTest({
+      patch: true,
+      collection: 'windows',
+      changes: {'strip-new:0': {key: 'strip-new:0', session: 'strip-new', window_index: '0', window_name: 'claude', active: true, panes: [{target: 'strip-new:0.0', pane_index: '0', active: true, current_command: 'claude'}]}},
+      removed_keys: ['strip-old:0'],
+      fields: {ok: true, sessions: {'strip-new': {windows: ['strip-new:0']}}},
+      removed_fields: [],
+    });
+
+    const state = api.tmuxSignalStateForTest();
+    assert.deepStrictEqual(canonical(state.windows.map(windowRecord => ({key: windowRecord.key, session: windowRecord.session}))), [{key: 'strip-new:0', session: 'strip-new'}], 'the keyed patch removes the stale name and installs the renamed window atomically');
+    assert.deepStrictEqual(canonical(state.sessions), {'strip-new': {windows: ['strip-new:0']}}, 'the patch replaces the session roster with the renamed identity');
+    assert.ok(api.tmuxWindowBarHtml('strip-new', {panes: []}).includes('data-window-index="0"'), 'string matching resolves the renamed window because no stale record is stranded');
+  });
+
   await testAsync('direct tmux sub-window clicks do not bounce through stale transcript or partial signal pushes', async () => {
     const api = loadYolomux('', ['meta-preview']);
     const button0 = tmuxWindowButtonElement('meta-preview', '0', true);

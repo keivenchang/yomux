@@ -510,12 +510,12 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
 
-    # Linux default is 100% of the host cores.
+    # Linux and macOS both leave half the host for live servers and agent work.
     expected = {
-        4: ("2", "1", "1"),
-        10: ("5", "3", "2"),
-        14: ("7", "4", "3"),
-        32: ("16", "10", "6"),
+        4: ("1", "1", "1"),
+        10: ("2", "1", "2"),
+        14: ("3", "2", "2"),
+        32: ("8", "5", "3"),
     }
     for cores, counts in expected.items():
         monkeypatch.setattr(check.os, "cpu_count", lambda cores=cores: cores)
@@ -524,7 +524,7 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
     assert check.pytest_worker_counts() == ("5", "3", "1")
 
-    # macOS default is 50% of the host cores.
+    # The platform no longer changes the shared-box default.
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
@@ -2406,11 +2406,11 @@ def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
 
 
 def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypatch, capsys):
-    """One worker contract, four surfaces. They disagreed: the docs claimed 75% and 12/8/4 forever.
+    """One worker contract, four surfaces. They previously disagreed on the shared-box default.
 
-    Resolved by same-SHA A/B, not by picking a side. Four interleaved full gates gave median wall
-    379.1 s at 100% against 406.9 s at 75% with identical failed-lane counts, so the arms do not
-    separate at n=2 and the code's 100% stands while the documentation is corrected to match.
+    Resolved by same-tree A/B, not by picking a side. The current 100% baseline reached peak load
+    76.016 and failed timing-sensitive lanes; 50% reduced peak load to 49.380 while preserving the
+    exact canonical phase ownership and leaving explicit overrides available.
     """
 
     check = load_check_module()
@@ -2421,14 +2421,14 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
 
     percent = check.check_cpu_percent()
     counts = check.pytest_worker_counts()
-    assert percent == 100
-    assert counts == ("16", "10", "6")
-    assert sum(int(count) for count in counts) == 32
+    assert percent == 50
+    assert counts == ("8", "5", "3")
+    assert sum(int(count) for count in counts) == 16
 
     with pytest.raises(SystemExit):
         check.main(["--help"])
     help_text = " ".join(capsys.readouterr().out.split())
-    assert f"default: {percent} on Linux" in help_text, help_text
+    assert f"default: {percent}" in help_text, help_text
 
     documentation = " ".join((REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split())
     assert f"Linux makes {percent}% of that capacity available to pytest" in documentation
