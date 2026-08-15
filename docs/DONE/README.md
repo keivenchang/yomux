@@ -4,11 +4,11 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-176 entries, 2026-06-02 to 2026-08-14.
+177 entries, 2026-06-02 to 2026-08-14.
 
 | month | entries |
 | --- | ---: |
-| [2026-08](2026-08/) | 19 |
+| [2026-08](2026-08/) | 20 |
 | [2026-07](2026-07/) | 55 |
 | [2026-06](2026-06/) | 102 |
 
@@ -16,6 +16,7 @@ This is a historical record, not the current architecture or API contract: a lat
 
 | date | what shipped |
 | --- | --- |
+| 2026-08-14 | [v0.7.6 performance release](2026-08/DONE.0-7-6-performance-release.md) |
 | 2026-08-14 | [v0.7.5 first-launch agent auth and setup brand](2026-08/DONE.0-7-5-first-launch-auth.md) |
 | 2026-08-14 | [v0.7.5 retired collaboration feature removal](2026-08/DONE.0-7-5-retired-collaboration-removal.md) |
 | 2026-08-14 | [v0.7.5 macOS runtime merge](2026-08/DONE.0-7-5-macos-merge.md) |
