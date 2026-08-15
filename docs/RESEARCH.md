@@ -6,7 +6,7 @@ YOLOmux is a lightweight, powerful AI-work workspace: it combines AI management,
 
 ## How this research maps to the roadmap
 
-[`TODO.md`](TODO.md) already sets the product boundary: YOLOmux centers AI management, editing/viewing, collaboration, and a lightweight but capable workspace; borrowed ideas must strengthen that control loop; event/audit data comes before a timeline; and broad multi-machine, canvas, or pipeline products wait. The findings below support those guardrails. They are evidence for small, testable additions—especially durable agent jobs, handoffs, approvals, session visibility, and collaboration—not a mandate to build a distributed orchestration platform.
+[`queues/README.md`](../queues/README.md) sets the product boundary: YOLOmux centers AI management, editing/viewing, collaboration, and a lightweight but capable workspace; borrowed ideas must strengthen that control loop; event/audit data comes before a timeline; and broad multi-machine, canvas, or pipeline products wait. The findings below support those guardrails. They are evidence for small, testable additions—especially durable agent jobs, handoffs, approvals, session visibility, and collaboration—not a mandate to build a distributed orchestration platform.
 
 ## Peer map and availability snapshot
 

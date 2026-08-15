@@ -18,9 +18,9 @@ Because `main` is checked out in the production checkout, it cannot also be chec
 
 ## Self-update: when the toast fires and what each message means
 
-`TmuxWebtermApp.perform_self_update` (`app.py:2041`) runs the plan `git pull --ff-only origin main` -> `python3 tools/static_build.py` -> restart. The conditions:
+`yolomux_lib/app.py::TmuxWebtermApp.perform_self_update` runs the plan `git pull --ff-only origin main` -> `python3 tools/static_build.py` -> restart. The conditions:
 
-- **Update available / notification.** `update_check_loop` (`app.py:2092`) polls on an interval (default 60 min, re-read live from settings each tick) and publishes `update_available` once per new target version when the configured `notify_level` allows it. A notify level of `none` idles the loop.
+- **Update available / notification.** `yolomux_lib/app.py::TmuxWebtermApp.update_check_loop` polls on an interval (default 60 min, re-read live from settings each tick) and publishes `update_available` once per new target version when the configured `notify_level` allows it. A notify level of `none` idles the loop.
 - **Pull must be a clean fast-forward.** If `git pull --ff-only` fails (the checkout is dirty or diverged — a "read-only" checkout), the update is **blocked**, nothing is pulled, and the message is `update blocked: checkout is not a clean fast-forward; sync it manually`. YOLOmux never force-updates; a dirty/diverged worktree is left untouched on purpose.
 - **After a successful pull**, `static_build.py` regenerates `static/yolomux.js` from `static_src/`, then `_spawn_self_restart()` decides whether to bounce the process.
 
@@ -31,7 +31,7 @@ The toast text reports the restart outcome:
 
 ## Auto-restart condition: running checkout only
 
-`_spawn_self_restart` (`app.py:2063`) auto-restarts the checkout that is running the current process. If the server was started from `<dev-worktree>/yolomux.py`, update pulls and builds in that worktree, then the helper restarts that same checkout. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches the resolved current argv from the same `PROJECT_ROOT`.
+`yolomux_lib/app.py::TmuxWebtermApp._spawn_self_restart` auto-restarts the checkout that is running the current process. If the server was started from `<dev-worktree>/yolomux.py`, update pulls and builds in that worktree, then the helper restarts that same checkout. Dev worktrees must never restart prod; the safety rule is that the helper only kills its own PID and relaunches the resolved current argv from the same `PROJECT_ROOT`.
 
 The mechanism, when it does fire, is intentionally portable — no systemd, no broad `pkill`:
 
@@ -50,7 +50,7 @@ The browser owns a separate self-update reload flow instead of relying on the ge
 - The generic `New YOLOmux version available` / `Reload` banner is suppressed for the self-update target owned by that client. A later unrelated server version can still use the normal banner path.
 - Auto-reload uses the same safety gate as the generic reload path. Dirty editor buffers or active typing defer the reload and show a self-update-specific `Software Update` notification; YOLOmux keeps polling and reloads once it is safe.
 
-Manual restart, when the toast asks for it (or any time you change source under a running server): use **kill-by-PID + nohup**, never `systemd-run --user` (denied by the harness D-Bus in this environment). Build the kill pattern around the explicit `$port` so you never match the relaunch command itself, exclude `$$`, and keep the kill and the relaunch as separate commands. A running server does NOT pick up edited `.py`/bundle files until restarted.
+Manual restart, when the toast asks for it (or any time you change source under a running server), uses `./boot.sh <port>` from the checkout that should serve the port. `boot.sh` owns the per-port startup lock, exact-listener retirement, load gate, detached launch, and readiness checks described in [`../DEVELOPMENT.md#restart-workflow`](../DEVELOPMENT.md#restart-workflow); do not recreate that lifecycle with a broad process pattern. A running server does NOT pick up edited `.py`/bundle files until restarted.
 
 ## Contributor requirements learned (mistakes to not repeat)
 
@@ -60,7 +60,7 @@ These are hard requirements when landing changes, learned by hitting them:
 - **`main` and dev worktrees refactor the same hot paths in parallel, so rebases conflict — resolve as the UNION of both sides.** When the resize-authority work on `main` and the lifecycle fixes on a dev branch both touched `bridge_tmux`/`start_locked`/`sendRemoteResize`, the correct resolution kept BOTH features (e.g. the fd-leak `try/except` *around* the `tmux_attach_command` helper, `claim_resize_authority` folded into the new try block; `sendRemoteResize` keeping main's `activate`/`shareClientId` message fields AND the new boolean return). Taking either side alone drops a real feature.
 - **Always rerun `python3 tools/check.py` after resolving a rebase/merge, and let it arbitrate.** A green full suite is the proof the union resolution is correct.
 - **A test that pins to a moving file will rot.** `test_diff_overview_matches_actual_todo_codemirror_rows` read the live `docs/TODO.md` and asserted a single diff chunk; once the doc was rewritten the diff grew to many chunks and the test failed for a data reason, not a code bug. Fixtures that need a realistic large diff must freeze BOTH sides (see EDITOR-CODEMIRROR.md) instead of reading a file that changes.
-- **`tools/check.py` runs py_compile, `static_build --check`, node syntax, the node layout suite (`tests/layout_url.test.js`), pytest, and a whitespace check.** Run it parallel (`-n auto` style) — it is the single gate before landing.
+- **`tools/check.py` owns the current lane graph and exclusive latency certification.** The default command runs its independent functional lanes in parallel, then performs one exclusive certification phase; use `--lane <name>` for focused iteration and `--serial` only to diagnose ordering or load. `tools/check.py` does not accept `-n auto`.
 - **No `clean-commit.sh` here.** That is a dynamo-only tool; yolomux commits do not run it.
 
 The commit/land workflow itself (LOCAL vs ORIGIN cps) is an operator workflow kept outside the repo. In short: LOCAL `cps` = rebase + fast-forward to local `main`, no version bump, no push; ORIGIN `cps` = rebase onto `origin/main`, bump `YOLOMUX_VERSION` in `yolomux_lib/infra/common.py`, then push. The version bump belongs only to the ORIGIN/publish path, never to local integration.

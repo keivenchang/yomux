@@ -6,6 +6,8 @@ Two constraints here exist nowhere else in the repo and are the reason this docu
 
 Field-level tmux signals are in [TMUX.md](TMUX.md); the Lost Tabber surface is in [GUI.md](GUI.md).
 
+> **CURRENT TRACEABILITY: 17/48 covered, 22/48 partial, 9/48 uncovered.** These counts classify the evidence rows below; they do not assert that every cited test was rerun during this documentation audit. This document combines shipped recovery behavior with the remaining acceptance contract and is not evidence that all E01-E48 journeys or the release decision have passed. The unresolved rows are summarized for future 0.7.7 queue planning in [`V0.7.7_IMPLEMENTATION_DISCREPANCIES.md`](V0.7.7_IMPLEMENTATION_DISCREPANCIES.md).
+
 ## Recovery Product Plan
 
 YOLOmux does not own the set of sessions worth saving. Every live session it can observe on an owner-verified known, configured, registered, or discovered tmux socket is tracked automatically, including sessions created directly by a person or indirectly by Claude/Codex skills. The minimum baseline is socket/session/window/pane identity, incarnation, cwd, current command/shell, pane PID, topology, and observation timestamps. Provider, transcript, and exact resume argv are enrichment fields: absence of those fields limits recovery to Shell only but never excludes the session from loss history.
