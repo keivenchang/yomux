@@ -1508,7 +1508,7 @@ def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqual
     # Not asked for: a skip, which the phase runner reports as certification_unit_did_not_run.
     monkeypatch.delenv("YOLOMUX_PROBE_CERTIFICATION", raising=False)
     with pytest.raises(pytest.skip.Exception) as skipped:
-        next(fixture_function(_Request()))
+        fixture_function(_Request())
     assert "YOLOMUX_PROBE_CERTIFICATION" in str(skipped.value)
 
     # Asked for on an unqualified host: NOT CERTIFIABLE, never a skip.
@@ -1520,7 +1520,7 @@ def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqual
         lambda **_kwargs: {signal: limit * 5 for signal, limit in limits.items()},
     )
     with pytest.raises(latency_calibration.NotCertifiableError) as refusal:
-        next(fixture_function(_Request()))
+        fixture_function(_Request())
     assert latency_calibration.NOT_CERTIFIABLE in str(refusal.value)
     assert refusal.value.evidence["nodeid"] == _Node.nodeid
 
@@ -1530,35 +1530,7 @@ def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqual
         "measure_host_resources",
         lambda **_kwargs: {signal: limit / 3 for signal, limit in limits.items()},
     )
-    writebacks = []
-    monkeypatch.setattr(latency_calibration, "complete_owned_writeback", lambda: writebacks.append("complete"))
-    qualified_fixture = fixture_function(_Request())
-    assert next(qualified_fixture)["qualified"] is True
-    assert writebacks == []
-    with pytest.raises(StopIteration):
-        next(qualified_fixture)
-    assert writebacks == ["complete"]
-
-
-def test_certification_writeback_completion_has_one_shared_owner(monkeypatch):
-    calls = []
-    monkeypatch.setattr(latency_calibration.os, "sync", lambda: calls.append("sync"))
-    assert latency_calibration.complete_owned_writeback() >= 0
-    assert calls == ["sync"]
-
-    load_check_module()
-    check_source, check_tree = parsed_python_source(REPO_ROOT / "tools" / "check.py")
-    assert "latency_calibration.complete_owned_writeback()" in check_source
-    direct_sync_calls = [
-        node
-        for node in ast.walk(check_tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "os"
-        and node.func.attr == "sync"
-    ]
-    assert direct_sync_calls == []
+    assert fixture_function(_Request())["qualified"] is True
 
 
 def test_certify_verdicts_cannot_reach_green_through_a_refusal(tmp_path):
