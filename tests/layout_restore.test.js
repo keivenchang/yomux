@@ -3440,6 +3440,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('function setLimitedMapEntry'), 'long-lived frontend maps share a bounded LRU setter');
     assert.ok(source.includes('fileExplorerMemoryCacheLimit = 512'), 'file explorer memory caches are capped');
     assert.ok(source.includes('commandPaletteRecentKeyLimit = 100'), 'command palette recent-key cache is capped');
+    assert.ok(/\.file-tree-row\.tabber-row \.tabber-window-text,\s*\.command-palette-group,\s*\.repo-chip-menu \.repo-chip-branch[\s\S]*?overflow:\s*hidden;[\s\S]*?text-overflow:\s*ellipsis;[\s\S]*?white-space:\s*nowrap;/.test(css), 'long indexed-root group labels use the shared single-line ellipsis owner');
     // The preview fixture above asserts restored vertical and horizontal scroll state.  Avoid
     // coupling that behavior to one helper call spelling.
     assert.equal(source.includes("const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef});\n  installCodeMirrorDiffResizeObserver"), false, 'diff resize observer is not installed before the rebuild decision');

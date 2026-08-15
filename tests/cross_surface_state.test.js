@@ -4296,6 +4296,21 @@ async function runCrossSurfaceStateSuite() {
   assert.equal(exactDoitRows[0]?.label, 'DOIT.53.md', 'S15: exact local DOIT.53.md stays first for a dotted filename query');
   assert.equal(exactDoitRows.some(item => item.label === 'report.html'), false, 'S15: external indexed full-path-only fuzzy noise is hidden for dotted filename queries');
   });
+  test('external indexed search cannot assemble a filename match across unrelated path segments', () => {
+  const indexedApi = loadYolomux('', ['1']);
+  const indexedRoot = '/Users/test/Library/Mobile Documents/com~apple~CloudDocs/ChangDerFamily';
+  const scatteredPath = `${indexedRoot}/c/o/n/s/u/m/e/r-/l/a/w/s/Unit-2-Test-Attempt-review.pdf`;
+  assert.ok(indexedApi.fuzzySubsequenceMatch('consumer-laws', scatteredPath), 'the generic fuzzy matcher reproduces the scattered full-path false positive');
+  indexedApi.setFileQuickOpenCandidatesForTest('/repo/yolomux', [
+    {name: 'consumer-laws.md', path: `${indexedRoot}/shared docs/consumer-laws.md`, relative_path: 'shared docs/consumer-laws.md', indexed_root: indexedRoot, kind: 'file'},
+    {name: 'Unit-2-Test-Attempt-review.pdf', path: scatteredPath, relative_path: 'c/o/n/s/u/m/e/r-/l/a/w/s/Unit-2-Test-Attempt-review.pdf', indexed_root: indexedRoot, kind: 'file'},
+  ]);
+  indexedApi.setCommandPaletteStateForTest('files', 'consumer-laws');
+  const indexedRows = indexedApi.fileQuickOpenItems().filter(item => item.category === 'file');
+  assert.deepStrictEqual(canonical(indexedRows.map(item => item.label)), ['consumer-laws.md'], 'external indexed results require a fuzzy match within one filename or relative-path segment');
+  const html = indexedApi.commandPaletteResultsHtmlForTest();
+  assert.ok(html.includes(`class="command-palette-group" title="Indexed ${indexedRoot}"`), 'the clipped indexed-root group preserves its full path as a hover title');
+  });
   test('quick-open restricts DOIT family search to sibling YOLOmux worktrees', () => {
   const doitFamilyApi = loadYolomux('', ['1']);
   assert.deepStrictEqual(canonical(doitFamilyApi.fileQuickOpenExtraRootsForSearchQuery('DOIT')), ['/home/test'], 'DOIT queries search the current YOLOmux workdir family parent');

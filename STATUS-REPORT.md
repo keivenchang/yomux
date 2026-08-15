@@ -1,6 +1,6 @@
 # Progress
 
-Updated: 2026-08-14 07:23 PM PT
+Updated: 2026-08-14 07:31 PM PT
 Worktree: `/home/keivenc/dev/yolomux.dev7771`
 
 **Goal:** Finish v0.7.6 as the five-queue performance release: gate optimization first, then rename completion, window-strip preservation, Quick Open indexed-result filtering, and session poll cadence; prove measurements and generated assets on a clean exact SHA; confirm the window-strip fix on 7770; archive the queues and close the release. New findings stay in `queues/backlog/` unless explicitly added
@@ -18,14 +18,14 @@ Worktree: `/home/keivenc/dev/yolomux.dev7771`
 - [ ] 7. Clean exact-SHA canonical gate passes with no new Warnings or Errors, generated assets rebuilt from `static_src/` and matching, and every performance claim backed by quiet-box before and after measurements
 - [ ] 8. The explicitly expanded five-queue scope is archived and v0.7.6 is closed; later findings remain in `queues/backlog/` unless explicitly added
 
-**Supporting queue totals:** 42/59 done; 17 pending.
+**Supporting queue totals:** 50/59 done; 9 pending.
 
 ## Active queues
 
 | queue | done | pending | complete |
 | --- | ---: | ---: | ---: |
 | `DOIT.076.1.session-poll-cadence.md` | 10 | 1 | 91% |
-| `DOIT.076.2.quick-open-indexed-results.md` | 0 | 12 | 0% |
+| `DOIT.076.2.quick-open-indexed-results.md` | 8 | 4 | 67% |
 | `DOIT.p0.gate-optimization.md` | 11 | 1 | 92% |
 | `DOIT.p0.unbounded-completion-wait.md` | 11 | 1 | 92% |
 | `DOIT.p0.window-strip-vanishes.md` | 10 | 2 | 83% |
@@ -45,17 +45,17 @@ Worktree: `/home/keivenc/dev/yolomux.dev7771`
 - [x] No regression in active-session responsiveness, confirmed in a real browser rather than by test alone. DONE: The live approval transition completed in 5.686s o…
 - [ ] Canonical gate green, no new Warnings or Errors.
 
-### `DOIT.076.2.quick-open-indexed-results.md` (0/12)
-- [ ] Do not merge into a dirty tree. Wait until the in-flight 0.7.6 work touching `20_layout_state.js` is committed, then re-run `git merge-tree` against the real H…
-- [ ] Merge and resolve `20_layout_state.js` by intent, not by text. The branch constrains external indexed matching; the concurrent work changes layout-mutation com…
-- [ ] Re-derive `tests/fixtures/architecture_budgets/v1.json` after the merge instead of taking either side. Two independently regenerated ratchets cannot be reconci…
-- [ ] Rebuild `static/yolomux.js` and `static/yolomux.css` from `static_src/` and confirm the generated-asset check passes. Both sides regenerate these, so whichever…
-- [ ] Run the branch's own regressions and confirm they still fail without the fix on the merged tree — a test carried through a merge can silently stop exercising a…
+### `DOIT.076.2.quick-open-indexed-results.md` (8/12)
+- [x] Do not merge into a dirty tree. Wait until the in-flight 0.7.6 work touching `20_layout_state.js` is committed, then re-run `git merge-tree` against the real H…
+- [x] Merge and resolve `20_layout_state.js` by intent, not by text. The branch constrains external indexed matching; the concurrent work changes layout-mutation com…
+- [x] Re-derive `tests/fixtures/architecture_budgets/v1.json` after the merge instead of taking either side. Two independently regenerated ratchets cannot be reconci…
+- [x] Rebuild `static/yolomux.js` and `static/yolomux.css` from `static_src/` and confirm the generated-asset check passes. Both sides regenerate these, so whichever…
+- [x] Run the branch's own regressions and confirm they still fail without the fix on the merged tree — a test carried through a merge can silently stop exercising a…
 - [ ] Verify in a real browser: open Quick Open against an external indexed root with a long path, search a term whose characters appear scattered across directory n…
 - [ ] `git log HEAD..origin/fix/quick-open-indexed-results` is empty.
-- [ ] The scattered-path regression passes on the merged tree and was seen to fail without the fix.
-- [ ] `tests/fixtures/architecture_budgets/v1.json` is regenerated post-merge, not inherited from either side.
-- [ ] Generated assets rebuilt from source and matching; the generated-asset check exits 0.
+- [x] The scattered-path regression passes on the merged tree and was seen to fail without the fix. DONE: Tests-only `5bdfbeaf9` failed 48/49 on the exact `consumer-…
+- [x] `tests/fixtures/architecture_budgets/v1.json` is regenerated post-merge, not inherited from either side. DONE: Regenerated from the merged working tree with `-…
+- [x] Generated assets rebuilt from source and matching; the generated-asset check exits 0. DONE: Rebuilt both bundles after the merge; `static_build.py --check` exi…
 - [ ] Real-browser confirmation of both the result filtering and the hover title, on a live restarted server.
 - [ ] Canonical gate green, no new Warnings or Errors.
 
@@ -114,7 +114,7 @@ Worktree: `/home/keivenc/dev/yolomux.dev7771`
 | --- | ---: | ---: | ---: | --- |
 | 2026-08-14 17:00 PT | 4 | 3 | - | window-strip P0 is 10/12: red Node/Chrome patch replay fixed at empty authority; restarted 7771 PID 801511 served matching bundle fb78ffcd and kept 0:claude with zero browser warnings/errors; shipping-version 7770 confirmation and canonical exact-SHA gate remain |
 | 2026-08-14 18:00 PT | 4 | 3 | +0 | window-strip remains 10/12; repaired the parallel-only YO!stats ring race at the controller-to-DOM paint fence after exact red 71/72; deterministic owner 72/72, real Chrome 1/1 in 33.09s, three-worker E2E 122/122 in 144.16s, Node 19/19, architecture 25/25; full canonical rerun starting |
-| 2026-08-14 19:00 PT | 4 | 4 | +0 | window-strip remains 10/12; gate 4 passed all functional lanes (E2E 182.42s, nonbrowser 393.53s, browser 473.71s, serial 6.91s) and all 7 qualified certification units in 97.90s; exact-SHA alone refused dirty_start_checkout. Restarted 7771 to PID 4158217 with served bundle 12c0bba4 matching disk, but authenticated stability probe returned 401; 7770 remains unchanged 0.7.5 PID 3867703 with bundle 56b32940, so shipping confirmation is blocked on authorized landing/release |
+| 2026-08-14 19:00 PT | 4 | 4 | +0 | window-strip remains 10/12; gate 4 passed all functional lanes (E2E 182.42s, nonbrowser 393.53s, browser 473.71s, serial 6.91s) and all 7 qualified certification units in 97.90s; exact-SHA alone refused dirty_start_checkout. Quick Open p1 was explicitly added and reached 8/12 after the clean `5bdfbeaf9` checkpoint, regenerated ratchet and bundles, exact tests-only red at 48/49 and 90/91, and merged green at 49/49 and 91/91; browser, merge commit, and canonical exact-SHA evidence remain |
 
 <!-- progress-report-goal: {"goal":"Finish v0.7.6 as the five-queue performance release: gate optimization first, then rename completion, window-strip preservation, Quick Open indexed-result filtering, and session poll cadence; prove measurements and generated assets on a clean exact SHA; confirm the window-strip fix on 7770; archive the queues and close the release. New findings stay in `queues/backlog/` unless explicitly added","items":[{"id":1,"text":"P0 gate optimization completed first: shared-box worker budget and lane ownership measured before and after without deleting, skipping, or deselecting tests; this item blocks session cadence work","done":true},{"id":2,"text":"P0 rename completion made bounded and lossless across render coalescing and supersession so a server-successful rename cannot leave its dialog open or be reported as failed","done":true},{"id":3,"text":"P0 tmux window-strip preservation reproduced from a last-window removal patch, fixed at the empty-authority fallback boundary rather than with a placeholder, made diagnostically observable, and confirmed in a real browser on 7770","done":false},{"id":4,"text":"P1 Quick Open external indexed-result filtering is landed from `origin/fix/quick-open-indexed-results`, with scattered whole-path matches rejected, post-merge ratchets and bundles regenerated, and the result and hover-title journey verified in a real browser","done":false},{"id":5,"text":"P1 activity-tiered statusd pane capture completed after gate optimization: active cadence retained, recent/quiet/cold sessions backed off to about 10/30/120 seconds, captures reduced from 315.0/minute to 87.0/minute, and statusd CPU reduced from 3.82 to 1.35 CPU-seconds in comparable quiet-box 60-second runs","done":true},{"id":6,"text":"Restarted 7771 passes real-browser approval and in-flight-render rename journeys","done":true},{"id":7,"text":"Clean exact-SHA canonical gate passes with no new Warnings or Errors, generated assets rebuilt from `static_src/` and matching, and every performance claim backed by quiet-box before and after measurements","done":false},{"id":8,"text":"The explicitly expanded five-queue scope is archived and v0.7.6 is closed; later findings remain in `queues/backlog/` unless explicitly added","done":false}],"queues":["DOIT.p0.gate-optimization.md","DOIT.p0.unbounded-completion-wait.md","DOIT.p0.window-strip-vanishes.md","DOIT.076.1.session-poll-cadence.md","DOIT.076.2.quick-open-indexed-results.md"]} -->
-<!-- progress-report-history: [{"hour":"2026-08-14 17:00 PT","done":4,"pending":3,"note":"window-strip P0 is 10/12: red Node/Chrome patch replay fixed at empty authority; restarted 7771 PID 801511 served matching bundle fb78ffcd and kept 0:claude with zero browser warnings/errors; shipping-version 7770 confirmation and canonical exact-SHA gate remain"},{"hour":"2026-08-14 18:00 PT","done":4,"pending":3,"note":"window-strip remains 10/12; repaired the parallel-only YO!stats ring race at the controller-to-DOM paint fence after exact red 71/72; deterministic owner 72/72, real Chrome 1/1 in 33.09s, three-worker E2E 122/122 in 144.16s, Node 19/19, architecture 25/25; full canonical rerun starting"},{"hour":"2026-08-14 19:00 PT","done":4,"pending":4,"note":"window-strip remains 10/12; gate 4 passed all functional lanes (E2E 182.42s, nonbrowser 393.53s, browser 473.71s, serial 6.91s) and all 7 qualified certification units in 97.90s; exact-SHA alone refused dirty_start_checkout. Restarted 7771 to PID 4158217 with served bundle 12c0bba4 matching disk, but authenticated stability probe returned 401; 7770 remains unchanged 0.7.5 PID 3867703 with bundle 56b32940, so shipping confirmation is blocked on authorized landing/release"}] -->
+<!-- progress-report-history: [{"hour":"2026-08-14 17:00 PT","done":4,"pending":3,"note":"window-strip P0 is 10/12: red Node/Chrome patch replay fixed at empty authority; restarted 7771 PID 801511 served matching bundle fb78ffcd and kept 0:claude with zero browser warnings/errors; shipping-version 7770 confirmation and canonical exact-SHA gate remain"},{"hour":"2026-08-14 18:00 PT","done":4,"pending":3,"note":"window-strip remains 10/12; repaired the parallel-only YO!stats ring race at the controller-to-DOM paint fence after exact red 71/72; deterministic owner 72/72, real Chrome 1/1 in 33.09s, three-worker E2E 122/122 in 144.16s, Node 19/19, architecture 25/25; full canonical rerun starting"},{"hour":"2026-08-14 19:00 PT","done":4,"pending":4,"note":"window-strip remains 10/12; gate 4 passed all functional lanes (E2E 182.42s, nonbrowser 393.53s, browser 473.71s, serial 6.91s) and all 7 qualified certification units in 97.90s; exact-SHA alone refused dirty_start_checkout. Quick Open p1 was explicitly added and reached 8/12 after the clean `5bdfbeaf9` checkpoint, regenerated ratchet and bundles, exact tests-only red at 48/49 and 90/91, and merged green at 49/49 and 91/91; browser, merge commit, and canonical exact-SHA evidence remain"}] -->
