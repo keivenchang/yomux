@@ -434,6 +434,17 @@ def process_record_diagnostic(
     """Route persisted local-service identity through the one central fence."""
 
     if table is None:
+        try:
+            record_pid = int(record.get("pid") or 0)
+        except (TypeError, ValueError):
+            record_pid = 0
+        if process_state(record_pid) == "Z":
+            return is_current_local_process(
+                record,
+                host_identity=host_identity,
+                start_identity_reader=lambda _pid: None,
+                pid_probe=lambda _pid: False,
+            )
         return is_current_local_process(
             record,
             host_identity=host_identity,
@@ -1718,6 +1729,32 @@ class LocalServiceRegistry:
             self._child_ownership.reaper_threads.add(thread)
         thread.start()
 
+    def _reap_recorded_child_if_exited(self) -> bool:
+        """Recover a child that exited before this generation could adopt it."""
+
+        if self.process is not None or not hasattr(os, "waitpid"):
+            return False
+        record = self._read_record()
+        pid = int(record.get("pid") or 0)
+        if (
+            pid <= 1
+            or int(record.get("launcher_pid") or 0) != os.getpid()
+            or process_state(pid) != "Z"
+        ):
+            return False
+        with self._adopted_reaper_lock:
+            if self._adopted_reaper_pid == pid:
+                return False
+            try:
+                waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                return False
+        if waited_pid != pid:
+            return False
+        self.invalidate_rpc_health()
+        self._retire_record_naming_pid(pid)
+        return True
+
     def settle_reaper_threads(self, timeout: float = 3.0) -> None:
         """Join every reaper this registry started after replacement starts are sealed."""
 
@@ -1749,6 +1786,7 @@ class LocalServiceRegistry:
         # the healthy-cache shortcut so a quiet service cannot remain defunct.
         if self.process is not None and self.process.poll() is not None:
             self.process = None
+        self._reap_recorded_child_if_exited()
         if self._upgrade_required is not None:
             return False
         if self.recently_healthy():

@@ -17,7 +17,7 @@
       "self_fields": 32
     },
     "yolomux_lib/local_services/registry.py:LocalServiceRegistry": {
-      "methods": 76,
+      "methods": 77,
       "self_fields": 27
     },
     "yolomux_lib/server.py:Handler": {
@@ -2129,7 +2129,7 @@
     "tests/test_local_service_registry_state.py": 95,
     "tests/test_local_service_runtime_row_projection.py": 158,
     "tests/test_local_services_host_identity.py": 134,
-    "tests/test_local_services_launch.py": 2091,
+    "tests/test_local_services_launch.py": 2135,
     "tests/test_local_services_rpc.py": 1306,
     "tests/test_local_services_watchdog.py": 339,
     "tests/test_login_auth.py": 1031,
