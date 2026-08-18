@@ -81,6 +81,39 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert command.count("--dang --self-signed --dev") == 3
 
 
+def test_boot_print_command_refuses_relative_log_dir_without_writing(tmp_path):
+    result = subprocess.run(
+        [str(ROOT / "boot.sh"), "--print-command", "--log-dir", "relative-logs", "17775"],
+        cwd=tmp_path,
+        env={**os.environ, "YOLOMUX_START_LOAD_WAIT_SECONDS": "30"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "YOLOMUX_LOG_DIR" in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_boot_refuses_unsafe_tmpdir_before_restart_lock_write(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    for value in ("relative-tmp", "/", str(home)):
+        cwd = tmp_path / f"cwd-{len(value)}"
+        cwd.mkdir()
+        result = subprocess.run(
+            [str(ROOT / "boot.sh"), "--print-command", "17775"],
+            cwd=cwd,
+            env={**os.environ, "HOME": str(home), "TMPDIR": value},
+            text=True,
+            capture_output=True,
+        )
+
+        assert result.returncode != 0
+        assert "TMPDIR" in result.stderr
+        assert list(cwd.iterdir()) == []
+
+
 def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(tmp_path):
     checkout = tmp_path / "checkout"
     vendor_dir = checkout / "static" / "vendor"

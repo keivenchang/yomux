@@ -8,6 +8,7 @@ import ctypes.util
 from http.client import HTTPConnection
 import json
 import os
+from pathlib import Path
 import shutil
 import signal
 import socket
@@ -29,6 +30,7 @@ from yolomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers import browser_layout
 from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
 from yolomux_lib.local_services import registry as local_service_registry
+from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import assert_writable_paths_beneath
 from tests.gate_harness import bootstrap_writable_paths
@@ -181,6 +183,13 @@ def test_gate_runtime_paths_and_imported_constants_are_fixture_owned(gate_runtim
     resolved = resolved_gate_writable_paths(gate_runtime_paths)
     assert_writable_paths_beneath(gate_runtime_paths.root, resolved)
 
+    artifact_paths = {
+        name: Path(os.environ[name])
+        for name in ("PYTHONPYCACHEPREFIX", "PIP_CACHE_DIR", "NPM_CONFIG_CACHE", "COVERAGE_FILE")
+    }
+    assert_writable_paths_beneath(gate_runtime_paths.root, artifact_paths)
+    assert os.environ[GENERATED_PYTHON_CACHE_PREFIX_ENV] == os.environ["PYTHONPYCACHEPREFIX"]
+
     assert gate_runtime_paths.config_dir.is_dir()
     assert gate_runtime_paths.state_dir.is_dir()
     assert gate_runtime_paths.cache_dir.is_dir()
@@ -197,9 +206,9 @@ def test_gate_browser_boundary_waits_for_preexisting_async_api_work():
     class PendingApiDriver:
         def __init__(self):
             self.states = [
-                {"available": True, "diagnosticMode": "retained-js", "pending": ["op-fixture"], "watchDiffPendingOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
-                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "activityRefreshing": True, "watchRootsPending": False},
-                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": ["op-fixture"], "watchDiffPendingOperationIds": [], "batchQueued": 0, "batchPending": 0, "batchOperations": 0, "watchDiffBatchQueued": 0, "watchDiffBatchPending": 0, "watchDiffBatchOperations": 0, "watchDiffBatchOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "batchQueued": 0, "batchPending": 0, "batchOperations": 0, "watchDiffBatchQueued": 0, "watchDiffBatchPending": 0, "watchDiffBatchOperations": 0, "watchDiffBatchOperationIds": [], "activityRefreshing": True, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "batchQueued": 0, "batchPending": 0, "batchOperations": 0, "watchDiffBatchQueued": 0, "watchDiffBatchPending": 0, "watchDiffBatchOperations": 0, "watchDiffBatchOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
             ]
             self.receipt_barriers = [
                 browser_receipt_barrier_with_blocker(normal_browser_receipt_blocker()),
@@ -225,12 +234,57 @@ def test_gate_browser_boundary_waits_for_preexisting_async_api_work():
         "diagnosticMode": "retained-js",
         "pending": [],
         "watchDiffPendingOperationIds": [],
+        "batchQueued": 0,
+        "batchPending": 0,
+        "batchOperations": 0,
+        "watchDiffBatchQueued": 0,
+        "watchDiffBatchPending": 0,
+        "watchDiffBatchOperations": 0,
+        "watchDiffBatchOperationIds": [],
         "activityRefreshing": False,
         "watchRootsPending": False,
         "browserReceiptBarrier": clean_browser_receipt_barrier(accepted=1),
     }
     assert driver.states == []
     assert driver.receipt_barriers == []
+
+
+def test_gate_browser_boundary_waits_for_a_request_before_its_202_operation_receipt():
+    class StartupRequestDriver:
+        def __init__(self):
+            self.states = [
+                {
+                    "available": True,
+                    "diagnosticMode": "browser-console",
+                    "pending": [],
+                    "startupActive": 1,
+                    "startupQueued": 0,
+                },
+                {
+                    "available": True,
+                    "diagnosticMode": "browser-console",
+                    "pending": ["op-after-startup-fetch"],
+                    "startupActive": 0,
+                    "startupQueued": 0,
+                },
+                {
+                    "available": True,
+                    "diagnosticMode": "browser-console",
+                    "pending": [],
+                    "startupActive": 0,
+                    "startupQueued": 0,
+                },
+            ]
+
+        def execute_script(self, _script):
+            return self.states.pop(0)
+
+    driver = StartupRequestDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=1)
+
+    assert settled["startupActive"] == 0
+    assert settled["pending"] == []
+    assert driver.states == []
 
 
 def test_gate_browser_boundary_waits_for_held_watch_root_registration():
@@ -312,6 +366,10 @@ def test_gate_browser_boundary_timeout_names_the_owned_pending_work():
                 "batchQueued": 0,
                 "batchPending": 0,
                 "batchOperations": 0,
+                "watchDiffBatchQueued": 0,
+                "watchDiffBatchPending": 0,
+                "watchDiffBatchOperations": 0,
+                "watchDiffBatchOperationIds": [],
                 "activityRefreshing": False,
                 "watchRootsPending": False,
                 "finderWatchReady": True,

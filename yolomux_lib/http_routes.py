@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from .infra.common import auth_setup_required
 from .infra.common import error_payload
 from .infra.common import inline_json_product_metadata
 from .infra.common import parse_bool
+from .state_services import ClientWatchRootValidationError
 from .chat.chat_service import ChatServiceError
 from .chat.chat_store import ChatStoreValidationError
 from .workspace.locales import resolve_locale_preference
@@ -252,6 +254,8 @@ def dispatch_http_route(request: Any, method: str) -> None:
     # record before parsing each request; route dispatch supplies the per-request start used
     # for ordinary endpoints which do not have a more specific build timer.
     setattr(request, "_http_request_dispatch_started_at", time.perf_counter())
+    setattr(request, "_http_request_thread_cpu_started_ns", time.thread_time_ns())
+    setattr(request, "_http_request_thread_native_id", threading.get_native_id())
     parsed = urlparse(request.path)
     if request.redirect_plaintext_to_https_if_needed(parsed):
         return
@@ -738,7 +742,10 @@ def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     qs = request_query(request, parsed)
     session = session_param(qs, None)
     body, status = request.server.app.auto_approve_status_bytes(session)
-    request.write_json_bytes(body, status=status)
+    if status == HTTPStatus.OK:
+        request.write_product_bytes(body, inline_json_product_metadata(body))
+    else:
+        request.write_json_bytes(body, status=status)
 
 
 def get_notify(request: Any, parsed: Any, route: Route) -> None:
@@ -1207,7 +1214,28 @@ def post_watch_roots(request: Any, parsed: Any, route: Route) -> None:
     payload = require_json_body(request, route)
     if payload is None:
         return
-    request.write_json(request.server.app.update_client_watch_roots(payload))
+    try:
+        response = request.server.app.update_client_watch_roots(payload)
+    except ClientWatchRootValidationError as error:
+        request.write_json(
+            error_payload(
+                str(error),
+                message_key="common.requestFailed",
+                canonical=True,
+                code="invalid_request",
+                origin="server.http",
+                retryable=False,
+                details={},
+                stack=[{
+                    "component": "server.http",
+                    "operation": "POST /api/watch/roots",
+                    "code": "invalid_request",
+                }],
+            ),
+            status=HTTPStatus.BAD_REQUEST,
+        )
+        return
+    request.write_json(response)
 
 
 def post_drop_action(request: Any, parsed: Any, route: Route) -> None:

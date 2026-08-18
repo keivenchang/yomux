@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "지각/부재",
   "debug.system.sampler.header.runtime.full": "마지막 런타임",
   "debug.system.sampler.header.runtime.short": "런타임",
+  "debug.tab.cost": "비용",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "그래프",
   "debug.tab.logs": "로그",

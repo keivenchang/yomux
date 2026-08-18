@@ -33,6 +33,7 @@ from .. import filesystem
 from ..local_service_projection import registry_runtime_row
 from ..workspace import session_files
 from ..observability.activity_summary import tabber_activity_view_result
+from ..observability.queued_delivery import compact_queued_delivery_journal
 from .common import RUNTIME_DIR
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
@@ -102,7 +103,9 @@ from ..web import html_preview_document
 # retires the mismatched pair.
 # v23: raw and zip products are private, file-backed artifacts consumed through bounded chunk
 # leases. A v22 peer can only retain/return whole byte products, so mixed peers must be fenced.
-JOBD_PROTOCOL_VERSION = 23
+# v24: queued-delivery journal compaction runs as registered maintenance work rather than burning
+# request-thread CPU. A v23 daemon rejects that task, so an upgraded web process must retire it.
+JOBD_PROTOCOL_VERSION = 24
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
@@ -522,12 +525,26 @@ def _session_files_cache_prune(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _queued_delivery_compact(payload: bytes) -> bytes:
+    """Compact one private operation journal in a jobd worker process."""
+
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict) or set(value) != {"state_path"}:
+        raise ValueError("queued-delivery compaction payload must contain only state_path")
+    state_path = Path(str(value.get("state_path") or "")).expanduser()
+    if not state_path.is_absolute() or ".." in state_path.parts:
+        raise ValueError("queued-delivery state path must be absolute and normalized")
+    result = compact_queued_delivery_journal(state_path)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 REGISTERED_TASKS = {
     "filesystem_batch": _filesystem_batch,
     "filesystem_operation": _filesystem_operation,
     "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
     "metadata_warm_view": _metadata_warm_view,
+    "queued_delivery_compact": _queued_delivery_compact,
     "session_files_cache_prune": _session_files_cache_prune,
     "session_files_view": _session_files_view,
     "tabber_activity_view": _tabber_activity_view,
@@ -986,6 +1003,10 @@ class PersistentJobBroker:
         # deliberately retains aggregates rather than completed product/profile payloads.
         self.product_phase_runtime_ms: dict[str, dict[str, dict[str, float]]] = {}
         self.product_work_totals: dict[str, dict[str, int]] = {}
+        self.owner_invocations: dict[str, int] = {
+            "jobd_work_graph_rebuild": 0,
+            "provider_metadata_rebuild": 0,
+        }
         self.source_diagnostics: dict[str, dict[str, str | int]] = {}
         self.source_change_counters: dict[str, int] = {}
         self.session_files_accepted_requester_counters: dict[str, int] = {}
@@ -1016,11 +1037,10 @@ class PersistentJobBroker:
         stats["total_ms"] += elapsed_ms
         stats["max_ms"] = max(stats["max_ms"], elapsed_ms)
 
-    def _record_phase_runtime_ms(self, task: str, result: bytes) -> None:
-        if task not in {"session_files_view", "metadata_warm_view"}:
+    def _record_phase_runtime_ms(self, task: str, decoded: dict[str, Any] | None) -> None:
+        if task not in {"session_files_view", "metadata_warm_view"} or decoded is None:
             return
-        decoded = json.loads(result.decode("utf-8"))
-        profile = decoded.get("profile") if isinstance(decoded, dict) else None
+        profile = decoded.get("profile")
         phases = profile.get("phases") if isinstance(profile, dict) else None
         if task == "session_files_view" and isinstance(phases, dict):
             task_stats = self.product_phase_runtime_ms.setdefault(task, {})
@@ -1047,6 +1067,11 @@ class PersistentJobBroker:
                 value = work.get(name)
                 if isinstance(value, int) and value >= 0:
                     totals[name] = totals.get(name, 0) + value
+            if task == "metadata_warm_view":
+                for owner in self.owner_invocations:
+                    value = work.get(owner)
+                    if isinstance(value, int) and value >= 0:
+                        self.owner_invocations[owner] += value
         if task != "session_files_view":
             return
         source = profile.get("source") if isinstance(profile, dict) else None
@@ -1227,8 +1252,11 @@ class PersistentJobBroker:
                 result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
                 if len(result) > result_limit:
                     raise ValueError("result too large")
+                decoded_result: dict[str, Any] | None = None
                 if task_result.product.get("format") == "json":
-                    json.loads(result.decode("utf-8"))
+                    decoded = json.loads(result.decode("utf-8"))
+                    if isinstance(decoded, dict):
+                        decoded_result = decoded
                 if record.status != "timed_out":
                     record.result = result
                     record.product = dict(task_result.product)
@@ -1241,7 +1269,7 @@ class PersistentJobBroker:
                         schedule=self._record_schedule(record),
                     )
                     self._bump_counter(record.task, "completed")
-                    self._record_phase_runtime_ms(record.task, result)
+                    self._record_phase_runtime_ms(record.task, decoded_result)
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
             except JobdFilesystemOperationFailure as exc:
@@ -1428,8 +1456,22 @@ class PersistentJobBroker:
             "traceback": redact_local_service_text(traceback_text),
         }
 
-    def _queue_record(self, task: str, payload: dict[str, Any], priority: str, generation: int, coalesce_key: str, deadline_at: float = 0.0) -> JobRecord:
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    def _queue_record(
+        self,
+        task: str,
+        payload: dict[str, Any],
+        priority: str,
+        generation: int,
+        coalesce_key: str,
+        deadline_at: float = 0.0,
+        *,
+        payload_bytes: bytes | None = None,
+    ) -> JobRecord:
+        encoded = (
+            payload_bytes
+            if payload_bytes is not None
+            else json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
         record = JobRecord(uuid.uuid4().hex, task, encoded, priority, generation, coalesce_key, time.time(), deadline_at=deadline_at)
         self.records[record.job_id] = record
         self.coalesced[(task, coalesce_key)] = record.job_id
@@ -1491,6 +1533,7 @@ class PersistentJobBroker:
             "task": task,
             "priority": priority,
             "payload": payload,
+            "payload_bytes": encoded,
             "generation": generation,
             "deadline_ms": requested_deadline_ms,
             "deadline_at": time.monotonic() + (requested_deadline_ms / 1000.0) if requested_deadline_ms else 0.0,
@@ -1507,6 +1550,9 @@ class PersistentJobBroker:
         task = str(submission["task"])
         priority = str(submission["priority"])
         payload = submission["payload"]
+        payload_bytes = submission["payload_bytes"]
+        if not isinstance(payload_bytes, bytes):
+            raise ValueError("validated submission payload bytes are invalid")
         generation = int(submission["generation"])
         deadline_at = float(submission["deadline_at"])
         coalesce_key = str(submission["coalesce_key"])
@@ -1521,7 +1567,15 @@ class PersistentJobBroker:
             return {"ok": False, "error": "queue full"}
         self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
         self._supersede_stale_queued(coalesce_key, generation)
-        record = self._queue_record(task, payload, priority, generation, coalesce_key, deadline_at)
+        record = self._queue_record(
+            task,
+            payload,
+            priority,
+            generation,
+            coalesce_key,
+            deadline_at,
+            payload_bytes=payload_bytes,
+        )
         self._bump_counter(task, "accepted")
         if task == "session_files_view":
             requester_key = self._session_files_requester_key(payload)
@@ -1702,6 +1756,7 @@ class PersistentJobBroker:
                 for task, phases in self.product_phase_runtime_ms.items()
             },
             "product_work_totals": {task: dict(totals) for task, totals in self.product_work_totals.items()},
+            "owner_invocations": dict(self.owner_invocations),
             "source_change_counters": dict(self.source_change_counters),
             "session_files_accepted_requester_counters": dict(self.session_files_accepted_requester_counters),
             "session_files_requester_counters": dict(self.session_files_requester_counters),
@@ -2012,6 +2067,7 @@ class JobClient(LocalServiceClient):
             "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {},
             "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {},
             "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {},
+            "owner_invocations": payload.get("owner_invocations") if isinstance(payload.get("owner_invocations"), dict) else {},
             "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {},
             "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {},
             "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {},

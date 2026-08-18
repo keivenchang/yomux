@@ -47,6 +47,15 @@ yolomux_validate_instance_isolation() {
   "$python_bin" "$repo_root/tools/instance_isolation.py" --port "$port" >/dev/null
 }
 
+yolomux_validate_root_environment() {
+  local requested_repo_root="${1:-${repo_root:-}}"
+  local requested_python_bin="${2:-${python_bin:-python3}}"
+  if [[ -z "$requested_repo_root" ]]; then
+    requested_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+  fi
+  "$requested_python_bin" "$requested_repo_root/tools/instance_isolation.py" validate-roots >/dev/null
+}
+
 yolomux_start_lock_path() {
   if [[ -n "${YOLOMUX_ROOT:-}" ]]; then
     printf '%s' "${YOLOMUX_ROOT%/}/cache/start.lock"
@@ -67,6 +76,10 @@ yolomux_release_start_lock() {
 
 yolomux_acquire_start_lock() {
   local lock_dir owner_pid
+  if ! yolomux_validate_root_environment; then
+    printf 'ERROR: startup root validation failed before lock acquisition\n' >&2
+    return 1
+  fi
   lock_dir="$(yolomux_start_lock_path)"
   mkdir -p "$(dirname "$lock_dir")"
   owner_pid=""

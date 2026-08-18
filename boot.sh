@@ -19,6 +19,7 @@ fi
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
+restart_lock_base="${TMPDIR:-/tmp}"
 dev_mode="auto"
 print_command=0
 check_assets=0
@@ -371,7 +372,7 @@ stop_port_listener() {
 
 port_restart_lock_dir() {
   local port="$1"
-  printf '%s/yolomux-restart-%s.lock' "${TMPDIR:-/tmp}" "$port"
+  printf '%s/yolomux-restart-%s.lock' "$restart_lock_base" "$port"
 }
 
 acquire_port_restart_lock() {
@@ -457,12 +458,15 @@ launch_server() {
 restart_port() {
   local port="$1"
   local log_path
-  acquire_port_restart_lock "$port"
   if ! yolomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
-    release_port_restart_lock "$port"
     die "port $port launch refused by instance-isolation preflight"
   fi
   log_path="$(log_path_for "$port")"
+  acquire_port_restart_lock "$port"
+  if ! mkdir -p "$log_dir" || ! : >> "$log_path"; then
+    release_port_restart_lock "$port"
+    die "log path is not writable: $log_path"
+  fi
   build_server_args "$port"
 
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -500,15 +504,23 @@ ensure_xterm_assets() {
   done
 }
 
+if [[ "$check_assets" -eq 1 ]]; then
+  ensure_xterm_assets
+  exit 0
+fi
+
+log_dir="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path YOLOMUX_LOG_DIR "$log_dir")" \
+  || die "log directory refused by product-root policy"
+restart_lock_base="$("$python_bin" "$repo_root/tools/instance_isolation.py" resolve-product-path TMPDIR "$restart_lock_base")" \
+  || die "restart lock directory refused by product-root policy"
+if ! yolomux_validate_root_environment "$repo_root" "$python_bin"; then
+  die "startup root validation failed before listener mutation"
+fi
+
 if [[ "$print_command" -eq 1 ]]; then
   for port in "${ports[@]}"; do
     print_launch_command "$port"
   done
-  exit 0
-fi
-
-if [[ "$check_assets" -eq 1 ]]; then
-  ensure_xterm_assets
   exit 0
 fi
 

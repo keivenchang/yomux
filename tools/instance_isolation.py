@@ -7,14 +7,59 @@ import json
 import os
 import shlex
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 ROOT_KEYS = ("YOLOMUX_RUNTIME_DIR", "YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR")
 YOLOMUX_ROOT_ENV = "YOLOMUX_ROOT"
+GENERATED_PYTHON_CACHE_PREFIX_ENV = "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"
+PRODUCT_ROOT_KEYS = (
+    YOLOMUX_ROOT_ENV,
+    "YOLOMUX_CONFIG_DIR",
+    "YOLOMUX_STATE_DIR",
+    "YOLOMUX_CACHE_DIR",
+    "YOLOMUX_RUNTIME_DIR",
+    "YOLOMUX_CODEX_HOME",
+    "CODEX_HOME",
+    "YOLOMUX_HOST_ARTIFACT_DIR",
+    "YOLOMUX_START_LOCK_DIR",
+    "YOLOMUX_LOG_DIR",
+    "YOLOMUX_CA_DIR",
+    "YOLOMUX_TOOL_LOCK_PATH",
+    "PYTHONPYCACHEPREFIX",
+    "TMPDIR",
+)
+ROOTED_OVERRIDE_KEYS = (
+    *ROOT_KEYS,
+    "YOLOMUX_CODEX_HOME",
+    "YOLOMUX_HOST_ARTIFACT_DIR",
+    "PYTHONPYCACHEPREFIX",
+)
+ROOTED_IGNORED_AMBIENT_KEYS = (
+    "CODEX_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+)
+AUTO_ROOT_IGNORED_AMBIENT_KEYS = (
+    *ROOTED_IGNORED_AMBIENT_KEYS,
+    "YOLOMUX_HOST_ARTIFACT_DIR",
+    "PYTHONPYCACHEPREFIX",
+    GENERATED_PYTHON_CACHE_PREFIX_ENV,
+)
+ROOTED_SOCKET_RELATIVE_PATHS = (
+    Path("control/yolomux-4194304-ffffffffffffffff.sock"),
+    Path("services/statusd.sock"),
+    Path("services/jobd.sock"),
+    Path("services/watchd.sock"),
+    Path("services/approvald.sock"),
+    Path("services/statsd.p24s7.ffffffffffffffff.sock"),
+    Path("services/indexer.sock"),
+)
 # W1: one authoritative identity carrier. Replaces the three same-valued vars
 # (YOLOMUX_EARLY_INSTANCE_PORT, YOLOMUX_MANAGED_INSTANCE_PORT, and the managed
 # use of the primary-port var) that previously had to be kept in sync by hand.
@@ -23,6 +68,136 @@ INSTANCE_ENV = "YOLOMUX_INSTANCE"
 # a negative search. Nothing in this module emits or reads them any more.
 EARLY_PORT_ENV = "YOLOMUX_EARLY_INSTANCE_PORT"
 MANAGED_INSTANCE_PORT_ENV = "YOLOMUX_MANAGED_INSTANCE_PORT"
+
+
+class YolomuxRootError(ValueError):
+    """A root configuration cannot safely contain every product path."""
+
+
+def resolved_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def resolved_home_path(values: Mapping[str, str]) -> Path:
+    """Resolve HOME without allowing a relative environment value to inherit cwd."""
+    configured = values.get("HOME")
+    configured_path = Path(configured) if configured else None
+    if configured_path is not None and not configured_path.is_absolute():
+        raise YolomuxRootError(f"HOME must be an absolute path, got {configured!r}")
+    if configured_path is not None and configured_path == Path(configured_path.anchor):
+        raise YolomuxRootError(f"HOME cannot use the filesystem root: {configured_path}")
+    expanded = configured_path if configured_path is not None else Path.home().expanduser()
+    if not expanded.is_absolute():
+        raise YolomuxRootError(f"HOME must resolve to an absolute path, got {expanded!s}")
+    candidate = resolved_path(expanded)
+    if candidate == Path(candidate.anchor):
+        raise YolomuxRootError(f"HOME cannot use the filesystem root: {candidate}")
+    return candidate
+
+
+def resolved_product_path(
+    values: Mapping[str, str],
+    key: str,
+    default: str | Path,
+    *,
+    reject_home: bool = True,
+) -> Path:
+    """Resolve one configured path without letting process cwd choose its location."""
+    configured = values.get(key)
+    supplied = Path(configured) if configured else Path(default).expanduser()
+    if not supplied.is_absolute():
+        supplied = configured if configured else str(default)
+        raise YolomuxRootError(f"{key} must resolve from an absolute path, got {supplied!r}")
+    candidate = resolved_path(supplied)
+    if configured and candidate == Path(candidate.anchor):
+        raise YolomuxRootError(f"{key} cannot use the filesystem root as a product root: {candidate}")
+    if configured and reject_home and candidate == resolved_home_path(values):
+        raise YolomuxRootError(f"{key} cannot use the home directory as a product root: {candidate}")
+    reject_worktree_product_path(key, candidate)
+    return candidate
+
+
+def reject_worktree_product_path(key: str, candidate: Path) -> None:
+    if candidate.is_relative_to(REPO_ROOT):
+        raise YolomuxRootError(
+            f"{key} cannot resolve inside the shared worktree: {candidate}; choose a host-local path"
+        )
+
+
+def rooted_product_path(
+    values: Mapping[str, str],
+    key: str,
+    root: Path,
+    default: str | Path,
+) -> Path:
+    """Resolve one rooted override and require it to remain under its owner."""
+    candidate = resolved_product_path(values, key, default)
+    if not candidate.is_relative_to(root):
+        raise YolomuxRootError(
+            f"{key} resolves outside YOLOMUX_ROOT: {candidate}; unset {key} or choose a path inside {root}"
+        )
+    return candidate
+
+
+def local_rpc_socket_path_bytes(platform: str = sys.platform) -> int:
+    """Return the real portable bind budget for this platform."""
+    return 96 if platform.casefold() == "darwin" else 107
+
+
+def rooted_socket_candidates(runtime_dir: Path, *, stats_digest: str = "f" * 16) -> tuple[Path, ...]:
+    """Return every rooted product socket shape without importing product code."""
+    return tuple(
+        runtime_dir / str(relative).replace("ffffffffffffffff", stats_digest)
+        for relative in ROOTED_SOCKET_RELATIVE_PATHS
+    )
+
+
+def validate_rooted_socket_budget(runtime_dir: Path, *, platform: str = sys.platform) -> None:
+    """Refuse a rooted layout whose longest real socket cannot bind in place."""
+    longest = max(rooted_socket_candidates(runtime_dir), key=lambda path: len(os.fsencode(str(path))))
+    length = len(os.fsencode(str(longest)))
+    limit = local_rpc_socket_path_bytes(platform)
+    if length > limit:
+        raise YolomuxRootError(
+            f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {limit}); choose a shorter YOLOMUX_ROOT"
+        )
+
+
+def resolved_state_dir(values: Mapping[str, str]) -> Path:
+    """Resolve the effective state directory without importing product modules."""
+    home = resolved_home_path(values)
+    configured_root = values.get(YOLOMUX_ROOT_ENV)
+    if not configured_root:
+        return resolved_product_path(values, "YOLOMUX_STATE_DIR", home / ".local" / "state" / "yolomux")
+    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
+    return rooted_product_path(values, "YOLOMUX_STATE_DIR", root, root / "state")
+
+
+def validate_product_root_environment(
+    environ: Mapping[str, str],
+    *,
+    platform: str = sys.platform,
+) -> None:
+    """Validate every explicit root before startup writes, locks, or listener mutation."""
+    home = resolved_home_path(environ)
+    reject_worktree_product_path("HOME", home)
+    configured_root = environ.get(YOLOMUX_ROOT_ENV)
+    for key in PRODUCT_ROOT_KEYS:
+        if key == "CODEX_HOME" and (configured_root or environ.get("YOLOMUX_CODEX_HOME")):
+            continue
+        if environ.get(key):
+            resolved_product_path(environ, key, environ[key])
+    if configured_root:
+        root = resolved_product_path(environ, YOLOMUX_ROOT_ENV, configured_root)
+        for key in ROOTED_OVERRIDE_KEYS:
+            if environ.get(key):
+                rooted_product_path(environ, key, root, environ[key])
+        runtime_dir = rooted_product_path(environ, "YOLOMUX_RUNTIME_DIR", root, root / "runtime")
+        validate_rooted_socket_budget(runtime_dir, platform=platform)
+    else:
+        for key in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR"):
+            if environ.get(key):
+                resolved_product_path(environ, key, environ[key], reject_home=False)
 
 
 @dataclass(frozen=True)
@@ -87,19 +262,36 @@ def scan_port(argv: list[str]) -> int | None:
 def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *, platform: str = sys.platform, home: Path | None = None, tempdir: Path | None = None) -> InstanceResolution:
     """Return the one root for a managed non-default instance."""
     values = dict(environ)
-    if values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS):
+    has_explicit_root = bool(values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS))
+    auto_root = not has_explicit_root and port is not None and port != default_port(platform)
+    validation_values = (
+        {key: value for key, value in values.items() if key not in AUTO_ROOT_IGNORED_AMBIENT_KEYS}
+        if auto_root
+        else values
+    )
+    try:
+        validate_product_root_environment(validation_values, platform=platform)
+    except YolomuxRootError as error:
+        return InstanceResolution(port, {}, str(error))
+    if has_explicit_root:
         return InstanceResolution(port, {})
     if port is None or port == default_port(platform):
         return InstanceResolution(port, {})
     # Runtime sockets must stay on a local, deliberately short path. F0 turns
     # this managed launch into one root instead of four independent families.
-    # macOS tempfile.gettempdir() expands below /private/var/folders and can make the
-    # longest product socket exceed the portable Unix-socket pathname budget.
-    default_tempdir = Path("/tmp") if platform.casefold() == "darwin" else Path(tempfile.gettempdir())
-    runtime_base = Path(tempdir) if tempdir is not None else default_tempdir
+    # Keep row planning independent of the parent process's cached tempfile state.
+    # A deliberate TMPDIR mapping is honored by direct resolution; row plans strip
+    # inherited TMPDIR and therefore use this canonical short base.
+    default_tempdir = Path("/tmp")
+    configured_tmp = str(values.get("TMPDIR") or "").strip()
+    runtime_base = Path(tempdir) if tempdir is not None else resolved_product_path(
+        values,
+        "TMPDIR",
+        configured_tmp or default_tempdir,
+    )
     runtime_base = runtime_base / f"y{os.getuid()}"
     instance = f"p{port}"
-    return InstanceResolution(port, {
+    environment = {
         YOLOMUX_ROOT_ENV: str(runtime_base / instance),
         # One authoritative identity carrier - no separate same-valued vars. It is
         # an assertion made only by the managed launcher: a caller-set YOLOMUX_ROOT
@@ -109,19 +301,28 @@ def resolve_instance_environment(port: int | None, environ: Mapping[str, str], *
         # (which never reads that election var); shared/default servers still get
         # their primary from startup_common.sh.
         INSTANCE_ENV: format_instance(InstanceIdentity(port=port, managed=True)),
-    })
+    }
+    try:
+        validate_product_root_environment({**validation_values, **environment}, platform=platform)
+    except YolomuxRootError as error:
+        return InstanceResolution(port, {}, str(error))
+    return InstanceResolution(port, environment)
 
 
 # Every inherited YOLOmux root/instance variable a parent shell (which may belong
 # to another instance) could carry. The launcher strips all of these before it
 # resolves a row, so an ambient root can never contaminate a fresh launch.
 _INHERITED_INSTANCE_KEYS = (
-    YOLOMUX_ROOT_ENV,
     INSTANCE_ENV,
     EARLY_PORT_ENV,
     MANAGED_INSTANCE_PORT_ENV,
     "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT",
-    *ROOT_KEYS,
+    *PRODUCT_ROOT_KEYS,
+    GENERATED_PYTHON_CACHE_PREFIX_ENV,
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
 )
 
 
@@ -188,6 +389,12 @@ def apply_early_instance_environment(argv: list[str], environ: dict[str, str] | 
     resolution = resolve_instance_environment(scan_port(argv), target, platform=os.uname().sysname)
     if resolution.error:
         raise RuntimeError(resolution.error)
+    if resolution.environment.get(YOLOMUX_ROOT_ENV):
+        for key in AUTO_ROOT_IGNORED_AMBIENT_KEYS:
+            target.pop(key, None)
+    elif target.get(YOLOMUX_ROOT_ENV):
+        for key in ROOTED_IGNORED_AMBIENT_KEYS:
+            target.pop(key, None)
     target.update(resolution.environment)
     return resolution.port
 
@@ -240,6 +447,37 @@ def _plan_row(argv: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "validate-roots":
+        try:
+            validate_product_root_environment(os.environ)
+        except YolomuxRootError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        return 0
+    if argv and argv[0] == "resolve-product-path":
+        if len(argv) != 3:
+            print("usage: resolve-product-path <environment-key> <path>", file=sys.stderr)
+            return 2
+        key, value = argv[1:]
+        values = dict(os.environ)
+        values[key] = value
+        try:
+            print(resolved_product_path(values, key, value))
+        except YolomuxRootError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        return 0
+    if argv and argv[0] == "resolve-state-dir":
+        if len(argv) != 1:
+            print("usage: resolve-state-dir", file=sys.stderr)
+            return 2
+        try:
+            validate_product_root_environment(os.environ, platform=os.uname().sysname)
+            print(resolved_state_dir(os.environ))
+        except YolomuxRootError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        return 0
     if argv and argv[0] == "exec":
         return _exec_row(argv[1:])
     if argv and argv[0] == "plan":

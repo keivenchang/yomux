@@ -1,6 +1,6 @@
 # YOLOmux Work Queues
 
-`STATUS-REPORT.md` is the sole source for the current release goal, order, and progress. Active work outside that goal lives in `backlog/DOIT.p0.*.md`, `backlog/DOIT.p1.*.md`, and `backlog/DOIT.p2.*.md`; completed work lives in `docs/DONE/`.
+`STATUS-REPORT.md` is the sole source for the current release goal, order, and progress. Active work outside that goal lives in `backlog/DOIT.p0.e*.*.md`, `backlog/DOIT.p1.e*.*.md`, and `backlog/DOIT.p2.e*.*.md`; completed work lives in `docs/DONE/`. Queue filenames use `DOIT.p<num>.e<num>.<desc>.md`: priority ranges from `p0` urgent through `p2` deferred, and effort ranges from `e1` small or bounded through `e5` architecture-scale, cross-system, or long-soak work.
 
 There is no broad TODO backlog. Every open requirement must have one concrete DOIT owner, priority, reproduction or decision boundary, and done criteria. Find every active queue with `rg --files -uu queues/backlog -g 'DOIT*.md' | sort`; `DOIT*.md` is gitignored, so normal Git status does not enumerate it.
 

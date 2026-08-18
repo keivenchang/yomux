@@ -371,6 +371,25 @@ def test_watch_signature_stops_child_security_work_at_requested_limit(tmp_path, 
     assert len(observed) == 4  # The root is observed once; exactly three children reach the security scan.
 
 
+def test_watch_signature_detects_same_size_child_edit_within_one_second(tmp_path):
+    child = tmp_path / "file.txt"
+    child.write_text("before", encoding="utf-8")
+    first_child_mtime_ns = 1_700_000_000_100_000_000
+    os.utime(child, ns=(first_child_mtime_ns, first_child_mtime_ns))
+    root_stat = tmp_path.stat()
+    before = filesystem.watch_signature(str(tmp_path), child_limit=3)
+
+    child.write_text("after!", encoding="utf-8")
+    second_child_mtime_ns = first_child_mtime_ns + 1
+    os.utime(child, ns=(second_child_mtime_ns, second_child_mtime_ns))
+    os.utime(tmp_path, ns=(root_stat.st_atime_ns, root_stat.st_mtime_ns))
+    after = filesystem.watch_signature(str(tmp_path), child_limit=3)
+
+    assert before != after
+    assert before[-1][0][2] == first_child_mtime_ns
+    assert after[-1][0][2] == second_child_mtime_ns
+
+
 def test_filesystem_batch_watch_signature_reuses_the_directory_listing_scan(tmp_path, monkeypatch):
     for index in range(6):
         (tmp_path / f"entry-{index}.txt").write_text(str(index), encoding="utf-8")

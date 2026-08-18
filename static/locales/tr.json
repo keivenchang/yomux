@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "geç/özledim",
   "debug.system.sampler.header.runtime.full": "Son çalışma zamanı",
   "debug.system.sampler.header.runtime.short": "çalışma zamanı",
+  "debug.tab.cost": "Maliyet",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafikler",
   "debug.tab.logs": "Günlükler",

@@ -155,6 +155,8 @@ LANE_SPECS: Final[tuple[LaneSpec, ...]] = (
     LaneSpec("pytest-socket", "pytest socket", (StepId.PYTEST_SOCKET,), phases=("nonbrowser",), worker_class="pytest-serial"),
     LaneSpec("whitespace", "git diff --check", (StepId.WHITESPACE,), True),
 )
+CHECK_LANE_ENV: Final[str] = "YOLOMUX_CHECK_LANE"
+PYTEST_LANE_NAMES: Final[tuple[str, ...]] = tuple(spec.name for spec in LANE_SPECS if spec.phases)
 
 
 def lane_spec(name: str) -> LaneSpec:

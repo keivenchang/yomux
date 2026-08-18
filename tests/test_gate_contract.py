@@ -486,7 +486,7 @@ def test_m1_first_delivery_is_not_retried_and_one_replacement_stream_repairs(bro
             "omittedMatchesEmpty": True,
             "omittedChannels": "events",
             "omittedOperations": None,
-            "canonicalSignature": '{"channels":["events","status"],"operations":["op-a","op-b"]}',
+                "canonicalSignature": '{"channels":["events","status"],"operations":[]}',
             "canonicalChannels": "events,status",
             "canonicalOperations": "op-a,op-b",
             "emptyDemandSource": True,

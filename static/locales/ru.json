@@ -433,6 +433,7 @@
   "debug.system.sampler.header.lateMiss.short": "опоздать/пропустить",
   "debug.system.sampler.header.runtime.full": "Последнее время выполнения",
   "debug.system.sampler.header.runtime.short": "время выполнения",
+  "debug.tab.cost": "Стоимость",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Графики",
   "debug.tab.logs": "Журналы",

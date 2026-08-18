@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "verspätet/verpasst",
   "debug.system.sampler.header.runtime.full": "Letzte Laufzeit",
   "debug.system.sampler.header.runtime.short": "Laufzeit",
+  "debug.tab.cost": "Kosten",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Diagramme",
   "debug.tab.logs": "Protokolle",

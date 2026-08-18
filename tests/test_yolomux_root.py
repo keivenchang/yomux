@@ -28,6 +28,9 @@ def _rooted_subprocess_environment(root: Path) -> dict[str, str]:
         "XDG_STATE_HOME",
         "XDG_CACHE_HOME",
         "CODEX_HOME",
+        "YOLOMUX_HOST_ARTIFACT_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "TMPDIR",
     ):
         values.pop(key, None)
     values["YOLOMUX_ROOT"] = str(root)
@@ -148,7 +151,8 @@ def test_socket_budget_accepts_a_realistic_development_root():
 
 def test_rooted_import_refuses_an_outside_config_before_creating_the_root(tmp_path: Path):
     root = tmp_path / "root"
-    env = {**os.environ, "YOLOMUX_ROOT": str(root), "YOLOMUX_CONFIG_DIR": "/outside/config"}
+    env = _rooted_subprocess_environment(root)
+    env["YOLOMUX_CONFIG_DIR"] = "/outside/config"
     result = subprocess.run(
         [sys.executable, "-c", "import yolomux_lib.infra.common"],
         env=env,

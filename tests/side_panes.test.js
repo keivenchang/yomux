@@ -28,7 +28,7 @@ async function runSidePaneSuite() {
     const api = loadYolomux('', ['1']);
     const policies = Object.fromEntries(api.TAB_TYPES.map(type => [type.key, type.panePlacement || api.panePlacementGenericOnly]));
     assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideRequired).map(([key]) => key), ['finder', 'differ', 'tabber']);
-    assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key), ['info', 'yoagent', 'chat', 'debug', 'yocost']);
+    assert.deepStrictEqual(Object.entries(policies).filter(([, policy]) => policy === api.panePlacementSideAllowed).map(([key]) => key), ['info', 'yoagent', 'chat', 'debug']);
     assert.equal(policies.preferences, api.panePlacementGenericOnly);
     assert.equal(policies['search-history'], api.panePlacementGenericOnly);
     assert.equal(policies['file-editor'], api.panePlacementGenericOnly);
@@ -41,7 +41,7 @@ async function runSidePaneSuite() {
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.finderItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.infoItemId), true);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.debugPaneItemId), true);
-    assert.equal(api.paneRoleAllowsItem(sideLeft, api.yocostItemId), true);
+    assert.equal(api.paneRoleAllowsItem(sideLeft, api.yocostItemId), false, 'the retired YO!cost item is migration input, not a live pane type');
     assert.equal(api.paneRoleAllowsItem(sideLeft, '1'), false);
     assert.equal(api.paneRoleAllowsItem(sideLeft, api.prefsItemId), false);
     assert.equal(api.paneRoleAllowsItem(generic, api.finderItemId), false);

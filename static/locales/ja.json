@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "遅刻/欠席",
   "debug.system.sampler.header.runtime.full": "最終ランタイム",
   "debug.system.sampler.header.runtime.short": "ランタイム",
+  "debug.tab.cost": "コスト",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "グラフ",
   "debug.tab.logs": "ログ",

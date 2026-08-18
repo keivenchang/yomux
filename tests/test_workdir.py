@@ -82,7 +82,7 @@ def test_agent_auth_status_parses_claude_json_and_codex_text(monkeypatch):
 def test_codex_runtime_env_defaults_to_user_codex_home(monkeypatch, tmp_path):
     monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.setattr(common.Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     env = common.codex_runtime_env({"PATH": "/usr/bin"})
 
@@ -101,7 +101,7 @@ def test_rooted_codex_runtime_reuses_user_credentials_without_creating_instance_
     monkeypatch.delenv("CODEX_HOME", raising=False)
     for name in ("YOLOMUX_CONFIG_DIR", "YOLOMUX_STATE_DIR", "YOLOMUX_CACHE_DIR", "YOLOMUX_RUNTIME_DIR"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(common.Path, "home", lambda: user_home)
+    monkeypatch.setenv("HOME", str(user_home))
 
     env = common.codex_runtime_env({"PATH": "/usr/bin", "YOLOMUX_ROOT": str(root)}, create_home=False)
 
@@ -120,7 +120,7 @@ def test_rooted_codex_auth_probe_uses_existing_user_login_without_creating_insta
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("YOLOMUX_CODEX_HOME", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)
-    monkeypatch.setattr(common.Path, "home", lambda: user_home)
+    monkeypatch.setenv("HOME", str(user_home))
 
     def run(cmd, *args, **kwargs):
         assert kwargs["env"]["CODEX_HOME"] == str(auth_file.parent)

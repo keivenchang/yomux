@@ -11,14 +11,44 @@ function toggleFileExplorer() {
   }
 }
 
+async function resolveFileExplorerDirectoryRoot(path, options = {}) {
+  const requested = normalizeDirectoryPath(expandUserPath(path));
+  try {
+    const info = await fetchFilePathInfo(requested, {fresh: true, force: true, user: options.user === true || options.manualSelection === true});
+    if (info?.kind === 'dir') {
+      const key = fileExplorerFsBatchKey('list', requested);
+      const record = fileExplorerFsResourceRecords.get(key);
+      if (record?.failureStatus) invalidateFileExplorerFsResourceRecord(key, record);
+      return requested;
+    }
+    if (info?.kind === 'file') {
+      markFileExplorerDirectoryDemandNegative(requested, 400);
+      retireFileExplorerDirectoryDemand(requested);
+      return dirnameOf(requested);
+    }
+    const error = new Error(t('fs.error.notDirectory', {path: requested}));
+    error.status = 400;
+    error.payload = {user_message: {key: 'fs.error.notDirectory', params: {path: requested}, fallback: error.message}};
+    setFileExplorerListError(requested, error, 400);
+    return '';
+  } catch (error) {
+    setFileExplorerListError(requested, error, Number(error?.status) || 0);
+    return '';
+  }
+}
+
 async function openFileExplorerAt(path, options = {}) {
   const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
-  const root = normalizeDirectoryPath(expandUserPath(path));
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
   const openGeneration = fileWorkspaceState.beginOpen();
   const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
+  const requestedRoot = normalizeDirectoryPath(expandUserPath(path));
+  const validateKind = options.validateKind === true
+    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
+  const root = validateKind ? await resolveFileExplorerDirectoryRoot(requestedRoot, options) : requestedRoot;
+  if (!root || !openStillCurrent()) return false;
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
@@ -44,6 +74,7 @@ async function openFileExplorerAt(path, options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   const rootChanged = root !== currentFileExplorerRoot();
   fileExplorerRoot = root;
+  layoutUrlState.finderRootKindUnverified = false;
   if (rootChanged) pruneFileExplorerSelectionForRoot(fileExplorerRoot);
   if (options.manualSelection === true) setFileExplorerSelectionPin(true);
   if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});
@@ -83,6 +114,8 @@ async function saveFileExplorerRootMode(mode) {
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerFsResourceRecords = new Map();
+const fileExplorerFsNegativeBackoffBaseMs = 30_000;
+const fileExplorerFsNegativeBackoffMaxMs = 5 * 60_000;
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
@@ -90,6 +123,7 @@ const fileExplorerRepoInfoEnrichmentState = {
   pending: new Set(),
   inFlight: new Set(),
   resolved: new Set(),
+  watchDiffOwned: new Set(),
   globalGeneration: 0,
   pathGenerations: new Map(),
   nextGeneration: 1,
@@ -121,6 +155,7 @@ let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
   'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation', 'repo-enrichment',
 ]);
+const FILE_EXPLORER_FS_BATCH_TERMINAL_OWNERS = new Set(['filesystem-watch-diff-refresh']);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
 const FILE_TREE_COMPACT_PAD_PX = 4;
@@ -202,10 +237,41 @@ function fileExplorerFsResourceRecord(type, path) {
   const key = fileExplorerFsBatchKey(type, path);
   let record = fileExplorerFsResourceRecords.get(key);
   if (!record) {
-    record = {value: undefined, storedAt: 0, request: null, requestUserInitiated: false, generation: 0};
+    record = {
+      value: undefined,
+      storedAt: 0,
+      request: null,
+      requestUserInitiated: false,
+      generation: 0,
+      failureCount: 0,
+      failureStatus: 0,
+      retryAt: 0,
+    };
     setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
   }
   return {key, record};
+}
+
+function clearFileExplorerFsResourceFailure(record) {
+  record.failureCount = 0;
+  record.failureStatus = 0;
+  record.retryAt = 0;
+}
+
+function recordFileExplorerFsResourceFailure(record, status) {
+  record.failureCount = Math.min(32, Math.max(0, Number(record.failureCount) || 0) + 1);
+  record.failureStatus = Number(status) || 0;
+  const exponent = Math.min(4, record.failureCount - 1);
+  record.retryAt = Date.now() + Math.min(fileExplorerFsNegativeBackoffMaxMs, fileExplorerFsNegativeBackoffBaseMs * (2 ** exponent));
+}
+
+function markFileExplorerDirectoryDemandNegative(path, status) {
+  const {record} = fileExplorerFsResourceRecord('list', path);
+  record.generation += 1;
+  record.value = undefined;
+  record.storedAt = 0;
+  record.request = null;
+  recordFileExplorerFsResourceFailure(record, status);
 }
 
 function fileExplorerFsResourceCurrent(key, record, generation) {
@@ -218,6 +284,7 @@ function setFileExplorerFsResourceValue(type, path, value) {
   record.request = null;
   record.value = value;
   record.storedAt = Date.now();
+  clearFileExplorerFsResourceFailure(record);
   return value;
 }
 
@@ -240,6 +307,7 @@ function invalidateFileExplorerFsResourceRecord(key, record) {
   record.value = undefined;
   record.storedAt = 0;
   record.request = null;
+  clearFileExplorerFsResourceFailure(record);
   if (fileExplorerFsResourceRecords.get(key) === record) fileExplorerFsResourceRecords.delete(key);
 }
 
@@ -251,6 +319,10 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
   if (canReuse && cacheTtlMs > 0 && record.value !== undefined && Date.now() - record.storedAt < cacheTtlMs) {
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
+  }
+  if (options.user !== true && record.retryAt > Date.now()) {
+    lifecycle.onNegativeReuse?.(record);
+    return Promise.resolve(Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue') ? lifecycle.errorValue : null);
   }
   // A Finder click must not wait behind an unrelated bootstrap/refresh request for the same
   // directory.  Give it one successor batch; later clicks share that user-owned request so this
@@ -273,11 +345,16 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
       if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
         record.value = value;
         record.storedAt = Date.now();
+        clearFileExplorerFsResourceFailure(record);
         lifecycle.onPublish?.(value);
       }
       return value;
     } catch (error) {
-      if (fileExplorerFsResourceCurrent(key, record, generation)) lifecycle.onError?.(error);
+      if (fileExplorerFsResourceCurrent(key, record, generation)) {
+        const negativeStatus = Number(lifecycle.negativeStatus?.(error)) || 0;
+        if (negativeStatus) recordFileExplorerFsResourceFailure(record, negativeStatus);
+        lifecycle.onError?.(error);
+      }
       if (Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue')) return lifecycle.errorValue;
       throw error;
     } finally {
@@ -320,6 +397,33 @@ function recordFileExplorerFsBatchTrigger(item, trigger) {
   item.triggerCounts[trigger] = Math.min(fileExplorerFsBatchTriggerCountLimit, count + 1);
 }
 
+function recordFileExplorerFsBatchTerminalOwner(item, owner) {
+  const normalized = String(owner || '');
+  if (!FILE_EXPLORER_FS_BATCH_TERMINAL_OWNERS.has(normalized)) return;
+  item.terminalOwners.add(normalized);
+}
+
+function fileExplorerFsBatchTerminalOwners(items) {
+  const owners = new Set();
+  for (const item of items) {
+    for (const owner of item?.terminalOwners || []) owners.add(owner);
+  }
+  return owners;
+}
+
+function fileExplorerFsBatchOwnershipState(owner) {
+  const normalized = String(owner || '');
+  const owned = item => item?.terminalOwners?.has(normalized) === true;
+  const operations = Array.from(fileExplorerFsBatchOperations.entries())
+    .filter(([, items]) => Array.isArray(items) && items.some(owned));
+  return {
+    queued: fileExplorerFsBatchQueue.filter(owned).length,
+    pending: Array.from(fileExplorerFsBatchPending.values()).filter(value => owned(value?.item)).length,
+    operations: operations.length,
+    operationIds: operations.map(([operationId]) => operationId).sort(),
+  };
+}
+
 function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
   const pending = fileExplorerFsBatchPending.get(fileExplorerFsBatchKey(type, normalizeDirectoryPath(path)));
   if (pending?.item && pending.item.sent !== true) recordFileExplorerFsBatchTrigger(pending.item, fileExplorerFsBatchTrigger(options));
@@ -342,6 +446,7 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     const existing = fileExplorerFsBatchPending.get(key);
     if (existing) {
       if (existing.item.sent !== true) recordFileExplorerFsBatchTrigger(existing.item, fileExplorerFsBatchTrigger(options));
+      recordFileExplorerFsBatchTerminalOwner(existing.item, options.terminalOwner);
       return existing.promise;
     }
   }
@@ -352,7 +457,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     reject = fail;
   });
   const trigger = fileExplorerFsBatchTrigger(options);
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, promise, resolve, reject, sent: false};
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, terminalOwners: new Set(), key, promise, resolve, reject, sent: false};
+  recordFileExplorerFsBatchTerminalOwner(item, options.terminalOwner);
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -386,6 +492,12 @@ function applyFileExplorerFsBatchOperationResult(record, result = {}) {
 function acceptFileExplorerFsBatchOperation(items, error) {
   if (!isApiPendingResponse(error) || !error.operationId) return false;
   fileExplorerFsBatchOperations.set(error.operationId, items);
+  const record = apiOperationState.records.get(error.operationId);
+  const terminalOwners = fileExplorerFsBatchTerminalOwners(items);
+  if (record && terminalOwners.size) {
+    record.terminalOwners = terminalOwners;
+    if (terminalOwners.size === 1) record.terminalOwner = terminalOwners.values().next().value;
+  }
   const terminal = apiOperationState.terminal.get(error.operationId);
   if (terminal?.result) {
     applyFileExplorerFsBatchOperationResult({id: error.operationId, kind: 'fs_batch'}, terminal.result);
@@ -544,13 +656,8 @@ async function postFileExplorerFsBatchChunk(items) {
     return {ok: true};
   } catch (error) {
     if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
-    try {
-      const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
-      return {ok: results.every(result => result.ok === true)};
-    } catch (fallbackError) {
-      for (const item of items) rejectFileExplorerFsBatchItem(item, fallbackError);
-      return {ok: false};
-    }
+    for (const item of items) rejectFileExplorerFsBatchItem(item, error);
+    return {ok: false};
   }
 }
 
@@ -610,8 +717,10 @@ async function fetchDirectory(path, options = {}) {
           ? err.message || `${openFailed} (${status})`
           : `${openFailed}: ${err}`;
         setFileExplorerListError(root, err, status);
+        if (fileExplorerDirectoryDemandTerminalError(err)) retireFileExplorerDirectoryDemand(root);
         console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       },
+      negativeStatus: err => fileExplorerDirectoryDemandTerminalError(err) ? Number(err?.status) || 400 : 0,
       errorValue: null,
     });
 }
@@ -660,7 +769,7 @@ function invalidateFileExplorerRoots(roots = []) {
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
 
-function entriesByDirFromFilesystemPush(payload = {}) {
+function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
   const entriesByDir = new Map();
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
   for (const item of directories) {
@@ -673,7 +782,10 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     markNewDirectoryEntries(path, entries);
     recordDirectorySignature(path, entries);
     setFileExplorerFsResourceValue('list', path, entries);
-    scheduleFileExplorerRepoInfoEnrichment(path, entries, {includeRoot: path === currentFileExplorerRoot()});
+    scheduleFileExplorerRepoInfoEnrichment(path, entries, {
+      includeRoot: path === currentFileExplorerRoot(),
+      watchDiffOwned: options.fromWatchDiff === true,
+    });
   }
   return entriesByDir;
 }
@@ -810,7 +922,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       fileExplorerFilesystemWatchToken = nextToken;
       fileExplorerFilesystemPushToken = nextToken;
     }
-    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload) : new Map();
+    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : new Map();
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
     if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
@@ -939,11 +1051,13 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
   if (!repo || typeof repo !== 'object') return null;
   const root = normalizeDirectoryPath(repo.root || fallbackRoot);
   if (!root) return null;
+  const cachePath = normalizeDirectoryPath(repo.cache_path || fallbackRoot || root);
   const dirtyCount = Number(repo.dirty_count);
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
   return {
     root,
+    cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
@@ -968,7 +1082,7 @@ function hydrateFileExplorerRepoInfoCache() {
 function persistFileExplorerRepoInfoCache() {
   try {
     const repos = Array.from(fileExplorerRepoInfoCache.entries())
-      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.cache_path || repo.root) === path)
       .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
       .slice(-200)
       .map(([path, repo]) => ({path, repo}));
@@ -982,8 +1096,12 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
-  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
+  // Finder preserves the path the user opened while macOS APIs can return its physical alias
+  // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) {
+    setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
+  }
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -994,7 +1112,9 @@ function clearFileExplorerRepoInfo(path, options = {}) {
   if (!normalized) return false;
   let changed = false;
   for (const [cachedPath, repo] of Array.from(fileExplorerRepoInfoCache.entries())) {
-    if (cachedPath !== normalized && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
+    if (cachedPath !== normalized
+        && normalizeDirectoryPath(repo?.cache_path || '') !== normalized
+        && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
     fileExplorerRepoInfoCache.delete(cachedPath);
     changed = true;
   }
@@ -1006,7 +1126,7 @@ function exactFileExplorerRepoInfo(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  return normalizeDirectoryPath(repo?.root || '') === normalized ? repo : null;
+  return normalizeDirectoryPath(repo?.cache_path || repo?.root || '') === normalized ? repo : null;
 }
 
 function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
@@ -1031,6 +1151,7 @@ function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {
     candidates.push(childPath(root, entry.name));
   }
   for (const path of candidates) {
+    if (options.watchDiffOwned === true) state.watchDiffOwned.add(path);
     if (options.refresh === true) {
       state.pathGenerations.set(path, state.nextGeneration++);
       state.resolved.delete(path);
@@ -1058,18 +1179,25 @@ async function enrichFileExplorerRepoInfoEntries() {
       path,
       globalGeneration: state.globalGeneration,
       pathGeneration: state.pathGenerations.get(path) || 0,
+      terminalOwner: state.watchDiffOwned.has(path) ? 'filesystem-watch-diff-refresh' : '',
     });
   }
   if (!requests.length) return;
   const results = await Promise.allSettled(requests.map(async request => ({
     ...request,
-    info: await fetchFilePathInfo(request.path, {fresh: true, force: true, trigger: 'repo-enrichment'}),
+    info: await fetchFilePathInfo(request.path, {
+      fresh: true,
+      force: true,
+      trigger: 'repo-enrichment',
+      terminalOwner: request.terminalOwner,
+    }),
   })));
   let changed = false;
   const enrichedPaths = new Set();
   for (let index = 0; index < requests.length; index += 1) {
     const request = requests[index];
     state.inFlight.delete(request.path);
+    if (!state.pending.has(request.path)) state.watchDiffOwned.delete(request.path);
     const result = results[index];
     if (result?.status !== 'fulfilled') continue;
     if (request.globalGeneration !== state.globalGeneration
@@ -1179,7 +1307,7 @@ function setFileExplorerManualRootMode() {
 
 function openFileExplorerManualRoot(path) {
   setFileExplorerManualRootMode();
-  return openFileExplorerAt(path, {manualSelection: true});
+  return openFileExplorerAt(path, {manualSelection: true, validateKind: true});
 }
 
 function tmuxDirectoryForItem(item) {
@@ -1261,6 +1389,93 @@ function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerE
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
     ));
+}
+
+function fileExplorerDirectoryDemandTerminalError(error) {
+  const status = Number(error?.status) || 0;
+  const messageKey = String(
+    error?.payload?.user_message?.key
+    || error?.payload?.error?.message?.key
+    || error?.payload?.message?.key
+    || '',
+  );
+  return status === 404 || (status === 400 && messageKey === 'fs.error.notDirectory');
+}
+
+function retireFileExplorerDirectoryDemand(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized) return false;
+  const retires = candidate => {
+    const value = normalizeDirectoryPath(candidate || '');
+    return value === normalized || pathIsInsideDirectory(value, normalized);
+  };
+  let changed = false;
+  for (const candidate of Array.from(fileExplorerExpanded)) {
+    if (retires(candidate)) changed = fileExplorerExpanded.delete(candidate) || changed;
+  }
+  for (const candidate of Array.from(fileExplorerPendingExpansions)) {
+    if (retires(candidate)) changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+  }
+  for (const candidate of Array.from(fileExplorerSyncUserExpansionState.keys())) {
+    if (retires(candidate)) changed = fileExplorerSyncUserExpansionState.delete(candidate) || changed;
+  }
+  for (const record of fileExplorerSyncTargetRecords.values()) {
+    const previousExpanded = Array.isArray(record.expandedPaths) ? record.expandedPaths : [];
+    const nextExpanded = previousExpanded.filter(candidate => !retires(candidate));
+    if (nextExpanded.length !== previousExpanded.length) {
+      record.expandedPaths = nextExpanded;
+      changed = true;
+    }
+    if (record.manualCollapsedPaths instanceof Set) {
+      for (const candidate of Array.from(record.manualCollapsedPaths)) {
+        if (retires(candidate)) changed = record.manualCollapsedPaths.delete(candidate) || changed;
+      }
+    }
+  }
+  for (const candidate of Array.from(fileExplorerSyncManualCollapsedPaths)) {
+    if (retires(candidate)) changed = fileExplorerSyncManualCollapsedPaths.delete(candidate) || changed;
+  }
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    const [type, candidate] = key.split('\x1f');
+    if (type === 'list' && candidate !== normalized && pathIsInsideDirectory(candidate, normalized)) {
+      invalidateFileExplorerFsResourceRecord(key, record);
+      changed = true;
+    }
+  }
+  for (const [candidate, record] of Array.from(fileExplorerDirectoryRecords.entries())) {
+    if (candidate !== normalized && pathIsInsideDirectory(candidate, normalized)) {
+      fileExplorerDirectoryRecords.delete(candidate);
+      record.knownEntryNames?.clear?.();
+      changed = true;
+    }
+  }
+  if (!changed) return false;
+  cancelPendingFileExplorerActiveSync({invalidateOpen: false});
+  refreshLayoutUrlStateSoon();
+  syncServerWatchRoots();
+  return true;
+}
+
+function qualifyFileExplorerDirectoryPaths(root, paths, entriesByDir) {
+  const normalizedRoot = normalizeDirectoryPath(root);
+  const qualified = [];
+  const retired = [];
+  for (const path of fileExplorerExpandedPathsForRoot(normalizedRoot, paths)) {
+    if (retired.some(parent => path === parent || pathIsInsideDirectory(path, parent))) continue;
+    const parent = dirnameOf(path);
+    const parentEntries = entriesByDir.get(parent);
+    if (!Array.isArray(parentEntries)) continue;
+    const name = basenameOf(path);
+    const entry = parentEntries.find(candidate => String(candidate?.name || '') === name);
+    if (entry?.kind === 'dir') {
+      qualified.push(path);
+      continue;
+    }
+    retired.push(path);
+    markFileExplorerDirectoryDemandNegative(path, entry ? 400 : 404);
+    retireFileExplorerDirectoryDemand(path);
+  }
+  return qualified;
 }
 
 function fileExplorerSyncUserExpansionEntries() {
@@ -2197,6 +2412,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   const root = normalizeDirectoryPath(plan?.root || '');
   const rootEntries = entriesByDir?.get(root);
   if (!root || !Array.isArray(rootEntries)) return false;
+  const qualifiedRenderPaths = qualifyFileExplorerDirectoryPaths(root, renderPaths, entriesByDir);
   const rootChanged = root !== currentFileExplorerRoot();
   const preserveState = options.preserveState === true && !rootChanged;
   const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
@@ -2208,7 +2424,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   if (!preserveState) fileExplorerExpanded.clear();
   for (const path of previousExpanded) fileExplorerExpanded.add(path);
   for (const path of fileExplorerSyncUserExpandedPathsForRoot(root)) fileExplorerExpanded.add(path);
-  for (const path of renderPaths) fileExplorerExpanded.add(path);
+  for (const path of qualifiedRenderPaths) fileExplorerExpanded.add(path);
   if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
     const tree = panel.querySelector?.('.file-explorer-tree-panel');
@@ -2219,29 +2435,62 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   return true;
 }
 
-async function fetchFileExplorerSyncListings(directories = [], options = {}, onListing = null) {
-  const entriesByDir = new Map();
-  const queue = [...directories];
-  const workerCount = Math.min(8, queue.length);
-  await Promise.all(Array.from({length: workerCount}, async () => {
-    while (queue.length) {
-      const directory = queue.shift();
-      const entries = await fetchDirectory(directory, options);
-      if (Array.isArray(entries)) {
-        entriesByDir.set(normalizeDirectoryPath(directory), entries);
-        onListing?.(directory, entries, entriesByDir);
+async function fetchFileExplorerSyncListings(directories = [], options = {}, onListing = null, seededEntries = null) {
+  const normalizedDirectories = Array.from(new Set(directories.map(directory => normalizeDirectoryPath(directory)).filter(Boolean)));
+  const root = normalizedDirectories[0] || '';
+  const entriesByDir = seededEntries instanceof Map ? new Map(seededEntries) : new Map();
+  if (!root) return entriesByDir;
+  if (normalizedDirectories.slice(1).some(directory => !pathIsInsideDirectory(directory, root))) {
+    const queue = [...normalizedDirectories];
+    const workerCount = Math.min(8, queue.length);
+    await Promise.all(Array.from({length: workerCount}, async () => {
+      while (queue.length) {
+        const directory = queue.shift();
+        const entries = await fetchDirectory(directory, options);
+        if (Array.isArray(entries)) {
+          entriesByDir.set(directory, entries);
+          onListing?.(directory, entries, entriesByDir);
+        }
       }
-    }
-  }));
+    }));
+    return entriesByDir;
+  }
+  if (!entriesByDir.has(root)) {
+    const entries = await fetchDirectory(root, options);
+    if (!Array.isArray(entries)) return entriesByDir;
+    entriesByDir.set(root, entries);
+    onListing?.(root, entries, entriesByDir);
+  }
+  const candidatePaths = normalizedDirectories.slice(1);
+  const maximumDepth = candidatePaths.reduce((maximum, path) => Math.max(maximum, childPathParts(root, path).length), 0);
+  for (let depth = 1; depth <= maximumDepth; depth += 1) {
+    const queue = qualifyFileExplorerDirectoryPaths(root, candidatePaths, entriesByDir)
+      .filter(path => childPathParts(root, path).length === depth && !entriesByDir.has(path));
+    const workerCount = Math.min(8, queue.length);
+    await Promise.all(Array.from({length: workerCount}, async () => {
+      while (queue.length) {
+        const directory = queue.shift();
+        const entries = await fetchDirectory(directory, options);
+        if (Array.isArray(entries)) {
+          entriesByDir.set(normalizeDirectoryPath(directory), entries);
+          onListing?.(directory, entries, entriesByDir);
+        }
+      }
+    }));
+  }
   return entriesByDir;
 }
 
 function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
+  const generation = fileExplorerSyncState.generation;
   requestAnimationFrame(() => {
+    if (fileExplorerSyncState.generation !== generation) return;
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
     void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
       if (
+        fileExplorerSyncState.generation !== generation
+        ||
         fileExplorerSyncPlanSignature(plan) !== signature
         || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
         || !fileExplorerSyncPlanTargetStillCurrent(plan)
@@ -2285,6 +2534,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings, {preserveState: !targetChanged}) || changed;
+      if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
       restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
@@ -2299,23 +2549,25 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!Array.isArray(rootEntries)) return false;
     const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
     changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
+    if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
     restoreFileExplorerSyncCursorState(plan.session, plan.root);
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);
 
-    const descendantDirectories = listingDirectories.filter(directory => normalizeDirectoryPath(directory) !== normalizedRoot);
     await fetchFileExplorerSyncListings(
-      descendantDirectories,
+      listingDirectories,
       {force: true, user: options.force === true},
       (directory, entries) => {
         if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return;
         fetchedListings.set(normalizeDirectoryPath(directory), entries);
         changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: true}) || changed;
+        if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return;
         restoreFileExplorerSyncCursorState(plan.session, plan.root);
         updateFileExplorerSessionHighlightRows(preferredItem);
       },
+      fetchedListings,
     );
     return changed;
   } finally {
@@ -2640,7 +2892,7 @@ function fileTreeRepoBranch(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return '';
   return repoBranchDisplayText(repo);
 }
 
@@ -2649,7 +2901,7 @@ function fileTreeRepoSyncMeta(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return [];
   const parts = [];
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);

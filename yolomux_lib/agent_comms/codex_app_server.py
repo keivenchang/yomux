@@ -42,11 +42,7 @@ def codex_runtime_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     if base_env is not None:
         env.update(base_env)
     env["PATH"] = healed_runtime_path(env, home=Path.home())
-    if env.get("YOLOMUX_ROOT"):
-        codex_home = resolve_yolomux_roots(env).codex_home
-    else:
-        configured_home = str(env.get("YOLOMUX_CODEX_HOME") or env.get("CODEX_HOME") or "").strip()
-        codex_home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
+    codex_home = resolve_yolomux_roots(env).codex_home
     codex_home.mkdir(parents=True, exist_ok=True)
     env["CODEX_HOME"] = str(codex_home)
     env["TERM"] = "xterm-256color"

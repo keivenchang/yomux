@@ -1490,7 +1490,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text, locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
       signal: controller?.signal,
-    });
+    }, {abortRetirementReason: 'yoagent_chat_cancelled'});
     if (yoagentChatState.activeRequest?.id !== requestId) return;
     if (payload.cancelled) {
       applyYoagentStreamPayload({stream_id: streamId, phase: 'stopped', done: true, aborted: true, auxiliary_done: true});

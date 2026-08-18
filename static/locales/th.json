@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "สาย/พลาด",
   "debug.system.sampler.header.runtime.full": "รันไทม์ล่าสุด",
   "debug.system.sampler.header.runtime.short": "รันไทม์",
+  "debug.tab.cost": "ค่าใช้จ่าย",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "กราฟ",
   "debug.tab.logs": "บันทึก",

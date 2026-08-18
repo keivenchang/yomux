@@ -400,6 +400,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "الرسوم البيانية",
+  "debug.tab.cost": "التكلفة",
   "debug.tab.services": "برامج الخلفية",
   "debug.tab.logs": "السجلات",
   "debug.waitingForServerStats": "في انتظار إحصاءات الخادم",

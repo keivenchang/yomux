@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import importlib.util
+import inspect
+import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -52,6 +55,66 @@ def load_tool_module():
     return module
 
 
+def test_active_browser_window_resolves_requested_instance_before_product_imports():
+    source = TOOL_PATH.read_text(encoding="utf-8")
+    assert source.index("apply_early_instance_environment(sys.argv[1:])") < source.index(
+        "from yolomux_lib.auth import AUTH_CONFIG_PATH"
+    )
+
+    environment = dict(os.environ)
+    for key in (
+        "YOLOMUX_INSTANCE",
+        "YOLOMUX_ROOT",
+        "YOLOMUX_RUNTIME_DIR",
+        "YOLOMUX_CONFIG_DIR",
+        "YOLOMUX_STATE_DIR",
+        "YOLOMUX_CACHE_DIR",
+        "YOLOMUX_CODEX_HOME",
+        "YOLOMUX_HOST_ARTIFACT_DIR",
+        "YOLOMUX_START_LOCK_DIR",
+        "YOLOMUX_LOG_DIR",
+        "YOLOMUX_CA_DIR",
+        "YOLOMUX_TOOL_LOCK_PATH",
+        "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX",
+        "CODEX_HOME",
+        "PYTHONPYCACHEPREFIX",
+        "TMPDIR",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+    ):
+        environment.pop(key, None)
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json; "
+                "from tools import yostats_active_browser_window as tool; "
+                "print(json.dumps({'auth': str(tool.AUTH_CONFIG_PATH), "
+                "'state': str(tool.STATE_DIR), "
+                "'runtime': str(tool.RUNTIME_DIR), "
+                "'managed': tool.is_managed_instance_port(7771)}))"
+            ),
+            "--port",
+            "7771",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected_root = Path("/tmp") / f"y{os.getuid()}" / "p7771"
+    assert json.loads(probe.stdout) == {
+        "auth": str(expected_root / "config" / "auth.yaml"),
+        "state": str(expected_root / "state"),
+        "runtime": str(expected_root / "runtime"),
+        "managed": True,
+    }
+
+
 def test_active_browser_window_workload_source_contract():
     tool = load_tool_module()
 
@@ -84,11 +147,97 @@ def test_active_browser_window_workload_source_contract():
     assert "capture_measurement_metrics" in source
     assert "install_measurement_fetch_header" in source
     assert "window.fetch =" in source
-    assert 'choices=("active", "idle-yostats")' in source
+    assert "Network.setExtraHTTPHeaders" not in source
+    assert 'choices=("active", "idle-yostats", "deterministic-fanout")' in source
     assert "prepare_idle_yostats_workload" in source
     assert "install_ticker_callback_counter" in source
     assert '"ticker_callbacks"' in source
     assert '"renderer"' in source
+
+
+def test_deterministic_fanout_contract_freezes_every_step_owner_and_profiler_limit():
+    tool = load_tool_module()
+
+    contract = tool.deterministic_fanout_workload_contract(75)
+
+    assert contract["schema_version"] == 1
+    assert contract["steps"] == {
+        "authenticated_cold_load": 1,
+        "identical_watch_root_renewals": 10,
+        "operation_add_remove_cycles": 10,
+        "unchanged_watchd_revisions": 10,
+        "client_event_source_reconnects": 1,
+        "producer_restarts": 1,
+    }
+    assert contract["source_generation_owners"] == {
+        "watch_roots": "deterministic-watch-roots",
+        "operation_cycles": "deterministic-operation-cycle",
+        "watchd_revisions": "filesystem-watch-diff",
+        "client_events": "client-event-transport",
+        "producer_restart": "watchd",
+    }
+    assert contract["owner_counter_names"] == [
+        "session_discovery",
+        "transcript_tail_scan",
+        "session_files_materialization",
+        "jobd_work_graph_rebuild",
+        "provider_metadata_rebuild",
+        "statsd_unchanged_cell_materialization",
+        "statusd_unchanged_pane_capture",
+    ]
+    assert contract["profiler"] == {
+        "tool": "py-spy",
+        "rate_hz": 99,
+        "duration_seconds": 75,
+        "threads": True,
+        "gil_only": True,
+        "sample_error_ceiling": 0,
+    }
+
+
+def test_deterministic_final_acceptance_requires_ui_convergence_and_zero_browser_errors():
+    tool = load_tool_module()
+    final_ui = {
+        "settled": True,
+        "source_generation": {"epoch": "server-one", "generation": 12},
+        "rendered_generation": {"epoch": "server-one", "generation": 12},
+        "owners": {
+            "client_event_connected": True,
+            "client_event_candidate": False,
+            "client_event_reconnect_pending": False,
+            "startup_active": 0,
+            "startup_queued": 0,
+            "watch_roots_in_flight": False,
+            "operations_pending": 0,
+            "operation_waiters": 0,
+            "acknowledgments_pending": 0,
+            "acknowledgment_in_flight": False,
+        },
+        "dom": {"grid_connected": True},
+    }
+    diagnostics = {
+        "js_debug_store_reachable": True,
+        "js_debug_event_count": 42,
+        "browser_local_failures": [],
+        "browser_log_failures": [],
+        "warning_or_error_count": 0,
+        "receipt_quiescent": True,
+    }
+
+    assert tool.validate_deterministic_final_acceptance(final_ui, diagnostics) == {
+        "ui_convergence": final_ui,
+        "browser_diagnostics": diagnostics,
+    }
+    with pytest.raises(RuntimeError, match="source generation"):
+        tool.validate_deterministic_final_acceptance(
+            {**final_ui, "rendered_generation": {"epoch": "server-one", "generation": 11}},
+            diagnostics,
+        )
+    with pytest.raises(RuntimeError, match="Warning/Error"):
+        tool.validate_deterministic_final_acceptance(
+            final_ui,
+            {**diagnostics, "warning_or_error_count": 1},
+        )
 
 
 @pytest.mark.parametrize("flag", [
@@ -112,6 +261,7 @@ def test_active_browser_window_rejects_credential_bearing_flags_before_any_brows
         "duration",
         "output",
         "port",
+        "session",
         "username",
         "workload",
     }
@@ -143,6 +293,35 @@ def test_active_browser_window_bypass_environment_does_not_skip_configured_cooki
     assert selected == [None]
     assert installed == [(driver, FIXTURE_BASE_URL, FIXTURE_PORT, user)]
     assert app_waits == [(driver, ["one", "two"], 20)]
+
+
+def test_deterministic_app_wait_accepts_explicit_sessions_anywhere_in_the_roster(monkeypatch):
+    tool = load_tool_module()
+    responses = iter([True, ["unrelated", "ant", "another", "yo7771-b"]])
+    driver = SimpleNamespace(execute_script=lambda _script: next(responses))
+
+    class ImmediateWait:
+        def until(self, predicate):
+            return predicate(driver)
+
+    monkeypatch.setattr(tool, "WebDriverWait", lambda *_args: ImmediateWait())
+
+    tool.wait_for_app(driver, ["yo7771-b", "ant"], timeout=20)
+
+
+def test_deterministic_app_wait_rejects_a_missing_explicit_session(monkeypatch):
+    tool = load_tool_module()
+    responses = iter([True, ["unrelated", "ant"]])
+    driver = SimpleNamespace(execute_script=lambda _script: next(responses))
+
+    class ImmediateWait:
+        def until(self, predicate):
+            return predicate(driver)
+
+    monkeypatch.setattr(tool, "WebDriverWait", lambda *_args: ImmediateWait())
+
+    with pytest.raises(RuntimeError, match=r"missing \['yo7771-b'\]"):
+        tool.wait_for_app(driver, ["yo7771-b", "ant"], timeout=20)
 
 
 @pytest.mark.parametrize("output", [Path("/outside/window.json"), Path("/tmp/../outside-window.json")])
@@ -217,7 +396,7 @@ def test_active_browser_window_reads_service_records_without_starting_another_ap
     services.mkdir()
     (services / "statsd.service.json").write_text('{"service":"statsd","pid":0,"socket":"/tmp/statsd.sock"}\n', encoding="utf-8")
     (services / "jobd.service.json").write_text('{"service":"jobd","pid":31,"socket":"/tmp/jobd.sock"}\n', encoding="utf-8")
-    monkeypatch.setattr(tool, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(tool, "RUNTIME_DIR", tmp_path)
     monkeypatch.setattr(tool, "process_is_alive", lambda pid: pid == 31)
     monkeypatch.setattr(tool, "service_pid_for_socket", lambda socket_path: 47 if socket_path == "/tmp/statsd.sock" else 0)
 
@@ -225,24 +404,323 @@ def test_active_browser_window_reads_service_records_without_starting_another_ap
     assert "--print-runtime-report" not in TOOL_PATH.read_text(encoding="utf-8")
 
 
-def test_active_browser_window_reads_only_generic_capture_metrics_from_the_target_server(monkeypatch):
+def test_active_browser_window_reads_only_generic_capture_metrics_from_the_authenticated_browser_server(monkeypatch):
     tool = load_tool_module()
-    stale_owner = {"port": 7770, "control_socket": "/tmp/stale-owner.sock"}
-    target_server = {"port": 7772, "control_socket": "/tmp/target-server.sock"}
-    monkeypatch.setattr(tool, "read_background_owner_debug_status", lambda: {"current_owner": stale_owner, "generations": [stale_owner, target_server]})
-    requests = []
-    monkeypatch.setattr(tool, "send_yolomux_control_request", lambda server, request: requests.append((server, request)) or {"ok": True, "performance": {"summary": []}})
+    source = inspect.getsource(tool.capture_measurement_metrics)
+    for forbidden in (
+        "ensure_started",
+        "runtime_status",
+        "service_status",
+        "send_yolomux_control_request",
+        "read_background_owner_debug_status",
+    ):
+        assert forbidden not in source
+    scripts = []
+    driver = SimpleNamespace(
+        execute_async_script=lambda script, *_arguments: scripts.append(script) or {
+            "ok": True,
+            "perf": {"summary": []},
+            "performanceDiagnostics": {
+                "browser_observation_status": {
+                    "owner_counters": {"statsd_unchanged_cell_materialization": 7},
+                },
+            },
+            "systemStatus": {
+                "local_services": {
+                    "services": [
+                        {
+                            "service": "jobd",
+                            "owner_invocations": {
+                                "jobd_work_graph_rebuild": 3,
+                                "provider_metadata_rebuild": 4,
+                            },
+                        },
+                        {
+                            "service": "statusd",
+                            "owner_invocations": {"statusd_unchanged_pane_capture": 5},
+                        },
+                    ],
+                },
+            },
+            "systemStatusAdvanced": {
+                "refresh": {
+                    "owner_invocations": {
+                        "session_discovery": 10,
+                        "transcript_tail_scan": 11,
+                        "session_files_materialization": 12,
+                        "jobd_work_graph_rebuild": 2,
+                    },
+                },
+            },
+        },
+    )
+    assert not hasattr(tool, "read_background_owner_debug_status")
+    assert not hasattr(tool, "send_yolomux_control_request")
 
-    assert tool.capture_measurement_metrics(7772) == {"summary": []}
-    assert requests == [(target_server, {"action": "runtime_measurement_metrics", "scope": "capture"})]
+    assert tool.capture_measurement_metrics(driver, require_owner_counters=True) == {
+        "summary": [],
+        "owner_counters": {
+            "session_discovery": 10,
+            "transcript_tail_scan": 11,
+            "session_files_materialization": 12,
+            "jobd_work_graph_rebuild": 5,
+            "provider_metadata_rebuild": 4,
+            "statsd_unchanged_cell_materialization": 7,
+            "statusd_unchanged_pane_capture": 5,
+        },
+        "owner_counter_sources": {
+            "watchd_refresh": {
+                "session_discovery": 10,
+                "transcript_tail_scan": 11,
+                "session_files_materialization": 12,
+                "jobd_work_graph_rebuild": 2,
+            },
+            "jobd": {
+                "jobd_work_graph_rebuild": 3,
+                "provider_metadata_rebuild": 4,
+            },
+            "statsd": {"statsd_unchanged_cell_materialization": 7},
+            "statusd": {"statusd_unchanged_pane_capture": 5},
+        },
+    }
+    assert len(scripts) == 1
+    assert "/api/diagnostics/performance?measurement_scope=capture" in scripts[0]
+    assert "'/api/diagnostics/performance'" in scripts[0]
+    assert "'/api/system-status'" in scripts[0]
+    assert "'/api/system-status/advanced'" in scripts[0]
+    assert "originalFetch" in scripts[0]
 
 
-def test_active_browser_window_rejects_a_missing_target_server_generation(monkeypatch):
+def test_active_browser_window_rejects_an_invalid_target_server_metrics_response():
     tool = load_tool_module()
-    monkeypatch.setattr(tool, "read_background_owner_debug_status", lambda: {"generations": [{"port": 7770, "control_socket": "/tmp/stale-owner.sock"}]})
+    driver = SimpleNamespace(execute_async_script=lambda _script, *_arguments: {"ok": False, "error": "forbidden"})
 
-    with pytest.raises(RuntimeError, match="port 7772"):
-        tool.capture_measurement_metrics(7772)
+    with pytest.raises(RuntimeError, match="forbidden"):
+        tool.capture_measurement_metrics(driver)
+
+
+def test_non_deterministic_capture_does_not_require_lane_owner_diagnostics():
+    tool = load_tool_module()
+    arguments = []
+    driver = SimpleNamespace(
+        execute_async_script=lambda _script, *args: arguments.extend(args) or {
+            "ok": True,
+            "perf": {"summary": []},
+        },
+    )
+
+    assert tool.capture_measurement_metrics(driver) == {"summary": []}
+    assert arguments == [False]
+
+
+def test_deterministic_capture_identifies_only_typed_demand_driven_snapshot_refusals_as_pending():
+    tool = load_tool_module()
+    driver = SimpleNamespace(
+        execute_async_script=lambda _script, *_arguments: {
+            "ok": True,
+            "perf": {"summary": []},
+            "performanceDiagnostics": {},
+            "systemStatus": {
+                "ok": False,
+                "snapshot": {"reason_code": "system_status_snapshot_unavailable"},
+            },
+            "systemStatusAdvanced": {
+                "ok": False,
+                "snapshot": {"reason_code": "system_status_snapshot_stale"},
+            },
+        },
+    )
+
+    with pytest.raises(
+        tool.MeasurementSnapshotPending,
+        match="system-status:system_status_snapshot_unavailable, system-status-advanced:system_status_snapshot_stale",
+    ):
+        tool.capture_measurement_metrics(driver, require_owner_counters=True)
+
+
+def test_deterministic_baseline_waits_for_typed_snapshot_publication(monkeypatch):
+    tool = load_tool_module()
+    expected = {"owner_counters": {"session_discovery": 1}}
+    calls = []
+
+    def capture(driver, *, require_owner_counters=False):
+        calls.append((driver, require_owner_counters))
+        if len(calls) == 1:
+            raise tool.MeasurementSnapshotPending("publishing")
+        return expected
+
+    class PublicationWait:
+        def __init__(self, driver, timeout, ignored_exceptions):
+            assert driver == "driver"
+            assert timeout == 20
+            assert ignored_exceptions == (tool.MeasurementSnapshotPending,)
+            self.ignored_exceptions = ignored_exceptions
+
+        def until(self, predicate):
+            try:
+                predicate("driver")
+            except self.ignored_exceptions:
+                pass
+            return predicate("driver")
+
+    monkeypatch.setattr(tool, "capture_measurement_metrics", capture)
+    monkeypatch.setattr(tool, "WebDriverWait", PublicationWait)
+
+    assert tool.wait_for_deterministic_measurement_baseline("driver") == expected
+    assert calls == [("driver", True), ("driver", True)]
+
+
+def test_active_browser_window_joins_every_issued_request_exactly_once():
+    tool = load_tool_module()
+    marker = "capture-0123456789abcdef0123456789abcdef"
+    digest = tool.measurement_marker_digest(marker)
+    issued = [
+        {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 200},
+        {"request_id": "r-two", "method": "POST", "path": "/api/fs/batch", "status": 202},
+    ]
+    performance = {
+        "capture": {"capacity": 2048, "retained": 31, "total": 31, "evicted": 0, "first_sequence": 1, "last_sequence": 31},
+        "recent": [
+            {"surface": "POST /api/watch/roots", "details": {"measurement_request_id": digest, "request_id": "r-response-one", "transport_request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 200}},
+            {"surface": "POST /api/fs/batch", "details": {"measurement_request_id": digest, "request_id": "r-response-two", "transport_request_id": "r-two", "method": "POST", "path": "/api/fs/batch", "status": 202}},
+            {"surface": "GET /api/ping", "details": {"measurement_request_id": "another-run", "request_id": "r-old", "status": 200}},
+        ],
+    }
+
+    result = tool.validate_capture_request_join(marker, issued, performance)
+
+    assert result["join"] == {
+        "issued": 2,
+        "server_records": 2,
+        "missing": [],
+        "duplicate": [],
+        "unexpected": [],
+    }
+    assert [row["details"]["transport_request_id"] for row in result["records"]] == ["r-one", "r-two"]
+    assert result["capture_store"] == performance["capture"]
+
+
+@pytest.mark.parametrize(
+    ("issued", "server_ids", "message"),
+    [
+        (["r-one", "r-two"], ["r-one"], "missing"),
+        (["r-one"], ["r-one", "r-one"], "duplicate"),
+        (["r-one"], ["r-one", "r-extra"], "unexpected"),
+    ],
+)
+def test_active_browser_window_rejects_incomplete_request_joins(issued, server_ids, message):
+    tool = load_tool_module()
+    marker = "capture-0123456789abcdef0123456789abcdef"
+    digest = tool.measurement_marker_digest(marker)
+    performance = {
+        "capture": {"capacity": 2048, "retained": len(server_ids), "total": len(server_ids), "evicted": 0},
+        "recent": [
+            {"surface": "GET /api/ping", "details": {"measurement_request_id": digest, "request_id": f"r-response-{index}", "transport_request_id": request_id, "status": 200}}
+            for index, request_id in enumerate(server_ids)
+        ],
+    }
+    issued_rows = [{"request_id": request_id, "method": "GET", "path": "/api/ping", "status": 200} for request_id in issued]
+
+    with pytest.raises(RuntimeError, match=message):
+        tool.validate_capture_request_join(marker, issued_rows, performance)
+
+
+@pytest.mark.parametrize(
+    ("issued", "server", "message"),
+    [
+        (
+            {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 0},
+            {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 200},
+            "browser status 0",
+        ),
+        (
+            {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 200},
+            {"request_id": "r-one", "method": "POST", "path": "/api/fs/batch", "status": 200},
+            "mismatch",
+        ),
+        (
+            {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 200},
+            {"request_id": "r-one", "method": "POST", "path": "/api/watch/roots", "status": 202},
+            "mismatch",
+        ),
+    ],
+)
+def test_active_browser_window_rejects_request_join_field_mismatches(issued, server, message):
+    tool = load_tool_module()
+    marker = "capture-0123456789abcdef0123456789abcdef"
+    digest = tool.measurement_marker_digest(marker)
+    performance = {
+        "capture": {"capacity": 2048, "retained": 1, "total": 1, "evicted": 0},
+        "recent": [{"surface": f"{server['method']} {server['path']}", "details": {"measurement_request_id": digest, "request_id": "r-response", "transport_request_id": server["request_id"], **server}}],
+    }
+
+    with pytest.raises(RuntimeError, match=message):
+        tool.validate_capture_request_join(marker, [issued], performance)
+
+
+def test_active_browser_window_measurement_fetch_ledger_is_bounded_and_body_free():
+    tool = load_tool_module()
+    scripts = []
+    driver = SimpleNamespace(execute_script=lambda script, *args: scripts.append((script, args)))
+
+    tool.install_measurement_fetch_header(driver, "capture-0123456789abcdef0123456789abcdef")
+
+    script, args = scripts[0]
+    assert args == ("capture-0123456789abcdef0123456789abcdef",)
+    assert "request_id" in script
+    assert "method" in script
+    assert "path" in script
+    assert "status" in script
+    assert "dropped" in script
+    assert "peak_api_fetches" in script
+    assert "activeApiRequests" in script
+    assert "4096" in script
+    assert "body:" not in script
+    assert "request.clone" not in script
+
+
+def test_deterministic_cold_navigation_starts_after_every_cpu_and_counter_baseline():
+    tool = load_tool_module()
+    source = inspect.getsource(tool.main)
+
+    assert source.index("prepare_deterministic_cold_navigation(") < source.index("measurement_before =")
+    assert source.index("measurement_before =") < source.index("process = subprocess.Popen(")
+    assert source.index("profiler_process = subprocess.Popen(") < source.index("open_deterministic_cold_navigation(")
+    assert source.index("open_deterministic_cold_navigation(") < source.index("perform_deterministic_fanout_browser_workload(")
+    assert source.count("wait_for_deterministic_measurement_baseline(driver)") == 2
+
+
+def test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes():
+    tool = load_tool_module()
+    source = inspect.getsource(tool.perform_deterministic_fanout_browser_workload)
+
+    assert "if (operationTerminalAckState.request)" in source
+    assert "const capturedAckIds = [...operationTerminalAckState.pending.keys()]" in source
+    assert "const retainedAckIds = capturedAckIds.filter" in source
+    assert "if (!apiOperationState.pending.size) return" in source
+    assert "record?.phase === 'accepted' && apiOperationState.pending.has" in source
+    assert "record?.phase === 'terminal'" in source
+    assert "apiOperationState.terminal.has(pending.operationId)" in source
+    assert source.index("await awaitPreexistingOperationQuiescence()") < source.index(
+        "operationTerminalAckState.timer = -1"
+    )
+    assert "const missingIds = operationIds.filter" in source
+    assert "unrelatedAckIds = pendingAckIds.filter" in source
+    assert "acknowledged.length !== pendingAckIds.length" in source
+    assert "pendingAckIds.some(id => !acknowledged.includes(id)" in source
+
+
+def test_deterministic_preload_retains_bounded_fanout_and_event_source_evidence_without_bodies():
+    tool = load_tool_module()
+    script = tool.deterministic_measurement_preload_script("capture-0123456789abcdef0123456789abcdef")
+
+    assert "max_concurrent_api_fetches" in script
+    assert "fs_batch_item_count" in script
+    assert "requests.length" in script
+    assert "body:" not in script
+    assert "event_sources" in script
+    assert "max_live" in script
+    assert "new Proxy" in script
 
 
 def test_active_browser_window_bounds_resource_evidence_and_strips_query_values():
@@ -258,6 +736,575 @@ def test_active_browser_window_bounds_resource_evidence_and_strips_query_values(
     )
 
     assert resources == [{"path": "/api/fs/batch", "duration": 2.5, "transferSize": 42}]
+
+
+def test_deterministic_fanout_requires_two_explicit_sessions():
+    tool = load_tool_module()
+
+    with pytest.raises(SystemExit):
+        tool.parse_args(["--workload", "deterministic-fanout", "--output", "/tmp/window.json"])
+    args = tool.parse_args([
+        "--workload", "deterministic-fanout",
+        "--session", "one",
+        "--session", "two",
+        "--duration", "75",
+        "--output", "/tmp/window.json",
+    ])
+    assert args.session == ["one", "two"]
+    assert args.duration == 75
+
+
+def test_deterministic_browser_workload_executes_each_owned_transition():
+    tool = load_tool_module()
+
+    class FakeDriver:
+        script = ""
+        arguments = ()
+
+        def execute_async_script(self, script, *arguments):
+            self.script = script
+            self.arguments = arguments
+            return {
+                "ok": True,
+                "steps": {
+                    "identical_watch_root_renewals": 10,
+                    "operation_add_remove_cycles": 10,
+                    "unchanged_watchd_revisions": 10,
+                    "client_event_source_reconnects": 1,
+                },
+                "source_generation_keys": {},
+                "owner_invocations": {},
+            }
+
+    driver = FakeDriver()
+    result = tool.perform_deterministic_fanout_browser_workload(
+        driver, "capture-0123456789abcdef0123456789abcdef", "session-one"
+    )
+
+    assert result["steps"]["identical_watch_root_renewals"] == 10
+    assert driver.arguments == ("capture-0123456789abcdef0123456789abcdef", 10, "session-one")
+    assert "forceSourceOwner: 'deterministic-watch-roots'" in driver.script
+    assert "registerApiOperationReceipt" in driver.script
+    assert "fetchFilesystemWatchDiff" in driver.script
+    assert "closeClientEventStream" in driver.script
+    assert "scheduleClientEventDisconnectEpisode(null)" in driver.script
+    assert "installClientEventStream" in driver.script
+
+
+def test_deterministic_operation_cycles_use_real_session_files_receipts_and_exact_acknowledgments():
+    tool = load_tool_module()
+
+    class FakeDriver:
+        script = ""
+
+        def execute_async_script(self, script, *_arguments):
+            self.script = script
+            return {
+                "ok": True,
+                "steps": {
+                    "identical_watch_root_renewals": 10,
+                    "operation_add_remove_cycles": 10,
+                    "unchanged_watchd_revisions": 10,
+                    "client_event_source_reconnects": 1,
+                },
+                "source_generation_keys": {},
+                "owner_invocations": {},
+            }
+
+    driver = FakeDriver()
+    tool.perform_deterministic_fanout_browser_workload(
+        driver, "capture-0123456789abcdef0123456789abcdef", "session-one"
+    )
+
+    assert "/api/session-files?" in driver.script
+    assert "force=1" in driver.script
+    assert "kind: 'session_files'" in driver.script
+    assert "apiFetchJson(sessionFilesUrl" in driver.script
+    assert "waitForApiOperationResult(pending" in driver.script
+    assert "registerApiOperationReceipt({" not in driver.script
+    assert "operationTerminalAckState.pending" in driver.script
+    assert "acknowledged" in driver.script
+    assert "ignored" in driver.script
+
+
+def test_deterministic_producer_restart_refuses_a_shared_instance_before_signalling(monkeypatch):
+    tool = load_tool_module()
+    monkeypatch.setattr(tool, "is_managed_instance_port", lambda _port: False)
+    monkeypatch.setattr(tool.os, "kill", lambda *_args: pytest.fail("shared producer must not be signalled"))
+
+    with pytest.raises(RuntimeError, match="managed isolated instance"):
+        tool.restart_managed_watchd_producer(SimpleNamespace(), FIXTURE_PORT)
+
+
+def test_deterministic_producer_restart_proves_exact_old_and_new_identities(monkeypatch):
+    tool = load_tool_module()
+    pids = iter(({"watchd": 41}, {"watchd": 42}))
+    signals = []
+    driver = SimpleNamespace(execute_async_script=lambda _script: {"ok": True})
+
+    class ImmediateWait:
+        def until(self, predicate):
+            return predicate(driver)
+
+    monkeypatch.setattr(tool, "is_managed_instance_port", lambda _port: True)
+    monkeypatch.setattr(tool, "runtime_service_pids", lambda: next(pids))
+    monkeypatch.setattr(tool, "process_start_key", lambda pid: (pid, f"start-{pid}"))
+    monkeypatch.setattr(tool, "process_is_alive", lambda _pid: False)
+    monkeypatch.setattr(tool.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(tool, "WebDriverWait", lambda *_args: ImmediateWait())
+
+    result = tool.restart_managed_watchd_producer(driver, FIXTURE_PORT)
+
+    assert signals == [(41, signal.SIGTERM)]
+    assert result == {
+        "service": "watchd",
+        "before_pid": 41,
+        "before_start_key": [41, "start-41"],
+        "after_pid": 42,
+        "after_start_key": [42, "start-42"],
+        "restarts": 1,
+        "source_generation_key": "watchd:42:(42, 'start-42')",
+    }
+
+
+def test_deterministic_profile_counts_samples_and_enforces_the_predeclared_error_ceiling(tmp_path):
+    tool = load_tool_module()
+    raw = tmp_path / "profile.raw"
+    raw.write_text("thread (1);one 3\nthread (2);two 2\n", encoding="utf-8")
+    command = ["py-spy", "record", "--duration", "75", "--threads", "--gil"]
+
+    profile = tool.validate_deterministic_profile(raw, "py-spy> wrote profile\n", 0, command)
+
+    assert profile["sample_count"] == 5
+    assert profile["sample_error_count"] == 0
+    assert profile["sample_error_ceiling"] == 0
+    assert profile["admissible"] is True
+    with pytest.raises(RuntimeError, match="errors=1 ceiling=0"):
+        tool.validate_deterministic_profile(raw, "Error: one sampling failure\n", 0, command)
+
+
+def test_deterministic_owner_counter_composition_fails_closed_on_each_diagnostics_source():
+    tool = load_tool_module()
+    performance_diagnostics = {
+        "browser_observation_status": {
+            "owner_counters": {"statsd_unchanged_cell_materialization": 7},
+        },
+    }
+    system_status = {
+        "local_services": {
+            "services": [
+                {
+                    "service": "jobd",
+                    "owner_invocations": {
+                        "jobd_work_graph_rebuild": 3,
+                        "provider_metadata_rebuild": 4,
+                    },
+                },
+                {
+                    "service": "statusd",
+                    "owner_invocations": {"statusd_unchanged_pane_capture": 5},
+                },
+            ],
+        },
+    }
+    system_status_advanced = {
+        "refresh": {
+            "owner_invocations": {
+                "session_discovery": 10,
+                "transcript_tail_scan": 11,
+                "session_files_materialization": 12,
+                "jobd_work_graph_rebuild": 2,
+            },
+        },
+    }
+
+    assert tool.compose_deterministic_owner_counters(
+        performance_diagnostics,
+        system_status,
+        system_status_advanced,
+    ) == {
+        "totals": {
+            "session_discovery": 10,
+            "transcript_tail_scan": 11,
+            "session_files_materialization": 12,
+            "jobd_work_graph_rebuild": 5,
+            "provider_metadata_rebuild": 4,
+            "statsd_unchanged_cell_materialization": 7,
+            "statusd_unchanged_pane_capture": 5,
+        },
+        "sources": {
+            "watchd_refresh": {
+                "session_discovery": 10,
+                "transcript_tail_scan": 11,
+                "session_files_materialization": 12,
+                "jobd_work_graph_rebuild": 2,
+            },
+            "jobd": {
+                "jobd_work_graph_rebuild": 3,
+                "provider_metadata_rebuild": 4,
+            },
+            "statsd": {"statsd_unchanged_cell_materialization": 7},
+            "statusd": {"statusd_unchanged_pane_capture": 5},
+        },
+    }
+
+    system_status["local_services"]["services"][1]["owner_invocations"] = {}
+    with pytest.raises(RuntimeError, match="statusd_unchanged_pane_capture"):
+        tool.compose_deterministic_owner_counters(
+            performance_diagnostics,
+            system_status,
+            system_status_advanced,
+        )
+
+    with pytest.raises(RuntimeError, match="watchd_refresh.session_discovery"):
+        tool.compose_deterministic_owner_counters(
+            performance_diagnostics,
+            {"ok": False, "state": "unpublished"},
+            {"ok": False, "state": "stale"},
+        )
+
+
+def test_deterministic_measurement_schema_retains_exact_ids_generations_and_owner_counter_samples():
+    tool = load_tool_module()
+    contract = tool.deterministic_fanout_workload_contract(75)
+    receipts = [
+        {
+            "id": f"op-{index}",
+            "request_id": f"request-{index}",
+            "accepted_cursor": {"epoch": "server-epoch", "seq": 0},
+            "terminal_cursor": {"epoch": "server-epoch", "seq": 1},
+        }
+        for index in range(10)
+    ]
+    operation_generations = [
+        {"id": row["id"], "epoch": "server-epoch", "accepted_seq": 0, "terminal_seq": 1}
+        for row in receipts
+    ]
+    browser_workload = {
+        "steps": {
+            "identical_watch_root_renewals": 10,
+            "operation_add_remove_cycles": 10,
+            "unchanged_watchd_revisions": 10,
+            "client_event_source_reconnects": 1,
+        },
+        "source_generation_keys": {
+            "watch_roots": "capture:roots:1",
+            "operation_cycles": operation_generations,
+        },
+        "owner_invocations": {"deterministic_watch_roots": 10},
+        "operation_cycles": {
+            "route": "/api/session-files",
+            "receipts": receipts,
+            "acknowledgment_batch_ids": [row["id"] for row in receipts],
+            "unrelated_acknowledgment_ids": [],
+            "acknowledgments": {
+                "ok": True,
+                "acknowledged": [row["id"] for row in receipts],
+                "ignored": [],
+            },
+        },
+    }
+    producer = {"restarts": 1, "source_generation_key": "watchd:42:start-42"}
+    request_join = {
+        "join": {"issued": 3, "server_records": 3, "missing": [], "duplicate": [], "unexpected": []},
+        "issued": [
+            {"request_id": "r-roots", "method": "POST", "path": "/api/watch/roots", "status": 200},
+            {"request_id": "r-diff", "method": "GET", "path": "/api/fs/watch-diff", "status": 200},
+            {"request_id": "r-batch", "method": "POST", "path": "/api/fs/batch", "status": 202},
+        ],
+        "browser_ledger": {
+            "max_concurrent_api_fetches": 8,
+            "peak_api_fetches": [],
+            "fs_batch_requests": [{"request_id": "r-batch", "item_count": 64}],
+            "event_sources": {
+                "created": ["client-event-source-1", "client-event-source-2"],
+                "closed": ["client-event-source-1"],
+                "live": ["client-event-source-2"],
+                "max_live": 1,
+                "replacements": 1,
+            },
+        },
+    }
+    performance = {
+        "summary": [],
+        "owner_counters": {
+            "session_discovery": 10,
+            "transcript_tail_scan": 11,
+            "session_files_materialization": 12,
+            "jobd_work_graph_rebuild": 13,
+            "provider_metadata_rebuild": 14,
+            "statsd_unchanged_cell_materialization": 42,
+            "statusd_unchanged_pane_capture": 16,
+        },
+        "owner_counter_sources": {
+            "watchd_refresh": {
+                "session_discovery": 10,
+                "transcript_tail_scan": 11,
+                "session_files_materialization": 12,
+                "jobd_work_graph_rebuild": 5,
+            },
+            "jobd": {
+                "jobd_work_graph_rebuild": 8,
+                "provider_metadata_rebuild": 14,
+            },
+            "statsd": {"statsd_unchanged_cell_materialization": 42},
+            "statusd": {"statusd_unchanged_pane_capture": 16},
+        },
+    }
+    performance_before = {
+        "summary": [],
+        "owner_counters": {
+            "session_discovery": 10,
+            "transcript_tail_scan": 11,
+            "session_files_materialization": 12,
+            "jobd_work_graph_rebuild": 13,
+            "provider_metadata_rebuild": 14,
+            "statsd_unchanged_cell_materialization": 41,
+            "statusd_unchanged_pane_capture": 16,
+        },
+        "owner_counter_sources": {
+            "watchd_refresh": {
+                "session_discovery": 10,
+                "transcript_tail_scan": 11,
+                "session_files_materialization": 12,
+                "jobd_work_graph_rebuild": 5,
+            },
+            "jobd": {
+                "jobd_work_graph_rebuild": 8,
+                "provider_metadata_rebuild": 14,
+            },
+            "statsd": {"statsd_unchanged_cell_materialization": 41},
+            "statusd": {"statusd_unchanged_pane_capture": 16},
+        },
+    }
+    profiler = {"admissible": True, "sample_count": 100, "sample_error_count": 0, "sample_error_ceiling": 0}
+
+    schema = tool.deterministic_measurement_schema(
+        contract, browser_workload, producer, request_join, performance, profiler, 12.3456,
+        performance_before=performance_before,
+    )
+
+    assert schema["observed_steps"] == contract["steps"]
+    assert schema["exact_request_ids_by_route"] == {
+        "POST /api/watch/roots": ["r-roots"],
+        "GET /api/fs/watch-diff": ["r-diff"],
+        "POST /api/fs/batch": ["r-batch"],
+    }
+    assert schema["source_generation_keys"] == {
+        "watch_roots": "capture:roots:1",
+        "operation_cycles": operation_generations,
+        "producer_restart": "watchd:42:start-42",
+    }
+    assert schema["operation_cycle_join"]["accepted"] == 10
+    assert schema["operation_cycle_join"]["terminal"] == 10
+    assert schema["operation_cycle_join"]["acknowledged"] == 10
+    assert schema["operation_cycle_join"]["batch_acknowledged"] == 10
+    assert schema["operation_cycle_join"]["unrelated_acknowledged"] == 0
+    assert schema["operation_cycle_join"]["ignored"] == 0
+    assert schema["browser_fanout"]["max_concurrent_api_fetches"] == 8
+    assert schema["browser_fanout"]["fs_batch_max_item_count"] == 64
+    assert schema["browser_fanout"]["event_sources"]["replacements"] == 1
+    assert schema["owner_invocations"]["session_discovery"] == 0
+    assert schema["owner_invocations"]["transcript_tail_scan"] == 0
+    assert schema["owner_invocations"]["statsd_unchanged_cell_materialization"] == 1
+    assert schema["owner_counter_samples"] == {
+        "before": performance_before["owner_counters"],
+        "after": performance["owner_counters"],
+        "delta": {
+            "session_discovery": 0,
+            "transcript_tail_scan": 0,
+            "session_files_materialization": 0,
+            "jobd_work_graph_rebuild": 0,
+            "provider_metadata_rebuild": 0,
+            "statsd_unchanged_cell_materialization": 1,
+            "statusd_unchanged_pane_capture": 0,
+        },
+        "sources": {
+            "before": performance_before["owner_counter_sources"],
+            "after": performance["owner_counter_sources"],
+        },
+    }
+    assert schema["elapsed_seconds"] == 12.346
+
+
+def test_deterministic_operation_join_preserves_ten_owned_cycles_inside_a_larger_live_ack_batch():
+    tool = load_tool_module()
+    receipts = [
+        {
+            "id": f"op-owned-{index}",
+            "request_id": f"request-owned-{index}",
+            "accepted_cursor": {"epoch": "owned-epoch", "seq": 0},
+            "terminal_cursor": {"epoch": "owned-epoch", "seq": 1},
+        }
+        for index in range(10)
+    ]
+    generation_rows = [
+        {
+            "id": row["id"],
+            "epoch": "owned-epoch",
+            "accepted_seq": 0,
+            "terminal_seq": 1,
+        }
+        for row in receipts
+    ]
+    owned_ids = [row["id"] for row in receipts]
+    batch_ids = [*owned_ids, "op-background-one", "op-background-two"]
+    workload = {
+        "source_generation_keys": {"operation_cycles": generation_rows},
+        "operation_cycles": {
+            "route": "/api/session-files",
+            "receipts": receipts,
+            "acknowledgment_batch_ids": batch_ids,
+            "unrelated_acknowledgment_ids": batch_ids[10:],
+            "acknowledgments": {
+                "acknowledged": batch_ids,
+                "ignored": [],
+            },
+        },
+    }
+
+    result = tool.validate_deterministic_operation_cycle_join(workload)
+
+    assert result["accepted"] == 10
+    assert result["acknowledged"] == 10
+    assert result["batch_acknowledged"] == 12
+    assert result["unrelated_acknowledged"] == 2
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "message"),
+    [
+        ({}, {}, "missing before"),
+        (
+            {name: 1 for name in (
+                "session_discovery",
+                "transcript_tail_scan",
+                "session_files_materialization",
+                "jobd_work_graph_rebuild",
+                "provider_metadata_rebuild",
+                "statsd_unchanged_cell_materialization",
+                "statusd_unchanged_pane_capture",
+            )},
+            {},
+            "missing after",
+        ),
+        (
+            {name: 1 for name in (
+                "session_discovery",
+                "transcript_tail_scan",
+                "session_files_materialization",
+                "jobd_work_graph_rebuild",
+                "provider_metadata_rebuild",
+                "statsd_unchanged_cell_materialization",
+                "statusd_unchanged_pane_capture",
+            )},
+            {name: (0 if name == "session_discovery" else 1) for name in (
+                "session_discovery",
+                "transcript_tail_scan",
+                "session_files_materialization",
+                "jobd_work_graph_rebuild",
+                "provider_metadata_rebuild",
+                "statsd_unchanged_cell_materialization",
+                "statusd_unchanged_pane_capture",
+            )},
+            "moved backwards",
+        ),
+    ],
+)
+def test_deterministic_owner_counter_samples_require_complete_monotonic_before_and_after(before, after, message):
+    tool = load_tool_module()
+
+    def sources(values):
+        if not values:
+            return {}
+        return {
+            "watchd_refresh": {
+                "session_discovery": values["session_discovery"],
+                "transcript_tail_scan": values["transcript_tail_scan"],
+                "session_files_materialization": values["session_files_materialization"],
+                "jobd_work_graph_rebuild": 0,
+            },
+            "jobd": {
+                "jobd_work_graph_rebuild": values["jobd_work_graph_rebuild"],
+                "provider_metadata_rebuild": values["provider_metadata_rebuild"],
+            },
+            "statsd": {
+                "statsd_unchanged_cell_materialization": values["statsd_unchanged_cell_materialization"],
+            },
+            "statusd": {
+                "statusd_unchanged_pane_capture": values["statusd_unchanged_pane_capture"],
+            },
+        }
+
+    with pytest.raises(RuntimeError, match=message):
+        tool.deterministic_owner_counter_snapshot(
+            {"owner_counters": after, "owner_counter_sources": sources(after)},
+            {"owner_counters": before, "owner_counter_sources": sources(before)},
+        )
+
+
+def test_deterministic_owner_counter_samples_reject_a_hidden_component_reset():
+    tool = load_tool_module()
+    totals = {name: 1 for name in tool.DETERMINISTIC_OWNER_COUNTER_NAMES}
+    totals["jobd_work_graph_rebuild"] = 5
+    baseline_sources = {
+        "watchd_refresh": {
+            "session_discovery": 1,
+            "transcript_tail_scan": 1,
+            "session_files_materialization": 1,
+            "jobd_work_graph_rebuild": 2,
+        },
+        "jobd": {"jobd_work_graph_rebuild": 3, "provider_metadata_rebuild": 1},
+        "statsd": {"statsd_unchanged_cell_materialization": 1},
+        "statusd": {"statusd_unchanged_pane_capture": 1},
+    }
+    after_sources = {
+        **baseline_sources,
+        "watchd_refresh": {**baseline_sources["watchd_refresh"], "jobd_work_graph_rebuild": 1},
+        "jobd": {**baseline_sources["jobd"], "jobd_work_graph_rebuild": 4},
+    }
+
+    with pytest.raises(RuntimeError, match=r"watchd_refresh\.jobd_work_graph_rebuild"):
+        tool.deterministic_owner_counter_snapshot(
+            {"owner_counters": totals, "owner_counter_sources": after_sources},
+            {"owner_counters": totals, "owner_counter_sources": baseline_sources},
+        )
+
+
+@pytest.mark.parametrize(
+    ("ledger", "message"),
+    [
+        (
+            {
+                "max_concurrent_api_fetches": 9,
+                "fs_batch_requests": [{"request_id": "r-batch", "item_count": 1}],
+                "event_sources": {"created": ["one", "two"], "closed": ["one"], "live": ["two"], "max_live": 1, "replacements": 1},
+            },
+            "concurrency",
+        ),
+        (
+            {
+                "max_concurrent_api_fetches": 1,
+                "fs_batch_requests": [{"request_id": "r-batch", "item_count": 65}],
+                "event_sources": {"created": ["one", "two"], "closed": ["one"], "live": ["two"], "max_live": 1, "replacements": 1},
+            },
+            "cardinality",
+        ),
+        (
+            {
+                "max_concurrent_api_fetches": 1,
+                "fs_batch_requests": [{"request_id": "r-batch", "item_count": 1}],
+                "event_sources": {"created": ["one", "two", "three"], "closed": ["one", "two"], "live": ["three"], "max_live": 1, "replacements": 2},
+            },
+            "EventSource",
+        ),
+    ],
+)
+def test_deterministic_browser_fanout_evidence_fails_closed(ledger, message):
+    tool = load_tool_module()
+
+    with pytest.raises(RuntimeError, match=message):
+        tool.validate_deterministic_browser_fanout({"browser_ledger": ledger})
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
@@ -314,6 +1361,7 @@ def test_main_installs_signal_handlers_deadline_and_selenium_timeouts():
     assert "set_script_timeout" in source
     # The capture window arms the tracked-group overload watchdog.
     assert "GroupOverloadWatchdog" in source
+    assert 'service_dir=RUNTIME_DIR / "services"' in source
     # The capture proves the pre-existing service ledger is unchanged.
     assert "ledger_snapshot()" in source
     assert "capture changed the service ledger" in source

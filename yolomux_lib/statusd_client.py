@@ -138,5 +138,10 @@ class StatusClient(LocalServiceClient):
             "generation": int(payload.get("generation") or 0),
             "build_count": int(payload.get("build_count") or 0),
             "encode_count": int(payload.get("encode_count") or 0),
+            "owner_invocations": (
+                dict(payload.get("owner_invocations"))
+                if isinstance(payload.get("owner_invocations"), dict)
+                else {}
+            ),
             "invalidation_reason": str(payload.get("invalidation_reason") or ""),
         })

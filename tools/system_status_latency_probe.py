@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.infra.host_identity import process_start_identity
+from yolomux_lib.infra.root_paths import resolved_product_path
 from yolomux_lib.local_services.registry import darwin_process_environment
 from yolomux_lib.tmux.sessions import process_cwd
 from tools.instance_isolation import resolve_instance_environment
@@ -162,8 +163,8 @@ def config_dir_from_process(environ: dict[str, str], port: int | None = None) ->
     root = environ.get("YOLOMUX_ROOT", "").strip()
     configured = environ.get("YOLOMUX_CONFIG_DIR", "").strip()
     if root:
-        root_path = Path(root).resolve(strict=True)
-        config = Path(configured).resolve(strict=True) if configured else root_path / "config"
+        root_path = resolved_product_path(environ, "YOLOMUX_ROOT", root).resolve(strict=True)
+        config = resolved_product_path(environ, "YOLOMUX_CONFIG_DIR", root_path / "config").resolve(strict=True)
         if not config.resolve(strict=True).is_relative_to(root_path):
             raise RuntimeError("listener config root escapes YOLOMUX_ROOT")
         return config
@@ -173,7 +174,7 @@ def config_dir_from_process(environ: dict[str, str], port: int | None = None) ->
         if not root:
             raise RuntimeError("listener process exposes no authoritative config root")
         return Path(root).resolve(strict=True) / "config"
-    return Path(configured).resolve(strict=True)
+    return resolved_product_path(environ, "YOLOMUX_CONFIG_DIR", configured).resolve(strict=True)
 
 
 def auth_cookie(config_dir: Path, port: int) -> str:

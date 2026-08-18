@@ -62,6 +62,31 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 sys.dont_write_bytecode = True
 
+from tools.instance_isolation import resolved_product_path
+from tools.instance_isolation import resolved_home_path
+from tools.instance_isolation import resolved_state_dir
+from tools.instance_isolation import validate_product_root_environment
+from tools.instance_isolation import YolomuxRootError
+
+
+def default_tool_lock_path() -> Path:
+    home = resolved_home_path(os.environ)
+    return resolved_product_path(
+        os.environ,
+        "YOLOMUX_TOOL_LOCK_PATH",
+        home / ".cache" / "yolomux" / "expensive-tools.lock",
+    )
+
+
+try:
+    validate_product_root_environment(os.environ)
+    DEFAULT_TOOL_LOCK_PATH = default_tool_lock_path()
+except YolomuxRootError as error:
+    if __name__ == "__main__":
+        print(f"CHECK REFUSED: {error}", file=sys.stderr, flush=True)
+        raise SystemExit(2)
+    raise
+
 # tests/latency_calibration.py is the sole owner of host qualification, the declared reference
 # envelopes and the fixed-ceiling verdict. The phase runner and the certification units read the
 # same module so a threshold cannot drift between the gate and the test that it admits.
@@ -78,6 +103,7 @@ from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner c
 from tools.test_catalog import focused_phase_target_args
 from tools.test_catalog import pytest_files
 from tools.test_plan import LANE_SPECS
+from tools.test_plan import CHECK_LANE_ENV
 from tools.test_plan import StepId
 from tools.test_plan import resolved_lane_step_ids
 from tools.test_plan import validate_lane_specs
@@ -85,10 +111,6 @@ from tools.tool_guard import TOOL_LOCK_OWNER_ENV
 from tools.tool_guard import tool_lock_owner_marker
 from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
 from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
-
-DEFAULT_TOOL_LOCK_PATH = Path(
-    os.environ.get("YOLOMUX_TOOL_LOCK_PATH", str(Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"))
-).expanduser()
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
 EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e", "pytest-gate-serial"})
@@ -383,7 +405,7 @@ def command_text(args: list[str]) -> str:
 
 
 def state_dir_from_env() -> Path:
-    return Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
+    return resolved_state_dir(os.environ)
 
 
 def active_yolomux_server_records(
@@ -463,10 +485,15 @@ def selected_needs_tool_guard(selected: list[Lane], explicit_lane_names: list[st
 
 
 @contextmanager
-def expensive_tool_lock(enabled: bool = True, lock_path: Path = DEFAULT_TOOL_LOCK_PATH):
+def expensive_tool_lock(enabled: bool = True, lock_path: Path | None = None):
     if not enabled:
         yield False
         return
+    lock_path = default_tool_lock_path() if lock_path is None else resolved_product_path(
+        {**os.environ, "YOLOMUX_TOOL_LOCK_PATH": str(lock_path)},
+        "YOLOMUX_TOOL_LOCK_PATH",
+        lock_path,
+    )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as handle:
         try:
@@ -514,7 +541,7 @@ def run_lane(lane: Lane) -> LaneResult:
     for step in lane.steps:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
-        environment = {**os.environ, **dict(step.env)} if step.env else None
+        environment = {**os.environ, CHECK_LANE_ENV: lane.name, **dict(step.env)}
         result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True, env=environment)
         step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:
@@ -1261,8 +1288,13 @@ def main(argv: list[str] | None = None) -> int:
         return 4
 
     guard_enabled = (certify or selected_needs_tool_guard(selected, args.lane)) and not args.no_tool_guard
+    try:
+        tool_lock_path = default_tool_lock_path()
+    except YolomuxRootError as exc:
+        print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
+        return EXIT_USAGE
     if guard_enabled:
-        print(f"Acquiring YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
+        print(f"Acquiring YOLOmux expensive-tool lock: {tool_lock_path}", flush=True)
 
     # `expected_containers` records whether the lanes will actually route into Docker: only then is
     # an unobservable client at retirement a refusal rather than a clear, because only then could an
@@ -1279,7 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
         # with the owner label, and restored on exit so a later in-process run is never mistaken for
         # this one's owner.
         with check_run_token_environment(), worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="test-gate"):
-            with expensive_tool_lock(enabled=guard_enabled):
+            with expensive_tool_lock(enabled=guard_enabled, lock_path=tool_lock_path):
                 if guard_enabled:
                     active_records = active_yolomux_server_records()
                     if lower_current_process_priority(active_records):

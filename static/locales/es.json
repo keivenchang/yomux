@@ -427,6 +427,7 @@
   "debug.system.sampler.header.lateMiss.short": "tarde/extrañar",
   "debug.system.sampler.header.runtime.full": "Último tiempo de ejecución",
   "debug.system.sampler.header.runtime.short": "tiempo de ejecución",
+  "debug.tab.cost": "Coste",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Gráficos",
   "debug.tab.logs": "Registros",

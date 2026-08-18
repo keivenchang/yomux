@@ -31,13 +31,11 @@ WATCHD_MAX_NATIVE_REGISTRATIONS = 512
 WATCHD_MAX_CHANGED_PATHS = 256
 WATCHD_MAX_WAIT_SECONDS = 30.0
 WATCHD_DESCRIPTOR_TTL_SECONDS = 90.0
-# How long the web bridge may reuse the transcript set it last derived for its descriptors.
-# The revision loop runs back-to-back — every transcript byte it watches produces a revision —
-# so rebuilding that set per revision cost ~26ms of CPU per pass and held the loop near a full
-# core. A tmux topology change bypasses this and resyncs immediately; the interval is only the
-# backstop for changes the signature cannot see. 6x under WATCHD_DESCRIPTOR_TTL_SECONDS, so a
-# descriptor cannot expire between resyncs even if every one of them is served from the memo.
-WATCHD_DESCRIPTOR_RESYNC_SECONDS = 15.0
+# One bounded reconciliation owner covers native event loss and descriptor transcript discovery.
+# Descriptor leases are renewed independently on every bridge long-poll, so their 90-second TTL
+# does not require expensive session discovery to run at the lease cadence.
+WATCHD_RECONCILE_SECONDS = 300.0
+WATCHD_DESCRIPTOR_RESYNC_SECONDS = WATCHD_RECONCILE_SECONDS
 # Floor on one revision-loop iteration. The loop's CPU converges to body_cpu / loop_period, and
 # because a cheaper body also re-arms sooner, that ratio is scale-invariant: three rounds of
 # making the body cheaper moved it 89% -> 47% -> 43% of a core and could not reach the 30%

@@ -49,6 +49,11 @@ MIN_WRITER_BUILD = 4
 # data wearing a current timestamp. Two days keeps the whole 24h window plus a
 # day of slack for late-arriving history, clock skew, and a missed nightly prune.
 RETENTION_SECONDS = 2 * 24 * 60 * 60
+WAL_AUTOCHECKPOINT_PAGES = 1000
+# Automatic checkpoints recycle logical frames but do not necessarily shrink
+# the file. This connection policy bounds the retained allocation after a reset;
+# Store.vacuum() separately truncates the rewrite-sized allocation immediately.
+WAL_ALLOCATION_CEILING_BYTES = 8 * 1024 * 1024
 DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
 # Sidecar beside the database, like WRITER_FENCE_FILENAME. The nightly prune
 # schedule needs the last successful prune to survive a restart, and schema_meta
@@ -378,6 +383,17 @@ class PruneResult:
     unavailable_spans_deleted: int = 0
     unavailable_spans_clipped: int = 0
 
+    @property
+    def changed(self) -> int:
+        return sum((
+            self.observations_deleted,
+            self.coverage_epochs_deleted,
+            self.coverage_epochs_clipped,
+            self.usage_atoms_deleted,
+            self.unavailable_spans_deleted,
+            self.unavailable_spans_clipped,
+        ))
+
 
 @dataclass(frozen=True)
 class AppendResult:
@@ -395,6 +411,8 @@ class AppendResult:
     usage_tombstones_duplicate: int = 0
     accepted_observation_ids: tuple[str, ...] = ()
     accepted_original_timestamps: tuple[float, ...] = ()
+    retention_cutoff: float | None = None
+    retention_prune: PruneResult | None = None
 
 
 @dataclass(frozen=True)
@@ -1432,7 +1450,13 @@ class Store:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
+            connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
             _initialize_browser_diagnostics(connection)
+            # A clean writer takeover must not inherit the largest WAL allocation
+            # a prior large transaction left behind. The service singleton lock
+            # makes this the safe startup boundary before worker readers exist.
+            _truncate_wal(connection)
         except (sqlite3.Error, StatsCurrentError):
             connection.close()
             raise
@@ -1885,11 +1909,20 @@ class Store:
         connection = self._connection()
         connection.execute("VACUUM")
         connection.execute("PRAGMA optimize")
+        # A passive/autocheckpoint recycles logical frames but retains the WAL's
+        # largest allocation. VACUUM can therefore leave a database-sized file
+        # behind even though every frame was checkpointed. Truncate before the
+        # completion marker so a blocked checkpoint keeps the rewrite due.
+        _truncate_wal(connection)
         with _transaction(connection):
             connection.execute(
                 "UPDATE schema_meta SET last_vacuumed_at = ? WHERE singleton = 1",
                 (timestamp,),
             )
+        # The marker transaction creates a few new frames after the first
+        # truncate. Remove those too so a successful rewrite has one exact
+        # physical postcondition rather than a history-dependent allocation.
+        _truncate_wal(connection)
         return timestamp
 
     def _apply_observations(
@@ -2056,11 +2089,14 @@ class Store:
         usage_atoms: Iterable[UsageAtom] = (),
         usage_tombstones: Iterable[UsageAtomTombstone] = (),
         unavailable_spans: Iterable[UnavailableSpan] = (),
+        retention_now: float | None = None,
     ) -> AppendResult:
-        """Commit one deduplicated source batch and advance one generation."""
+        """Commit one deduplicated source batch and enforce optional retention."""
 
         if self.read_only:
             raise StatsCurrentError("stats store reader cannot mutate the database")
+        if retention_now is not None:
+            _require_retention_covers_display_window()
 
         prepared_observations = tuple(_observation_values(item) for item in observations)
         prepared_coverage = tuple(_coverage_values(item) for item in coverage_epochs)
@@ -2069,9 +2105,15 @@ class Store:
             _usage_tombstone_values(item) for item in usage_tombstones
         )
         prepared_unavailable = tuple(_unavailable_values(item) for item in unavailable_spans)
+        retention_cutoff = (
+            None
+            if retention_now is None
+            else _validate_timestamp(retention_now, "retention_now") - RETENTION_SECONDS
+        )
         connection = self._connection()
         observations_accepted = coverage_changed = usage_accepted = unavailable_accepted = 0
         tombstones_accepted = tombstones_duplicate = usage_attribution_conflicts = 0
+        retention_prune: PruneResult | None = None
         with _transaction(connection):
             generation = int(connection.execute(
                 "SELECT source_generation FROM schema_meta WHERE singleton = 1"
@@ -2090,9 +2132,12 @@ class Store:
             unavailable_accepted = self._apply_unavailable_spans(
                 connection, prepared_unavailable,
             )
+            if retention_cutoff is not None:
+                retention_prune = _prune_retained_facts(connection, retention_cutoff)
             changed = (
                 observations_accepted + coverage_changed + usage_accepted
                 + unavailable_accepted + tombstones_accepted
+                + (0 if retention_prune is None else retention_prune.changed)
             )
             if changed:
                 generation += 1
@@ -2122,6 +2167,20 @@ class Store:
                     (accepted_tombstones, 5),
                 )
                 for values in accepted
+            ),
+            retention_cutoff,
+            (
+                None
+                if retention_prune is None
+                else PruneResult(
+                    retention_prune.observations_deleted,
+                    retention_prune.coverage_epochs_deleted,
+                    retention_prune.coverage_epochs_clipped,
+                    retention_prune.usage_atoms_deleted,
+                    generation,
+                    retention_prune.unavailable_spans_deleted,
+                    retention_prune.unavailable_spans_clipped,
+                )
             ),
         )
 
@@ -2438,38 +2497,11 @@ class Store:
         cutoff = _validate_timestamp(now, "now") - RETENTION_SECONDS
         connection = self._connection()
         with _transaction(connection):
-            _prune_browser_diagnostics(connection, cutoff)
-            observations = connection.execute(
-                "DELETE FROM observations WHERE observed_at < ?", (cutoff,)
-            ).rowcount
-            usage_atoms = connection.execute(
-                "DELETE FROM usage_atoms WHERE observed_at < ?", (cutoff,)
-            ).rowcount
-            coverage_deleted = connection.execute(
-                "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at < ?",
-                (cutoff,),
-            ).rowcount
-            coverage_clipped = connection.execute(
-                "UPDATE coverage_epochs SET started_at = ? "
-                "WHERE started_at < ? AND (ended_at IS NULL OR ended_at >= ?)",
-                (cutoff, cutoff, cutoff),
-            ).rowcount
-            unavailable_deleted = connection.execute(
-                "DELETE FROM unavailable_spans WHERE ended_at < ?", (cutoff,)
-            ).rowcount
-            unavailable_clipped = connection.execute(
-                "UPDATE unavailable_spans SET started_at = ? "
-                "WHERE started_at < ? AND ended_at >= ?",
-                (cutoff, cutoff, cutoff),
-            ).rowcount
-            changed = (
-                observations + usage_atoms + coverage_deleted + coverage_clipped
-                + unavailable_deleted + unavailable_clipped
-            )
+            pruned = _prune_retained_facts(connection, cutoff)
             generation = int(connection.execute(
                 "SELECT source_generation FROM schema_meta WHERE singleton = 1"
             ).fetchone()[0])
-            if changed:
+            if pruned.changed:
                 generation += 1
                 connection.execute(
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
@@ -2479,8 +2511,13 @@ class Store:
         # stay due, or one bad night silently becomes a skipped day.
         self._record_pruned_at(now)
         return PruneResult(
-            observations, coverage_deleted, coverage_clipped, usage_atoms, generation,
-            unavailable_deleted, unavailable_clipped,
+            pruned.observations_deleted,
+            pruned.coverage_epochs_deleted,
+            pruned.coverage_epochs_clipped,
+            pruned.usage_atoms_deleted,
+            generation,
+            pruned.unavailable_spans_deleted,
+            pruned.unavailable_spans_clipped,
         )
 
 
@@ -2495,6 +2532,50 @@ def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
     finally:
         if not committed and connection.in_transaction:
             connection.execute("ROLLBACK")
+
+
+def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> PruneResult:
+    """Delete or clip every retained fact before cutoff on the caller's transaction."""
+
+    _prune_browser_diagnostics(connection, cutoff)
+    observations = connection.execute(
+        "DELETE FROM observations WHERE observed_at < ?", (cutoff,)
+    ).rowcount
+    usage_atoms = connection.execute(
+        "DELETE FROM usage_atoms WHERE observed_at < ?", (cutoff,)
+    ).rowcount
+    coverage_deleted = connection.execute(
+        "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at < ?",
+        (cutoff,),
+    ).rowcount
+    coverage_clipped = connection.execute(
+        "UPDATE coverage_epochs SET started_at = ? "
+        "WHERE started_at < ? AND (ended_at IS NULL OR ended_at >= ?)",
+        (cutoff, cutoff, cutoff),
+    ).rowcount
+    unavailable_deleted = connection.execute(
+        "DELETE FROM unavailable_spans WHERE ended_at < ?", (cutoff,)
+    ).rowcount
+    unavailable_clipped = connection.execute(
+        "UPDATE unavailable_spans SET started_at = ? "
+        "WHERE started_at < ? AND ended_at >= ?",
+        (cutoff, cutoff, cutoff),
+    ).rowcount
+    return PruneResult(
+        observations,
+        coverage_deleted,
+        coverage_clipped,
+        usage_atoms,
+        0,
+        unavailable_deleted,
+        unavailable_clipped,
+    )
+
+
+def _truncate_wal(connection: sqlite3.Connection) -> None:
+    result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if result is None or len(result) != 3 or int(result[0]) != 0:
+        raise StatsCurrentError("stats WAL truncate remained busy")
 
 
 def require_compatible_writer(

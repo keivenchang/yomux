@@ -166,6 +166,7 @@ def test_vacuum_reclaims_pruned_raw_table_pages(tmp_path):
     with Store.open(path) as store:
         assert store.vacuum(123.0) == 123.0
         assert store.last_vacuumed_at() == 123.0
+        assert path.with_name(f"{path.name}-wal").stat().st_size == 0
     assert path.stat().st_size < before_bytes
     connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     try:
@@ -179,7 +180,15 @@ def test_current_database_uses_a_versioned_path_and_publishes_the_fence_first(tm
     assert DATABASE_FILENAME == f"stats-v{SCHEMA_VERSION}.sqlite3"
     assert DATABASE_FILENAME != "stats-history.sqlite3"
 
-    Store.open(path).close()
+    with Store.open(path) as store:
+        connection = store._connection()
+        assert connection.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == (
+            storage_module.WAL_AUTOCHECKPOINT_PAGES
+        )
+        assert connection.execute("PRAGMA journal_size_limit").fetchone()[0] == (
+            storage_module.WAL_ALLOCATION_CEILING_BYTES
+        )
+        assert path.with_name(f"{path.name}-wal").stat().st_size == 0
 
     fence = json.loads((tmp_path / WRITER_FENCE_FILENAME).read_text(encoding="utf-8"))
     assert fence == {
@@ -195,6 +204,26 @@ def test_current_database_uses_a_versioned_path_and_publishes_the_fence_first(tm
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         connection.close()
+
+
+def test_writer_open_truncates_a_recycled_oversized_wal_allocation(tmp_path):
+    path = tmp_path / DATABASE_FILENAME
+    wal_path = path.with_name(f"{path.name}-wal")
+    with Store.open(path) as first:
+        observations = tuple(
+            Observation(
+                f"retained-{index}", "cpu", "host", float(index), "epoch-1", 1,
+                {"payload": "x" * 16_384},
+            )
+            for index in range(128)
+        )
+        assert first.append_batch(observations=observations).observations_accepted == len(observations)
+        assert first._connection().execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[0] == 0
+        retained_bytes = wal_path.stat().st_size
+        assert retained_bytes > 0
+
+        with Store.open(path):
+            assert wal_path.stat().st_size == 0
 
 
 def test_current_store_rejects_legacy_names_and_symbolic_link_aliases(tmp_path):

@@ -232,7 +232,7 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
         "-t",
         f"{session}:",
         "-c",
-        str(ai_config),
+        str(ai_config.resolve()),
         "bash",
     )
     assert respawned.returncode == 0, respawned.stderr or respawned.stdout
@@ -246,10 +246,13 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
             f"{session}:",
             "#{pane_current_path}",
         )
-        return result if result.returncode == 0 and result.stdout.strip() == str(ai_config) else False
+        pane_path = Path(result.stdout.strip()).resolve() if result.returncode == 0 else None
+        return result if pane_path == ai_config.resolve() else False
 
     pane_cwd = WebDriverWait(authenticated_e2e_browser.driver, 12).until(expected_pane_cwd)
-    assert pane_cwd.returncode == 0 and pane_cwd.stdout.strip() == str(ai_config), pane_cwd.stderr or pane_cwd.stdout
+    assert pane_cwd.returncode == 0 and Path(pane_cwd.stdout.strip()).resolve() == ai_config.resolve(), (
+        pane_cwd.stderr or pane_cwd.stdout
+    )
     WebDriverWait(authenticated_e2e_browser.driver, 12).until(
         lambda _driver: (
             authenticated_e2e_browser.runtime.app.activity_transcript_service.transcripts_payload_cache_record.worker
@@ -301,16 +304,16 @@ def test_authenticated_real_page_finder_repeats_without_pending(authenticated_e2
             done({error: String(error?.stack || error)});
           }
         })();
-        """,
-        session,
-        str(ai_config),
-    )
+            """,
+            session,
+            str(ai_config.resolve()),
+        )
     assert not metadata.get("error"), metadata
     assert metadata["status"] == 200 and metadata["state"] == "ready" and metadata["requestId"], metadata
     assert metadata["hasCanonicalSession"] is True and metadata["hasFlattenedSessions"] is False, metadata
     assert metadata["rendered"]["grid"] is True, metadata
-    assert metadata["rendered"]["graphRoot"] == str(ai_config) and metadata["rendered"]["graphBranch"] == "master", metadata
-    assert "master" in metadata["rendered"]["tabAriaLabel"] and str(ai_config) in metadata["rendered"]["popoverText"], metadata
+    assert metadata["rendered"]["graphRoot"] == str(ai_config.resolve()) and metadata["rendered"]["graphBranch"] == "master", metadata
+    assert "master" in metadata["rendered"]["tabAriaLabel"] and str(ai_config.resolve()) in metadata["rendered"]["popoverText"], metadata
 
     authenticated_e2e_browser.expand(ai_config.parent, child_path=ai_config)
     for repo, child, branch in ((ai_config, ai_child, "master"), (ant, ant_child, "main")):

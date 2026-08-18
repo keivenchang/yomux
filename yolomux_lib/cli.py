@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import ipaddress
 import json
 import os
 import re
 import shutil
 import signal
-import socket
 import ssl
 import subprocess
 import sys
@@ -43,6 +41,8 @@ from .local_services.registry import tracked_local_service_groups
 from .local_services.registry import tracked_port_process_group
 from .local_services.watchdog import GroupOverloadWatchdog
 from .ptrace import allow_diagnostic_ptrace
+from tools.tls_san import self_signed_interface_ips as discover_self_signed_interface_ips
+from tools.tls_san import self_signed_san as build_self_signed_san
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
 from .server_logs import emit_server_log
@@ -157,81 +157,11 @@ def self_signed_cert_paths() -> tuple[Path, Path]:
 
 
 def self_signed_interface_ips() -> tuple[str, ...]:
-    addresses: list[str] = []
-
-    def add(value: str, interface: str = "") -> None:
-        if interface.startswith(("docker", "br-", "veth")):
-            return
-        candidate = value.split("%", 1)[0]
-        try:
-            parsed = ipaddress.ip_address(candidate)
-        except ValueError:
-            return
-        if parsed.is_loopback or parsed.is_unspecified or candidate in addresses:
-            return
-        addresses.append(candidate)
-
-    for family, target in (
-        (socket.AF_INET, ("10.255.255.255", 1)),
-        (socket.AF_INET6, ("2001:db8::1", 1, 0, 0)),
-    ):
-        try:
-            with socket.socket(family, socket.SOCK_DGRAM) as probe:
-                probe.connect(target)
-                add(probe.getsockname()[0])
-        except OSError:
-            pass
-    try:
-        for iface_addr in socket.getaddrinfo(socket.gethostname(), None):
-            add(iface_addr[4][0])
-    except OSError:
-        pass
-    ip_command = shutil.which("ip")
-    if ip_command:
-        try:
-            result = subprocess.run(
-                [ip_command, "-j", "address", "show"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            for interface in json.loads(result.stdout):
-                for addr_info in interface.get("addr_info", []):
-                    add(str(addr_info.get("local", "")), str(interface.get("ifname", "")))
-        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, TypeError):
-            pass
-    ifconfig_command = shutil.which("ifconfig")
-    if ifconfig_command:
-        try:
-            result = subprocess.run(
-                [ifconfig_command],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            interface = ""
-            for line in result.stdout.splitlines():
-                if line and not line[0].isspace():
-                    interface = line.split(":", 1)[0]
-                for match in re.finditer(r"\binet6?\s+(?:addr:)?([^\s]+)", line):
-                    add(match.group(1), interface)
-        except (OSError, subprocess.CalledProcessError):
-            pass
-    return tuple(addresses)
+    return discover_self_signed_interface_ips()
 
 
 def self_signed_san() -> str:
-    names = ["DNS:localhost", "IP:127.0.0.1"]
-    if SERVER_HOSTNAME and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", SERVER_HOSTNAME):
-        if SERVER_HOSTNAME != "localhost":
-            names.append(f"DNS:{SERVER_HOSTNAME}")
-    for ip in self_signed_interface_ips():
-        entry = f"IP:{ip}"
-        if entry not in names:
-            names.append(entry)
-    return ",".join(names)
+    return build_self_signed_san(SERVER_HOSTNAME, self_signed_interface_ips())
 
 
 class SelfSignedCertificateUnavailable(RuntimeError):

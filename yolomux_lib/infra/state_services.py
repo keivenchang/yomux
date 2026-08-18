@@ -15,6 +15,10 @@ from typing import Callable
 from .types import SessionFilesPayload
 
 
+class ClientWatchRootValidationError(ValueError):
+    """A versioned browser watch-root descriptor violates its wire contract."""
+
+
 @dataclass
 class ClientWatchDescriptor:
     """One browser's watch demand, owned by its client-event stream lifecycle."""
@@ -22,6 +26,8 @@ class ClientWatchDescriptor:
     expires_at: float
     descriptor_generation: int = 1
     roots: tuple[str, ...] = ()
+    root_surfaces_version: int = 0
+    root_surfaces: tuple[tuple[str, tuple[str, ...]], ...] = ()
     files: tuple[str, ...] = ()
     background_files: tuple[str, ...] = ()
     context_items: tuple[dict[str, Any], ...] = ()
@@ -561,6 +567,12 @@ class ActivityTranscriptService:
     activity_summary_futures: dict[tuple[Any, ...], Future[dict[str, Any]]] = field(default_factory=dict)
     transcripts_payload_cache_lock: threading.RLock = field(default_factory=threading.RLock)
     transcripts_payload_cache_record: TranscriptsPayloadCacheRecord = field(default_factory=TranscriptsPayloadCacheRecord)
+    # One graph per session, fenced by the complete SessionInfo identity, watched repository
+    # generations, and provider-cache generation. Watch revisions may rebuild the outer payload,
+    # but they do not rebuild this expensive graph unless one of those inputs changed.
+    work_graph_cache_lock: threading.RLock = field(default_factory=threading.RLock)
+    work_graph_cache: dict[str, tuple[tuple[Any, ...], dict[str, Any]]] = field(default_factory=dict)
+    work_graph_futures: dict[tuple[str, tuple[Any, ...]], Future[dict[str, Any]]] = field(default_factory=dict)
     transcript_tail_cache_lock: threading.RLock = field(default_factory=threading.RLock)
     transcript_tail_cache: dict[tuple[Any, ...], tuple[float, str]] = field(default_factory=dict)
     context_items_cache_lock: threading.RLock = field(default_factory=threading.RLock)
@@ -579,16 +591,23 @@ class ClientWatchService:
     """Own watcher snapshots, revisions, and lifecycle records independently of HTTP routes."""
 
     lock: threading.RLock = field(default_factory=threading.RLock)
+    # Fixed, bounded, monotonic counts at the three expensive refresh-fanout boundaries. These
+    # are process-lifetime diagnostics, not request metrics and never carry keys from callers.
+    owner_invocations: dict[str, int] = field(default_factory=lambda: {
+        "session_discovery": 0,
+        "transcript_tail_scan": 0,
+        "session_files_materialization": 0,
+        "jobd_work_graph_rebuild": 0,
+    })
     # Every descriptor is keyed by the browser's existing client-event client_id.
     # Keeping the demand here rather than in route-local globals prevents one tab's
     # Finder state from replacing another tab's watch set.
     descriptors: dict[str, ClientWatchDescriptor] = field(default_factory=dict)
     initialized: bool = False
     settings_signature: tuple[Any, ...] | None = None
-    # The transcript set the watchd descriptors carry, with the tmux topology signature it was
-    # derived from and the monotonic time it was derived. The revision loop rebuilds descriptors
-    # on every revision, and its own watched transcripts generate those revisions, so deriving
-    # this set per revision was a feedback loop worth ~26ms of CPU a pass.
+    # The transcript set the watchd descriptors carry, with the tmux topology signature and time
+    # it was derived from. Descriptor leases renew on every bridge long-poll, while expensive
+    # session discovery runs only for a topology change or watchd's bounded reconciliation.
     watchd_transcripts: list[str] = field(default_factory=list)
     watchd_transcripts_signature: str = ""
     watchd_transcripts_at: float = 0.0
@@ -617,6 +636,16 @@ class ClientWatchService:
     # actually published by the server-side watch loop, keyed by the same `trigger` strings already
     # passed to publish_session_files_ready_events/publish_context_items_ready_events.
     invalidation_counts: dict[str, int] = field(default_factory=dict)
+
+    def note_owner_invocation(self, owner: str) -> None:
+        with self.lock:
+            if owner not in self.owner_invocations:
+                raise ValueError(f"unknown refresh-fanout owner {owner!r}")
+            self.owner_invocations[owner] += 1
+
+    def owner_invocation_snapshot(self) -> dict[str, int]:
+        with self.lock:
+            return dict(self.owner_invocations)
 
     def snapshot(self, now: float | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         with self.lock:

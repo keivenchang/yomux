@@ -376,6 +376,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafikler",
+  "debug.tab.cost": "Maliyet",
   "debug.tab.services": "Daemon'lar",
   "debug.tab.logs": "Günlükler",
   "debug.waitingForServerStats": "Sunucu istatistikleri bekleniyor",

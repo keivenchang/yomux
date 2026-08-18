@@ -48,6 +48,7 @@ from .watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
 from .watchd_protocol import WATCHD_MAX_CHANGED_PATHS
 from .watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
 from .watchd_protocol import WATCHD_PROTOCOL_VERSION
+from .watchd_protocol import WATCHD_RECONCILE_SECONDS
 from .watchd_protocol import WATCHD_SERVICE_NAME
 from .watchd_protocol import WATCHD_SNAPSHOT_DEADLINE_SECONDS
 from .watchd_protocol import WatchDescriptor
@@ -60,7 +61,6 @@ from .watch_diff import payload_from_products
 WATCHD_DEFAULT_IDLE_SECONDS = 60.0
 WATCHD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 WATCHD_HISTORY_LIMIT = 64
-WATCHD_RECONCILE_SECONDS = 300.0
 WATCHD_RETRY_SECONDS = 10.0
 WATCHD_POLL_SECONDS = 1.0
 WATCHD_EVENT_BATCH_LIMIT = 64

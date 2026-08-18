@@ -30,7 +30,7 @@ async function fetchRawFileBlob(path, options = {}) {
       cache: 'no-store',
       deadlineMs: options.deadlineMs || apiFetchLongOperationDeadlineMs,
       ...(options.signal ? {signal: options.signal} : {}),
-    }, {returnUnauthorizedResponse: true});
+    }, {returnUnauthorizedResponse: true, abortRetirementReason: 'raw_file_media_replaced'});
     if (!response.ok) return rawFileFailureResult(response, path);
     const blob = await response.blob();
     return {

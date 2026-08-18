@@ -192,6 +192,21 @@ def test_status_generation_probe_is_immediate_within_the_existing_transport_budg
     assert statusd_client.STATUSD_GENERATION_PROBE_TRANSPORT_TIMEOUT_SECONDS == 1.5
 
 
+def test_status_client_runtime_status_projects_pane_capture_owner_counter(monkeypatch, tmp_path):
+    client = StatusClient(tmp_path / "statusd.sock")
+    monkeypatch.setattr(client.registry, "status", lambda: {
+        "healthy": True,
+        "status": {
+            "pid": 100,
+            "owner_invocations": {"statusd_unchanged_pane_capture": 7},
+        },
+    })
+
+    runtime = client.runtime_status()
+
+    assert runtime["owner_invocations"] == {"statusd_unchanged_pane_capture": 7}
+
+
 def test_statusd_reuses_one_encoded_snapshot_and_retains_stale_bytes(monkeypatch, tmp_path):
     FakeStatusApp.builds = 0
     FakeStatusApp.fail = False
@@ -446,6 +461,7 @@ def test_statusd_cold_session_uses_slow_capture_tier_and_activity_promotes_immed
             sync_workers,
             session_payload_cache=None,
             capture_sessions=None,
+            **_kwargs,
         ):
             assert sync_workers is False
             selected = set(self.sessions if capture_sessions is None else capture_sessions)
@@ -466,6 +482,7 @@ def test_statusd_cold_session_uses_slow_capture_tier_and_activity_promotes_immed
         wall_clock=lambda: wall[0],
         monotonic=lambda: monotonic[0],
         session_activity_reader=lambda: (dict(activity), None),
+        pane_source_reader=lambda: ({}, None),
         session_jitter=lambda _lower, _upper: 0.0,
     )
 
@@ -489,6 +506,80 @@ def test_statusd_cold_session_uses_slow_capture_tier_and_activity_promotes_immed
     assert service.session_capture_due_at["cold"] - monotonic[0] == pytest.approx(
         statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
     )
+
+
+def test_statusd_reuses_unchanged_pane_classification_and_captures_one_changed_pane(monkeypatch, tmp_path):
+    wall = [1_000.0]
+    monotonic = [100.0]
+    pane_sources = {
+        "%1": ("active", "pane-one-v1"),
+        "%2": ("cold", "pane-two-v1"),
+    }
+    captures: list[set[str]] = []
+
+    class PaneClassificationStatusApp(FakeStatusApp):
+        def build_auto_approve_status(
+            self,
+            *,
+            timings,
+            sync_workers,
+            session_payload_cache=None,
+            capture_sessions=None,
+            pane_source_signatures=None,
+            capture_targets=None,
+        ):
+            assert sync_workers is False
+            assert pane_source_signatures == {
+                target: signature for target, (_session, signature) in pane_sources.items()
+            }
+            selected = set(capture_targets or ())
+            captures.append(selected)
+            timings["pane_capture_count"] = float(len(selected))
+            cached = dict(session_payload_cache or {})
+            sessions = {
+                name: {"session": name, "screen": {"key": "idle"}}
+                if capture_sessions is None or name in capture_sessions or name not in cached
+                else dict(cached[name])
+                for name in self.sessions
+            }
+            return {"session_order": list(self.sessions), "sessions": sessions, "errors": [], "rules": {}}, 200
+
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", PaneClassificationStatusApp)
+    service = statusd.PersistentStatusService(
+        tmp_path / "statusd.sock",
+        wall_clock=lambda: wall[0],
+        monotonic=lambda: monotonic[0],
+        session_activity_reader=lambda: ({"active": int(wall[0]), "cold": int(wall[0])}, None),
+        pane_source_reader=lambda: (dict(pane_sources), None),
+        session_jitter=lambda _lower, _upper: 0.0,
+    )
+
+    service._build(("active", "cold"))
+    baseline = service.status()["owner_invocations"]["statusd_unchanged_pane_capture"]
+    assert captures == [{"%1", "%2"}]
+
+    for _revision in range(10):
+        service.invalidation_reason = "unchanged-revision"
+        service._build(("active", "cold"))
+
+    assert captures[-10:] == [set()] * 10
+    assert service.status()["owner_invocations"]["statusd_unchanged_pane_capture"] == baseline
+
+    monotonic[0] += statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+    wall[0] += statusd.STATUSD_SNAPSHOT_MAX_AGE_SECONDS
+    service._build(("active", "cold"))
+    assert captures[-1] == {"%1", "%2"}, "the bounded safety cadence must recapture despite a signature collision"
+    after_safety_capture = service.status()["owner_invocations"]["statusd_unchanged_pane_capture"]
+    assert after_safety_capture == baseline + 2
+
+    pane_sources["%2"] = ("cold", "pane-two-v2")
+    service.invalidation_reason = "changed-pane"
+    service._build(("active", "cold"))
+
+    assert captures[-1] == {"%2"}
+    assert service.status()["owner_invocations"] == {
+        "statusd_unchanged_pane_capture": after_safety_capture + 1,
+    }
 
 
 def _find_claude_case(case_name):

@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "laat/miss",
   "debug.system.sampler.header.runtime.full": "Laatste looptijd",
   "debug.system.sampler.header.runtime.short": "looptijd",
+  "debug.tab.cost": "Kosten",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafieken",
   "debug.tab.logs": "Logboeken",

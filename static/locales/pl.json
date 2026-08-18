@@ -433,6 +433,7 @@
   "debug.system.sampler.header.lateMiss.short": "spóźniony/spóźniony",
   "debug.system.sampler.header.runtime.full": "Ostatni czas działania",
   "debug.system.sampler.header.runtime.short": "czas wykonania",
+  "debug.tab.cost": "Koszt",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Wykresy",
   "debug.tab.logs": "Dzienniki",

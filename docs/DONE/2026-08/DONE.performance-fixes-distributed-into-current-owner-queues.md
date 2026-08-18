@@ -4,7 +4,7 @@
 
 Not started. **This queue was audited by yo7775 after its first draft and rewritten; two items were unsafe as written and one was mis-sequenced.** See *Audit corrections* below before implementing anything. One change has already landed ahead of the queue: `30_app_menus.js` no longer sends `force=1` on session metadata.
 
-Archive status: valid phase-attribution work moved to `DOIT.p2.latency-boundaries.md`; refresh, watch-root, Finder-batch, deepcopy, jobd, statsd, and statusd work moved to `DOIT.p1.refresh-fanout-background-cpu.md`; activity summary remains in its P0-disable/P1-replacement chain; SSE deltas remain in `DOIT.p2.sse-payload-delivery.md`; copy feedback moved to `DOIT.p2.copy-feedback.md`. The rejected security/performance shortcuts remain below as historical guardrails, not active checkboxes.
+Archive status: valid phase-attribution work moved to `DOIT.p2.e4.latency-boundaries.md`; refresh, watch-root, Finder-batch, deepcopy, jobd, statsd, and statusd work moved to `DOIT.p1.e5.refresh-fanout-background-cpu.md`; activity summary remains in its P0-disable/P1-replacement chain; SSE deltas remain in `DOIT.p2.e5.sse-payload-delivery.md`; copy feedback moved to `DOIT.p2.copy-feedback.md`. The rejected security/performance shortcuts remain below as historical guardrails, not active checkboxes.
 
 ## Goal
 
@@ -118,4 +118,4 @@ Existing tests are close to worthless for this queue and must not be treated as 
 - Creating secret canaries in the real home or against the live server.
 - Naming a cause from a client-side timing alone.
 
-Current owners: [native network-filesystem watch admission](../../../queues/backlog/DOIT.p1.native-watch-network-fs.md), [refresh fan-out and background CPU](../../../queues/backlog/DOIT.p1.refresh-fanout-background-cpu.md), [latency phase attribution](../../../queues/backlog/DOIT.p2.latency-boundaries.md), and [SSE payload delivery](../../../queues/backlog/DOIT.p2.sse-payload-delivery.md). Copy feedback and terminal wheel consistency were verified complete and archived by the [v0.7.7 queue reconciliation](DONE.0-7-7-active-queue-reconciliation.md).
+Current owners: [native network-filesystem watch admission](../../../queues/backlog/DOIT.p1.e4.native-watch-network-fs.md), [refresh fan-out and background CPU](../../../queues/backlog/DOIT.p1.e5.refresh-fanout-background-cpu.md), [latency phase attribution](../../../queues/backlog/DOIT.p2.e4.latency-boundaries.md), and [SSE payload delivery](../../../queues/backlog/DOIT.p2.e5.sse-payload-delivery.md). Copy feedback and terminal wheel consistency were verified complete and archived by the [v0.7.7 queue reconciliation](DONE.0-7-7-active-queue-reconciliation.md).

@@ -17,6 +17,8 @@ import pytest
 import threading as threading_module
 
 import yolomux_lib.app as app_module
+import yolomux_lib.observability.queued_delivery as queued_delivery_module
+from yolomux_lib.infra import jobd as jobd_module
 from yolomux_lib import common as common_module
 from yolomux_lib import sessions as sessions_module
 from yolomux_lib import watchd
@@ -39,6 +41,8 @@ from tests.browser_helpers.browser_layout import start_browser_server
 from tests.browser_helpers.browser_layout import stop_browser_server
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yolomux_lib.observability.queued_delivery import QueuedDeliveryCompactionOwner
+from yolomux_lib.observability.queued_delivery import compact_queued_delivery_journal
 from yolomux_lib.server_logs import SERVER_LOGS
 from yolomux_lib.filesystem import exclusions
 
@@ -624,7 +628,6 @@ def test_terminal_before_receipt_remains_exact_until_delivery_ack_then_bounds_re
     assert replay["state"] == "failed"
     assert replay["request"] == receipt["request"]
     assert replay["error"]["code"] == "operation_replay_evicted"
-    assert path.stat().st_size < 64 * 1024
     recovered = QueuedDeliveryLedger(state_path=path)
     assert recovered.operation_status(operation_id) == (replay, HTTPStatus.GONE)
 
@@ -658,7 +661,6 @@ def test_queued_operation_terminal_after_exposed_receipt_remains_exact_until_del
     replay, status = ledger.operation_status(operation_id)
     assert status == HTTPStatus.GONE
     assert replay["error"]["code"] == "operation_replay_evicted"
-    assert path.stat().st_size < 64 * 1024
 
 
 def test_operation_terminal_batch_ack_is_exact_idempotent_and_bounds_once(tmp_path):
@@ -696,7 +698,289 @@ def test_operation_terminal_batch_ack_is_exact_idempotent_and_bounds_once(tmp_pa
         replay, status = ledger.operation_status(item["id"])
         assert status == HTTPStatus.GONE
         assert replay["error"]["code"] == "operation_replay_evicted"
-    assert path.stat().st_size < 64 * 1024
+
+
+def test_operation_ack_appends_one_durable_v3_record_before_live_mutation(monkeypatch, tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-ack-journal",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-ack-journal"},
+    )
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(
+        operation_id,
+        {"state": "ready", "request": receipt["request"], "data": {"blob": "x" * (512 * 1024)}},
+        HTTPStatus.OK,
+    )
+    before_size = path.stat().st_size
+    original_append = queued_delivery_module.append_fsync_text
+    persisted_before_mutation = []
+
+    def observed_append(target, text, mode=None):
+        persisted_before_mutation.append(ledger._operations[operation_id]["delivery_acknowledged"] is False)
+        original_append(target, text, mode=mode)
+
+    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", observed_append)
+    monkeypatch.setattr(queued_delivery_module, "atomic_write_text", lambda *_args, **_kwargs: pytest.fail("ack request must not rewrite the ledger"))
+
+    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
+    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
+    after_first_ack = path.stat().st_size
+    assert persisted_before_mutation == [True]
+    assert after_first_ack - before_size < 1024
+    entry = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+    assert entry == {
+        "version": 3,
+        "type": "ack",
+        "epoch": terminal["operation"]["cursor"]["epoch"],
+        "acks": exact,
+    }
+    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
+    assert path.stat().st_size == after_first_ack
+
+
+def test_operation_ack_append_failure_keeps_live_transition_retryable(monkeypatch, tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-ack-failure",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-ack-failure"},
+    )
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
+    original_append = queued_delivery_module.append_fsync_text
+    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+
+    with pytest.raises(OSError, match="disk full"):
+        ledger.acknowledge_operation_deliveries(exact)
+    assert ledger._operations[operation_id]["delivery_acknowledged"] is False
+
+    monkeypatch.setattr(queued_delivery_module, "append_fsync_text", original_append)
+    assert ledger.acknowledge_operation_deliveries(exact) == [operation_id]
+    assert QueuedDeliveryLedger(state_path=path)._operations[operation_id]["delivery_acknowledged"] is True
+
+
+def test_v3_ack_recovery_bounds_replay_and_ignores_only_a_truncated_final_record(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-v3-recovery",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-v3-recovery"},
+    )
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(
+        operation_id,
+        {"state": "ready", "request": receipt["request"], "data": {"blob": "z" * (512 * 1024)}},
+        HTTPStatus.OK,
+    )
+    before_ack = path.read_text(encoding="utf-8")
+    exact = [{"id": operation_id, "cursor": terminal["operation"]["cursor"]}]
+    ledger.acknowledge_operation_deliveries(exact)
+    after_ack = path.read_text(encoding="utf-8")
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+    replay, status = recovered.operation_status(operation_id)
+    assert status == HTTPStatus.GONE
+    assert replay["error"]["code"] == "operation_replay_evicted"
+
+    path.write_text(before_ack + after_ack[len(before_ack):].rstrip("\n")[:-8], encoding="utf-8")
+    truncated = QueuedDeliveryLedger(state_path=path)
+    replay, status = truncated.operation_status(operation_id)
+    assert status == HTTPStatus.OK
+    assert replay["data"]["blob"].startswith("z")
+
+
+def test_out_of_band_compaction_holds_file_lock_before_read_and_preserves_racing_append(monkeypatch, tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-compact-race",
+        route="GET /api/fs/list",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-compact-race"},
+    )
+    operation_id = receipt["operation"]["id"]
+    compactor_has_lock = threading_module.Event()
+    release_compactor = threading_module.Event()
+    original_write = queued_delivery_module.atomic_write_text
+
+    def blocked_write(target, text, mode=None):
+        compactor_has_lock.set()
+        assert release_compactor.wait(2)
+        original_write(target, text, mode=mode)
+
+    monkeypatch.setattr(queued_delivery_module, "atomic_write_text", blocked_write)
+    compact_thread = threading_module.Thread(target=compact_queued_delivery_journal, args=(path,))
+    compact_thread.start()
+    assert compactor_has_lock.wait(2)
+
+    terminal_result = []
+    terminal_thread = threading_module.Thread(
+        target=lambda: terminal_result.append(ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)),
+    )
+    terminal_thread.start()
+    assert terminal_thread.is_alive()
+    release_compactor.set()
+    compact_thread.join(2)
+    terminal_thread.join(2)
+
+    assert not compact_thread.is_alive()
+    assert not terminal_thread.is_alive()
+    assert terminal_result[0] is not None
+    assert QueuedDeliveryLedger(state_path=path).operation_status(operation_id) == ({"state": "ready"}, HTTPStatus.OK)
+
+
+def test_operation_compaction_watermark_keeps_ack_appended_after_submission_due(monkeypatch, tmp_path):
+    now = [100.0]
+    monkeypatch.setattr(queued_delivery_module, "QUEUED_OPERATION_COMPACT_RECORDS", 3)
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path, compaction_clock=lambda: now[0])
+
+    def terminal(suffix):
+        receipt = ledger.accept_operation(
+            request_id=f"r-watermark-{suffix}",
+            route="GET /api/fs/list",
+            deadline_at=time.time() + 30,
+            progress={"phase": "waiting_for_product"},
+            producer={"service": "jobd", "job_id": f"job-watermark-{suffix}"},
+        )
+        event = ledger.terminalize_operation(receipt["operation"]["id"], {"state": "ready"}, HTTPStatus.OK)
+        ledger.acknowledge_operation_delivery(receipt["operation"]["id"], event["operation"]["cursor"])
+
+    terminal("a")
+    submitted = ledger.operation_compaction_request()
+    assert submitted["due_at"] == now[0]
+    terminal("b")
+
+    ledger.note_operation_compaction_succeeded(submitted)
+
+    remaining = ledger.operation_compaction_request()
+    assert remaining is not None
+    assert remaining["ack_generation"] > submitted["ack_generation"]
+    assert remaining["tail_records"] > 0
+
+
+def test_compaction_owner_submits_one_fresh_maintenance_job_and_clears_due(monkeypatch, tmp_path):
+    monkeypatch.setattr(queued_delivery_module, "QUEUED_OPERATION_COMPACT_RECORDS", 3)
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    submissions = []
+    submitted = threading_module.Event()
+
+    def submit(state_path, coalesce_key):
+        submissions.append((state_path, coalesce_key))
+        submitted.set()
+        return {"ok": True, "job": {"job_id": "compact-1", "status": "completed"}}
+
+    owner = QueuedDeliveryCompactionOwner(
+        ledger,
+        submit,
+        lambda _job_id: pytest.fail("completed receipt must not be polled"),
+    )
+    try:
+        receipt = ledger.accept_operation(
+            request_id="r-owner",
+            route="GET /api/fs/list",
+            deadline_at=time.time() + 30,
+            progress={"phase": "waiting_for_product"},
+            producer={"service": "jobd", "job_id": "job-owner"},
+        )
+        event = ledger.terminalize_operation(receipt["operation"]["id"], {"state": "ready"}, HTTPStatus.OK)
+        ledger.acknowledge_operation_delivery(receipt["operation"]["id"], event["operation"]["cursor"])
+        assert submitted.wait(2)
+        worker = owner._worker
+        if worker is not None:
+            worker.join(2)
+        assert ledger.operation_compaction_request() is None
+        assert len(submissions) == 1
+        assert submissions[0][0] == path
+        assert submissions[0][1].startswith("operation-ledger-compact:")
+    finally:
+        owner.stop()
+
+
+def test_jobd_registered_compactor_replays_current_file_under_the_worker_lock(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-jobd-compact",
+        route="GET /api/fs/list",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-jobd-compact"},
+    )
+    operation_id = receipt["operation"]["id"]
+    terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+    ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"])
+
+    result = json.loads(jobd_module.run_registered_task(
+        "queued_delivery_compact",
+        json.dumps({"state_path": str(path)}).encode("utf-8"),
+    ))
+
+    assert result["operations"] == 1
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1
+    assert QueuedDeliveryLedger(state_path=path)._operations[operation_id]["delivery_acknowledged"] is True
+
+
+def test_app_submits_operation_compaction_as_fresh_maintenance_receipt(tmp_path):
+    calls = []
+
+    class JobClient:
+        def produce(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return {"ok": True, "job": {"job_id": "compact", "status": "queued"}}, b""
+
+    webapp = object.__new__(TmuxWebtermApp)
+    webapp.job_client = JobClient()
+    path = tmp_path / "operations.json"
+
+    response = webapp.submit_queued_delivery_compaction(path, "operation-ledger-compact:test")
+
+    assert response["ok"] is True
+    assert calls == [(('queued_delivery_compact', {"state_path": str(path)}), {
+        "priority": "maintenance",
+        "generation": 1,
+        "coalesce_key": "operation-ledger-compact:test",
+        "delivery": "receipt",
+        "fresh_only": True,
+    })]
+
+
+def test_operation_ack_batch_persists_one_record_for_sixty_four_exact_transitions(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    exact = []
+    for index in range(64):
+        receipt = ledger.accept_operation(
+            request_id=f"r-batch-64-{index}",
+            route="GET /api/fs/list",
+            deadline_at=time.time() + 30,
+            progress={"phase": "waiting_for_product"},
+            producer={"service": "jobd", "job_id": f"job-batch-64-{index}"},
+        )
+        operation_id = receipt["operation"]["id"]
+        terminal = ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+        exact.append({"id": operation_id, "cursor": terminal["operation"]["cursor"]})
+    before_lines = len(path.read_text(encoding="utf-8").splitlines())
+
+    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == before_lines + 1
+    assert json.loads(lines[-1])["acks"] == exact
 
 
 def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch, tmp_path):
@@ -4479,6 +4763,89 @@ def test_exclusion_policy_travels_from_the_real_submit_into_the_real_worker(monk
     rendered = sorted(entry["path"] for entry in result["payload"]["files"])
     assert "src/live.py" in rendered, rendered
     assert "vendorcache/blob.bin" not in rendered, rendered
+
+
+def test_worker_reuses_task_local_snapshot_while_deriving_isolated_exact_output(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("changed\n", encoding="utf-8")
+    snapshot = {
+        "branch": "main",
+        "statuses": {"tracked.txt": "M"},
+        "numstat": {"tracked.txt": {"added": 2, "removed": 1}},
+        "selected_from": "",
+        "selected_to": "",
+        "status_error": "",
+        "repo_error": "",
+        "repo_error_message": {"key": "", "params": {}, "fallback": ""},
+        "recent_refs": [{"name": "main", "commit": "abc"}],
+        "ahead_behind": {"ahead": 1, "behind": 0},
+    }
+    real_deepcopy = copy_module.deepcopy
+    snapshot_before = real_deepcopy(snapshot)
+    snapshot_calls = []
+
+    def cached_snapshot(repo_path, from_ref, to_ref, generation, builder):
+        snapshot_calls.append((repo_path, from_ref, to_ref, generation, builder))
+        return snapshot, False
+
+    def info_for(session, pane_id):
+        pane = PaneInfo(
+            session=session,
+            window="0",
+            pane="0",
+            pane_id=pane_id,
+            target=f"{session}:0.0",
+            current_path=str(repo),
+            command="bash",
+            active=True,
+            window_active=True,
+            title="",
+            pid=1,
+        )
+        return SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=[])
+
+    request = {
+        "session": "",
+        "infos": {
+            "s1": dataclasses.asdict(info_for("s1", "%1")),
+            "s2": dataclasses.asdict(info_for("s2", "%2")),
+        },
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+    }
+    monkeypatch.setattr(session_files, "cached_repository_snapshot", cached_snapshot)
+    monkeypatch.setattr(session_files.time, "perf_counter", lambda: 100.0)
+
+    expected = session_files.session_files_view_result(real_deepcopy(request), max_bytes=8 * 1024 * 1024)
+    assert len(snapshot_calls) == 1
+    snapshot_calls.clear()
+    guarded_request = real_deepcopy(request)
+
+    def reject_whole_snapshot_copy(value, memo=None):
+        assert value is not snapshot, "the task-local provider must return its memoized snapshot directly"
+        return real_deepcopy(value, memo)
+
+    monkeypatch.setattr(session_files.copy, "deepcopy", reject_whole_snapshot_copy)
+    result = session_files.session_files_view_result(guarded_request, max_bytes=8 * 1024 * 1024)
+
+    assert result == expected
+    assert len(snapshot_calls) == 1
+    assert result["profile"]["work"]["repositories"] == 1
+    assert result["profile"]["work"]["git_snapshots"] == 1
+    assert snapshot == snapshot_before
+
+    rows = {row["session"]: row for row in result["payload"]["files"]}
+    assert rows.keys() == {"s1", "s2"}
+    assert rows["s1"] is not rows["s2"]
+    second_row_before = real_deepcopy(rows["s2"])
+    rows["s1"]["added"] = 999
+    rows["s1"]["agents"].append("mutated")
+    assert rows["s2"] == second_row_before
+    result["payload"]["refs_by_repo"][str(repo)][0]["name"] = "mutated"
+    assert snapshot == snapshot_before
 
 
 def test_worker_falls_back_to_shipped_defaults_when_no_policy_arrives(tmp_path):

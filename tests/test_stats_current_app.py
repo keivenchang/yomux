@@ -881,6 +881,7 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
         stop_periodic=lambda: calls.append("pricing"),
     )
     webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
+    webapp.queued_delivery_compaction_owner = SimpleNamespace(stop=lambda: calls.append("compaction"))
     webapp.jobd_operation_service = SimpleNamespace(stop=lambda: calls.append("operations"))
     webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("jobd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
@@ -896,7 +897,7 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
 
     webapp.stop_auto_approve_all()
 
-    assert calls == ["pricing", "current", "operations", "jobd", "approval", "owner", "yoagent", "control"]
+    assert calls == ["pricing", "current", "compaction", "operations", "jobd", "approval", "owner", "yoagent", "control"]
 
 
 def test_legacy_stats_handlers_and_scheduler_bodies_are_deleted():

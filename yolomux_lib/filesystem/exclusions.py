@@ -47,6 +47,15 @@ INDEX_EXCLUDE_GLOB_PREFIX = "glob:"
 INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
 
 
+def _directory_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if not name or name in {".", ".."} or "/" in name or "\\" in name:
+        return None
+    return name
+
+
 def _canonical_text_tuple(value: Any) -> tuple[str, ...] | None:
     """Return ``value`` as a tuple of non-empty strings, or None if ANY member is unusable.
 
@@ -130,17 +139,19 @@ class ExclusionPolicy:
         raw_names = values.get("index_exclude_dir_names", list(defaults))
         if not isinstance(raw_names, list):
             raw_names = list(defaults)
-        names: set[str] = set()
-        for raw_name in raw_names:
-            if not isinstance(raw_name, str):
-                continue
-            name = raw_name.strip()
-            if not name or name in {".", ".."} or "/" in name or "\\" in name:
-                continue
-            names.add(name)
+        names = {name for raw_name in raw_names if (name := _directory_name(raw_name)) is not None}
         raw_rules = values.get("index_exclude_paths", [])
-        rules = tuple(sorted({rule.strip() for rule in raw_rules if isinstance(rule, str) and rule.strip()})) if isinstance(raw_rules, list) else ()
-        return cls(skip_dir_names=tuple(sorted(names)), exclude_rules=rules)
+        rules: set[str] = set()
+        if isinstance(raw_rules, list):
+            for raw_rule in raw_rules:
+                if not isinstance(raw_rule, str) or not (rule := raw_rule.strip()):
+                    continue
+                if not rule.startswith((INDEX_EXCLUDE_GLOB_PREFIX, INDEX_EXCLUDE_REGEX_PREFIX)):
+                    if (name := _directory_name(rule)) is not None:
+                        names.add(name)
+                        continue
+                rules.add(rule)
+        return cls(skip_dir_names=tuple(sorted(names)), exclude_rules=tuple(sorted(rules)))
 
     @classmethod
     def from_payload(cls, payload: Any) -> "ExclusionPolicy | None":

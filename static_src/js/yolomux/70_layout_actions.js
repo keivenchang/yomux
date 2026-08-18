@@ -2167,6 +2167,7 @@ function rekeyMap(map, oldKey, newKey) {
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
+  terminalFrameRecoveryAttempts.delete(session);
   terminalMobileAccessoryStates.delete(session);
   altScreenWheelRemainder.delete(session);
   clearAgentWindowActivityRecordsForSession(session);
@@ -2527,7 +2528,10 @@ function installTerminalResizeAuthorityHandlers() {
   if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
   window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
-  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
+  // Another YOLOmux server can change tmux's shared ignore-size flags without changing this
+  // browser's local dimensions. Every foreground pointer transition must therefore cross the
+  // socket instead of trusting lastTerminalResizeAuthoritySignature.
+  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}), {capture: true});
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
   });
@@ -3512,6 +3516,7 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
+  if (terminals.get(session) === item) terminals.delete(session);
   if (item.reconnectTimer) {
     clearTimeout(item.reconnectTimer);
     tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.reconnectTimer);
@@ -3532,11 +3537,13 @@ function closeTerminalItem(session, item) {
   }
   if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
+  item.containerBindingDispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
   item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
+  item.containerBindingDispose = null;
   tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
   const observer = resizeObservers.get(session);
   if (observer) {
@@ -3654,9 +3661,7 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
 
 function estimateTerminalSize(container, term = null) {
   const content = terminalContentSize(container);
-  const measured = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || null;
+  const measured = terminalRenderCellDimensions(term);
   if (measured?.width && measured?.height) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),

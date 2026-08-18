@@ -23,6 +23,7 @@ from tests.browser_helpers import webdriver_lease
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
 from tools import static_build
+from tools import instance_isolation
 from tools import test_catalog
 from tools import test_plan
 from tools import pytest_catalog_plugin
@@ -958,6 +959,33 @@ def test_performance_report_path_is_tmp_only(monkeypatch):
         check.performance_report_path("report.json")
 
 
+def test_check_state_dir_uses_rooted_owner_and_refuses_outside_override(monkeypatch, tmp_path):
+    check = load_check_module()
+    root = tmp_path / "root"
+    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
+    monkeypatch.delenv("YOLOMUX_STATE_DIR", raising=False)
+
+    assert check.state_dir_from_env() == root / "state"
+
+    monkeypatch.setenv("YOLOMUX_STATE_DIR", str(tmp_path / "outside"))
+    with pytest.raises(ValueError, match="YOLOMUX_STATE_DIR resolves outside YOLOMUX_ROOT"):
+        check.state_dir_from_env()
+
+
+def test_expensive_tool_lock_refuses_direct_worktree_path(monkeypatch, tmp_path):
+    check = load_check_module()
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    lock_path = worktree / "tool.lock"
+    monkeypatch.setattr(instance_isolation, "REPO_ROOT", worktree)
+
+    with pytest.raises(ValueError, match="shared worktree"):
+        with check.expensive_tool_lock(lock_path=lock_path):
+            pass
+
+    assert not lock_path.exists()
+
+
 def test_performance_instrumentation_adds_bounded_pytest_durations_and_parses_them():
     check = load_check_module()
     lane = check.Lane("demo", "demo", (check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"]), check.Step("node", ["node", "--check", "static/yolomux.js"])))
@@ -994,6 +1022,17 @@ def test_instrumented_pytest_step_records_every_phase_beyond_ten_rows(tmp_path):
     assert len(rows) == 36
     assert {row["phase"] for row in rows} == {"setup", "call", "teardown"}
     assert len({row["nodeid"] for row in rows}) == 12
+
+
+def test_run_lane_exports_its_identity_to_every_step(monkeypatch):
+    check = load_check_module()
+    environments = []
+    monkeypatch.setattr(check.subprocess, "run", lambda *_args, **kwargs: environments.append(kwargs["env"]) or subprocess.CompletedProcess([], 0, "", ""))
+
+    result = check.run_lane(check.Lane("pytest-e2e", "e2e", (check.Step("probe", ["probe"]),)))
+
+    assert result.ok
+    assert environments[0][check.CHECK_LANE_ENV] == "pytest-e2e"
 
 
 def test_collection_assigns_class_specific_timeout_ceilings(tmp_path):

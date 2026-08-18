@@ -465,6 +465,73 @@ def test_response_parent_frames_opaque_product_bytes_without_materialization_and
     assert handler._route_response_written is True
 
 
+def test_auto_approve_success_forwards_statusd_product_without_materialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    route = next(route for route in http_routes.ALL_ROUTES if route.path == "/api/auto-approve")
+    handler = server.Handler.__new__(server.Handler)
+    handler._route_response = route
+    handler._route_response_written = False
+    handler._api_request_id = "r-auto-approve-product"
+    handler.headers = {}
+    body = b'{"sessions":{"1":{"status":"idle"}},"agent_window_snapshot_revision":7}'
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        auto_approve_status_bytes=lambda session: (body, HTTPStatus.OK),
+        observe_http_product_delivery=lambda *_args: None,
+    ))
+    writes = []
+
+    def capture(
+        _self,
+        data: bytes,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        json_encode_ms: float = 0.0,
+        product_metadata=None,
+    ) -> None:
+        writes.append((data, status, json_encode_ms, product_metadata))
+
+    def fail_materialization(*_args, **_kwargs):
+        raise AssertionError("successful statusd bytes must not be decoded, copied, or encoded")
+
+    handler._write_json_representation = MethodType(capture, handler)
+    monkeypatch.setattr(server.json, "loads", fail_materialization)
+    monkeypatch.setattr(server.json, "dumps", fail_materialization)
+    monkeypatch.setattr(server.copy, "deepcopy", fail_materialization)
+
+    http_routes.get_auto_approve(handler, SimpleNamespace(query="session=1"), route)
+
+    expected = (
+        b'{"state":"ready","request":{"id":"r-auto-approve-product"},"data":'
+        + body
+        + b',"ok":true,"terminal":true,"sessions":{"1":{"status":"idle"}},"agent_window_snapshot_revision":7}'
+    )
+    assert writes == [(expected, HTTPStatus.OK, 0.0, http_routes.inline_json_product_metadata(body))]
+
+
+def test_auto_approve_failure_retains_canonical_transient_normalization() -> None:
+    route = next(route for route in http_routes.ALL_ROUTES if route.path == "/api/auto-approve")
+    handler, writes = _capturing_handler(route)
+    failure = b'{"ok":false,"status":503,"error":"refreshing"}'
+    handler.server.app.auto_approve_status_bytes = lambda session: (
+        failure,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+
+    http_routes.get_auto_approve(handler, SimpleNamespace(query="session=1"), route)
+
+    payload, status = writes[0]
+    assert status == HTTPStatus.ACCEPTED
+    assert payload == {
+        "state": "queued",
+        "request": payload["request"],
+        "status": "pending",
+        "retry_after_seconds": 1,
+        "reason": "upstream service is refreshing",
+        "ok": True,
+        "terminal": False,
+    }
+    assert payload["request"]["id"].startswith("r-")
+
+
 def test_warm_filesystem_response_writes_canonical_bytes_without_a_qualified_promise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

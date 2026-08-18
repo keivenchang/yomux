@@ -1566,6 +1566,30 @@ def test_capture_measurement_metrics_retains_a_200_request_run_amid_global_churn
     assert [row["details"]["measurement_request_id"] for row in recent] == [f"run-{index}" for index in range(200)]
 
 
+def test_capture_measurement_ring_reports_capacity_sequence_and_eviction():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        for index in range(app_module.PERFORMANCE_CAPTURE_RECORD_LIMIT + 3):
+            webapp.record_performance_sample(
+                "http-endpoint",
+                "GET /api/ping",
+                details={"measurement_scope": "capture", "request_id": f"r-{index}"},
+            )
+        payload = webapp.performance_metrics_payload(measurement_scope="capture")
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["capture"] == {
+        "capacity": app_module.PERFORMANCE_CAPTURE_RECORD_LIMIT,
+        "retained": app_module.PERFORMANCE_CAPTURE_RECORD_LIMIT,
+        "total": app_module.PERFORMANCE_CAPTURE_RECORD_LIMIT + 3,
+        "evicted": 3,
+        "first_sequence": 4,
+        "last_sequence": app_module.PERFORMANCE_CAPTURE_RECORD_LIMIT + 3,
+    }
+    assert payload["recent"][0]["details"]["capture_sequence"] == 4
+
+
 def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     logs = []
@@ -3624,6 +3648,95 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     assert payload["sessions"]["6"]["prompt"]["visible"] is True
 
 
+def test_status_service_roster_reuses_each_pane_classification_by_source_signature(monkeypatch):
+    pane0 = PaneInfo(
+        session="5", window="0", window_name="claude", pane="0", pane_id="%10", target="%10",
+        current_path="/repo/claude", command="claude", active=True, window_active=True, title="claude", pid=10,
+    )
+    pane1 = PaneInfo(
+        session="5", window="1", window_name="codex", pane="0", pane_id="%11", target="%11",
+        current_path="/repo/codex", command="codex", active=True, window_active=False, title="codex", pid=11,
+    )
+    info = SessionInfo(
+        session="5",
+        panes=[pane0, pane1],
+        selected_pane=pane0,
+        agents=[
+            AgentInfo("5", "claude", 10, "%10", "claude", "/repo/claude", "running", "claude-id", None, None),
+            AgentInfo("5", "codex", 11, "%11", "codex", "/repo/codex", "running", "codex-id", None, None),
+        ],
+    )
+    pane_text = {"%10": "claude working", "%11": "codex idle"}
+    captures = []
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["5"], None))
+    monkeypatch.setattr(app_module, "discover_status_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "auto_approve_lock_owner", lambda _session: None)
+
+    def fake_capture(target, *_args, **kwargs):
+        captures.append((target, kwargs.get("visible_only")))
+        return pane_text[target]
+
+    monkeypatch.setattr(app_module, "tmux_capture_pane", fake_capture)
+    monkeypatch.setattr(
+        app_module,
+        "agent_screen_state",
+        lambda text, **_kwargs: {"key": "working" if "working" in text else "idle", "text": text},
+    )
+    monkeypatch.setattr(app_module, "approval_prompt_state", lambda _text, *_args: {"visible": False})
+    webapp = app_module.TmuxWebtermApp(["5"], status_service_mode=True)
+    timings = {}
+    try:
+        first, _status = webapp.build_auto_approve_status(
+            timings=timings,
+            sync_workers=False,
+            pane_source_signatures={"%10": "one-v1", "%11": "two-v1"},
+            capture_targets={"%10", "%11"},
+        )
+        assert timings["pane_capture_count"] == 2
+        captures.clear()
+
+        for _revision in range(10):
+            timings = {}
+            unchanged, _status = webapp.build_auto_approve_status(
+                timings=timings,
+                sync_workers=False,
+                pane_source_signatures={"%10": "one-v1", "%11": "two-v1"},
+                capture_targets=set(),
+            )
+            assert timings["pane_capture_count"] == 0
+
+        pane_text["%11"] = "codex working"
+        timings = {}
+        collision_refresh, _status = webapp.build_auto_approve_status(
+            timings=timings,
+            sync_workers=False,
+            pane_source_signatures={"%10": "one-v1", "%11": "two-v1"},
+            capture_targets={"%11"},
+        )
+        assert captures == [("%11", True)]
+        assert timings["pane_capture_count"] == 1
+        captures.clear()
+
+        pane_text["%11"] = "codex idle again"
+        timings = {}
+        changed, _status = webapp.build_auto_approve_status(
+            timings=timings,
+            sync_workers=False,
+            pane_source_signatures={"%10": "one-v1", "%11": "two-v2"},
+            capture_targets={"%11"},
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert captures == [("%11", True)]
+    assert timings["pane_capture_count"] == 1
+    assert first["sessions"]["5"]["screen"]["key"] == "working"
+    assert unchanged["sessions"]["5"]["agent_windows"][1]["state"] == "idle"
+    assert collision_refresh["sessions"]["5"]["agent_windows"][1]["state"] == "working"
+    assert changed["sessions"]["5"]["screen"]["key"] == "working"
+    assert changed["sessions"]["5"]["agent_windows"][1]["state"] == "idle"
+
+
 def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_path):
     pane0 = PaneInfo(
         session="5",
@@ -4995,7 +5108,7 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
         return {"5": info}, []
 
     monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
-    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True: {"session": info.session, "call": calls[-1], "metadata": include_metadata})
+    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True, work_graph=None: {"session": info.session, "call": calls[-1], "metadata": include_metadata})
     monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
     webapp = app_module.TmuxWebtermApp(["5"])
     calls.clear()
@@ -5163,7 +5276,7 @@ def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(mo
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
 
-    def fake_session_to_json(info, cache, allow_network=False, include_metadata=True):
+    def fake_session_to_json(info, cache, allow_network=False, include_metadata=True, work_graph=None):
         include_metadata_values.append(include_metadata)
         return {"session": info.session, "metadata_loading": not include_metadata}
 
@@ -5192,7 +5305,7 @@ def test_refresh_transcripts_payload_cache_publishes_full_payload_when_requested
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
     monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
-    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True: include_metadata_values.append(include_metadata) or {"session": info.session, "metadata_loading": not include_metadata})
+    monkeypatch.setattr(app_module, "session_to_json", lambda info, cache, allow_network=False, include_metadata=True, work_graph=None: include_metadata_values.append(include_metadata) or {"session": info.session, "metadata_loading": not include_metadata})
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
@@ -5632,6 +5745,142 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
 
     assert calls == ["jobd", False]
     assert refreshes == [(True, True)]
+
+
+def test_session_metadata_work_graph_owner_reuses_unchanged_source_generations(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    working = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "working", "agent-5", None, None)])
+    idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)])
+    current = {"info": working}
+    rebuilds = []
+
+    def fake_work_graph(info, _cache, allow_network=False):
+        rebuilds.append((info.agents[0].status, allow_network))
+        graph = metadata.empty_work_graph()
+        graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}
+        return graph
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda maintenance=True: [])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"5": current["info"]}, []))
+    monkeypatch.setattr(app_module, "session_work_graph", fake_work_graph)
+    monkeypatch.setattr(metadata, "session_work_graph", fake_work_graph)
+    monkeypatch.setattr(webapp, "indexed_repo_roots_snapshot", lambda: [])
+    monkeypatch.setattr(webapp, "agent_auth_payload", lambda force=False: {"agentAuth": {}, "availableAgents": []})
+    monkeypatch.setattr(webapp, "apply_metadata_badge_pulses", lambda _payloads: None)
+    monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda _sessions: None)
+    monkeypatch.setattr(webapp, "watcher_covers_repo", lambda root: root == "/repo")
+    try:
+        webapp.build_session_metadata_payload()
+        for _revision in range(10):
+            webapp.build_session_metadata_payload()
+        assert rebuilds == [("working", False)]
+
+        # Agent status is a work-graph runtime-actor input, but not a provider-metadata input.
+        current["info"] = idle
+        webapp.build_session_metadata_payload()
+        webapp.build_session_metadata_payload()
+        assert rebuilds == [("working", False), ("idle", False)]
+
+        # One watcher-authoritative repository generation change rebuilds exactly once.
+        with webapp.session_files_service.cache_lock:
+            webapp.session_files_service.repo_dirty_generations["/repo"] = 1
+        webapp.build_session_metadata_payload()
+        webapp.build_session_metadata_payload()
+
+        # Replayed provider metadata advances its own bounded cache generation and invalidates the
+        # enriched graph once; another unchanged payload reads that graph without rebuilding it.
+        webapp.metadata_cache.set("github-pr:acme/repo:5", {"number": 5}, ttl=60.0)
+        webapp.build_session_metadata_payload()
+        webapp.build_session_metadata_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert rebuilds == [("working", False), ("idle", False), ("idle", False), ("idle", False)]
+    assert webapp.client_watch_service.owner_invocation_snapshot()["jobd_work_graph_rebuild"] == 4
+
+
+def test_session_work_graph_owner_is_single_flight_and_rejects_stale_provider_generation(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo("5", [pane], pane, [])
+    entered = threading.Event()
+    release = threading.Event()
+    rebuilds = []
+
+    def fake_work_graph(_info, _cache, allow_network=False):
+        rebuilds.append(allow_network)
+        entered.set()
+        assert release.wait(timeout=3)
+        graph = metadata.empty_work_graph()
+        graph["marker"] = len(rebuilds)
+        graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}
+        return graph
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(app_module, "session_work_graph", fake_work_graph)
+    monkeypatch.setattr(webapp, "watcher_covers_repo", lambda root: root == "/repo")
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(webapp.session_work_graph_for_generation, info) for _index in range(8)]
+            assert entered.wait(timeout=2)
+            release.set()
+            assert [future.result()["marker"] for future in futures] == [1] * 8
+        assert rebuilds == [False]
+
+        # A provider update that lands during a later build invalidates that result before it can
+        # become the retained source for the new generation.
+        changed = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)])
+        entered.clear()
+        release.clear()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            stale = executor.submit(webapp.session_work_graph_for_generation, changed)
+            assert entered.wait(timeout=2)
+            webapp.metadata_cache.set("github-pr:acme/repo:5", {"number": 5}, ttl=60.0)
+            release.set()
+            assert stale.result()["marker"] == 2
+        with webapp.activity_transcript_service.work_graph_cache_lock:
+            retained = webapp.activity_transcript_service.work_graph_cache["5"]
+        assert retained[1]["marker"] == 1
+
+        # The next read owns the provider's new generation once and then becomes reusable.
+        entered.clear()
+        release.set()
+        assert webapp.session_work_graph_for_generation(changed)["marker"] == 3
+        assert webapp.session_work_graph_for_generation(changed)["marker"] == 3
+    finally:
+        release.set()
+        webapp.control_server.stop()
+
+    assert rebuilds == [False, False, False]
+
+
+def test_session_work_graph_owner_retains_unwatched_repository_safety_reconciliation(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo("5", [pane], pane, [])
+    now = {"value": 100.0}
+    rebuilds = []
+
+    def fake_work_graph(_info, _cache, allow_network=False):
+        rebuilds.append(allow_network)
+        graph = metadata.empty_work_graph()
+        graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}
+        return graph
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(app_module, "session_work_graph", fake_work_graph)
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(webapp, "watcher_covers_repo", lambda _root: False)
+    try:
+        webapp.session_work_graph_for_generation(info)
+        webapp.session_work_graph_for_generation(info)
+        assert rebuilds == [False]
+        now["value"] += metadata.GIT_METADATA_CACHE_SECONDS + 0.1
+        webapp.session_work_graph_for_generation(info)
+        webapp.session_work_graph_for_generation(info)
+    finally:
+        webapp.control_server.stop()
+
+    assert rebuilds == [False, False]
 
 
 def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
@@ -7816,6 +8065,73 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         assert webapp.client_watch_roots_snapshot() == []
         assert webapp.client_watch_files_snapshot() == []
         assert webapp.client_watch_background_files_snapshot() == []
+    finally:
+        webapp.control_server.stop()
+
+
+def test_versioned_client_watch_root_surfaces_are_exact_bounded_and_retained():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        payload = webapp.update_client_watch_roots({
+            "roots": ["/repo", "/scratch"],
+            "root_surfaces_version": 1,
+            "root_surfaces": [
+                {"path": "/scratch", "surfaces": ["modified-files-parent"]},
+                {"path": "/repo", "surfaces": ["modified-files-repository", "finder", "finder"]},
+            ],
+        })
+
+        assert payload["root_surfaces_version"] == 1
+        assert payload["root_surfaces"] == [
+            {"path": "/repo", "surfaces": ["finder", "modified-files-repository"]},
+            {"path": "/scratch", "surfaces": ["modified-files-parent"]},
+        ]
+        descriptor = next(iter(webapp.client_watch_service.descriptors.values()))
+        assert descriptor.root_surfaces_version == 1
+        assert descriptor.root_surfaces == (
+            ("/repo", ("finder", "modified-files-repository")),
+            ("/scratch", ("modified-files-parent",)),
+        )
+
+        invalid_payloads = [
+            {
+                "roots": ["/repo"],
+                "root_surfaces_version": 1,
+                "root_surfaces": [{"path": "/repo", "surfaces": ["unknown"]}],
+            },
+            {
+                "roots": ["/repo"],
+                "root_surfaces_version": 1,
+                "root_surfaces": [],
+            },
+            {
+                "roots": ["/repo"],
+                "root_surfaces_version": 1,
+                "root_surfaces": [{"path": "/other", "surfaces": ["finder"]}],
+            },
+            {
+                "roots": ["/repo"],
+                "root_surfaces": [{"path": "/repo", "surfaces": ["finder"]}],
+            },
+        ]
+        for invalid in invalid_payloads:
+            with pytest.raises(ValueError):
+                webapp.update_client_watch_roots(invalid)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_legacy_roots_only_watch_descriptor_remains_accepted_during_bundle_reload_skew():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        payload = webapp.update_client_watch_roots({"roots": ["/repo"]})
+
+        assert payload["roots"] == ["/repo"]
+        assert payload["root_surfaces_version"] == 0
+        assert payload["root_surfaces"] == []
+        descriptor = next(iter(webapp.client_watch_service.descriptors.values()))
+        assert descriptor.root_surfaces_version == 0
+        assert descriptor.root_surfaces == ()
     finally:
         webapp.control_server.stop()
 

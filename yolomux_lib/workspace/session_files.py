@@ -4075,7 +4075,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
             else:
                 git_snapshot_builds += 1
             snapshot_cache[key] = snapshot
-        return copy.deepcopy(snapshot)
+        return snapshot
 
     attribution_started = time.perf_counter()
     # session_files_payload owns the actual cross-session attribution calculation; recording it

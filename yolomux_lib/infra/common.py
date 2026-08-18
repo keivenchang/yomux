@@ -44,6 +44,8 @@ from .root_paths import YolomuxRootError
 from .root_paths import YolomuxRoots
 from .root_paths import resolve_yolomux_roots as _resolve_root_paths
 from .root_paths import resolved_path
+from .root_paths import resolved_product_path
+from tools.instance_isolation import rooted_socket_candidates
 from .filesystem_preflight import FilesystemClassification
 from .filesystem_preflight import preflight_mutable_roots
 from ..workspace.locales import user_message_payload
@@ -103,18 +105,9 @@ def resolve_yolomux_roots(
 def runtime_socket_candidates(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> tuple[Path, ...]:
     """Enumerate every product-owned Unix socket before rooted directories exist."""
     resolved_identity = identity or current_host_identity()
-    services = paths.runtime_dir / "services"
     database = paths.state_dir / HOST_PARTITION_DIRNAME / resolved_identity.stable_host_id / "stats-v7.sqlite3"
     digest = hashlib.sha256(str(database).encode("utf-8")).hexdigest()[:16]
-    return (
-        paths.runtime_dir / "control" / "yolomux-4194304-ffffffffffffffff.sock",
-        services / "statusd.sock",
-        services / "jobd.sock",
-        services / "watchd.sock",
-        services / "approvald.sock",
-        services / f"statsd.p24s7.{digest}.sock",
-        services / "indexer.sock",
-    )
+    return rooted_socket_candidates(paths.runtime_dir, stats_digest=digest)
 
 
 def validate_rooted_socket_paths(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> None:
@@ -145,14 +138,20 @@ def runtime_root(
         # A rooted run already has a unique, operator-selected parent. Keeping
         # host/boot suffixes here would make the advertised <root>/runtime
         # layout false and wastes the Unix-socket pathname budget.
-        return resolved_path(values[YOLOMUX_ROOT_ENV]) / "runtime"
+        return resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV]) / "runtime"
     resolved_identity = identity or current_host_identity()
-    base = values.get("YOLOMUX_RUNTIME_DIR") or values.get("XDG_RUNTIME_DIR")
-    if base:
-        runtime_base = Path(base).expanduser() / "yolomux"
+    if values.get("YOLOMUX_RUNTIME_DIR"):
+        runtime_base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yolomux"
+    elif values.get("XDG_RUNTIME_DIR"):
+        runtime_base = resolved_product_path(
+            values,
+            "XDG_RUNTIME_DIR",
+            values["XDG_RUNTIME_DIR"],
+            reject_home=False,
+        ) / "yolomux"
     else:
         resolved_uid = os.getuid() if uid is None else int(uid)
-        runtime_base = Path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
+        runtime_base = resolved_path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
     # Keep the socket-bearing root readable while leaving enough sockaddr_un
     # budget for the longest service filename. These stable prefixes identify
     # the host and boot in diagnostics without an opaque hash.
@@ -551,11 +550,8 @@ def heal_server_path() -> str:
 
 
 def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
-    values = env or os.environ
-    if values.get(YOLOMUX_ROOT_ENV):
-        return resolve_yolomux_roots(values).codex_home
-    configured = str(values.get("YOLOMUX_CODEX_HOME") or values.get("CODEX_HOME") or "").strip()
-    return Path(configured).expanduser() if configured else Path.home() / ".codex"
+    values = os.environ if env is None else env
+    return resolve_yolomux_roots(values).codex_home
 
 
 def codex_runtime_env(base_env: dict[str, str] | None = None, *, create_home: bool = True) -> dict[str, str]:

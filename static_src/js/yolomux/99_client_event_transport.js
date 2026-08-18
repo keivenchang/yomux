@@ -23,10 +23,41 @@ function applyClientEventReadyEnvelope(envelope = {}) {
   return true;
 }
 
-function repairClientEventReadyChannels(channels) {
+function clientEventWatchRootsForceOptions(owner, generation) {
+  return {
+    forceSourceOwner: String(owner || ''),
+    forceSourceGeneration: String(generation || ''),
+  };
+}
+
+function clientEventEnvelopeForceGeneration(envelope = {}) {
+  return JSON.stringify([
+    String(envelope.epoch || clientEventTransportState.resourceEpoch || ''),
+    String(envelope.resource || ''),
+    Number(envelope.resource_revision || 0),
+    Number(envelope.id || 0),
+  ]);
+}
+
+function clientEventReadyWatchRootsGeneration(envelope = {}, recoveryEpisodeId = 0) {
+  const revisions = envelope.resource_revisions && typeof envelope.resource_revisions === 'object'
+    ? Object.entries(envelope.resource_revisions)
+      .map(([resource, revision]) => [String(resource), Number(revision) || 0])
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    : [];
+  return JSON.stringify([
+    String(envelope.epoch || 'legacy'),
+    revisions,
+    Number(recoveryEpisodeId || 0),
+  ]);
+}
+
+function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
   if (channels.has('files')) {
     if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    if (typeof syncServerWatchRoots === 'function') {
+      syncServerWatchRoots({immediate: true, force: true, ...watchRootsForceOptions});
+    }
   }
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
   if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
@@ -109,14 +140,19 @@ function repairClientEventPatchResource(resource, envelope = {}) {
   return true;
 }
 
-function repairClientEventResources(resources = [], envelope = {}) {
+function repairClientEventResources(resources = [], envelope = {}, watchRootsForceOptions = null) {
   const genericResources = [];
   for (const rawResource of resources || []) {
     const resource = String(rawResource || '');
     if (!repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
   }
   const channels = clientEventRepairChannels(genericResources);
-  if (channels.size) repairClientEventReadyChannels(channels);
+  if (channels.size) {
+    repairClientEventReadyChannels(
+      channels,
+      watchRootsForceOptions || clientEventWatchRootsForceOptions('client-event-repair', clientEventEnvelopeForceGeneration(envelope)),
+    );
+  }
 }
 
 function clientEventReadyGapResources(envelope = {}) {
@@ -430,7 +466,7 @@ function handleClientPushEvent(type, payload = {}, envelope = {}) {
   return true;
 }
 
-function handleClientPushEventNowByType(type, payload = {}) {
+function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
   if (type === 'operation_terminal') {
     applyApiOperationTerminal(payload);
     return;
@@ -597,7 +633,13 @@ function handleClientPushEventNowByType(type, payload = {}) {
     return;
   }
   if (type === 'roots_changed') {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    if (typeof syncServerWatchRoots === 'function') {
+      syncServerWatchRoots({
+        immediate: true,
+        force: true,
+        ...clientEventWatchRootsForceOptions('roots-changed', clientEventEnvelopeForceGeneration(envelope)),
+      });
+    }
     return;
   }
   if (type === 'search_progress') {
@@ -608,12 +650,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
 }
 
 const clientPushEventHandlers = Object.freeze(Object.fromEntries(
-  clientPushEventTypes.map(type => [type, payload => handleClientPushEventNowByType(type, payload)])
+  clientPushEventTypes.map(type => [type, (payload, envelope) => handleClientPushEventNowByType(type, payload, envelope)])
 ));
 
-function handleClientPushEventNow(type, payload = {}) {
+function handleClientPushEventNow(type, payload = {}, envelope = {}) {
   const handler = clientPushEventHandlers[type];
-  if (handler) handler(payload);
+  if (handler) handler(payload, envelope);
 }
 
 function clientEventDemandDescriptor() {
@@ -637,7 +679,7 @@ function clientEventDemandDescriptor() {
       channels.add('transcripts');
     }
     if (activeItems.some(item => isTmuxSession(item) && panelActiveTabName(item) === 'events')) channels.add('events');
-    if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
+    if (activeItems.includes(debugPaneItemId)
         && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
@@ -694,7 +736,12 @@ function normalizeClientEventDemandDescriptor(descriptor = {}) {
 }
 
 function clientEventDemandSignature(descriptor) {
-  return JSON.stringify(normalizeClientEventDemandDescriptor(descriptor));
+  const normalized = normalizeClientEventDemandDescriptor(descriptor);
+  // Operation IDs are replay fences, not connection identity. The global client stream receives
+  // live operation terminals through its browser client ID; changing accepted work must not replace
+  // that stream. A newly opened stream still carries the current IDs so reconnect can replay exact
+  // terminals which completed while no subscriber was serving.
+  return JSON.stringify({...normalized, operations: []});
 }
 
 function clearClientEventDisconnectEpisode(source, options = {}) {
@@ -774,6 +821,19 @@ function closeClientEventStream() {
   if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
 
+const clientEventSourceOperationReplayIds = new WeakMap();
+
+function prepareClientEventOperationReplay(operationId) {
+  const normalized = String(operationId || '');
+  const source = clientEventTransportState.source;
+  if (!normalized || !source || clientEventTransportState.connected) return false;
+  if (clientEventSourceOperationReplayIds.get(source)?.has(normalized)) return false;
+  // There is no serving stream yet: close the stale pre-ready source and any candidate atomically.
+  // applyClientEventDemand will immediately open one URL containing every currently pending ID.
+  closeClientEventStream();
+  return true;
+}
+
 function openClientEventStream(descriptor, options = {}) {
   descriptor = normalizeClientEventDemandDescriptor(descriptor);
   if (!descriptor.channels.length) return null;
@@ -798,6 +858,7 @@ function openClientEventStream(descriptor, options = {}) {
     scheduleClientEventDisconnectEpisode(null);
     return null;
   }
+  clientEventSourceOperationReplayIds.set(source, new Set(descriptor.operations));
   if (clientEventTransportState.disconnectEpisode?.source === null) {
     clientEventTransportState.disconnectEpisode.source = source;
   }
@@ -840,13 +901,20 @@ function openClientEventStream(descriptor, options = {}) {
     } else if (clientEventTransportState.source !== source) {
       return;
     }
-    clearClientEventDisconnectEpisode(source, {recovered: true});
     const isRecoveryReady = clientEventTransportState.reconnectPending;
+    const recoveryEpisodeId = isRecoveryReady && clientEventTransportState.disconnectEpisode?.source === source
+      ? clientEventTransportState.disconnectEpisode.id
+      : 0;
+    clearClientEventDisconnectEpisode(source, {recovered: true});
     clientEventTransportState.reconnectPending = false;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     const envelope = clientEventEnvelope(event);
     const readyEpoch = String(envelope.epoch || '');
+    const watchRootsForceOptions = clientEventWatchRootsForceOptions(
+      'client-events-ready',
+      clientEventReadyWatchRootsGeneration(envelope, recoveryEpisodeId),
+    );
     // Older servers did not include an epoch/revision summary. Treat that compatibility frame
     // as an unknown reconnect and conservatively repair current demand rather than assuming it
     // is the same generation with zero gaps.
@@ -858,14 +926,18 @@ function openClientEventStream(descriptor, options = {}) {
     }
     if (freshEpoch) {
       const readyResources = Object.keys(envelope.resource_revisions || {});
-      repairClientEventResources(readyResources, envelope);
+      repairClientEventResources(readyResources, envelope, watchRootsForceOptions);
       const unrepairedChannels = new Set(channels);
       for (const channel of clientEventRepairChannels(readyResources)) unrepairedChannels.delete(channel);
-      repairClientEventReadyChannels(unrepairedChannels);
+      repairClientEventReadyChannels(unrepairedChannels, watchRootsForceOptions);
     } else {
       const gapResources = clientEventReadyGapResources(envelope);
       repairReadyEventLogRevisions(gapResources, envelope);
-      repairClientEventResources(gapResources.filter(resource => !/^event_log_changed/.test(resource)), envelope);
+      repairClientEventResources(
+        gapResources.filter(resource => !/^event_log_changed/.test(resource)),
+        envelope,
+        watchRootsForceOptions,
+      );
     }
   });
   source.addEventListener('ping', event => {
@@ -932,8 +1004,8 @@ function applyClientEventDemand(timer = clientEventTransportState.demandTimer, s
   const descriptor = clientEventDemandDescriptor();
   const signature = clientEventDemandSignature(descriptor);
   const sameDemand = signature === clientEventTransportState.demandSignature;
-  if (sameDemand && clientEventTransportState.source) return false;
   clientEventTransportState.demand = descriptor;
+  if (sameDemand && clientEventTransportState.source) return false;
   clientEventTransportState.demandSignature = signature;
   if (!descriptor.channels.length) {
     if (!sameDemand) closeClientEventStream();

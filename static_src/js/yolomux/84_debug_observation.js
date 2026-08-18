@@ -1072,6 +1072,7 @@ function debugSubTabsHtml() {
   loadJsDebugStatsUiPreferences();
   return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
     ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
+    ${debugSubTabButtonHtml('cost', t('debug.tab.cost'))}
     ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
     ${debugSubTabButtonHtml('system', t('debug.tab.services'))}
     ${debugSubTabButtonHtml('logs', t('debug.tab.logs'))}

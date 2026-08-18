@@ -403,6 +403,82 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert kwargs["stderr"] is subprocess.STDOUT
 
 
+@pytest.mark.parametrize(
+    "artifact_location",
+    ("generated-outside", "generated-inside", "contained-explicit", "outside-explicit", "forged-exact"),
+)
+def test_registry_spawn_rebases_only_generated_artifacts_outside_current_root(tmp_path, monkeypatch, artifact_location):
+    starts = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    root = Path("/tmp") / f"yls-{os.getpid()}"
+    generated_prefix = str(tmp_path / "bootstrap-python-cache")
+    for key in (
+        "YOLOMUX_CONFIG_DIR",
+        "YOLOMUX_STATE_DIR",
+        "YOLOMUX_CACHE_DIR",
+        "YOLOMUX_RUNTIME_DIR",
+        "YOLOMUX_CODEX_HOME",
+        "CODEX_HOME",
+        "YOLOMUX_HOST_ARTIFACT_DIR",
+        "PYTHONPYCACHEPREFIX",
+        "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("YOLOMUX_ROOT", str(root))
+    if artifact_location == "generated-outside":
+        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setattr(sys, "pycache_prefix", generated_prefix)
+    elif artifact_location == "generated-inside":
+        contained_generated = str(root / "generated-python-cache")
+        monkeypatch.setenv("PYTHONPYCACHEPREFIX", contained_generated)
+        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", contained_generated)
+        monkeypatch.setattr(sys, "pycache_prefix", contained_generated)
+    elif artifact_location == "contained-explicit":
+        monkeypatch.setenv("YOLOMUX_HOST_ARTIFACT_DIR", str(root / "artifacts"))
+        monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(root / "explicit-python-cache"))
+        monkeypatch.delenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", raising=False)
+    elif artifact_location == "outside-explicit":
+        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", str(tmp_path / "different-prefix"))
+    else:
+        monkeypatch.setenv("PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setenv("YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX", generated_prefix)
+        monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "different-prefix"))
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        popen=lambda args, **kwargs: starts.append((args, kwargs)) or FakeProcess(),
+    )
+
+    if artifact_location in {"outside-explicit", "forged-exact"}:
+        with pytest.raises(ValueError, match="PYTHONPYCACHEPREFIX resolves outside YOLOMUX_ROOT"):
+            registry._spawn()
+        assert starts == []
+        return
+
+    assert registry._spawn() is not None
+    child = starts[0][1]["env"]
+    assert Path(child["PYTHONPYCACHEPREFIX"]).is_relative_to(root)
+    assert Path(child["PIP_CACHE_DIR"]).is_relative_to(root)
+    assert Path(child["NPM_CONFIG_CACHE"]).is_relative_to(root)
+    assert Path(child["COVERAGE_FILE"]).is_relative_to(root)
+    if artifact_location == "generated-outside":
+        assert child["PYTHONPYCACHEPREFIX"] != generated_prefix
+        assert child["YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
+    elif artifact_location == "generated-inside":
+        assert child["PYTHONPYCACHEPREFIX"] == str(root / "generated-python-cache")
+        assert child["YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX"] == child["PYTHONPYCACHEPREFIX"]
+    else:
+        assert child["YOLOMUX_HOST_ARTIFACT_DIR"] == str(root / "artifacts")
+        assert child["PYTHONPYCACHEPREFIX"] == str(root / "explicit-python-cache")
+        assert "YOLOMUX_GENERATED_PYTHONPYCACHEPREFIX" not in child
+
+
 def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     starts = []
 

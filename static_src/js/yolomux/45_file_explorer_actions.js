@@ -42,7 +42,11 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
+    () => fetchFilesystemBatchItem('info', normalized, {
+      dedupe: options.fresh !== true,
+      trigger: fileExplorerFsBatchTrigger(options),
+      terminalOwner: options.terminalOwner,
+    }),
     {
       skipRequest: () => suppressBackgroundFilesystemFetch(options),
       skipValue: null,
@@ -977,19 +981,28 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
+function fileExplorerQualifiedExpandedPaths(root, entriesByDir) {
+  return qualifyFileExplorerDirectoryPaths(root, Array.from(fileExplorerExpanded), entriesByDir);
+}
+
 async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
-  const directories = new Set([normalizedRoot]);
-  for (const path of fileExplorerExpanded) {
-    if (pathIsInsideDirectory(path, normalizedRoot) && path !== normalizedRoot) directories.add(normalizeDirectoryPath(path));
-  }
-  const listings = await Promise.all(Array.from(directories).map(async directory => ({
-    directory,
-    entries: await fetchDirectory(directory, options),
-  })));
-  for (const {directory, entries} of listings) {
-    if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+  const rootEntries = await fetchDirectory(normalizedRoot, options);
+  if (!rootEntries) return entriesByDir;
+  entriesByDir.set(normalizedRoot, rootEntries);
+  const expandedPaths = fileExplorerExpandedPathsForRoot(normalizedRoot);
+  const maximumDepth = expandedPaths.reduce((maximum, path) => Math.max(maximum, childPathParts(normalizedRoot, path).length), 0);
+  for (let depth = 1; depth <= maximumDepth; depth += 1) {
+    const qualified = fileExplorerQualifiedExpandedPaths(normalizedRoot, entriesByDir)
+      .filter(path => childPathParts(normalizedRoot, path).length === depth);
+    const listings = await Promise.all(qualified.map(async directory => ({
+      directory,
+      entries: await fetchDirectory(directory, options),
+    })));
+    for (const {directory, entries} of listings) {
+      if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+    }
   }
   return entriesByDir;
 }
@@ -2475,13 +2488,13 @@ async function refreshOpenFilesIfChanged(options = {}) {
 
 function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
-  const directories = new Set();
   if (!fileExplorerTreePaneIsVisible()) return [];
-  directories.add(root);
-  for (const path of fileExplorerExpanded) {
-    if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
+  const entriesByDir = new Map();
+  for (const directory of [root, ...fileExplorerExpandedPathsForRoot(root)]) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    if (Array.isArray(entries)) entriesByDir.set(directory, entries);
   }
-  return Array.from(directories);
+  return [root, ...fileExplorerQualifiedExpandedPaths(root, entriesByDir)];
 }
 
 function visibleFileEditorWatchFiles() {
@@ -2501,14 +2514,32 @@ function backgroundFileEditorWatchFiles() {
     .sort();
 }
 
-function clientServerWatchRoots() {
-  const roots = new Set(watchedFileExplorerDirectories());
+const clientServerWatchRootSurfacesVersion = 1;
+const clientServerWatchRootSurfaceNames = new Set([
+  'finder',
+  'modified-files-parent',
+  'modified-files-repository',
+]);
+
+function addClientServerWatchRootSurface(rootSurfaces, path, surface) {
+  const normalized = normalizeDirectoryPath(path);
+  if (!normalized || !normalized.startsWith('/') || !clientServerWatchRootSurfaceNames.has(surface)) return;
+  const surfaces = rootSurfaces.get(normalized) || new Set();
+  surfaces.add(surface);
+  rootSurfaces.set(normalized, surfaces);
+}
+
+function clientServerWatchRootDescriptor() {
+  const rootSurfaces = new Map();
+  for (const directory of watchedFileExplorerDirectories()) {
+    addClientServerWatchRootSurface(rootSurfaces, directory, 'finder');
+  }
   if (fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
     for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
-      roots.add(path);
+      addClientServerWatchRootSurface(rootSurfaces, path, 'modified-files-repository');
       repoRoots.push(path);
     }
     // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
@@ -2516,13 +2547,12 @@ function clientServerWatchRoots() {
     for (const file of fileExplorerSessionFilesState.payload?.files || []) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
-      roots.add(dirnameOf(path));
+      addClientServerWatchRootSurface(rootSurfaces, dirnameOf(path), 'modified-files-parent');
     }
   }
-  return Array.from(roots)
-    .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && path.startsWith('/'))
-    .sort();
+  const rows = Array.from(rootSurfaces, ([path, surfaces]) => ({path, surfaces: Array.from(surfaces).sort()}))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return {roots: rows.map(row => row.path), rootSurfaces: rows};
 }
 
 function transcriptPreviewPaneIsActive(session) {
@@ -2542,6 +2572,8 @@ function clientServerWatchState() {
   if (document.visibilityState === 'hidden') {
     return {
       roots: [],
+      root_surfaces_version: clientServerWatchRootSurfacesVersion,
+      root_surfaces: [],
       files: [],
       background_files: [],
       context_items: [],
@@ -2549,11 +2581,14 @@ function clientServerWatchState() {
       session_files: [],
     };
   }
+  const rootDescriptor = clientServerWatchRootDescriptor();
   const state = {
     // This is the existing client-event identity, not a filesystem path. The
     // server unions simultaneous tabs and releases this descriptor on SSE close.
     client_id: String(browserClientId || ''),
-    roots: clientServerWatchRoots(),
+    roots: rootDescriptor.roots,
+    root_surfaces_version: clientServerWatchRootSurfacesVersion,
+    root_surfaces: rootDescriptor.rootSurfaces,
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
     context_items: transcriptContextWatchRequests(),
@@ -2574,28 +2609,60 @@ function clientServerWatchState() {
 }
 
 function mergedServerWatchRootsOptions(options = {}) {
-  return {
+  const merged = {
     ...serverWatchRootsState.pendingOptions,
     ...options,
     force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
     immediate: serverWatchRootsState.pendingOptions.immediate === true || options.immediate === true,
   };
+  if (options.force === true) {
+    merged.forceSourceOwner = String(options.forceSourceOwner || '');
+    merged.forceSourceGeneration = String(options.forceSourceGeneration || '');
+  }
+  return merged;
+}
+
+function serverWatchRootsForceIdentity(options = {}) {
+  if (options.force !== true) return null;
+  const owner = String(options.forceSourceOwner || '');
+  const generation = String(options.forceSourceGeneration || '');
+  return owner && generation ? {owner, generation} : null;
+}
+
+function serverWatchRootsRequestKey(signature, options = {}) {
+  if (options.force !== true) return JSON.stringify([signature, '', '']);
+  const identity = serverWatchRootsForceIdentity(options);
+  return identity ? JSON.stringify([signature, identity.owner, identity.generation]) : '';
+}
+
+function serverWatchRootsForceRequestCompleted(signature, options = {}) {
+  const identity = serverWatchRootsForceIdentity(options);
+  if (!identity) return false;
+  return serverWatchRootsState.completedForceKeys.get(identity.owner) === serverWatchRootsRequestKey(signature, options);
 }
 
 function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
+  const state = clientServerWatchState();
+  const signature = JSON.stringify(state);
+  const requestKey = serverWatchRootsRequestKey(signature, options);
   if (serverWatchRootsState.inFlight) {
+    if ((options.force !== true && signature === serverWatchRootsState.signature)
+      || (requestKey && requestKey === serverWatchRootsState.activeKey)) {
+      return serverWatchRootsState.request;
+    }
     serverWatchRootsState.pendingOptions = mergedServerWatchRootsOptions(options);
     return;
   }
-  const state = clientServerWatchState();
-  const signature = JSON.stringify(state);
   if (signature === serverWatchRootsState.signature && options.force !== true) return;
+  if (serverWatchRootsForceRequestCompleted(signature, options)) return;
+  const forceIdentity = serverWatchRootsForceIdentity(options);
   serverWatchRootsState.signature = signature;
   serverWatchRootsState.inFlight = true;
+  serverWatchRootsState.activeKey = requestKey;
   serverWatchRootsState.registrationPending = true;
   serverWatchRootsState.registered = false;
-  return apiFetch('/api/watch/roots', {
+  const request = apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
@@ -2604,6 +2671,9 @@ function syncServerWatchRootsNow(options = {}) {
     serverWatchRootsState.registered = true;
     serverWatchRootsState.syncedAt = Date.now();
     return ensureFileExplorerFilesystemWatchBaseline();
+  }).then(result => {
+    if (forceIdentity && requestKey) serverWatchRootsState.completedForceKeys.set(forceIdentity.owner, requestKey);
+    return result;
   }).catch(() => {
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.signature = '';
@@ -2611,10 +2681,14 @@ function syncServerWatchRootsNow(options = {}) {
   }).finally(() => {
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.inFlight = false;
+    serverWatchRootsState.request = null;
+    serverWatchRootsState.activeKey = '';
     if (Object.keys(serverWatchRootsState.pendingOptions).length) {
       syncServerWatchRoots({immediate: true});
     }
   });
+  serverWatchRootsState.request = request;
+  return request;
 }
 
 function ensureFileExplorerFilesystemWatchBaseline() {
@@ -2622,7 +2696,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
     return Boolean(fileExplorerFilesystemWatchToken);
   }
   if (!serverWatchRootsState.registered) {
-    syncServerWatchRoots({immediate: true, force: true});
+    syncServerWatchRoots({immediate: true});
     return false;
   }
   const baseline = (async () => {
@@ -2635,21 +2709,36 @@ function ensureFileExplorerFilesystemWatchBaseline() {
 function syncServerWatchRoots(options = {}) {
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
+  const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);
   if (signature === serverWatchRootsState.signature && pendingOptions.force !== true) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
+    serverWatchRootsState.pendingOptions = {};
+    return;
+  }
+  if (serverWatchRootsForceRequestCompleted(signature, pendingOptions)) {
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
   const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
-  if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) return;
+  if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
+    serverWatchRootsState.scheduledKey = requestKey;
+    return;
+  }
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
+  serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};
     syncServerWatchRootsNow(pending);
@@ -2658,19 +2747,16 @@ function syncServerWatchRoots(options = {}) {
 
 async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
-  const directories = watchedFileExplorerDirectories();
-  if (!directories.length) return;
   let changed = false;
-  const entriesByDir = new Map();
+  const entriesByDir = await fileExplorerEntriesByWatchedDirectory(currentFileExplorerRoot(), {
+    recordSignature: false,
+    fresh: true,
+    trigger: options.trigger,
+  });
+  if (!entriesByDir.size) return;
   const signaturesByDir = new Map();
-  const listings = await Promise.all(directories.map(async directory => ({
-    directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
-  })));
-  for (const {directory, entries} of listings) {
-    if (!entries) continue;
+  for (const [directory, entries] of entriesByDir) {
     const normalizedDirectory = normalizeDirectoryPath(directory);
-    entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     signaturesByDir.set(normalizedDirectory, signature);
     const previous = fileExplorerDirectoryRecord(normalizedDirectory)?.signature;

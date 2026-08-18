@@ -3682,6 +3682,7 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
+  if (!jsDebugCostSubviewVisible()) return false;
   if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
   const scope = debugPricingRefreshLifecycleScope();
   const timer = setTimeout(() => {
@@ -3692,6 +3693,7 @@ function scheduleDebugCostPricingStatusRefresh() {
   }, 750);
   jsDebugPricingRefreshState.timer = timer;
   scope.ownTimer('status', timer);
+  return true;
 }
 
 function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
@@ -3853,7 +3855,7 @@ function jsDebugStatsPanelVisible() {
   return debugModeEnabled === true
     && document.visibilityState !== 'hidden'
     && typeof itemIsActivePaneTab === 'function'
-    && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
+    && itemIsActivePaneTab(debugPaneItemId);
 }
 
 function jsDebugStatsDocumentVisible() {
@@ -3861,7 +3863,7 @@ function jsDebugStatsDocumentVisible() {
 }
 
 function jsDebugStatsLayoutItemsVisible(items) {
-  return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
+  return Array.isArray(items) && items.includes(debugPaneItemId);
 }
 
 function jsDebugCurrentStatsSelection() {
@@ -3922,6 +3924,7 @@ function ensureJsDebugCurrentStatsClient() {
   loadJsDebugStatsUiPreferences();
   const selection = jsDebugCurrentStatsSelection();
   const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
+    fetch: apiFetch,
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
@@ -6426,12 +6429,19 @@ const DEBUG_SUBVIEWS = Object.freeze([
   }),
   debugSubviewDescriptor({
     id: 'cost',
-    html: yoCostPanelHtml,
-    render: (panel, options = {}) => renderYoCostPanels(options),
+    html: () => `<div class="js-debug-subview js-debug-cost-view" ${debugSubViewAttrs('cost')}><div class="preferences-scroll js-yocost-scroll"></div></div>`,
+    render: renderYoCostPanel,
     bind: bindYoCostPanel,
-    activate: () => syncDebugGraphLiveTicker(),
-    deactivate: () => syncDebugGraphLiveTicker(),
-    relocalize: relocalizeYoCostPanelChrome,
+    activate: () => {
+      renderYoCostPanels({force: true});
+      if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+      syncDebugGraphLiveTicker();
+    },
+    deactivate: () => {
+      disposeDebugPricingRefreshLifecycle('cost-subtab-deactivated');
+      syncDebugGraphLiveTicker();
+    },
+    relocalize: panel => renderYoCostPanel(panel, {force: true}),
   }),
 ]);
 
@@ -6440,7 +6450,7 @@ function debugSubview(id) {
 }
 
 function debugPanelSubviewDescriptors() {
-  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
+  return DEBUG_SUBVIEWS;
 }
 
 function syncDebugSubviewActivation({pollNow = false} = {}) {
@@ -6453,7 +6463,7 @@ function syncDebugSubviewActivation({pollNow = false} = {}) {
 function debugPanelHtml() {
   return `
     ${debugSubTabsHtml()}
-    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
+    ${['graph', 'cost', 'events', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
@@ -6531,58 +6541,42 @@ function bindYoCostPanel(panel) {
   });
 }
 
-function createYoCostPanel() {
-  enableDebugMode();
-  return createFramedPanel({
-    item: yocostItemId,
-    className: 'panel js-yocost-panel',
-    frame: {
-      headClass: 'preferences-panel-head',
-      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
-      bodyClass: 'preferences-body js-yocost-body',
-      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-    },
-    bind: panel => debugSubview('cost').bind(panel),
-  });
-}
-
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
   return 3000 + Math.floor(Math.max(0, Math.min(1, Number(randomValue) || 0)) * 7000);
 }
 
-function renderYoCostPanels({force = false} = {}) {
+function jsDebugCostSubviewVisible() {
+  return typeof document !== 'undefined'
+    && document.visibilityState !== 'hidden'
+    && debugRuntimeState.subTab === 'cost'
+    && itemIsActivePaneTab(debugPaneItemId);
+}
+
+function renderYoCostPanel(panel, {force = false} = {}) {
   if (dragState.item != null) {
     jsDebugRenderForce ||= force;
     jsDebugRenderDragDeferred = true;
     return false;
   }
   const nowMs = Date.now();
-  const visible = typeof document !== 'undefined'
-    && document.visibilityState !== 'hidden'
-    && itemIsActivePaneTab(yocostItemId);
-  if (!force && (!visible || nowMs < jsDebugCostPanelNextRefreshAtMs)) return false;
-  let rendered = false;
-  for (const panel of document.querySelectorAll('.js-yocost-panel')) {
-    const recentlyScrolled = nowMs - Number(panel.dataset.jsDebugCostLastScrollMs || 0) < 1000;
-    if (debugGraphInteractionBelongsToPanel(panel) || recentlyScrolled) {
-      panel.dataset.jsDebugGraphRefreshPending = 'true';
-      continue;
-    }
-    const body = panel.querySelector('.js-yocost-body');
-    reconcilePanelBody({
-      body,
-      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-      anchors: [
-        elementScrollAnchor('.js-yocost-scroll'),
-        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
-      ],
-    });
-    delete panel.dataset.jsDebugGraphRefreshPending;
-    bindYoCostPanel(panel);
-    rendered = true;
+  if (!panel || !jsDebugCostSubviewVisible()) return false;
+  if (!force && nowMs < jsDebugCostPanelNextRefreshAtMs) return false;
+  const recentlyScrolled = nowMs - Number(panel.dataset.jsDebugCostLastScrollMs || 0) < 1000;
+  if (debugGraphInteractionBelongsToPanel(panel) || recentlyScrolled) {
+    panel.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
   }
-  if (!rendered) return false;
+  const body = panel.querySelector('[data-js-debug-subview="cost"]');
+  reconcilePanelBody({
+    body,
+    html: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    anchors: [
+      elementScrollAnchor('.js-yocost-scroll'),
+      keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+    ],
+  });
+  delete panel.dataset.jsDebugGraphRefreshPending;
+  bindYoCostPanel(panel);
   commitJsDebugCurrentStatsPaint();
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
@@ -6591,15 +6585,19 @@ function renderYoCostPanels({force = false} = {}) {
   return true;
 }
 
+function renderYoCostPanels(options = {}) {
+  let rendered = false;
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    rendered = renderYoCostPanel(panel, options) || rendered;
+  }
+  return rendered;
+}
+
 function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force, deferFocusedControl});
   }
   renderYoCostPanels({force});
-}
-
-function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
-  return relocalizeVirtualPanelChrome(panel, yocostTabLabel());
 }
 
 function createDebugPanel() {
@@ -6675,7 +6673,6 @@ function renderDebugPanels(options = {}) {
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -6688,7 +6685,6 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -6790,7 +6786,7 @@ function preserveDebugGraphBodyControls(graph, nextBody) {
 }
 
 function debugCostAgeLabels() {
-  if (typeof document === 'undefined' || !itemIsActivePaneTab(yocostItemId)) return [];
+  if (!jsDebugCostSubviewVisible()) return [];
   return [...document.querySelectorAll('[data-js-yocost-data-age-label]')].filter(label => !label.closest('[hidden]') && label.getClientRects().length > 0);
 }
 
@@ -6827,12 +6823,12 @@ function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
   const slidingActive = jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive();
   const intervalMs = slidingActive ? debugGraphSlideIntervalMs(debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs)) : Infinity;
   const nextSlideMs = slidingActive ? Math.ceil((nowMs + 1) / intervalMs) * intervalMs : Infinity;
-  const nextAgeMs = itemIsActivePaneTab(yocostItemId) ? jsDebugCostAgeNextRefreshAtMs || nowMs : Infinity;
+  const nextAgeMs = jsDebugCostSubviewVisible() ? jsDebugCostAgeNextRefreshAtMs || nowMs : Infinity;
   return Math.min(nextSlideMs, nextAgeMs);
 }
 
 function debugGraphLiveTickerNeeded() {
-  return (jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive()) || itemIsActivePaneTab(yocostItemId);
+  return (jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive()) || jsDebugCostSubviewVisible();
 }
 
 function debugGraphSlideLiveViews(nowMs = Date.now()) {
@@ -6889,7 +6885,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
-  if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel, .js-yocost-panel'))) {
+  if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel'))) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
@@ -6940,7 +6936,8 @@ function bindDebugCostSummaryTabButtons(graph) {
     bindOnce(anchor, 'debug-cost-details', () => {
       const handleClick = event => {
       event.preventDefault();
-      selectSession(yocostItemId, {userInitiated: true});
+      void Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+        .then(() => setDebugSubTab('cost'));
       };
       anchor.addEventListener('click', handleClick);
       return () => anchor.removeEventListener('click', handleClick);
@@ -7394,7 +7391,7 @@ function flushDeferredDebugGraphInteractionRefresh(panel) {
   for (const graph of panel.querySelectorAll?.('[data-js-debug-graph]') || []) {
     flushed = flushDeferredDebugGraphRefresh(graph) || flushed;
   }
-  if (panel.matches?.('.js-yocost-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
+  if (panel.matches?.('.js-debug-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
     delete panel.dataset.jsDebugGraphRefreshPending;
     flushed = renderYoCostPanels({force: true}) || flushed;
   }
@@ -7833,7 +7830,6 @@ function bindDebugPanel(panel) {
 
 registerDebugRuntimeFacade('panel', {
   createDebugPanel,
-  createYoCostPanel,
   renderDebugPanels,
   renderYoCostPanels,
 });

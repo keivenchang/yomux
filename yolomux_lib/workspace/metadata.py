@@ -670,9 +670,35 @@ class MetadataCache(TtlCache):
     # (time.time), as the original did, via clock=. Per-entry TTL on set() is inherited.
     def __init__(self, ttl_seconds: int = METADATA_CACHE_TTL_SECONDS):
         super().__init__(ttl_seconds=ttl_seconds, max_entries=1024, clock=time.time)
+        # Provider-cache generation and value publication are one transition. The parent `set`
+        # owns eviction, so use a re-entrant lock instead of copying that algorithm here.
+        self.lock = threading.RLock()
+        self.generation = 0
 
     def get(self, key: str) -> Any:
         return self.get_or_miss(key)
+
+    def source_generation(self) -> int:
+        """Return the provider-cache generation after retiring expired inputs."""
+        now = self.clock()
+        with self.lock:
+            expired = [name for name, (expires_at, _value) in self.values.items() if expires_at <= now]
+            for name in expired:
+                self.values.pop(name, None)
+            if expired:
+                self.generation += 1
+            return self.generation
+
+    def clear(self) -> None:
+        with self.lock:
+            if self.values:
+                self.values.clear()
+                self.generation += 1
+
+    def set(self, key: str, value: Any, ttl: float | None = None) -> None:
+        with self.lock:
+            super().set(key, value, ttl=ttl)
+            self.generation += 1
 
 
 WORK_GRAPH_VERSION = 1
@@ -1513,7 +1539,16 @@ def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
         key: {"value": value, "ttl_remaining": max(0.0, expires_at - now)}
         for key, (expires_at, value) in cache.values.items()
     }
-    result = {"entries": entries, "truncated": False, "profile": {"work": {"sessions": warmed_sessions, **work}}}
+    result = {
+        "entries": entries,
+        "truncated": False,
+        "profile": {"work": {
+            "sessions": warmed_sessions,
+            "jobd_work_graph_rebuild": warmed_sessions,
+            "provider_metadata_rebuild": int(warmed_sessions > 0),
+            **work,
+        }},
+    }
     # A pathological fan-out of branches/PRs/Linear issues is bounded by evicting the
     # lowest-remaining-TTL entries first -- those are the ones a caller can most safely defer
     # re-fetching, since they were already closest to a natural cache expiry.
@@ -2089,7 +2124,14 @@ def fallback_pull_request(repo: dict[str, str], number: int, source: str, title:
         "source": source,
     }
 
-def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_network: bool = True, include_metadata: bool = True) -> dict[str, Any]:
+def session_to_json(
+    info: SessionInfo,
+    metadata_cache: MetadataCache,
+    allow_network: bool = True,
+    include_metadata: bool = True,
+    *,
+    work_graph: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     transcript_mtime = 0.0
     for agent in info.agents:
         if not agent.transcript:
@@ -2098,7 +2140,10 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
             transcript_mtime = max(transcript_mtime, Path(agent.transcript).stat().st_mtime)
         except OSError:
             continue
-    work_graph = session_work_graph(info, metadata_cache, allow_network=allow_network) if include_metadata else empty_work_graph(loading=True)
+    if include_metadata:
+        resolved_work_graph = work_graph if work_graph is not None else session_work_graph(info, metadata_cache, allow_network=allow_network)
+    else:
+        resolved_work_graph = empty_work_graph(loading=True)
     window_rows = window_metadata(info)
     return {
         "session": info.session,
@@ -2122,6 +2167,6 @@ def session_to_json(info: SessionInfo, metadata_cache: MetadataCache, allow_netw
         ],
         "window_metadata": window_rows,
         "transcript_mtime": transcript_mtime,
-        "work_graph": work_graph,
+        "work_graph": resolved_work_graph,
         "metadata_loading": not include_metadata,
     }

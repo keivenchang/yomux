@@ -382,6 +382,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "גרפים",
+  "debug.tab.cost": "עלות",
   "debug.tab.services": "דמונים",
   "debug.tab.logs": "יומנים",
   "debug.waitingForServerStats": "ממתין לנתוני השרת",
