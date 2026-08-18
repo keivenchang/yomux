@@ -1971,7 +1971,15 @@ const tabStripOverflowCheckSet = new Set();
 let tabStripOverflowCheckFrame = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
-let authRedirectStarted = false;
+// Authentication expiry is one one-way browser transition: retain its terminal outcome, redirect
+// claim, visible state, and transport retirements together so no poller invents a local retry policy.
+const authRedirectStarted = {
+  redirect: false,
+  terminalError: null,
+  loginUrl: '',
+  retirements: new Map(),
+};
+let devAutoReloadSource = null;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;

@@ -386,6 +386,7 @@ class StatsCurrentClient:
     def ensure_started(self) -> bool:
         if self._upgrade_required is not None:
             return False
+        self._transport.registry.prune_stale_runtime_locks_once()
         if self._transport.registry.recently_healthy() or self._transport.registry.healthy():
             return True
         upgrade = self._transport.registry._upgrade_required

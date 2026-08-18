@@ -2777,6 +2777,7 @@ test('hidden boot loads saved exact selection before constructing the one curren
     function itemIsActivePaneTab() { return false; }
     function jsDebugStatsClientIdForRequest() { return 'saved-selection'; }
     function apiFetch() {}
+    function claimTerminalAuthentication() {}
     function recordJsDebugCurrentStatsFailure() {}
     function recordJsDebugCurrentStatsRetirement() {}
     function acceptJsDebugCurrentStatsPushProof() {}

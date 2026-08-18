@@ -104,6 +104,32 @@ class FilesystemWatchReadyProductRecord:
 
 
 @dataclass
+class JobdOperationFlight:
+    """One keyed completion reservation shared by equivalent accepted-operation callers."""
+
+    lane: str
+    key: str
+    deadline_at: float
+    future: Future[Any] = field(default_factory=Future)
+    owner_ready: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    owner_operation_id: str = ""
+    participants: int = 1
+
+    def accept_owner(self, operation_id: str) -> None:
+        self.owner_operation_id = str(operation_id)
+        self.owner_ready.set()
+
+    def cancel_owner(self) -> None:
+        self.cancelled.set()
+        self.owner_ready.set()
+
+    def wait_for_owner(self) -> str:
+        self.owner_ready.wait()
+        return "" if self.cancelled.is_set() else self.owner_operation_id
+
+
+@dataclass
 class StatsSampleRecord:
     last_monotonic: float | None = None
     last_process_time: float | None = None
@@ -465,9 +491,11 @@ class JobdOperationService:
 
     worker_limit: int = 4
     operation_limit: int = 64
+    flight_participant_limit: int = 64
     lock: threading.RLock = field(default_factory=threading.RLock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     futures: set[Future[Any]] = field(default_factory=set)
+    flights: dict[tuple[str, str], JobdOperationFlight] = field(default_factory=dict)
     _lane_slots: dict[str, threading.BoundedSemaphore] = field(init=False)
     _lane_executors: dict[str, ThreadPoolExecutor | None] = field(init=False)
     _idle_condition: threading.Condition = field(init=False)
@@ -475,6 +503,7 @@ class JobdOperationService:
     def __post_init__(self) -> None:
         self.worker_limit = max(1, int(self.worker_limit))
         self.operation_limit = max(self.worker_limit, int(self.operation_limit))
+        self.flight_participant_limit = max(1, int(self.flight_participant_limit))
         self._lane_slots = {lane: threading.BoundedSemaphore(self.operation_limit) for lane in JOBD_OPERATION_LANES}
         self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
         self._idle_condition = threading.Condition(self.lock)
@@ -493,6 +522,43 @@ class JobdOperationService:
             if not self._lane_slots[lane].acquire(blocking=False):
                 return None
             return JobdOperationReservation(self, lane)
+
+    def claim(
+        self,
+        lane: str,
+        key: str,
+        deadline_at: float,
+    ) -> tuple[JobdOperationFlight | None, JobdOperationReservation | None, bool]:
+        """Atomically join one keyed flight or reserve the lane for its first caller."""
+        if lane not in self._lane_slots:
+            raise ValueError(f"unknown jobd completion lane {lane!r}")
+        flight_key = (str(lane), str(key))
+        with self.lock:
+            existing = self.flights.get(flight_key)
+            if existing is not None:
+                if existing.participants >= self.flight_participant_limit:
+                    return None, None, False
+                existing.participants += 1
+                return existing, None, False
+            if self.stop_event.is_set() or not self._lane_slots[lane].acquire(blocking=False):
+                return None, None, False
+            reservation = JobdOperationReservation(self, lane)
+            flight = JobdOperationFlight(lane=lane, key=str(key), deadline_at=float(deadline_at))
+            self.flights[flight_key] = flight
+            return flight, reservation, True
+
+    def release_flight_participant(self, flight: JobdOperationFlight) -> None:
+        """Return a claim whose caller failed before it persisted a receipt."""
+        with self.lock:
+            if flight.participants > 0:
+                flight.participants -= 1
+
+    def release_flight(self, flight: JobdOperationFlight) -> None:
+        """Release only the current owner for this exact lane/key generation."""
+        with self.lock:
+            flight_key = (flight.lane, flight.key)
+            if self.flights.get(flight_key) is flight:
+                self.flights.pop(flight_key, None)
 
     def _release_lane_slot(self, lane: str) -> None:
         self._lane_slots[lane].release()
@@ -538,6 +604,8 @@ class JobdOperationService:
             self._lane_executors = {lane: None for lane in JOBD_OPERATION_LANES}
         for executor in executors:
             executor.shutdown(wait=True, cancel_futures=True)
+        with self.lock:
+            self.flights.clear()
 
 
 @dataclass

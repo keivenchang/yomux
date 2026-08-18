@@ -420,6 +420,13 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  if (terminalAuthenticationActive() && String(url || '').split(/[?#]/, 1)[0].startsWith('/api/')) {
+    const route = typeof registeredCommandRouteForRequest === 'function'
+      ? registeredCommandRouteForRequest(url, options)
+      : null;
+    if (!terminalAuthenticationRequestIsBackground(url, options, route)) redirectToLoginUrl(authRedirectStarted.loginUrl);
+    throw authRedirectStarted.terminalError;
+  }
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
@@ -519,15 +526,15 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     noteApiDebugHeaders(debugEvent, url, startedAt);
   }
   if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
-    if (registeredCommandRouteForRequest(url, requestOptions)?.contractClass === 'background') {
+    const terminalError = claimTerminalAuthentication(response);
+    const route = registeredCommandRouteForRequest(url, requestOptions);
+    if (terminalAuthenticationRequestIsBackground(url, requestOptions, route)) {
       cleanup();
-      const error = new Error('authentication required');
-      error.status = 401;
-      throw error;
+      throw terminalError;
     }
     await redirectToLogin(response);
     cleanup();
-    throw new Error('authentication required');
+    throw terminalError;
   }
   return apiFetchResponseWithDeadline(response, {
     cleanup,
@@ -1144,15 +1151,83 @@ function loginRedirectUrlForCurrentLocation() {
   return `/login?next=${encodeURIComponent(nextPath || '/')}`;
 }
 
+function terminalAuthenticationActive() {
+  return authRedirectStarted.terminalError !== null;
+}
+
+const terminalAuthenticationBackgroundReadPaths = new Set([
+  '/api/ping',
+]);
+
+function terminalAuthenticationRequestIsBackground(url, options = {}, route = null) {
+  if (options?.yolomuxBackgroundRead === true) return true;
+  if (route?.contractClass === 'background') return true;
+  const method = typeof commandRequestMethod === 'function'
+    ? commandRequestMethod(options)
+    : String(options?.method || 'GET').trim().toUpperCase();
+  const path = typeof commandRequestPath === 'function'
+    ? commandRequestPath(url)
+    : String(url || '').split(/[?#]/, 1)[0];
+  return method === 'GET' && terminalAuthenticationBackgroundReadPaths.has(path);
+}
+
+function terminalAuthenticationError(value = null) {
+  if (value?.terminalAuthentication === true && value?.status === 401) return value;
+  const error = value instanceof Error ? value : new Error('authentication required');
+  error.status = 401;
+  error.code = 'authentication_required';
+  error.reason = 'authentication_required';
+  error.terminalAuthentication = true;
+  return error;
+}
+
+function publishTerminalAuthenticationState() {
+  if (document.body?.dataset) document.body.dataset.authenticationState = 'signed-out';
+  const status = document.getElementById?.('status');
+  if (!status) return;
+  status.textContent = t('auth.error.authenticationRequired');
+  status.setAttribute?.('role', 'alert');
+  status.setAttribute?.('aria-live', 'assertive');
+  status.setAttribute?.('aria-atomic', 'true');
+  status.classList?.add?.('layout-status-visible', 'layout-status-danger');
+  status.classList?.remove?.('layout-status-advisory');
+  if (status.dataset) status.dataset.layoutStatusKind = 'danger';
+}
+
+function registerTerminalAuthenticationRetirement(owner, retire) {
+  const key = String(owner || '').trim();
+  if (!key) throw new TypeError('terminal authentication retirement owner is required');
+  if (typeof retire !== 'function') throw new TypeError(`terminal authentication retirement ${key} must be a function`);
+  authRedirectStarted.retirements.set(key, retire);
+  if (terminalAuthenticationActive()) retire(authRedirectStarted.terminalError);
+  return () => authRedirectStarted.retirements.delete(key);
+}
+
+function claimTerminalAuthentication(value = null) {
+  if (terminalAuthenticationActive()) return authRedirectStarted.terminalError;
+  const error = terminalAuthenticationError(value);
+  authRedirectStarted.terminalError = error;
+  publishTerminalAuthenticationState();
+  for (const [owner, retire] of authRedirectStarted.retirements) {
+    try {
+      retire(error);
+    } catch (retirementError) {
+      console.error(`terminal authentication retirement failed: ${owner}`, retirementError);
+    }
+  }
+  return error;
+}
+
 function claimLoginRedirect() {
-  if (authRedirectStarted) return;
-  authRedirectStarted = true;
+  if (authRedirectStarted.redirect) return;
+  authRedirectStarted.redirect = true;
   return true;
 }
 
 function redirectToLoginUrl(loginUrl = '') {
   if (!claimLoginRedirect()) return false;
-  window.location.assign(loginUrl || loginRedirectUrlForCurrentLocation());
+  authRedirectStarted.loginUrl = loginUrl || loginRedirectUrlForCurrentLocation();
+  window.location.assign(authRedirectStarted.loginUrl);
   return true;
 }
 
@@ -1163,6 +1238,7 @@ async function redirectToLogin(response) {
     const payload = await response.clone().json();
     if (payload?.login_url) loginUrl = payload.login_url;
   } catch (_) {}
+  authRedirectStarted.loginUrl = loginUrl;
   window.location.assign(loginUrl);
 }
 

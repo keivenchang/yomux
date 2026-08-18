@@ -8662,6 +8662,270 @@ def test_filesystem_watch_diff_warm_calls_return_ready_without_another_jobd_rpc(
     assert submissions[0][2]["delivery"] == "ready_or_receipt"
 
 
+def test_equivalent_inflight_filesystem_watch_diff_requests_share_one_completion(monkeypatch, tmp_path):
+    """A duplicate reload request joins the accepted producer before completion admission."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    roots = ["/repo"]
+    product_released = threading.Event()
+    produce_started = threading.Event()
+    submissions = []
+
+    class BlockingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append((task, payload, kwargs))
+            produce_started.set()
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-watch", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            assert product_key == submissions[0][2]["coalesce_key"]
+            assert product_released.wait(2.0), "test did not release the shared watch product"
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+            }, json.dumps({
+                "responses": [{
+                    "id": 0,
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"path": "/repo", "entries": []},
+                    "watch_signature": ["/repo", "dir", 1, 0, []],
+                }],
+                "performance": {"operation_ms": 1.0},
+            }).encode("utf-8")
+
+    terminal_events = []
+    terminals_ready = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = BlockingBatchJob()
+    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    webapp.jobd_operation_service = app_module.JobdOperationService(worker_limit=1, operation_limit=1)
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type != "operation_terminal":
+            return
+        terminal_events.append(payload)
+        if len(terminal_events) == 2:
+            terminals_ready.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        first, first_status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-reload-watch-1",
+        )
+        assert produce_started.wait(1.0), "first watch-diff producer did not start"
+        second, second_status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-reload-watch-2",
+        )
+        assert [first_status, second_status] == [HTTPStatus.ACCEPTED, HTTPStatus.ACCEPTED]
+        assert first["operation"]["id"] != second["operation"]["id"]
+        assert len(submissions) == 1
+        assert len(webapp.jobd_operation_service.flights) == 1
+        assert terminal_events == []
+        product_released.set()
+        assert terminals_ready.wait(2.0), "both accepted receipts did not terminalize"
+        terminal_by_id = {event["operation"]["id"]: event for event in terminal_events}
+        assert set(terminal_by_id) == {first["operation"]["id"], second["operation"]["id"]}
+        assert all(event["result"]["state"] == "ready" for event in terminal_by_id.values())
+        assert all(event["status"] == HTTPStatus.OK for event in terminal_by_id.values())
+    finally:
+        product_released.set()
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+
+def test_watch_diff_cache_recheck_terminalizes_a_follower_that_joined_the_new_flight(monkeypatch, tmp_path):
+    """A cache publication racing a new claim cannot strand a joined accepted receipt."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    roots = ["/repo"]
+    ready_products = [{
+        "responses": [{
+            "id": 0,
+            "ok": True,
+            "status": 200,
+            "payload": {"path": "/repo", "entries": []},
+            "watch_signature": ["/repo", "dir", 1, 0, []],
+        }],
+        "performance": {"operation_ms": 1.0},
+    }]
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.jobd_operation_service = app_module.JobdOperationService(worker_limit=1, operation_limit=1)
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+
+    original_claim = webapp.jobd_operation_service.claim
+    claim_lock = threading.Lock()
+    second_at_claim = threading.Event()
+    cache_published = threading.Event()
+    owner_claimed = threading.Event()
+    follower_claimed = threading.Event()
+    claim_count = 0
+
+    def claim_after_both_cache_misses(lane, key, deadline_at):
+        nonlocal claim_count
+        with claim_lock:
+            claim_count += 1
+            ordinal = claim_count
+        if ordinal == 1:
+            assert second_at_claim.wait(1.0), "second request did not reach claim after its cache miss"
+            webapp.cache_filesystem_watch_products(ready_products, {key})
+            cache_published.set()
+            claimed = original_claim(lane, key, deadline_at)
+            owner_claimed.set()
+            assert follower_claimed.wait(1.0), "second request did not join the newly claimed flight"
+            return claimed
+        second_at_claim.set()
+        assert cache_published.wait(1.0), "cache was not published between the initial miss and claim"
+        assert owner_claimed.wait(1.0), "first request did not own the new flight"
+        claimed = original_claim(lane, key, deadline_at)
+        follower_claimed.set()
+        return claimed
+
+    monkeypatch.setattr(webapp.jobd_operation_service, "claim", claim_after_both_cache_misses)
+    terminal_events = []
+    terminal_ready = threading.Event()
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type != "operation_terminal":
+            return
+        terminal_events.append(payload)
+        terminal_ready.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    responses = []
+
+    def request(request_id):
+        responses.append(webapp.filesystem_watch_diff_http_payload(force_full=True, request_id=request_id))
+
+    requests = [
+        threading.Thread(target=request, args=("r-cache-owner",)),
+        threading.Thread(target=request, args=("r-cache-follower",)),
+    ]
+    try:
+        for worker in requests:
+            worker.start()
+        for worker in requests:
+            worker.join(timeout=2.0)
+            assert not worker.is_alive(), "watch-diff request did not finish"
+
+        assert sorted(status for _payload, status in responses) == [HTTPStatus.OK, HTTPStatus.ACCEPTED]
+        accepted = next(payload for payload, status in responses if status == HTTPStatus.ACCEPTED)
+        assert terminal_ready.wait(1.0), "the joined accepted receipt never reached a terminal result"
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["operation"]["id"] == accepted["operation"]["id"]
+        assert terminal_events[0]["status"] == HTTPStatus.OK
+        assert terminal_events[0]["result"]["state"] == "ready"
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+
+@pytest.mark.parametrize(
+    "request_order",
+    (
+        ("a", "b", "a", "b"),
+        ("b", "a", "b", "a"),
+    ),
+)
+def test_inflight_watch_diff_fanout_owns_one_completion_per_semantic_key(monkeypatch, tmp_path, request_order):
+    """Request order cannot change the one-flight-per-key ownership or cross-key isolation."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    roots_by_key = {"a": ["/repo-a"], "b": ["/repo-b"]}
+    selected_roots = roots_by_key[request_order[0]]
+    product_released = threading.Event()
+    both_producers_started = threading.Event()
+    submissions = []
+    submission_lock = threading.Lock()
+
+    class BlockingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            with submission_lock:
+                submissions.append((task, payload, kwargs))
+                if len(submissions) == len(roots_by_key):
+                    both_producers_started.set()
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{payload['requests'][0]['path']}", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            assert product_released.wait(2.0), "test did not release the distinct watch products"
+            with submission_lock:
+                submission = next(call for call in submissions if call[2]["coalesce_key"] == product_key)
+            path = submission[1]["requests"][0]["path"]
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+            }, json.dumps({
+                "responses": [{
+                    "id": 0,
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"path": path, "entries": []},
+                    "watch_signature": [path, "dir", 1, 0, []],
+                }],
+                "performance": {"operation_ms": 1.0},
+            }).encode("utf-8")
+
+    terminal_events = []
+    terminals_ready = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = BlockingBatchJob()
+    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    webapp.jobd_operation_service = app_module.JobdOperationService(worker_limit=2, operation_limit=2)
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: list(selected_roots))
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type != "operation_terminal":
+            return
+        terminal_events.append(payload)
+        if len(terminal_events) == len(request_order):
+            terminals_ready.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    receipts = []
+    try:
+        for index, key in enumerate(request_order):
+            selected_roots = roots_by_key[key]
+            receipt, status = webapp.filesystem_watch_diff_http_payload(
+                force_full=True,
+                request_id=f"r-fanout-{index}-{key}",
+            )
+            assert status == HTTPStatus.ACCEPTED
+            receipts.append((key, receipt))
+        assert both_producers_started.wait(1.0), "both distinct watch producers did not start"
+        assert len(submissions) == len(roots_by_key)
+        assert len(webapp.jobd_operation_service.flights) == len(roots_by_key)
+        product_released.set()
+        assert terminals_ready.wait(2.0), "every joined receipt did not terminalize"
+    finally:
+        product_released.set()
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    terminal_by_id = {event["operation"]["id"]: event for event in terminal_events}
+    assert len(terminal_by_id) == len(request_order)
+    for key, receipt in receipts:
+        event = terminal_by_id[receipt["operation"]["id"]]
+        assert event["status"] == HTTPStatus.OK
+        assert event["result"]["data"]["directories"][0]["path"] == roots_by_key[key][0]
+
+
 def test_filesystem_watch_diff_async_submit_failure_terminalizes_the_accepted_receipt(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     terminal = threading.Event()
@@ -8722,11 +8986,7 @@ def test_filesystem_watch_diff_force_full_acceptance_does_not_submit_refresh_or_
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-    class CapturingCompletionService:
-        stop_event = threading.Event()
-
-        def reserve(self, lane="bulk"):
-            return _StubOperationReservation(on_release=_reservation_must_not_release)
+    class CapturingCompletionService(app_module.JobdOperationService):
 
         def submit_reserved(self, reservation, function, *args):
             self.submission = (function, args)
@@ -8761,20 +9021,17 @@ def test_filesystem_watch_diff_force_full_acceptance_does_not_submit_refresh_or_
     assert submitted == []
     completion, completion_args = webapp.jobd_operation_service.submission
     assert completion == webapp.complete_filesystem_watch_diff_operation
-    assert completion_args[2] == {"mode": "full", "reason": "forced", "token": "", "removed_roots": []}
-    assert completion_args[3] == roots
+    assert completion_args[1] == {"mode": "full", "reason": "forced", "token": "", "removed_roots": []}
+    assert completion_args[2] == roots
 
 
 def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
 
-    class RejectingCompletionService:
-        stop_event = threading.Event()
-
-        def reserve(self, lane="bulk"):
-            return _StubOperationReservation(on_release=_reservation_must_not_release)
+    class RejectingCompletionService(app_module.JobdOperationService):
 
         def submit_reserved(self, reservation, _function, *_args):
+            reservation.release()
             return False
 
         def stop(self):
@@ -8819,12 +9076,8 @@ def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dro
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-    class CapturingCompletionService:
-        stop_event = threading.Event()
+    class CapturingCompletionService(app_module.JobdOperationService):
         submission = None
-
-        def reserve(self, lane="bulk"):
-            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
         def submit_reserved(self, reservation, function, *args):
             self.submission = (function, args)
@@ -8844,7 +9097,7 @@ def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dro
         )
         submitted_during_acceptance = list(submitted)
         completion, completion_args = webapp.jobd_operation_service.submission
-        batches = webapp.submit_filesystem_watch_batches(completion_args[3], completion_args[5])
+        batches = webapp.submit_filesystem_watch_batches(completion_args[2], completion_args[3])
     finally:
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
@@ -8855,7 +9108,7 @@ def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dro
     assert payload["operation"]["context"]["roots"] == 105
     assert payload["operation"]["context"]["batches"] == 2
     assert completion == webapp.complete_filesystem_watch_diff_operation
-    assert completion_args[3] == roots
+    assert completion_args[2] == roots
     assert submitted_during_acceptance == [], "acceptance must not submit any job on the request thread"
     assert [len(batch_payload["requests"]) for _task, batch_payload, _kwargs in submitted] == [64, 41]
     assert [
@@ -8899,44 +9152,14 @@ def test_filesystem_watch_diff_rejects_more_roots_than_the_client_watch_contract
 def test_filesystem_watch_diff_releases_completion_reservation_when_operation_acceptance_fails(monkeypatch):
     current = (("/repo", ("/repo", "dir", 1, 0, ())),)
 
-    class TrackingCompletionService:
-        stop_event = threading.Event()
-
-        def __init__(self):
-            self.reservations = 0
-            self.workers = []
-
-        def reserve(self, lane="bulk"):
-            self.reservations += 1
-            return _StubOperationReservation(on_release=self._release)
-
-        def _release(self):
-            self.reservations -= 1
-
-        def submit_reserved(self, reservation, function, *args):
-            def run():
-                try:
-                    function(*args)
-                finally:
-                    reservation.release()
-
-            worker = threading.Thread(target=run)
-            self.workers.append(worker)
-            worker.start()
-            return True
-
-        def stop(self):
-            self.stop_event.set()
-            for worker in self.workers:
-                worker.join(timeout=2.0)
-
     pending_batch = app_module.FilesystemWatchBatchProduct(
         producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:test", generation=1),
         ready_product={"responses": []},
     )
-    completion_service = TrackingCompletionService()
+    completion_service = app_module.JobdOperationService(worker_limit=1, operation_limit=1)
     webapp = app_module.TmuxWebtermApp([])
     webapp.jobd_operation_service = completion_service
+    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
     monkeypatch.setattr(
         webapp,
         "submit_filesystem_watch_batches",
@@ -8951,11 +9174,13 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
         webapp.record_filesystem_watch_snapshot(current)
         with pytest.raises(RuntimeError, match="ledger write failed"):
             webapp.filesystem_watch_diff_http_payload(since_token="missing")
+        assert completion_service.wait_for_idle(2.0)
+        reservation = completion_service.reserve("bulk")
+        assert reservation is not None, "failed receipt acceptance leaked its completion slot"
+        reservation.release()
     finally:
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
-
-    assert completion_service.reservations == 0
 
 
 def test_filesystem_watch_diff_plan_returns_full_when_since_is_stale():

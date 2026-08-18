@@ -277,6 +277,7 @@ def run_local_rpc_service(
     on_start: Callable[[], None] | None = None,
     on_shutdown: Callable[[], None] | None = None,
     concurrent_handlers: int = 0,
+    parent_pid_reader: Callable[[], int] = os.getppid,
 ) -> int:
     """Run one bounded local service socket until stopped or idle.
 
@@ -291,6 +292,7 @@ def run_local_rpc_service(
     unattributed latency.
     """
     previous_handlers = install_stop_signal_handlers(stop_event)
+    launching_parent_pid = max(0, int(parent_pid_reader()))
     requested_socket_path = socket_path
     socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
     socket_alias = requested_socket_path if requested_socket_path != socket_path else None
@@ -415,6 +417,9 @@ def run_local_rpc_service(
 
             try:
                 while not stop_event.is_set():
+                    if launching_parent_pid > 1 and int(parent_pid_reader()) != launching_parent_pid:
+                        stop_event.set()
+                        continue
                     try:
                         connection, _address = server.accept()
                     except TimeoutError:

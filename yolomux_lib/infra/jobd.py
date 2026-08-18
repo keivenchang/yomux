@@ -47,6 +47,7 @@ from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
 from ..local_services.runtime import local_service_exception_cause
 from ..local_services.runtime import redact_local_service_text
+from ..local_services.runtime import reap_dead_client_leases
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
 from ..local_services.client import LocalServiceClient
@@ -1693,6 +1694,7 @@ class PersistentJobBroker:
         return response, b""
 
     def common_status(self) -> dict[str, Any]:
+        reap_dead_client_leases(self.leases)
         self._refresh_records()
         active_records = [
             self._record_payload(record)
@@ -1897,6 +1899,7 @@ class PersistentJobBroker:
 
     def _idle_should_stop(self) -> bool:
         with self.state_lock:
+            reap_dead_client_leases(self.leases)
             return (
                 not self.leases
                 and not self._queued_count()

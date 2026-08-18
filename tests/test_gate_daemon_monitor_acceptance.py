@@ -239,11 +239,11 @@ def _statsd_restart_count(server: IsolatedDevServer) -> int:
     return _restart_counts(document).get("statsd", 0)
 
 
-def _assert_restart_counts_preserved(
+def _assert_restart_counts_bounded(
     before_counts: dict[str, int],
     after_counts: dict[str, int],
 ) -> None:
-    """Every resource counted before the web restart must still be present after, with the SAME count.
+    """Every retained resource stays present and records at most one real parent-bound restart.
 
     Present FIRST, then exact-compare with NO default: a resource that VANISHED from the post-restart
     health document is a failure, not an "unchanged" pass. Reading the after value with a
@@ -257,9 +257,9 @@ def _assert_restart_counts_preserved(
         f"{vanished} (before={before_counts}, after={after_counts})"
     )
     for name, before_count in before_counts.items():
-        assert after_counts[name] == before_count, (
+        assert after_counts[name] in {before_count, before_count + 1}, (
             f"a5: web restart changed restart_count for {name}: {before_count} -> {after_counts[name]} "
-            "(shared daemons should survive the restart with unchanged epochs)"
+            "(a parent-bound daemon may restart once, but must not be double-counted)"
         )
 
 
@@ -314,15 +314,12 @@ def test_a5_service_then_web_restart_continues_history_without_double_counting(
 ) -> None:
     """A5: a service restart, then a web restart on the same port, continues the retained history.
 
-    The shared service daemons run at a production-like idle here, so a brief web restart does not
-    make them idle-exit. That is the real deployment: statsd is deliberately shared so it survives a
-    web restart, which is exactly why the backend-health epoch survives too. A 0.2 s idle would make
-    every daemon idle-exit during the restart gap and respawn fresh -- a real restart the observer
-    correctly counts, which would drown the double-count signal this test is trying to isolate.
+    Service daemons are parent-bound: a web restart retires the old generation even when its idle
+    deadline has not elapsed. Retained history must distinguish that one real restart from a duplicate
+    observation while preserving the observer epoch.
     """
 
-    # Idle comfortably longer than the whole restart gap (server stop + fresh boot), so the shared
-    # daemons persist across the web restart with unchanged process epochs.
+    # Keep idle retirement out of the scenario so every daemon exit is attributable to parent death.
     server = isolated_dev_server_factory("a5", env_overrides={"YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS": "45"})
     # Every daemon identity this test ever sees, so teardown can retire the UNION. The shared daemons
     # started before the web restart reparent to init when `restart()` stops the old web process, so
@@ -384,15 +381,27 @@ def test_a5_service_then_web_restart_continues_history_without_double_counting(
         assert before_pid > 1, before
         assert before_counts.get("statsd", 0) >= 1, before_counts
 
-        # Preserve the daemon identities that will SURVIVE the web restart (the fresh statsd plus the
-        # original jobd/statusd/approvald), captured while the old web process is still their parent.
-        captured_daemons.extend(process_descendants(server.process.pid))
+        # Freeze the exact pre-restart identities. Parent-bound service generations must all retire;
+        # a replacement is a real single restart, not an observation of the old orphan.
+        pre_web_restart_daemons = process_descendants(server.process.pid)
+        captured_daemons.extend(pre_web_restart_daemons)
 
-        # The WEB restart: a new OS process binds the exact same port and re-reads the retained
-        # history. The shared daemons keep running underneath it, reparented to init.
+        # The WEB restart: a new OS process binds the exact same port and re-reads retained history.
         server.restart()
         server.assert_serving()
         assert server.port == original_port
+        deadline = time.monotonic() + 10.0
+        surviving_old_daemons = []
+        while time.monotonic() < deadline:
+            surviving_old_daemons = [
+                (pid, cmdline)
+                for pid, identity, cmdline in pre_web_restart_daemons
+                if pid_is_alive(pid) and process_start_identity(pid) == identity
+            ]
+            if not surviving_old_daemons:
+                break
+            time.sleep(HEALTH_POLL_SECONDS)
+        assert not surviving_old_daemons, f"a5: parent-bound daemon(s) survived web restart: {surviving_old_daemons}"
 
         # After the web restart the history must ADVANCE (a higher revision written by a NEW pid)
         # while keeping the SAME observer epoch -- or, if it could not continue, name an explicit
@@ -421,14 +430,11 @@ def test_a5_service_then_web_restart_continues_history_without_double_counting(
             assert coverage == "full", (coverage, after)
             assert not reset_reason, (reset_reason, after)
 
-        # No double-counted restart: the shared daemons survived the web restart, so the web restart
-        # is not itself a service restart and must not inflate any monitored resource's restart_count.
-        # The one service restart forced above is counted once, in `before`, and carried forward
-        # unchanged across the web restart. Every before-resource must still be PRESENT after (a
-        # vanished resource fails), and its count must match exactly with no fallback default.
+        # No double-counted restart: each demanded parent-bound daemon may add one real process epoch,
+        # while an undemanded daemon retains its previous count. Every before-resource remains present.
         after_counts = _restart_counts(after)
         assert "statsd" in after_counts, (before_counts, after_counts)
-        _assert_restart_counts_preserved(before_counts, after_counts)
+        _assert_restart_counts_bounded(before_counts, after_counts)
 
         # Negative control: if statsd DISAPPEARED from the post-restart document, the preservation
         # check must FAIL rather than fall back to the old count and report "unchanged". Force it out
@@ -436,12 +442,9 @@ def test_a5_service_then_web_restart_continues_history_without_double_counting(
         # resource at all.
         without_statsd = {name: count for name, count in after_counts.items() if name != "statsd"}
         with pytest.raises(AssertionError, match="disappeared"):
-            _assert_restart_counts_preserved(before_counts, without_statsd)
+            _assert_restart_counts_bounded(before_counts, without_statsd)
     finally:
-        # A 45 s idle means the daemons would otherwise outlive this test. Reap the UNION of the
-        # pre-restart survivors (now reparented to init, invisible to the replacement's descendant
-        # tree) and the replacement server's current descendants. `reap_descendants` is identity
-        # fenced, so any already-dead or recycled pid in the union is skipped, never mis-signalled.
+        # Reap the union of old identities and the replacement server's current descendants.
         if server.process.poll() is None:
             captured_daemons.extend(process_descendants(server.process.pid))
         server.stop()

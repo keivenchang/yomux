@@ -1060,10 +1060,27 @@ def _is_incomplete_stats_current_cursor(path: Path) -> bool:
         return False
 
 
+def _transcript_scan_cache_stat(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+
+
+def _transcript_scan_cache_size(path: Path) -> int | None:
+    result = _transcript_scan_cache_stat(path)
+    return None if result is None else result.st_size
+
+
 def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, max_bytes: int = _TRANSCRIPT_SCAN_STORE_MAX_BYTES) -> None:
     store_dir = transcript_scan_store_dir()
     try:
-        paths = sorted(store_dir.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        paths_with_mtime = []
+        for path in store_dir.glob("*.json"):
+            result = _transcript_scan_cache_stat(path)
+            if result is not None:
+                paths_with_mtime.append((path, result.st_mtime_ns))
+        paths = [path for path, _mtime_ns in sorted(paths_with_mtime, key=lambda item: item[1], reverse=True)]
     except OSError as exc:
         logger.warning("failed to inspect transcript scan cache: %s", exc)
         return
@@ -1073,7 +1090,9 @@ def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, m
     retained_bytes = 0
     for path in protected:
         try:
-            size = path.stat().st_size
+            size = _transcript_scan_cache_size(path)
+            if size is None:
+                continue
             if retained_bytes + size <= max_bytes:
                 retained_bytes += size
                 continue
@@ -1082,7 +1101,9 @@ def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, m
             logger.warning("failed to prune transcript scan cache %s: %s", path.name, exc)
     for index, path in enumerate(ordinary):
         try:
-            size = path.stat().st_size
+            size = _transcript_scan_cache_size(path)
+            if size is None:
+                continue
             if index < max_entries and retained_bytes + size <= max_bytes:
                 retained_bytes += size
                 continue

@@ -1,7 +1,7 @@
 {
   "class_budgets": {
     "yolomux_lib/app.py:TmuxWebtermApp": {
-      "methods": 557,
+      "methods": 558,
       "self_fields": 97
     },
     "yolomux_lib/infra/background_owner.py:BackgroundOwnerRegistry": {
@@ -17,8 +17,8 @@
       "self_fields": 32
     },
     "yolomux_lib/local_services/registry.py:LocalServiceRegistry": {
-      "methods": 77,
-      "self_fields": 27
+      "methods": 79,
+      "self_fields": 28
     },
     "yolomux_lib/server.py:Handler": {
       "methods": 88,
@@ -167,16 +167,16 @@
     "static_src/css/yolomux/30_preferences_changes.css": 3611,
     "static_src/css/yolomux/50_terminal_file_tree.css": 4274,
     "static_src/css/yolomux/60_editor_file_panels.css": 3339,
-    "static_src/js/yolomux/10_core_utils.js": 6869,
+    "static_src/js/yolomux/10_core_utils.js": 6945,
     "static_src/js/yolomux/20_layout_state.js": 7003,
     "static_src/js/yolomux/40_file_explorer_files.js": 5915,
-    "static_src/js/yolomux/85_debug_panel.js": 8008,
-    "static_src/js/yolomux/99_terminal_boot.js": 6945,
-    "yolomux_lib/app.py": 17045,
+    "static_src/js/yolomux/85_debug_panel.js": 8009,
+    "static_src/js/yolomux/99_terminal_boot.js": 6953,
+    "yolomux_lib/app.py": 17128,
     "yolomux_lib/search/file_index.py": 4468,
     "yolomux_lib/server.py": 3152,
-    "yolomux_lib/stats_current/service.py": 4459,
-    "yolomux_lib/workspace/session_files.py": 4133
+    "yolomux_lib/stats_current/service.py": 4464,
+    "yolomux_lib/workspace/session_files.py": 4154
   },
   "lane_ownership": [
     {
@@ -274,12 +274,6 @@
     {
       "count": 1,
       "name": "activeFile",
-      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
-      "writer": "static_src/js/yolomux/10_core_utils.js"
-    },
-    {
-      "count": 1,
-      "name": "authRedirectStarted",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/10_core_utils.js"
     },
@@ -1563,6 +1557,12 @@
     },
     {
       "count": 1,
+      "name": "devAutoReloadSource",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/99_client_event_transport.js"
+    },
+    {
+      "count": 1,
       "name": "selfUpdateAvailableTarget",
       "owner": "static_src/js/yolomux/99_terminal_boot.js",
       "writer": "static_src/js/yolomux/99_client_event_transport.js"
@@ -1614,6 +1614,12 @@
       "name": "yoloRulesPayload",
       "owner": "static_src/js/yolomux/00_bootstrap_state.js",
       "writer": "static_src/js/yolomux/99_terminal_boot.js"
+    },
+    {
+      "count": 2,
+      "name": "devAutoReloadSource",
+      "owner": "static_src/js/yolomux/00_bootstrap_state.js",
+      "writer": "static_src/js/yolomux/99_terminal_shortcuts_boot.js"
     },
     {
       "count": 2,
@@ -1986,12 +1992,12 @@
     "tests/helpers/fixture_http_server.py": 161,
     "tests/i18n_locale_registry.test.js": 270,
     "tests/i18n_structured_message.test.js": 267,
-    "tests/layout_async.test.js": 8410,
+    "tests/layout_async.test.js": 8519,
     "tests/layout_restore.test.js": 4966,
     "tests/open_file_missing_guard.test.js": 368,
     "tests/side_panes.test.js": 728,
-    "tests/stats_current_panel.test.js": 3635,
-    "tests/stats_current_ui.test.js": 2858,
+    "tests/stats_current_panel.test.js": 3636,
+    "tests/stats_current_ui.test.js": 2957,
     "tests/subsystems/app_darwin_memory.py": 68,
     "tests/subsystems/app_jobd_product.py": 82,
     "tests/subsystems/browser_harness_lifecycle.py": 218,
@@ -2004,7 +2010,7 @@
     "tests/test_aged_state.py": 111,
     "tests/test_agent_tui.py": 613,
     "tests/test_api_response_parent.py": 1117,
-    "tests/test_app.py": 17586,
+    "tests/test_app.py": 17811,
     "tests/test_approvald.py": 178,
     "tests/test_architecture_budgets.py": 333,
     "tests/test_atomic_file.py": 16,
@@ -2034,7 +2040,7 @@
     "tests/test_browser_layout.py": 17027,
     "tests/test_browser_ring_landing_verify.py": 792,
     "tests/test_browser_stats_coverage.py": 676,
-    "tests/test_browser_stats_widen.py": 1275,
+    "tests/test_browser_stats_widen.py": 1363,
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
@@ -2076,7 +2082,7 @@
     "tests/test_gate_contracts_q.py": 37,
     "tests/test_gate_corruption_ui.py": 112,
     "tests/test_gate_cross_host_views.py": 213,
-    "tests/test_gate_daemon_monitor_acceptance.py": 448,
+    "tests/test_gate_daemon_monitor_acceptance.py": 451,
     "tests/test_gate_daemon_monitor_statsd_recovery.py": 306,
     "tests/test_gate_differ.py": 1494,
     "tests/test_gate_editor.py": 826,
@@ -2116,7 +2122,7 @@
     "tests/test_inotify_capacity.py": 181,
     "tests/test_install_metadata.py": 25,
     "tests/test_instance_isolation.py": 351,
-    "tests/test_jobd.py": 3065,
+    "tests/test_jobd.py": 3092,
     "tests/test_journey_phase_contracts.py": 60,
     "tests/test_launcher_ephemeral_server.py": 78,
     "tests/test_launcher_probe.py": 61,
@@ -2129,7 +2135,7 @@
     "tests/test_local_service_registry_state.py": 95,
     "tests/test_local_service_runtime_row_projection.py": 158,
     "tests/test_local_services_host_identity.py": 134,
-    "tests/test_local_services_launch.py": 2135,
+    "tests/test_local_services_launch.py": 2272,
     "tests/test_local_services_rpc.py": 1306,
     "tests/test_local_services_watchdog.py": 339,
     "tests/test_login_auth.py": 1031,
@@ -2164,7 +2170,7 @@
     "tests/test_server_static.py": 329,
     "tests/test_service_failure_matrix.py": 242,
     "tests/test_session_actions.py": 331,
-    "tests/test_session_files.py": 4951,
+    "tests/test_session_files.py": 5035,
     "tests/test_sessions.py": 1067,
     "tests/test_settings.py": 889,
     "tests/test_shared_config_lock.py": 121,
@@ -2185,8 +2191,8 @@
     "tests/test_stats_current_revision.py": 45,
     "tests/test_stats_current_runtime.py": 798,
     "tests/test_stats_current_scheduler.py": 520,
-    "tests/test_stats_current_service.py": 4382,
-    "tests/test_stats_current_storage.py": 1445,
+    "tests/test_stats_current_service.py": 4452,
+    "tests/test_stats_current_storage.py": 1544,
     "tests/test_stats_current_transcripts.py": 1260,
     "tests/test_stats_current_usage.py": 225,
     "tests/test_stats_resolution.py": 139,
@@ -2208,7 +2214,7 @@
     "tests/test_transcripts.py": 268,
     "tests/test_ui_pins.py": 103,
     "tests/test_uploads.py": 173,
-    "tests/test_watch_diff_route_contract.py": 600,
+    "tests/test_watch_diff_route_contract.py": 585,
     "tests/test_watchd.py": 3955,
     "tests/test_web.py": 224,
     "tests/test_webdriver_lease.py": 254,

@@ -324,6 +324,31 @@ def test_jobd_broker_past_its_idle_window_stays_up_while_a_client_lease_is_held(
     assert broker.stop_event.is_set() is False
 
 
+def test_jobd_idle_reaps_a_dead_client_lease_before_deciding_to_stay_up(tmp_path):
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+    broker.leases["dead-client"] = runtime.current_host_identity().process_record_fields(
+        pid=999_999_999,
+        start_identity="proc:1",
+    )
+
+    assert broker._idle_should_stop() is True
+    assert broker.leases == {}
+
+
+def test_jobd_status_reaps_dead_client_leases_for_startup_reconciliation(tmp_path):
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    broker.leases["dead-client"] = runtime.current_host_identity().process_record_fields(
+        pid=999_999_999,
+        start_identity="proc:1",
+    )
+
+    status = broker.common_status()
+
+    assert status["clients"] == 0
+    assert broker.leases == {}
+
+
 @pytest.mark.gate_serial
 def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
     """The fs-batch/differ completion worker pins the broker with a client lease while it polls.
@@ -455,14 +480,16 @@ def test_watch_diff_completion_holds_a_jobd_lease_across_the_broker_idle_window(
 
         monkeypatch.setattr(app, "wait_for_jobd_operation_product", poll_probe)
 
-        fence = app_module.FilesystemWatchReceiptFence()
-        fence.accept("op-1")
+        flight = app_module.JobdOperationFlight(
+            lane="bulk",
+            key="watch-key-0",
+            deadline_at=time.time() + 5.0,
+        )
+        flight.accept_owner("op-1")
         app.complete_filesystem_watch_diff_operation(
-            fence,
-            "req-1",
+            flight,
             {},
             ["/tmp/watch-root"],
-            time.time() + 5.0,
             "seed-1",
         )
 

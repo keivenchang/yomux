@@ -1041,6 +1041,20 @@ def _coalesced_dirty_intervals(
     return tuple(merged)
 
 
+def _read_window(
+    value: tuple[int | float, int | float] | None,
+) -> tuple[float, float] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (tuple, list)) or len(value) != 2:
+        raise StorageValidationError("read window must contain start and end")
+    start = _validate_timestamp(value[0], "read window start")
+    end = _validate_timestamp(value[1], "read window end")
+    if end <= start:
+        raise StorageValidationError("read window end must follow its start")
+    return start, end
+
+
 def _time_clauses(
     intervals: tuple[tuple[float, float], ...] | None,
 ) -> tuple[tuple[str, tuple[float, ...]], ...]:
@@ -1089,6 +1103,15 @@ def _rows_in_dirty_intervals(
         if intervals[interval_index][0] <= observed_at:
             selected.append(row)
     return tuple(selected)
+
+
+_COVERAGE_PREDECESSOR_SQL = (
+    "SELECT family, source_id, epoch_id, started_at, ended_at, "
+    "native_cadence_seconds, owner_generation FROM coverage_epochs "
+    "INDEXED BY coverage_epochs_end "
+    "WHERE family = ? AND source_id = ? AND ended_at IS NOT NULL "
+    "AND ended_at <= ? ORDER BY ended_at DESC, started_at DESC, epoch_id DESC LIMIT 1"
+)
 
 
 def _read_header(connection: sqlite3.Connection) -> _Header:
@@ -2271,12 +2294,14 @@ class Store:
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
         include_coverage: bool = True,
+        read_window: tuple[int | float, int | float] | None = None,
     ) -> StoreSnapshot:
-        """Read all coverage plus either full or dirty-window original facts."""
+        """Read overlapping coverage plus bounded-history or dirty-window original facts."""
 
         with self.pinned_snapshot(
             dirty_intervals=dirty_intervals,
             include_coverage=include_coverage,
+            read_window=read_window,
         ) as read:
             return read()
 
@@ -2360,12 +2385,18 @@ class Store:
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
         include_coverage: bool = True,
+        read_window: tuple[int | float, int | float] | None = None,
     ) -> Iterator[Callable[[], StoreSnapshot]]:
         """Pin one WAL generation before yielding its potentially longer row scan."""
 
         connection = self._connection()
+        window = _read_window(read_window)
         intervals = _coalesced_dirty_intervals(dirty_intervals)
-        time_clauses = _time_clauses(intervals)
+        time_clauses = (
+            ((" WHERE observed_at >= ?", (window[0],)),)
+            if intervals is None and window is not None
+            else _time_clauses(intervals)
+        )
         with _transaction(connection):
             header = _read_header(connection)
 
@@ -2383,11 +2414,48 @@ class Store:
                 observation_rows = _rows_in_dirty_intervals(
                     observation_rows, intervals, 3,
                 )
+                coverage_where = (
+                    "" if window is None
+                    else "WHERE (ended_at IS NULL OR ended_at > ?) AND started_at < ? "
+                )
                 coverage_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, owner_generation FROM coverage_epochs "
-                    "ORDER BY started_at, family, source_id, epoch_id"
+                    + coverage_where
+                    + "ORDER BY started_at, family, source_id, epoch_id",
+                    () if window is None else window,
                 ).fetchall()
+                if window is not None and coverage_rows:
+                    # The materializer uses the epoch immediately before the
+                    # first overlap to distinguish a real left-edge outage from
+                    # a source whose history simply starts inside the window.
+                    overlap_sources = {
+                        (str(row[0]), str(row[1])) for row in coverage_rows
+                    }
+                    spanning_sources = {
+                        (str(row[0]), str(row[1]))
+                        for row in coverage_rows
+                        if float(row[3]) <= window[0]
+                    }
+                    predecessors = tuple(
+                        predecessor
+                        for family, source_id in sorted(overlap_sources - spanning_sources)
+                        for predecessor in connection.execute(
+                            _COVERAGE_PREDECESSOR_SQL,
+                            (family, source_id, window[0]),
+                        ).fetchall()
+                    )
+                else:
+                    predecessors = ()
+                if window is not None:
+                    bounded_coverage = {
+                        (str(row[0]), str(row[1]), str(row[2])): row
+                        for row in (*coverage_rows, *predecessors)
+                    }
+                    coverage_rows = sorted(
+                        bounded_coverage.values(),
+                        key=lambda row: (float(row[3]), str(row[0]), str(row[1]), str(row[2])),
+                    )
                 usage_rows = tuple(
                     row
                     for time_clause, time_parameters in time_clauses
@@ -2401,10 +2469,16 @@ class Store:
                 usage_rows = _rows_in_dirty_intervals(
                     usage_rows, intervals, 5,
                 )
+                unavailable_where = (
+                    "" if window is None
+                    else "WHERE ended_at > ? AND started_at < ? "
+                )
                 unavailable_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
-                    "ORDER BY started_at, family, source_id, epoch_id"
+                    + unavailable_where
+                    + "ORDER BY started_at, family, source_id, epoch_id",
+                    () if window is None else window,
                 ).fetchall()
                 reconciliation_rows = connection.execute(
                     "SELECT migration_id, completed_at, source_digest, details_json "
@@ -2545,20 +2619,20 @@ def _prune_retained_facts(connection: sqlite3.Connection, cutoff: float) -> Prun
         "DELETE FROM usage_atoms WHERE observed_at < ?", (cutoff,)
     ).rowcount
     coverage_deleted = connection.execute(
-        "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at < ?",
+        "DELETE FROM coverage_epochs WHERE ended_at IS NOT NULL AND ended_at <= ?",
         (cutoff,),
     ).rowcount
     coverage_clipped = connection.execute(
         "UPDATE coverage_epochs SET started_at = ? "
-        "WHERE started_at < ? AND (ended_at IS NULL OR ended_at >= ?)",
+        "WHERE started_at < ? AND (ended_at IS NULL OR ended_at > ?)",
         (cutoff, cutoff, cutoff),
     ).rowcount
     unavailable_deleted = connection.execute(
-        "DELETE FROM unavailable_spans WHERE ended_at < ?", (cutoff,)
+        "DELETE FROM unavailable_spans WHERE ended_at <= ?", (cutoff,)
     ).rowcount
     unavailable_clipped = connection.execute(
         "UPDATE unavailable_spans SET started_at = ? "
-        "WHERE started_at < ? AND ended_at >= ?",
+        "WHERE started_at < ? AND ended_at > ?",
         (cutoff, cutoff, cutoff),
     ).rowcount
     return PruneResult(
