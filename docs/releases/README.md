@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.8 | `v0.7.8` | `f32ffd898` | [v0.7.8-evidence.md](v0.7.8-evidence.md) | mobile and Stats GUI, bounded background work, macOS compatibility, correctness, and safety fixes |
 | 0.7.7 | `v0.7.7` | `fb58cac56` | [v0.7.7-evidence.md](v0.7.7-evidence.md) | complete Markdown and specs overhaul with 331 open requirements preserved in concrete queues |
 | 0.7.6 | `v0.7.6` | `35907e6f3` | [v0.7.6-evidence.md](v0.7.6-evidence.md) | bounded tmux mutations, retained window strips, filtered Quick Open, and reduced quiet polling |
 | 0.7.5 | `v0.7.5` | `6c59437f8` | [v0.7.5-evidence.md](v0.7.5-evidence.md) | retired collaboration removal, runtime/auth cleanup, and graduated Finder interactivity |
@@ -13,7 +14,7 @@ One evidence page per shipped version. Each page records what that release actua
 | 0.7.1 | `v0.7.1` | `a4209e0fb` | [v0.7.1-evidence.md](v0.7.1-evidence.md) | accepted, tagged, live |
 | 0.7.0 | `v0.7.0` | `bba47f31e` | [v0.7.0-evidence.md](v0.7.0-evidence.md) | evidence page audits an earlier rejected candidate, not the rewritten shipped commit |
 
-Verified 2026-08-15 against the local annotated tag objects, `origin/main`, and the direct and peeled origin tag refs in `yolomux.dev7771`.
+Verified 2026-08-18 against the local annotated tag objects, `origin/main`, and the direct and peeled origin tag refs in `yolomux.dev7771`.
 
 ## Historical note
 
