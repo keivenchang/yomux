@@ -1588,7 +1588,7 @@ def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cell
     assert service._take_work() == (False, expected, False)
 
 
-def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
+def test_vacuum_runs_only_from_worker_after_quiet_and_persists_its_schedule(tmp_path):
     monotonic_now = [0.0]
     wall_now = [1_000.0]
     store = FakeStore()
@@ -1605,12 +1605,14 @@ def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
     service._next_prune_check_at = 9_999.0
     service._next_vacuum_at = 0.0
 
-    # Requests never perform file-rewriting maintenance; the generic runtime
-    # calls _idle only after client handling has stopped.
+    # Requests never perform file-rewriting maintenance. The worker owns the
+    # deadline, but the same recent-client quiet gate still protects RPCs.
     service._on_client()
     assert store.vacuums == []
     monotonic_now[0] = 2.0
     assert service._idle() is True
+    assert store.vacuums == []
+    assert service._vacuum_if_due_while_idle(store) is True
     assert store.vacuums == [1_000.0]
     assert service._status()["vacuum"] == {
         "interval_seconds": service_module.VACUUM_INTERVAL_SECONDS,
@@ -1705,11 +1707,11 @@ def test_vacuum_cap_overrides_quiet_gate_on_a_continuously_busy_box(tmp_path):
 @pytest.mark.parametrize(
     ("collector", "dirty", "ring_deadline", "host_deadlines", "now", "expected"),
     (
-        pytest.param(False, False, None, (100.0, 100.0), 100.0, None, id="no-collector-idle"),
-        pytest.param(False, False, 90.0, (100.0, 100.0), 100.0, None, id="no-collector-stale-ring"),
+        pytest.param(False, False, None, (100.0, 100.0), 100.0, 60.0, id="no-collector-maintenance"),
+        pytest.param(False, False, 90.0, (100.0, 100.0), 100.0, 60.0, id="no-collector-stale-ring"),
         pytest.param(False, True, 105.0, (100.0, 100.0), 100.0, 5.0, id="no-collector-future-ring"),
         pytest.param(False, True, 100.0, (110.0, 110.0), 100.0, 0.0, id="no-collector-due-ring"),
-        pytest.param(False, True, None, (100.0, 100.0), 100.0, None, id="no-collector-waiting-source"),
+        pytest.param(False, True, None, (100.0, 100.0), 100.0, 60.0, id="no-collector-waiting-source"),
         pytest.param(True, False, None, (105.0, 110.0), 100.0, 5.0, id="collector-future"),
         pytest.param(True, False, None, (90.0, 110.0), 100.0, 0.0, id="collector-due"),
         pytest.param(True, True, 103.0, (105.0, 110.0), 100.0, 3.0, id="collector-with-earlier-ring"),
@@ -1740,6 +1742,8 @@ def test_ring_wait_timeout_uses_only_owned_deadlines(
     if dirty and ring_deadline is None:
         service._ring_waiting_for_source = 1
     monotonic_now[0] = now
+    service._next_prune_check_at = now + service_module.PRUNE_CHECK_SECONDS
+    service._next_vacuum_at = now + service_module.VACUUM_INTERVAL_SECONDS
 
     assert service._ring_wait_timeout() == expected
 

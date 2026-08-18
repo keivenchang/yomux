@@ -73,6 +73,7 @@ class FakePruneStore:
 
     def __init__(self) -> None:
         self.prunes: list[float] = []
+        self.vacuums: list[float] = []
         self.source_generation = 7
 
     def prune(self, *, now: float) -> PruneResult:
@@ -81,6 +82,10 @@ class FakePruneStore:
 
     def last_pruned_at(self) -> float:
         return self.prunes[-1] if self.prunes else 0.0
+
+    def vacuum(self, *, completed_at: float) -> float:
+        self.vacuums.append(completed_at)
+        return completed_at
 
 
 def build_service(tmp_path: Path, *, clock, monotonic, prune_time_reader) -> service_module.StatsCurrentService:
@@ -307,6 +312,78 @@ def test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not():
 # --------------------------------------------------------------------------
 
 
+def test_materializer_worker_owns_cutoff_deadline_when_listener_never_idles(tmp_path):
+    with local_zone(PACIFIC):
+        wall = [local_epoch(2026, 6, 1, 12, 0)]
+        monotonic = [0.0]
+        listener_store = FakePruneStore()
+        worker_store = FakePruneStore()
+        service = build_service(
+            tmp_path,
+            clock=lambda: wall[0],
+            monotonic=lambda: monotonic[0],
+            prune_time_reader=lambda: "02:30",
+        )
+        service.writer = listener_store
+        service._last_pruned_at = wall[0] - service_module.PRUNE_CHECK_SECONDS
+        service._next_prune_check_at = monotonic[0]
+
+        # A continuously readable listener socket may never reach its idle hook.
+        # The materializer wait must therefore wake for retention itself, then
+        # prune through the worker thread's SQLite connection.
+        assert service._ring_wait_timeout() == 0.0
+        assert service._prune_if_due(worker_store) is True
+        assert worker_store.prunes == [wall[0]]
+        assert listener_store.prunes == []
+        assert service._ring_wait_timeout() == service_module.PRUNE_CHECK_SECONDS
+
+
+def test_cutoff_scheduler_rechecks_fractional_wall_clock_shortfall(tmp_path):
+    wall = [1_700_000_059.999]
+    monotonic = [60.0]
+    store = FakePruneStore()
+    service = build_service(
+        tmp_path,
+        clock=lambda: wall[0],
+        monotonic=lambda: monotonic[0],
+        prune_time_reader=lambda: "02:30",
+    )
+    service.writer = store
+    service._last_pruned_at = 1_700_000_000.0
+    service._next_prune_check_at = monotonic[0]
+
+    assert service._prune_if_due() is False
+    assert service._next_prune_check_at == pytest.approx(monotonic[0] + 0.001)
+
+    wall[0] += 0.001
+    monotonic[0] += 0.001
+    assert service._prune_if_due() is True
+    assert store.prunes == [wall[0]]
+
+
+def test_materializer_worker_enforces_vacuum_cap_when_listener_never_idles(tmp_path):
+    wall = [1_700_000_000.0]
+    monotonic = [service_module.VACUUM_MAX_DEFER_SECONDS]
+    listener_store = FakePruneStore()
+    worker_store = FakePruneStore()
+    service = build_service(
+        tmp_path,
+        clock=lambda: wall[0],
+        monotonic=lambda: monotonic[0],
+        prune_time_reader=lambda: "02:30",
+    )
+    service.writer = listener_store
+    service.last_client_at = monotonic[0]
+    service._next_prune_check_at = monotonic[0] + 10_000.0
+    service._next_vacuum_at = 0.0
+    service._vacuum_due_since = 0.0
+
+    assert service._ring_wait_timeout() == 0.0
+    assert service._vacuum_if_due_while_idle(worker_store) is True
+    assert worker_store.vacuums == [wall[0]]
+    assert listener_store.vacuums == []
+
+
 def test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window(tmp_path):
     with local_zone(PACIFIC):
         wall = [local_epoch(2026, 6, 1, 12, 0)]
@@ -321,13 +398,14 @@ def test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window(tmp_p
         service.writer = store
         service._last_pruned_at = wall[0] - 30.0
 
-        # The cutoff is still fresh, and checks cannot run more than once a minute.
+        # The cutoff is still fresh, so the next wake owns the remaining
+        # wall-clock interval instead of adding a fresh full minute.
         assert service._prune_if_due() is False
-        assert service._next_prune_check_at == service_module.PRUNE_CHECK_SECONDS
+        assert service._next_prune_check_at == 30.0
         assert store.prunes == []
 
-        monotonic[0] += service_module.PRUNE_CHECK_SECONDS - 1.0
-        wall[0] += service_module.PRUNE_CHECK_SECONDS - 1.0
+        monotonic[0] += 29.0
+        wall[0] += 29.0
         assert service._prune_if_due() is False
         assert store.prunes == []
 

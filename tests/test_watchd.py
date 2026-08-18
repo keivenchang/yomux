@@ -2239,7 +2239,8 @@ def test_watchd_transcript_paths_rebuild_on_topology_change_and_within_the_resyn
     rebuilds = []
 
     def fake_discover(sessions, **kwargs):
-        rebuilds.append(tuple(sessions))
+        if sessions is webapp.sessions:
+            rebuilds.append(tuple(sessions))
         return {}, []
 
     monkeypatch.setattr(app_module, "list_tmux_panes", lambda: (list(panes), None))
@@ -2290,8 +2291,9 @@ def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_c
     calls = {"discover": 0, "transcript_tail": 0, "session_files": 0}
 
     def fake_discover(sessions, **kwargs):
-        del sessions, kwargs
-        calls["discover"] += 1
+        del kwargs
+        if sessions is webapp.sessions:
+            calls["discover"] += 1
         return {}, []
 
     monkeypatch.setattr(app_module, "list_tmux_panes", lambda: (list(panes), None))
@@ -2316,6 +2318,14 @@ def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_c
         "session_files_materialization": 0,
         "jobd_work_graph_rebuild": 0,
     }
+
+    # The monkeypatch is process-global, so a surviving watcher for another app
+    # can pass the same session values through it. Attribute calls by the app's
+    # owned session list; equal foreign input is not this instance's fan-out.
+    foreign_webapp = app_module.TmuxWebtermApp(["alpha"], status_service_mode=True)
+    assert foreign_webapp.watchd_transcript_paths() == []
+    assert foreign_webapp.client_watch_service.owner_invocation_snapshot()["session_discovery"] == 1
+    assert calls == {"discover": 1, "transcript_tail": 0, "session_files": 0}
 
     for revision in range(1, 11):
         clock[0] += watchd.WATCHD_RECONCILE_SECONDS / 20

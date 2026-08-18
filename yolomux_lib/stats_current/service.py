@@ -37,9 +37,9 @@ MAX_ID_BYTES = 512
 MAX_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_IDLE_SECONDS = 60.0
 # The configured local time owns the daily maintenance occurrence, while this
-# interval also bounds physical retention drift between daily runs. Each check
-# deletes only facts older than the current cutoff, so the frequent path stays
-# incremental instead of allowing a 48-hour policy to retain nearly 72 hours.
+# interval also bounds physical retention drift between daily runs. The worker
+# owns this deadline independently of listener traffic; an accept-timeout hook
+# can starve forever on a continuously readable socket.
 PRUNE_CHECK_SECONDS = 60.0
 # Ten seconds keeps the 10-second views at most one bucket behind durable ingest.
 # A 60-second writer cadence would make that view trail by as many as six buckets.
@@ -1343,20 +1343,20 @@ class StatsCurrentService:
             else VACUUM_INTERVAL_SECONDS + self._vacuum_jitter_seconds
         )
         self._next_vacuum_at = self.monotonic() + remaining
-        self.worker = threading.Thread(target=self._worker_loop, name="yolomux-stats-materializer", daemon=True)
-        self.worker.start()
         # Read the persisted prune time before the first check: a restart must not
         # re-run last night's prune, and a daemon that lives less than a day must
         # still catch up a night that was missed while the machine was off.
         self._last_pruned_at = self.writer.last_pruned_at()
         self._next_prune_check_at = self.monotonic()
+        self.worker = threading.Thread(target=self._worker_loop, name="yolomux-stats-materializer", daemon=True)
+        self.worker.start()
         self.work_event.set()
 
     def _vacuum_jitter(self) -> float:
         """Return bounded injectable scheduling jitter for periodic maintenance."""
         return VACUUM_JITTER_SECONDS * min(1.0, max(0.0, float(self.randomizer())))
 
-    def _vacuum_if_due_while_idle(self) -> bool:
+    def _vacuum_if_due_while_idle(self, writer: storage.Store | None = None) -> bool:
         """Run file-rewriting maintenance on the hourly cadence, quiet-gated.
 
         Compaction becomes DUE on the ``_next_vacuum_at`` cadence, but the rewrite
@@ -1370,7 +1370,8 @@ class StatsCurrentService:
         ``VACUUM_MAX_DEFER_SECONDS`` (measured from when it first became due, via
         ``_vacuum_due_since``) it runs anyway and accepts the brief stall.
         """
-        if self.writer is None:
+        vacuum_writer = self.writer if writer is None else writer
+        if vacuum_writer is None:
             return False
         now = self.monotonic()
         if now < self._next_vacuum_at:
@@ -1382,8 +1383,13 @@ class StatsCurrentService:
         quiet = now - self.last_client_at >= self.idle_seconds
         capped = now - self._vacuum_due_since >= VACUUM_MAX_DEFER_SECONDS
         if not quiet and not capped:
-            # Due, but the box is busy and the cap has not yet elapsed; wait for a
-            # quiet tick rather than block the serial listener on the rewrite.
+            # Due, but the box is busy and the cap has not elapsed. The worker
+            # must yield instead of spinning on an already-past deadline, while
+            # still waking no later than the fixed max-defer boundary.
+            self._next_vacuum_at = min(
+                now + VACUUM_RETRY_SECONDS,
+                self._vacuum_due_since + VACUUM_MAX_DEFER_SECONDS,
+            )
             return False
         with self.work_lock:
             pending = (
@@ -1401,7 +1407,7 @@ class StatsCurrentService:
                 return False
             started = self.monotonic()
             try:
-                completed_at = self.writer.vacuum(completed_at=self.clock())
+                completed_at = vacuum_writer.vacuum(completed_at=self.clock())
             except (OSError, sqlite3.Error, storage.StatsCurrentError) as error:
                 self._vacuum_failure = type(error).__name__[:64]
                 self._next_vacuum_at = self.monotonic() + VACUUM_RETRY_SECONDS
@@ -1556,7 +1562,7 @@ class StatsCurrentService:
 
     def _ring_wait_timeout(self) -> float | None:
         with self.work_lock:
-            deadlines = []
+            deadlines = [self._next_prune_check_at, self._next_vacuum_at]
             if self.collector_context is not None:
                 deadlines.extend((self._next_host_cpu_at, self._next_host_gpu_at))
             if self._pending_ring_dirty and self._next_ring_flush_at is not None:
@@ -1773,6 +1779,8 @@ class StatsCurrentService:
                 self.work_event.clear()
                 if self.stop_event.is_set():
                     break
+                self._prune_if_due(publisher)
+                self._vacuum_if_due_while_idle(publisher)
                 self._collect_host_facts_if_due(publisher)
                 work = self._take_work()
                 if work is not None:
@@ -1788,21 +1796,27 @@ class StatsCurrentService:
         if not facts.observations and not facts.coverage_epochs:
             return
         with self.work_lock:
+            append_now = self.clock()
             result = publisher.append_batch(
                 observations=facts.observations,
                 coverage_epochs=facts.coverage_epochs,
+                retention_now=append_now,
             )
-            changed = result.observations_accepted + result.coverage_changed
-            if not changed:
+            accepted = result.observations_accepted + result.coverage_changed
+            pruned = 0 if result.retention_prune is None else result.retention_prune.changed
+            if not accepted and not pruned:
                 return
-            dirty = self._accepted_dirty_cells(result.accepted_original_timestamps)
+            dirty = self._append_dirty_cells(result)
             self._latest_source_generation = max(self._latest_source_generation, result.source_generation)
-            self._last_source_commit_at = self.clock()
+            self._last_source_commit_at = append_now
             self._pending_dirty.update(dirty)
             self._stage_ring_cells_locked(dirty, result.source_generation)
-            if result.coverage_changed:
-                self._merge_cached_coverage(facts.coverage_epochs, ())
-                self._pending_coverage_refresh = True
+            self._update_cached_coverage_locked(
+                facts.coverage_epochs,
+                (),
+                accepted_change=bool(result.coverage_changed),
+                retention_prune=result.retention_prune,
+            )
         self.work_event.set()
 
     def _web_push_target(self) -> tuple[dict[str, object] | None, str]:
@@ -2942,6 +2956,55 @@ class StatsCurrentService:
             if horizon_starts[cell.resolution] <= cell.start
         }
 
+    def _append_dirty_cells(
+        self,
+        result: storage.AppendResult,
+    ) -> set[materializer.DirtyCell]:
+        """Retain cutoff cells even when the accepted-fact horizon filters them."""
+
+        dirty = self._accepted_dirty_cells(result.accepted_original_timestamps)
+        if (
+            result.retention_cutoff is not None
+            and result.retention_prune is not None
+            and result.retention_prune.changed
+        ):
+            dirty.update(self._dirty_cells_at((result.retention_cutoff,)))
+        return dirty
+
+    def _update_cached_coverage_locked(
+        self,
+        coverage: tuple[storage.CoverageEpoch, ...],
+        unavailable: tuple[storage.UnavailableSpan, ...],
+        *,
+        accepted_change: bool,
+        retention_prune: storage.PruneResult | None,
+    ) -> bool:
+        """Keep the one warm coverage model aligned with accepted and pruned facts."""
+
+        retention_change = bool(
+            retention_prune is not None
+            and (
+                retention_prune.coverage_epochs_deleted
+                or retention_prune.coverage_epochs_clipped
+                or retention_prune.unavailable_spans_deleted
+                or retention_prune.unavailable_spans_clipped
+            )
+        )
+        if not accepted_change and not retention_change:
+            return False
+        self._coverage_version += 1
+        if retention_change:
+            # A delete or clip cannot be represented by the append-only merge.
+            # Drop both halves together so the next build pins and normalizes
+            # one retained SQLite snapshot instead of serving stale no-data rows.
+            self._cached_coverage_epochs = ()
+            self._cached_unavailable_spans = ()
+            self._coverage_cache_ready = False
+        else:
+            self._merge_cached_coverage(coverage, unavailable)
+        self._pending_coverage_refresh = True
+        return True
+
     def _merge_cached_coverage(
         self,
         coverage: tuple[storage.CoverageEpoch, ...],
@@ -3093,6 +3156,7 @@ class StatsCurrentService:
         if self.writer is None:
             raise storage.StatsCurrentError("stats store is not open")
         with self.work_lock:
+            append_now = self.clock()
             try:
                 result = self.writer.append_batch(
                     observations=observations,
@@ -3100,29 +3164,34 @@ class StatsCurrentService:
                     usage_tombstones=tombstones,
                     coverage_epochs=coverage,
                     unavailable_spans=unavailable,
+                    retention_now=append_now,
                 )
             except storage.UsageAtomIdentityConflict as error:
                 self._append_requests += 1
                 return self._usage_identity_conflict_response(error)
-            changed = sum((result.observations_accepted, result.usage_atoms_accepted,
-                           result.usage_tombstones_accepted, result.coverage_changed,
-                           result.unavailable_spans_accepted))
+            accepted = sum((result.observations_accepted, result.usage_atoms_accepted,
+                            result.usage_tombstones_accepted, result.coverage_changed,
+                            result.unavailable_spans_accepted))
+            pruned = 0 if result.retention_prune is None else result.retention_prune.changed
             self._usage_atoms_accepted += result.usage_atoms_accepted
             if result.usage_atoms_accepted:
-                self._last_usage_atom_accepted_at = self.clock()
-            if changed:
-                dirty = self._accepted_dirty_cells(result.accepted_original_timestamps)
+                self._last_usage_atom_accepted_at = append_now
+            if accepted or pruned:
+                dirty = self._append_dirty_cells(result)
                 self._latest_source_generation = max(self._latest_source_generation, result.source_generation)
-                self._last_source_commit_at = self.clock()
+                self._last_source_commit_at = append_now
                 self._pending_dirty.update(dirty)
                 self._stage_ring_cells_locked(dirty, result.source_generation)
-                coverage_changed = bool(result.coverage_changed or result.unavailable_spans_accepted)
-                if coverage_changed:
-                    self._coverage_version += 1
-                    self._merge_cached_coverage(coverage, unavailable)
-                    self._pending_coverage_refresh = True
+                self._update_cached_coverage_locked(
+                    coverage,
+                    unavailable,
+                    accepted_change=bool(
+                        result.coverage_changed or result.unavailable_spans_accepted
+                    ),
+                    retention_prune=result.retention_prune,
+                )
             self._append_browser_failure_log(observations, result.accepted_observation_ids)
-        if changed:
+        if accepted or pruned:
             self.work_event.set()
         self._append_requests += 1
         self._usage_attribution_conflicts += result.usage_attribution_conflicts
@@ -3134,10 +3203,12 @@ class StatsCurrentService:
         counts = asdict(result)
         counts.pop("accepted_observation_ids")
         counts.pop("accepted_original_timestamps")
+        counts.pop("retention_cutoff")
+        counts.pop("retention_prune")
         response: dict[str, object] = {
             "ok": True,
             "source_generation": result.source_generation,
-            "accepted": changed,
+            "accepted": accepted,
             "duplicates": duplicates,
             "counts": counts,
         }
@@ -3646,16 +3717,17 @@ class StatsCurrentService:
         self._prune_preference_error = ""
         return prune_schedule.resolve_local_time(configured)
 
-    def _prune_if_due(self) -> bool:
+    def _prune_if_due(self, writer: storage.Store | None = None) -> bool:
         """Run an owed daily prune or the bounded cutoff sweep between runs.
 
-        This is the ONLY pruner. It runs on the listener's accept-timeout idle
-        hook, never on a request, and asks the schedule at most once per
-        PRUNE_CHECK_SECONDS.
+        This is the ONLY pruner. The materializer worker calls it with that
+        thread's SQLite writer, never on a request, and asks the schedule at
+        most once per PRUNE_CHECK_SECONDS.
         """
 
         now_monotonic = self.monotonic()
-        if now_monotonic < self._next_prune_check_at or self.writer is None:
+        prune_writer = self.writer if writer is None else writer
+        if now_monotonic < self._next_prune_check_at or prune_writer is None:
             return False
         self._next_prune_check_at = now_monotonic + PRUNE_CHECK_SECONDS
         self._prune_time = self._resolved_prune_time()
@@ -3664,8 +3736,17 @@ class StatsCurrentService:
         # condition owns the retention ceiling between occurrences; without it,
         # a healthy once-nightly delete necessarily permits almost one extra day.
         scheduled_due = prune_schedule.is_due(now, self._last_pruned_at, self._prune_time)
-        cutoff_sweep_due = now - self._last_pruned_at >= PRUNE_CHECK_SECONDS
+        cutoff_age = now - self._last_pruned_at
+        cutoff_sweep_due = cutoff_age >= PRUNE_CHECK_SECONDS
         if not scheduled_due and not cutoff_sweep_due:
+            # The monotonic wake can arrive fractionally before the wall-clock
+            # cutoff. Preserve the normal cadence, but do not skip that cutoff
+            # for another full minute.
+            cutoff_remaining = PRUNE_CHECK_SECONDS - cutoff_age
+            self._next_prune_check_at = min(
+                self._next_prune_check_at,
+                now_monotonic + max(0.0, cutoff_remaining),
+            )
             return False
         due_at = prune_schedule.most_recent_occurrence(now, self._prune_time)
         started = self.monotonic()
@@ -3673,7 +3754,7 @@ class StatsCurrentService:
             previous_source_generation = self._latest_source_generation
             # One timestamp decides due-ness, the cutoff, and what is persisted,
             # so the three can never disagree.
-            result = self.writer.prune(now=now)
+            result = prune_writer.prune(now=now)
             self._latest_source_generation = max(
                 self._latest_source_generation,
                 result.source_generation,
@@ -3704,6 +3785,12 @@ class StatsCurrentService:
                 }
                 self._pending_dirty.update(cutoff_dirty)
                 self._stage_ring_cells_locked(cutoff_dirty, result.source_generation)
+                self._update_cached_coverage_locked(
+                    (),
+                    (),
+                    accepted_change=False,
+                    retention_prune=result,
+                )
         self._prunes += 1
         self._last_prune_at = self.clock()
         self._last_prune_seconds = max(0.0, self.monotonic() - started)
@@ -3715,13 +3802,7 @@ class StatsCurrentService:
         return True
 
     def _idle(self) -> bool:
-        self._prune_if_due()
         reap_dead_client_leases(self.leases)
-        # Compaction owns its own quiet-gate and max-defer cap, so it is offered
-        # every idle tick rather than only when the service is fully idle: a busy
-        # box's cap could never fire if the offer were behind the idle gate. Prune
-        # runs first so the rewrite reclaims the free-list retention just released.
-        self._vacuum_if_due_while_idle()
         with self.work_lock:
             pending = (
                 self._pending_full
