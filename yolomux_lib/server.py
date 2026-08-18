@@ -6,6 +6,7 @@ import copy
 from functools import lru_cache
 import gzip
 import hashlib
+import hmac
 import html
 import json
 import logging
@@ -291,20 +292,18 @@ def refresh_tmux_session_clients_after_attach(session: str) -> bool:
     return refreshed
 
 
-def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int | None = None) -> bool:
-    """Make `client_name` the column authority for `session`: silence every WIDER client.
+def claim_tmux_resize_authority(
+    session: str,
+    client_name: str,
+    active_cols: int | None = None,
+    active_rows: int | None = None,
+) -> bool:
+    """Make `client_name` the size authority for `session`.
 
     Called when a browser surface activates a pane. Under `window-size largest` the shared window
-    is as wide as the widest non-`ignore-size` client, so a wider sibling (a second browser surface
-    OR a hand-attached terminal) makes the focused surface's content overflow its viewport. Flag
-    those wider clients `ignore-size` so they stop voting and the window collapses to the active
-    width; `active_cols` is the width the surface is asking for, preferred over its last-reported
-    width since the pty resize for this same message lands just after this call.
-
-    Width-only by design (per the column-overflow symptom): clients at or below the active width
-    don't inflate it and are left untouched, so the blast radius is exactly the clients that would
-    break the active surface. Idempotent -- when nothing is wider and the active client already
-    counts, it issues no tmux calls (the "current width already == active width" fast path).
+    follows the largest non-`ignore-size` client. A wider OR taller sibling therefore makes the
+    focused surface overflow or leaves a short screen inside a tall viewport. Flag clients that
+    exceed either active dimension so the window converges to the foreground surface.
     """
     clean_client_name = str(client_name or "").strip()
     if not clean_client_name:
@@ -315,19 +314,20 @@ def claim_tmux_resize_authority(session: str, client_name: str, active_cols: int
         # The active client is not listed yet (just attached); best-effort make it count.
         return refresh_tmux_client_ignore_size(clean_client_name, False)
     width = active_cols if isinstance(active_cols, int) and active_cols > 0 else int(current.get("width") or 0)
+    height = active_rows if isinstance(active_rows, int) and active_rows > 0 else int(current.get("height") or 0)
     active_ignored = tmux_client_has_flag(current, "ignore-size")
-    wider = [
+    conflicting = [
         row for row in rows
         if str(row.get("name") or "") != clean_client_name
         and not tmux_client_has_flag(row, "ignore-size")
-        and int(row.get("width") or 0) > width
+        and (int(row.get("width") or 0) > width or int(row.get("height") or 0) > height)
     ]
-    if not active_ignored and not wider:
+    if not active_ignored and not conflicting:
         return False
     changed = False
     if active_ignored:
         changed = refresh_tmux_client_ignore_size(clean_client_name, False) or changed
-    for row in wider:
+    for row in conflicting:
         changed = refresh_tmux_client_ignore_size(str(row.get("name") or ""), True) or changed
     return changed
 
@@ -580,6 +580,14 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         if error is not None:
             self.write_json(error, status=status)
             return None
+        marker = self.measurement_marker()
+        if marker and body is not None:
+            self._http_request_body_bytes = len(body)
+            self._http_request_body_identity_v1 = hmac.new(
+                marker.encode("ascii"),
+                b"yolomux.capture.request-body.v1\0" + body,
+                hashlib.sha256,
+            ).hexdigest()[:32]
         if body == b"" and (allow_empty or allow_missing):
             return {}
         try:
@@ -918,6 +926,8 @@ class ApiResponseWriter(_HandlerAdapter):
             self._api_request_id = proposed
         else:
             self._api_request_id = f"r-{uuid.uuid4().hex}"
+        if not getattr(self, "_http_transport_request_id", ""):
+            self._http_transport_request_id = self._api_request_id
         return self._api_request_id
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -1566,9 +1576,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self._http_request_line_read_at = None
         self._http_request_parse_completed_at = None
         self._http_request_dispatch_started_at = None
+        self._http_request_thread_cpu_started_ns = None
+        self._http_request_thread_native_id = None
+        self._http_request_body_bytes = None
+        self._http_request_body_identity_v1 = None
         self._route_response = None
         self._route_response_written = False
         self._api_request_id = ""
+        self._http_transport_request_id = ""
         super().handle_one_request()
 
     def dispatch_route_response(self, route: Any, operation: Callable[[], None]) -> None:
@@ -1756,6 +1771,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         }
         if str(details["path"]).startswith("/api/"):
             details["request_id"] = self.api_request_id()
+            details["transport_request_id"] = str(
+                getattr(self, "_http_transport_request_id", "") or details["request_id"]
+            )
         measurement_scope = self.measurement_scope()
         if measurement_scope:
             details["measurement_scope"] = measurement_scope
@@ -1763,11 +1781,28 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             # a slow request can be joined to that click without exposing a browser identifier.
             details["measurement_request_id"] = self.measurement_request_id()
             details["measurement_connection_id"] = self.measurement_connection_id()
+            details["process_pid"] = os.getpid()
+            request_thread_native_id = getattr(self, "_http_request_thread_native_id", None)
+            if isinstance(request_thread_native_id, int):
+                details["thread_native_id"] = request_thread_native_id
+            request_thread_cpu_started_ns = getattr(self, "_http_request_thread_cpu_started_ns", None)
+            if isinstance(request_thread_cpu_started_ns, int) and request_thread_native_id == threading.get_native_id():
+                details["request_thread_cpu_ms"] = round(
+                    max(0, time.thread_time_ns() - request_thread_cpu_started_ns) / 1_000_000,
+                    3,
+                )
+            request_body_bytes = getattr(self, "_http_request_body_bytes", None)
+            body_identity = getattr(self, "_http_request_body_identity_v1", None)
+            if isinstance(request_body_bytes, int) and isinstance(body_identity, str):
+                details["request_body_bytes"] = request_body_bytes
+                details["request_body_identity_v1"] = body_identity
         request_started = getattr(self, "_http_request_started_at", None)
         request_line_read_at = getattr(self, "_http_request_line_read_at", None)
         request_parse_completed_at = getattr(self, "_http_request_parse_completed_at", None)
         dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
         response_started = time.perf_counter()
+        if measurement_scope and isinstance(dispatch_started, (int, float)):
+            details["dispatch_to_record_wall_ms"] = round(max(0.0, (response_started - dispatch_started) * 1000), 3)
         if isinstance(request_started, (int, float)):
             details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
         if isinstance(request_started, (int, float)) and isinstance(request_line_read_at, (int, float)):
@@ -2109,6 +2144,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if hasattr(self.server.app, "wake_client_event_watcher"):
             self.server.app.wake_client_event_watcher()
         demanded_operation_ids = {value for value in (operation_id, *replay_operation_ids) if value}
+        global_operation_stream = bool(client_id) and not operation_id
 
         def write_operation_terminal(event_payload: dict[str, Any]) -> None:
             self.write_sse_json("operation_terminal", {
@@ -2160,7 +2196,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if str(event.get("type") or "") == "operation_terminal":
                     event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                     event_operation = event_payload.get("operation") if isinstance(event_payload.get("operation"), dict) else {}
-                    if str(event_operation.get("id") or "") not in demanded_operation_ids:
+                    if not global_operation_stream and str(event_operation.get("id") or "") not in demanded_operation_ids:
                         continue
                     write_operation_terminal(event_payload)
                     continue
@@ -2720,6 +2756,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         master_fd: int | None = None
         slave_fd: int | None = None
         process: subprocess.Popen[Any] | None = None
+        authority_claim_pending = not readonly and saw_initial_resize
 
         def session_exists() -> bool:
             return tmux(["has-session", "-t", target]).returncode == 0
@@ -2751,7 +2788,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             attach_args.extend(["-t", target])
             process = attach_tmux()
             if not readonly and saw_initial_resize:
-                self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)
+                self.server.claim_resize_authority(
+                    session, tmux_client_name, resize_client_id, initial_cols, initial_rows,
+                )
             for payload in pending_payloads:
                 self.handle_ws_payload(
                     session,
@@ -2771,6 +2810,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     readers = [master_fd] if connection_ready else [master_fd, self.connection]
                     readable, _, _ = select.select(readers, [], [], 0.1)
                     if master_fd in readable:
+                        # Popen can return before tmux exposes the new client in list-clients, so the
+                        # eager claim above may miss. Readable PTY output proves the attach exists;
+                        # claim once more at that transition before forwarding its first frame.
+                        if authority_claim_pending:
+                            self.server.claim_resize_authority(
+                                session,
+                                tmux_client_name,
+                                resize_client_id,
+                                resize_state["cols"],
+                                resize_state["rows"],
+                            )
+                            authority_claim_pending = False
                         data = os.read(master_fd, 65536)
                         if not data:
                             break
@@ -2801,6 +2852,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 returncode = process.poll()
                 if returncode == 0 and session_exists():
                     process = attach_tmux()
+                    authority_claim_pending = not readonly
                     continue
                 break
         except OSError:
@@ -2914,7 +2966,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if message.get("foreground") is True or message.get("activate") is True:
                     claimer = getattr(self.server, "claim_resize_authority", None)
                     if callable(claimer):
-                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols))
+                        authority_changed = bool(claimer(session, tmux_client_name, resize_client_id, cols, rows))
                 previous = (
                     resize_state.get("rows"),
                     resize_state.get("cols"),
@@ -3033,9 +3085,16 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         with self.host_pty_dimensions_lock:
             return self.host_pty_dimensions.get(str(session or ""), (DEFAULT_ROWS, DEFAULT_COLS))
 
-    def claim_resize_authority(self, session: str, tmux_client_name: str, resize_client_id: str = "", active_cols: int | None = None) -> bool:
+    def claim_resize_authority(
+        self,
+        session: str,
+        tmux_client_name: str,
+        resize_client_id: str = "",
+        active_cols: int | None = None,
+        active_rows: int | None = None,
+    ) -> bool:
         del resize_client_id
-        return claim_tmux_resize_authority(session, tmux_client_name, active_cols)
+        return claim_tmux_resize_authority(session, tmux_client_name, active_cols, active_rows)
 
     def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
         return self.socket.accept()

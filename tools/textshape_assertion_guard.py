@@ -94,6 +94,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_yostats_active_browser_window.py:test_capture_tools_share_proc_cpu_reader_and_positive_validators": "The capture tools must import shared CPU and positive-value validators.",
     "tests/test_yostats_active_browser_window.py:test_active_browser_window_workload_source_contract": "The operator capture tool's workload and measurement setup is an audited static contract; authentication is exercised separately.",
     "tests/test_yostats_active_browser_window.py:test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped": "The benchmark subprocess group boundary is an operator cleanup contract.",
+    "tests/test_yostats_active_browser_window.py:test_deterministic_operation_batch_quiesces_existing_operations_before_freezing_ack_flushes": "The frozen operator workload must quiesce the pre-existing operation and acknowledgement owners before suppressing the batch timer, then reject missing, unrelated, ignored, or retained acknowledgement IDs. The live 75-second run proves the behavior; this source contract pins the ordering inside the injected browser script that a Python fake driver cannot execute.",
     "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts": "The capture CLI's bounded signal, deadline, and Selenium setup is an operator safety contract.",
     "tests/test_filesystem_access_policy.py:test_one_owner_builds_every_filesystem_job_descriptor": "The one-owner scan IS a source-shape contract: a filesystem job descriptor built by hand anywhere in app.py, jobd.py or tests/ is the second construction site that reintroduces the cross-port authorization bypass. Its allowlist is keyed by occurrence count so a second copy of an allowlisted literal still fails, and it was watched firing on a reverted fixture.",
     "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export": "The retired global background-owner primary-port export, the Darwin launchctl setenv, and the two dropped early/managed instance-port vars must remain ABSENT from the live launcher; a negative source search is the only way to prove a removed global env export never returns, and the launcher starts real dev servers so it cannot be exercised at runtime here.",
@@ -111,7 +112,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "9ceda53664da031c4454b64bea6942c5046b49671325518bb5ad865297b280c9"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "0bcd31739191c3abd4ad6c970dfe28ec0acde634b3a710c50136a803287b9b7b"
 
 
 @dataclass(frozen=True, slots=True)

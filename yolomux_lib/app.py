@@ -135,6 +135,7 @@ from .jobd import JobClient
 from .observability.pricing_catalog import PricingCatalog
 from .observability.pricing_catalog import PricingRefreshCoordinator
 from .observability.queued_delivery import QueuedDeliveryLedger
+from .observability.queued_delivery import QueuedDeliveryCompactionOwner
 from .stats_current.client import StatsCurrentClient
 from .stats_current.client import iter_append_batches as stats_current_append_batches
 from .stats_current import collectors as stats_current_collectors
@@ -167,6 +168,7 @@ from .metadata import github_checks_unknown
 from .metadata import git_inventory
 from .metadata import invalidate_git_metadata_paths
 from .metadata import indexed_repo_summaries
+from .metadata import GIT_METADATA_CACHE_SECONDS
 from .metadata import INDEXED_REPO_ROOTS_CACHE_SECONDS
 from .metadata import metadata_build_cache
 from .metadata import project_inventory
@@ -237,6 +239,7 @@ from .types import SessionFilesPayload
 from .state_services import ActivityTranscriptService
 from .state_services import ClientEventWatcherRecord
 from .state_services import ClientWatchDescriptor
+from .state_services import ClientWatchRootValidationError
 from .state_services import ClientWatchService
 from .state_services import JobdOperationService
 from .state_services import JobdOperationReservation
@@ -1125,11 +1128,17 @@ SERVER_ACTIVITY_HEARTBEAT_ROTATE_SECONDS = 3600.0
 CLIENT_WATCH_ROOT_TTL_SECONDS = 300
 CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
+CLIENT_WATCH_ROOT_SURFACES_VERSION = 1
+CLIENT_WATCH_ROOT_SURFACES = frozenset({
+    "finder",
+    "modified-files-parent",
+    "modified-files-repository",
+})
 FILESYSTEM_WATCH_HISTORY_LIMIT = 64
 FILESYSTEM_WATCH_HISTORY_SECONDS = 180.0
 PERFORMANCE_RECORD_LIMIT = 4096
 PERFORMANCE_RECENT_LIMIT = 120
-PERFORMANCE_CAPTURE_RECORD_LIMIT = 512
+PERFORMANCE_CAPTURE_RECORD_LIMIT = 2048
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 SERVER_CPU_BUDGET_PERCENT = 30.0
 # Below this share of the measured CPU, the profiled consumer list is not an explanation and
@@ -2438,6 +2447,51 @@ class WatchBridge:
             return app.server_event_poll_seconds()
         return max(0.01, min(60.0, next_due - now))
 
+    def normalized_client_root_surfaces(
+        self,
+        payload: dict[str, Any],
+        roots: list[str],
+    ) -> tuple[int, tuple[tuple[str, tuple[str, ...]], ...]]:
+        has_version = "root_surfaces_version" in payload
+        has_rows = "root_surfaces" in payload
+        if not has_version and not has_rows:
+            # A running tab can retain the previous bundle until the server-version event asks it
+            # to reload. Keep that bounded skew window functional, but mark it v0 instead of
+            # inventing surface attribution the legacy browser never sent.
+            return 0, ()
+        if not has_version or not has_rows:
+            raise ClientWatchRootValidationError("root surface version and rows must be provided together")
+        version = payload.get("root_surfaces_version")
+        if isinstance(version, bool) or not isinstance(version, int) or version != CLIENT_WATCH_ROOT_SURFACES_VERSION:
+            raise ClientWatchRootValidationError("unsupported root surface protocol version")
+        raw_rows = payload.get("root_surfaces")
+        if not isinstance(raw_rows, list) or len(raw_rows) > CLIENT_WATCH_ROOT_LIMIT:
+            raise ClientWatchRootValidationError("root surfaces must be a bounded list")
+
+        accepted_roots = set(roots)
+        normalized: dict[str, tuple[str, ...]] = {}
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                raise ClientWatchRootValidationError("each root surface row must be an object")
+            raw_path = row.get("path")
+            path = str(raw_path or "").strip()
+            if not path.startswith("/"):
+                raise ClientWatchRootValidationError("root surface paths must be absolute")
+            path = str(Path(path).expanduser())
+            if path in normalized:
+                raise ClientWatchRootValidationError("root surface paths must be unique")
+            raw_surfaces = row.get("surfaces")
+            if not isinstance(raw_surfaces, list) or not raw_surfaces or len(raw_surfaces) > len(CLIENT_WATCH_ROOT_SURFACES):
+                raise ClientWatchRootValidationError("root surfaces must be a bounded non-empty list")
+            surfaces = tuple(sorted(set(str(surface or "") for surface in raw_surfaces)))
+            if not surfaces or any(surface not in CLIENT_WATCH_ROOT_SURFACES for surface in surfaces):
+                raise ClientWatchRootValidationError("root surfaces contain an unknown surface")
+            normalized[path] = surfaces
+
+        if set(normalized) != accepted_roots:
+            raise ClientWatchRootValidationError("root surfaces must exactly cover accepted roots")
+        return CLIENT_WATCH_ROOT_SURFACES_VERSION, tuple(sorted(normalized.items()))
+
     def update_client_watch_roots(self, app, roots: Any) -> dict[str, Any]:
         now = time.monotonic()
         payload = roots if isinstance(roots, dict) else {"roots": roots}
@@ -2445,6 +2499,7 @@ class WatchBridge:
         descriptor_id = client_id or f"legacy:{app.watch_root_owner_id}"
         raw_roots = payload.get("roots", []) if isinstance(payload, dict) else []
         unique = app.watch_root_index.normalize_paths(raw_roots)
+        root_surfaces_version, root_surfaces = self.normalized_client_root_surfaces(payload, unique)
         normalized_files: list[str] = []
         raw_files = payload.get("files", []) if isinstance(payload, dict) else []
         if isinstance(raw_files, list):
@@ -2479,6 +2534,8 @@ class WatchBridge:
             previous_descriptor = self.state.descriptors.get(descriptor_id)
             stable_descriptor = (
                 tuple(unique),
+                root_surfaces_version,
+                root_surfaces,
                 tuple(unique_files),
                 tuple(unique_background_files),
                 tuple(context_items),
@@ -2487,6 +2544,8 @@ class WatchBridge:
             )
             previous_stable = (
                 previous_descriptor.roots,
+                previous_descriptor.root_surfaces_version,
+                previous_descriptor.root_surfaces,
                 previous_descriptor.files,
                 previous_descriptor.background_files,
                 previous_descriptor.context_items,
@@ -2503,6 +2562,8 @@ class WatchBridge:
                 expires_at=now + CLIENT_WATCH_ROOT_TTL_SECONDS,
                 descriptor_generation=descriptor_generation,
                 roots=tuple(unique),
+                root_surfaces_version=root_surfaces_version,
+                root_surfaces=root_surfaces,
                 files=tuple(unique_files),
                 background_files=tuple(unique_background_files),
                 context_items=tuple(context_items),
@@ -2527,6 +2588,11 @@ class WatchBridge:
         return {
             "ok": True,
             "roots": unique,
+            "root_surfaces_version": root_surfaces_version,
+            "root_surfaces": [
+                {"path": path, "surfaces": list(surfaces)}
+                for path, surfaces in root_surfaces
+            ],
             "files": unique_files,
             "background_files": unique_background_files,
             "context_items": context_items,
@@ -2678,11 +2744,13 @@ class WatchBridge:
         return hashlib.sha256(repr((watched, rows)).encode("utf-8")).hexdigest()
 
     def watchd_transcript_paths(self, app) -> list[str]:
-        """The transcripts the descriptors watch, rebuilt on topology change or every 15s.
+        """The transcripts descriptors watch, rebuilt on topology change or bounded reconcile.
 
         The revision loop calls this once per revision and the transcripts it returns are what
         produce those revisions, so deriving it every time was a feedback loop: 25.8ms of CPU a
-        pass, which measured as ~90% of a core on the live server.
+        pass, which measured as ~90% of a core on the live server. Descriptor lease renewal stays
+        independent and cheap; this discovery backstop shares watchd's 300-second loss-reconcile
+        cadence instead of introducing a second polling owner.
         """
 
         signature = app.watchd_topology_signature()
@@ -2699,6 +2767,7 @@ class WatchBridge:
         # discover_sessions runs outside the lock: it is the slow call this memo exists to
         # bound, and holding the watch service lock across it would stall every route that
         # touches a descriptor.
+        service.note_owner_invocation("session_discovery")
         sessions, _errors = discover_sessions(app.sessions)
         transcripts = sorted({
             str(Path(agent.transcript).expanduser().resolve(strict=False))
@@ -5443,6 +5512,7 @@ class SessionFilesCoordinator:
         priority = "interactive" if force else "freshness"
 
         def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
+            app.client_watch_service.note_owner_invocation("session_files_materialization")
             return app.compute_session_files_payload_via_jobd(
                 session,
                 infos,
@@ -7606,6 +7676,7 @@ class TmuxWebtermApp:
         self._session_files_coordinator = SessionFilesCoordinator(self)
         self.agent_window_git_inventory_cache: dict[str, tuple[int, float, dict[str, Any] | None]] = {}
         self.agent_window_git_inventory_cache_lock = threading.Lock()
+        self.status_pane_classification_cache: dict[str, dict[str, Any]] = {}
         self._activity_cache = ActivityCache(self)
         self._watch_bridge = WatchBridge(self)
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
@@ -7642,8 +7713,14 @@ class TmuxWebtermApp:
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
         self.performance_capture_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_CAPTURE_RECORD_LIMIT)
+        self.performance_capture_record_count_total = 0
         self.queued_delivery_ledger = QueuedDeliveryLedger(
             state_path=SESSION_FILES_OPERATION_STATE_PATH,
+        )
+        self.queued_delivery_compaction_owner = QueuedDeliveryCompactionOwner(
+            self.queued_delivery_ledger,
+            self.submit_queued_delivery_compaction,
+            self.job_client.result,
         )
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
@@ -8868,6 +8945,18 @@ class TmuxWebtermApp:
             "ignored": [item["id"] for item in acknowledgments if item["id"] not in acknowledged_set],
         }, HTTPStatus.OK
 
+    def submit_queued_delivery_compaction(self, state_path: Path, coalesce_key: str) -> dict[str, Any]:
+        response, _body = self.job_client.produce(
+            "queued_delivery_compact",
+            {"state_path": str(state_path)},
+            priority="maintenance",
+            generation=1,
+            coalesce_key=coalesce_key,
+            delivery="receipt",
+            fresh_only=True,
+        )
+        return response
+
     def operation_access_allowed(self, operation_id: str, sessions: list[str]) -> bool:
         context = self.queued_delivery_ledger.operation_context(operation_id)
         if context is None:
@@ -8887,6 +8976,7 @@ class TmuxWebtermApp:
             })
 
     def stop_jobd_operation_service(self) -> None:
+        self.queued_delivery_compaction_owner.stop()
         self.jobd_operation_service.stop()
 
     def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
@@ -11454,6 +11544,8 @@ class TmuxWebtermApp:
             self.performance_records.append(item)
             item_details = item.get("details") if isinstance(item.get("details"), dict) else {}
             if item_details.get("measurement_scope") == "capture":
+                self.performance_capture_record_count_total += 1
+                item_details["capture_sequence"] = self.performance_capture_record_count_total
                 self.performance_capture_records.append(item)
         return item
 
@@ -11464,6 +11556,7 @@ class TmuxWebtermApp:
         with self.performance_record_lock:
             records = [dict(item) for item in self.performance_records]
             scoped_records = [dict(item) for item in self.performance_capture_records] if requested_scope == "capture" else records
+            capture_total = self.performance_capture_record_count_total
         # Capture rows have their own bounded ring and unique request digests. Do not apply the
         # diagnostics UI's 60-second summary window to a 200-request measurement run: a slow but
         # valid run must remain joinable, and the caller selects its exact rows by digest.
@@ -11526,7 +11619,7 @@ class TmuxWebtermApp:
             summary_rows,
             key=lambda item: (-int(item["payload_bytes_total"]), -int(item["count"]), item["role"], item["surface"]),
         )
-        return {
+        payload = {
             "window_seconds": max(1.0, float(window_seconds or PERFORMANCE_SUMMARY_WINDOW_SECONDS)),
             "record_limit": PERFORMANCE_RECORD_LIMIT,
             "record_count": len(records),
@@ -11536,6 +11629,21 @@ class TmuxWebtermApp:
             # unrelated churn evicts): `window_records` is already scope+window filtered (W9).
             "recent": window_records if requested_scope == "capture" else records[-PERFORMANCE_RECENT_LIMIT:],
         }
+        if requested_scope == "capture":
+            sequences = [
+                int(item["details"].get("capture_sequence") or 0)
+                for item in window_records
+                if isinstance(item.get("details"), dict)
+            ]
+            payload["capture"] = {
+                "capacity": PERFORMANCE_CAPTURE_RECORD_LIMIT,
+                "retained": len(window_records),
+                "total": capture_total,
+                "evicted": max(0, capture_total - len(window_records)),
+                "first_sequence": min(sequences, default=0),
+                "last_sequence": max(sequences, default=0),
+            }
+        return payload
 
     def server_cpu_budget_top_consumers(
         self,
@@ -11869,6 +11977,7 @@ class TmuxWebtermApp:
         with self.client_watch_service.lock:
             dependency_invalidations = dict(self.client_watch_service.invalidation_counts)
             watcher_record = self.client_watch_service.event_watcher_record
+        owner_invocations = self.client_watch_service.owner_invocation_snapshot()
         recurring_work = self.client_event_recurring_work_snapshot(watcher_record)
         client_event_snapshot = self.client_events.snapshot()
         heartbeat_attempts = int(client_event_snapshot.get("heartbeat_events") or 0)
@@ -11916,6 +12025,7 @@ class TmuxWebtermApp:
             # how many jobd-product-backed refreshes the server-side watch loop actually published,
             # by the source that drove each one (checkbox 8/10 dependency-invalidation diagnostics).
             "dependency_invalidations": dependency_invalidations,
+            "owner_invocations": owner_invocations,
             "recurring_work": recurring_work,
         }
 
@@ -12739,7 +12849,13 @@ class TmuxWebtermApp:
         sessions, errors = discover_sessions(self.sessions)
         with metadata_build_cache():
             session_payloads = {
-                name: session_to_json(info, self.metadata_cache, allow_network=False, include_metadata=not lightweight)
+                name: session_to_json(
+                    info,
+                    self.metadata_cache,
+                    allow_network=False,
+                    include_metadata=not lightweight,
+                    work_graph=self.session_work_graph_for_generation(info) if not lightweight else None,
+                )
                 for name, info in sessions.items()
             }
             indexed_repos = [] if lightweight else indexed_repo_summaries(
@@ -12771,6 +12887,72 @@ class TmuxWebtermApp:
             self.apply_metadata_badge_pulses(session_payloads)
             self.warm_metadata_cache_async(sessions)
         return payload
+
+    def session_work_graph_source_generation(
+        self,
+        info: SessionInfo,
+        graph: dict[str, Any] | None,
+    ) -> tuple[Any, ...]:
+        """Name every source that can change one session's canonical work graph."""
+        session_generation = self.client_event_payload_signature(asdict(info))
+        repository_generations = self.metadata_warm_repository_signature(graph)
+        provider_generation = self.metadata_cache.source_generation()
+        worktrees = graph.get("git_worktrees") if isinstance(graph, dict) else None
+        uncovered_repository = any(
+            isinstance(worktree, dict)
+            and bool(worktree.get("root"))
+            and not self.watcher_covers_repo(Path(str(worktree["root"])))
+            for worktree in worktrees.values()
+        ) if isinstance(worktrees, dict) else False
+        fallback_generation = int(time.monotonic() // GIT_METADATA_CACHE_SECONDS) if uncovered_repository else 0
+        return session_generation, repository_generations, provider_generation, fallback_generation
+
+    def session_work_graph_for_generation(self, info: SessionInfo) -> dict[str, Any]:
+        """Return the one cached graph for an explicit session/repository/provider generation."""
+        service = self.activity_transcript_service
+        with service.work_graph_cache_lock:
+            cached = service.work_graph_cache.get(info.session)
+            cached_graph = cached[1] if cached is not None else None
+            source_generation = self.session_work_graph_source_generation(info, cached_graph)
+            if cached is not None and cached[0] == source_generation:
+                return copy.deepcopy(cached_graph)
+            future_key = (info.session, source_generation)
+            future = service.work_graph_futures.get(future_key)
+            if future is None:
+                future = Future()
+                service.work_graph_futures[future_key] = future
+                owner = True
+            else:
+                owner = False
+
+        if not owner:
+            return copy.deepcopy(future.result())
+
+        try:
+            self.client_watch_service.note_owner_invocation("jobd_work_graph_rebuild")
+            graph = session_work_graph(info, self.metadata_cache, allow_network=False)
+            completed_generation = self.session_work_graph_source_generation(info, graph)
+            stable_during_build = (
+                source_generation[0] == completed_generation[0]
+                and source_generation[2] == completed_generation[2]
+                and (cached is None or source_generation[1:] == completed_generation[1:])
+            )
+            with service.work_graph_cache_lock:
+                if stable_during_build and service.work_graph_cache.get(info.session) is cached:
+                    service.work_graph_cache[info.session] = (completed_generation, copy.deepcopy(graph))
+                active_sessions = set(self.sessions)
+                for session in list(service.work_graph_cache):
+                    if session not in active_sessions:
+                        service.work_graph_cache.pop(session, None)
+            future.set_result(graph)
+            return graph
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with service.work_graph_cache_lock:
+                if service.work_graph_futures.get(future_key) is future:
+                    service.work_graph_futures.pop(future_key, None)
 
     def indexed_repo_roots_snapshot(self) -> list[str]:
         """Return the last jobd discovery immediately and advance it asynchronously."""
@@ -13353,6 +13535,7 @@ class TmuxWebtermApp:
             text = cached_text[1] if cached_text else None
         if text is None:
             try:
+                self.client_watch_service.note_owner_invocation("transcript_tail_scan")
                 text = tail_file_lines(path, safe_lines)
             except OSError as exc:
                 diagnostic = str(exc)
@@ -15548,34 +15731,16 @@ class TmuxWebtermApp:
         def prompt_classifier(prompt_target: str, visible_text: str, pane_text: str | None, prompt_source: str) -> dict[str, Any]:
             return hybrid_approval_prompt_state(prompt_target, visible_text, pane_text, prompt_source=prompt_source)
 
-        def roster_prompt_classifier(_prompt_target: str, visible_text: str, pane_text: str | None, _prompt_source: str) -> dict[str, Any]:
-            if pane_text is None:
-                return approval_prompt_state(visible_text)
-            return approval_prompt_state(visible_text, pane_text)
-
-        def screen_classifier(visible_text: str, pane_target: str | None) -> dict[str, Any]:
-            return dict(agent_screen_state(visible_text, pane_target=pane_target))
-
         if not capture_pane:
             # Roster path: derive working/idle from the LIVE pane via a cheap visible-only capture
             # plus cheap prompt presence from the already-captured text. This avoids the expensive
             # hybrid transcript / bash double-capture fan-out while still lighting roster approval badges.
-            state = classify_agent_pane(
+            classification = self.roster_pane_classification(
+                session,
                 target,
-                session=session,
                 discovered_sessions=discovered_sessions,
-                prompt_source="pane",
-                include_composer=False,
-                include_transcript_activity=False,
-                capture_full_for_bash=False,
-                capture_func=tmux_capture_pane,
-                capture_styled_func=tmux_capture_pane_styled,
-                prompt_classifier=roster_prompt_classifier,
-                screen_classifier=screen_classifier,
             )
-            if state.reason_code in {"disconnected", "error"}:
-                return hidden_prompt, {"key": "idle", "text": ""}
-            return normalized_prompt_state(state.prompt), dict(state.screen)
+            return dict(classification["prompt"]), dict(classification["screen"])
         state = classify_agent_pane(
             target,
             session=session,
@@ -15586,10 +15751,54 @@ class TmuxWebtermApp:
             capture_func=tmux_capture_pane,
             capture_styled_func=tmux_capture_pane_styled,
             prompt_classifier=prompt_classifier,
-            screen_classifier=screen_classifier,
+            screen_classifier=self.agent_pane_screen_classification,
             discover_sessions_func=discover_sessions,
         )
         return normalized_prompt_state(state.prompt), dict(state.screen)
+
+    @staticmethod
+    def agent_pane_screen_classification(visible_text: str, pane_target: str | None) -> dict[str, Any]:
+        return dict(agent_screen_state(visible_text, pane_target=pane_target))
+
+    def roster_pane_classification(
+        self,
+        session: str,
+        target: str,
+        *,
+        discovered_sessions: dict[str, SessionInfo],
+    ) -> dict[str, dict[str, Any]]:
+        def roster_prompt_classifier(
+            _prompt_target: str,
+            visible_text: str,
+            pane_text: str | None,
+            _prompt_source: str,
+        ) -> dict[str, Any]:
+            if pane_text is None:
+                return approval_prompt_state(visible_text)
+            return approval_prompt_state(visible_text, pane_text)
+
+        state = classify_agent_pane(
+            target,
+            session=session,
+            discovered_sessions=discovered_sessions,
+            prompt_source="pane",
+            include_composer=False,
+            include_transcript_activity=False,
+            capture_full_for_bash=False,
+            capture_func=tmux_capture_pane,
+            capture_styled_func=tmux_capture_pane_styled,
+            prompt_classifier=roster_prompt_classifier,
+            screen_classifier=self.agent_pane_screen_classification,
+        )
+        if state.reason_code in {"disconnected", "error"}:
+            return {
+                "prompt": normalized_prompt_state(),
+                "screen": {"key": "idle", "text": ""},
+            }
+        return {
+            "prompt": normalized_prompt_state(state.prompt),
+            "screen": dict(state.screen),
+        }
 
     def agent_window_screen_state(
         self,
@@ -15598,7 +15807,9 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         target = str(agent.pane_target or "")
         if target and preclassified_by_target and target in preclassified_by_target:
-            return dict(preclassified_by_target[target])
+            preclassified = preclassified_by_target[target]
+            screen = preclassified.get("screen") if isinstance(preclassified, dict) else None
+            return dict(screen if isinstance(screen, dict) else preclassified)
         if not target:
             return {"key": "idle", "text": ""}
         visible_text = tmux_capture_pane(target, visible_only=True)
@@ -16555,6 +16766,7 @@ class TmuxWebtermApp:
         capture_bare_session_when_roster: bool = False,
         activity_snapshot: dict[str, Any] | None = None,
         timings: dict[str, float] | None = None,
+        preclassified_by_target: dict[str, dict[str, Any]] | None = None,
     ) -> AutoApproveState:
         statuses = self.approval_client.status_session(session)
         if statuses:
@@ -16589,12 +16801,17 @@ class TmuxWebtermApp:
                 })
         capture_target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
         prompt_started = time.perf_counter()
-        prompt, screen = self.prompt_and_screen_status(
-            session,
-            discovered_sessions=discovered_sessions,
-            capture_pane=include_live_prompt,
-            capture_bare_session_when_roster=capture_bare_session_when_roster,
-        )
+        classification = preclassified_by_target.get(capture_target) if preclassified_by_target else None
+        if isinstance(classification, dict) and isinstance(classification.get("screen"), dict):
+            prompt = normalized_prompt_state(classification.get("prompt"))
+            screen = dict(classification["screen"])
+        else:
+            prompt, screen = self.prompt_and_screen_status(
+                session,
+                discovered_sessions=discovered_sessions,
+                capture_pane=include_live_prompt,
+                capture_bare_session_when_roster=capture_bare_session_when_roster,
+            )
         add_phase_timing(timings, "prompt_screen", prompt_started)
         prompt_attention_key = self.prompt_attention_key(session, prompt, screen)
         if prompt_attention_key:
@@ -16618,11 +16835,84 @@ class TmuxWebtermApp:
             info=info,
             discovered_sessions=discovered_sessions,
             activity_snapshot=activity_snapshot,
-            preclassified_by_target={capture_target: screen} if capture_target else None,
+            preclassified_by_target=preclassified_by_target or ({capture_target: screen} if capture_target else None),
             include_path_metadata=False,
         )
         add_phase_timing(timings, "agent_windows", agent_windows_started)
         return payload
+
+    def status_roster_pane_classifications(
+        self,
+        discovered_sessions: dict[str, SessionInfo],
+        rebuild_sessions: set[str],
+        *,
+        pane_source_signatures: dict[str, str] | None,
+        capture_targets: set[str] | None,
+    ) -> tuple[dict[str, dict[str, Any]], int]:
+        if pane_source_signatures is not None:
+            source_targets = set(pane_source_signatures)
+            self.status_pane_classification_cache = {
+                target: record
+                for target, record in self.status_pane_classification_cache.items()
+                if target in source_targets
+            }
+        else:
+            self.status_pane_classification_cache.clear()
+
+        targets: dict[str, str] = {}
+        for session in self.sessions:
+            if session not in rebuild_sessions:
+                continue
+            target = self.auto_approve_capture_target(session, discovered_sessions=discovered_sessions)
+            if target:
+                targets.setdefault(target, session)
+            info = discovered_sessions.get(session)
+            if info is None:
+                continue
+            for agent in info.agents:
+                agent_target = str(agent.pane_target or "")
+                if agent_target:
+                    targets.setdefault(agent_target, session)
+
+        classifications: dict[str, dict[str, Any]] = {}
+        capture_count = 0
+        for target, session in targets.items():
+            source_signature = pane_source_signatures.get(target) if pane_source_signatures is not None else None
+            cached = self.status_pane_classification_cache.get(target)
+            cache_matches = (
+                source_signature is not None
+                and isinstance(cached, dict)
+                and cached.get("source_signature") == source_signature
+                and isinstance(cached.get("screen"), dict)
+            )
+            must_capture = (
+                pane_source_signatures is None
+                or source_signature is None
+                or not cache_matches
+                or capture_targets is None
+                or target in capture_targets
+            )
+            if must_capture:
+                classification = self.roster_pane_classification(
+                    session,
+                    target,
+                    discovered_sessions=discovered_sessions,
+                )
+                capture_count += 1
+                if source_signature is not None:
+                    cached = {
+                        "source_signature": source_signature,
+                        "prompt": dict(classification["prompt"]),
+                        "screen": dict(classification["screen"]),
+                    }
+                    self.status_pane_classification_cache[target] = cached
+                else:
+                    cached = classification
+            classifications[target] = {
+                "prompt": dict(cached.get("prompt") or normalized_prompt_state()),
+                "screen": dict(cached["screen"]),
+            }
+        return classifications, capture_count
 
     def build_auto_approve_status(
         self,
@@ -16632,6 +16922,8 @@ class TmuxWebtermApp:
         sync_workers: bool = True,
         session_payload_cache: dict[str, Any] | None = None,
         capture_sessions: set[str] | None = None,
+        pane_source_signatures: dict[str, str] | None = None,
+        capture_targets: set[str] | None = None,
     ) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
         refresh_started = time.perf_counter()
         refresh_errors = self.refresh_sessions(maintenance=False)
@@ -16659,6 +16951,19 @@ class TmuxWebtermApp:
         add_phase_timing(timings, "discover_sessions", discover_started)
         sessions_started = time.perf_counter()
         cached = session_payload_cache or {}
+        rebuild_sessions = {
+            name
+            for name in self.sessions
+            if capture_sessions is None or name in capture_sessions or not isinstance(cached.get(name), dict)
+        }
+        preclassified_by_target, pane_capture_count = self.status_roster_pane_classifications(
+            discovered_sessions,
+            rebuild_sessions,
+            pane_source_signatures=pane_source_signatures,
+            capture_targets=capture_targets,
+        )
+        if timings is not None:
+            timings["pane_capture_count"] = float(pane_capture_count)
         sessions_payload = {}
         for name in self.sessions:
             cached_payload = cached.get(name)
@@ -16672,6 +16977,7 @@ class TmuxWebtermApp:
                 capture_bare_session_when_roster=True,
                 activity_snapshot=activity_snapshot,
                 timings=timings,
+                preclassified_by_target=preclassified_by_target,
             )
         add_phase_timing(timings, "sessions", sessions_started)
         payload: AutoApproveStatusPayload = {

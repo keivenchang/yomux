@@ -12,6 +12,7 @@ Every test here owns one measured F8 defect:
 """
 
 from contextlib import contextmanager
+import multiprocessing
 import os
 from pathlib import Path
 import signal
@@ -218,6 +219,19 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _run_reaper_until_interrupted(command: list[str], cwd: Path) -> None:
+    def raise_interrupt(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, raise_interrupt)
+    signal.signal(signal.SIGTERM, raise_interrupt)
+    try:
+        run_reaped_container_command(command, cwd=cwd, env=os.environ)
+    except KeyboardInterrupt:
+        return
+    raise RuntimeError("reaper command completed before the interrupt")
+
+
 def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path):
     grandchild_file = tmp_path / "container.pid"
     # The outer python stands in for the docker wrapper; the `sleep` grandchild it spawns in the same
@@ -237,20 +251,30 @@ def test_interrupted_container_run_reaps_the_wrapper_and_its_container(tmp_path)
         ),
     ]
 
-    def fire_interrupt():
+    worker_sigint = signal.getsignal(signal.SIGINT)
+    controller = multiprocessing.get_context("spawn").Process(
+        target=_run_reaper_until_interrupted,
+        args=(command, tmp_path),
+        name="f8-interrupt-controller",
+    )
+    controller.start()
+    try:
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if grandchild_file.exists() and grandchild_file.read_text().strip():
                 break
             time.sleep(0.02)
-        time.sleep(0.1)
-        os.kill(os.getpid(), signal.SIGINT)  # delivered to the main thread blocked in wait()
+        assert grandchild_file.exists() and grandchild_file.read_text().strip(), "container wrapper did not start"
+        assert controller.pid is not None
+        os.kill(controller.pid, signal.SIGINT)
+        controller.join(15)
+        assert controller.exitcode == 0
+    finally:
+        if controller.is_alive():
+            controller.terminate()
+            controller.join(10)
 
-    interrupter = threading.Thread(target=fire_interrupt, name="f8-interrupt")
-    interrupter.start()
-    with pytest.raises(KeyboardInterrupt):
-        run_reaped_container_command(command, cwd=tmp_path, env=os.environ)
-    interrupter.join(10)
+    assert signal.getsignal(signal.SIGINT) is worker_sigint
 
     grandchild_pid = int(grandchild_file.read_text().strip())
     deadline = time.monotonic() + 5.0
@@ -282,6 +306,10 @@ def _blocked_by_baseline_state():
         "batchQueued": 0,
         "batchPending": 0,
         "batchOperations": 0,
+        "watchDiffBatchQueued": 0,
+        "watchDiffBatchPending": 0,
+        "watchDiffBatchOperations": 0,
+        "watchDiffBatchOperationIds": [],
         "activityRefreshing": False,
         "watchRootsPending": True,
         "watchRootsTimerPending": False,
@@ -331,6 +359,50 @@ def test_quiescence_waits_out_the_in_flight_watch_diff_baseline_receipt():
     assert settled["pending"] == []
     assert settled["watchDiffPendingOperationIds"] == []
     assert settled["watchRootsBaselinePending"] is False
+
+
+def test_quiescence_waits_out_batch_items_owned_by_the_in_flight_baseline():
+    class OwnedBatchDescendantDriver:
+        def __init__(self):
+            self.baseline_awaited = 0
+            self.receipt_scripts = []
+
+        def execute_script(self, _script):
+            if self.baseline_awaited:
+                return _quiescent_state()
+            state = _blocked_by_baseline_state()
+            state["batchQueued"] = 8
+            state["watchDiffBatchQueued"] = 8
+            return state
+
+        def execute_async_script(self, script, *_args):
+            if "watchDiffPromise" in script:
+                self.baseline_awaited += 1
+                return {"hadPromise": True, "settled": True, "rejected": False}
+            self.receipt_scripts.append(script)
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = OwnedBatchDescendantDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.baseline_awaited == 1
+    assert settled["batchQueued"] == 0
+    assert settled["watchDiffBatchQueued"] == 0
+
+
+def test_quiescence_fails_closed_when_a_queued_batch_is_not_owned_by_the_baseline():
+    class UnrelatedQueuedBatchDriver:
+        def execute_script(self, _script):
+            state = _blocked_by_baseline_state()
+            state["batchQueued"] = 2
+            state["watchDiffBatchQueued"] = 1
+            return state
+
+        def execute_async_script(self, *_args):  # pragma: no cover - must never run
+            raise AssertionError("unrelated queued batch work must never enter the baseline receipt wait")
+
+    with pytest.raises(AssertionError, match="fixture API work did not quiesce"):
+        wait_for_fixture_api_quiescence(UnrelatedQueuedBatchDriver(), timeout=0.01)
 
 
 def test_quiescence_fails_closed_when_an_unrelated_op_is_pending_beside_the_baseline():
@@ -419,7 +491,71 @@ def test_quiescence_fails_immediately_when_baseline_pending_has_no_in_flight_pro
     assert driver.baseline_awaited == 1
 
 
-def test_quiescence_fails_when_receipt_settles_but_state_stays_pending(monkeypatch):
+def test_quiescence_accepts_a_baseline_that_settles_between_state_read_and_receipt_wait():
+    class SettledBetweenCallsDriver:
+        def __init__(self):
+            self.baseline_awaited = 0
+            self.state_reads = 0
+            self.receipt_checked = False
+            self.receipt_scripts = []
+
+        def execute_script(self, _script):
+            self.state_reads += 1
+            return _quiescent_state() if self.receipt_checked else _blocked_by_baseline_state()
+
+        def execute_async_script(self, script, *_args):
+            if "watchDiffPromise" in script:
+                self.baseline_awaited += 1
+                self.receipt_checked = True
+                return {"hadPromise": False, "settled": True}
+            self.receipt_scripts.append(script)
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = SettledBetweenCallsDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.baseline_awaited == 1
+    assert driver.state_reads >= 2
+    assert settled["watchDiffBaselineReceipt"] == {"hadPromise": False, "settled": True}
+    assert settled["browserReceiptBarrier"] == clean_browser_receipt_barrier(accepted=1)
+    assert settled["watchRootsBaselinePending"] is False
+
+
+def test_quiescence_waits_for_concrete_work_started_by_the_settled_baseline():
+    class DescendantOperationDriver:
+        def __init__(self):
+            self.baseline_awaited = 0
+            self.post_receipt_reads = 0
+            self.receipt_scripts = []
+
+        def execute_script(self, _script):
+            if not self.baseline_awaited:
+                return _blocked_by_baseline_state()
+            self.post_receipt_reads += 1
+            if self.post_receipt_reads < 3:
+                state = _quiescent_state()
+                state["pending"] = ["op-repo-info-enrichment"]
+                state["batchOperations"] = 1
+                return state
+            return _quiescent_state()
+
+        def execute_async_script(self, script, *_args):
+            if "watchDiffPromise" in script:
+                self.baseline_awaited += 1
+                return {"hadPromise": True, "settled": True, "rejected": False}
+            self.receipt_scripts.append(script)
+            return clean_browser_receipt_barrier(accepted=1)
+
+    driver = DescendantOperationDriver()
+    settled = wait_for_fixture_api_quiescence(driver, timeout=0.05)
+
+    assert driver.baseline_awaited == 1
+    assert driver.post_receipt_reads >= 3
+    assert settled["pending"] == []
+    assert settled["batchOperations"] == 0
+
+
+def test_quiescence_fails_when_receipt_settles_but_baseline_flag_stays_pending(monkeypatch):
     monkeypatch.setattr(gate_harness_module, "_WATCH_DIFF_BASELINE_RECEIPT_SECONDS", 5.0)
 
     class RejectedButStillPendingDriver:
@@ -437,9 +573,9 @@ def test_quiescence_fails_when_receipt_settles_but_state_stays_pending(monkeypat
 
     driver = RejectedButStillPendingDriver()
     started = time.monotonic()
-    with pytest.raises(AssertionError, match="settled but fixture work is still not quiescent"):
+    with pytest.raises(AssertionError, match="settled but its lifecycle flag is still pending"):
         wait_for_fixture_api_quiescence(driver, timeout=0.05)
-    # A settled/rejected receipt triggers exactly one re-read then a raise; no spin on the bound.
+    # A settled/rejected receipt with its own flag still set fails immediately; no spin on the bound.
     assert time.monotonic() - started < 2.0
     assert driver.baseline_awaited == 1
 
@@ -507,16 +643,42 @@ def test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner(browse
         """
         const baselineId = 'op-f8-adapter-baseline';
         const unrelatedId = 'op-f8-adapter-unrelated';
-        const baselineRecord = {id: baselineId, terminalOwner: 'filesystem-watch-diff-refresh'};
-        const unrelatedRecord = {id: unrelatedId};
+        const baselineRecord = {
+          id: baselineId,
+          kind: 'fs_watch_diff',
+          context: {operation: 'watch-diff-baseline', session: 'yt-f8', path: '/fixture/root'},
+          request: {id: 'request-f8-baseline', method: 'GET', path: '/api/fs/watch-diff?full=1'},
+          phase: 'accepted',
+          terminalOwner: 'filesystem-watch-diff-refresh',
+        };
+        const unrelatedRecord = {
+          id: unrelatedId,
+          kind: 'session_files',
+          context: {operation: 'session-files', session: 'yt-f8'},
+          request: {id: 'request-f8-unrelated', method: 'POST', path: '/api/session-files'},
+          phase: 'accepted',
+        };
+        const batchLength = fileExplorerFsBatchQueue.length;
+        fileExplorerFsBatchQueue.push(
+          {terminalOwners: new Set(['filesystem-watch-diff-refresh'])},
+          {terminalOwners: new Set()},
+        );
         apiOperationState.records.set(baselineId, baselineRecord);
         apiOperationState.pending.set(baselineId, baselineRecord);
         apiOperationState.records.set(unrelatedId, unrelatedRecord);
         apiOperationState.pending.set(unrelatedId, unrelatedRecord);
         try {
           const state = window.__yolomuxFixtureLifecycle.operationState();
-          return {pending: state.pending, owned: state.watchDiffPendingOperationIds};
+          return {
+            pending: state.pending,
+            pendingDetails: state.pendingDetails,
+            pendingDetailsTruncated: state.pendingDetailsTruncated,
+            owned: state.watchDiffPendingOperationIds,
+            batchQueuedDelta: state.batchQueued - batchLength,
+            ownedBatchQueuedDelta: state.watchDiffBatchQueued,
+          };
         } finally {
+          fileExplorerFsBatchQueue.splice(batchLength);
           apiOperationState.pending.delete(baselineId);
           apiOperationState.records.delete(baselineId);
           apiOperationState.pending.delete(unrelatedId);
@@ -526,7 +688,27 @@ def test_generated_lifecycle_adapter_partitions_pending_by_terminal_owner(browse
     )
     assert "op-f8-adapter-baseline" in partition["pending"]
     assert "op-f8-adapter-unrelated" in partition["pending"]
+    assert partition["pendingDetailsTruncated"] is False
+    details = {detail["id"]: detail for detail in partition["pendingDetails"]}
+    assert details["op-f8-adapter-baseline"] == {
+        "id": "op-f8-adapter-baseline",
+        "kind": "fs_watch_diff",
+        "contextOperation": "watch-diff-baseline",
+        "contextSession": "yt-f8",
+        "contextPath": "/fixture/root",
+        "requestId": "request-f8-baseline",
+        "requestMethod": "GET",
+        "requestPath": "/api/fs/watch-diff?full=1",
+        "phase": "accepted",
+        "terminalOwner": "filesystem-watch-diff-refresh",
+        "terminalOwners": [],
+        "waiterCount": 0,
+    }
+    assert details["op-f8-adapter-unrelated"]["kind"] == "session_files"
+    assert details["op-f8-adapter-unrelated"]["requestId"] == "request-f8-unrelated"
     # The baseline op is baseline-owned; the unrelated op is pending but NOT owned. That is the exact
     # partition, and it can only be right if the adapter actually reads terminalOwner.
     assert "op-f8-adapter-baseline" in partition["owned"]
     assert "op-f8-adapter-unrelated" not in partition["owned"]
+    assert partition["batchQueuedDelta"] == 2
+    assert partition["ownedBatchQueuedDelta"] == 1

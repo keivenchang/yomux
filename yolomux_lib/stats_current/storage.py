@@ -49,6 +49,11 @@ MIN_WRITER_BUILD = 4
 # data wearing a current timestamp. Two days keeps the whole 24h window plus a
 # day of slack for late-arriving history, clock skew, and a missed nightly prune.
 RETENTION_SECONDS = 2 * 24 * 60 * 60
+WAL_AUTOCHECKPOINT_PAGES = 1000
+# Automatic checkpoints recycle logical frames but do not necessarily shrink
+# the file. This connection policy bounds the retained allocation after a reset;
+# Store.vacuum() separately truncates the rewrite-sized allocation immediately.
+WAL_ALLOCATION_CEILING_BYTES = 8 * 1024 * 1024
 DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
 # Sidecar beside the database, like WRITER_FENCE_FILENAME. The nightly prune
 # schedule needs the last successful prune to survive a restart, and schema_meta
@@ -1432,7 +1437,13 @@ class Store:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
+            connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
+            connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
             _initialize_browser_diagnostics(connection)
+            # A clean writer takeover must not inherit the largest WAL allocation
+            # a prior large transaction left behind. The service singleton lock
+            # makes this the safe startup boundary before worker readers exist.
+            _truncate_wal(connection)
         except (sqlite3.Error, StatsCurrentError):
             connection.close()
             raise
@@ -1885,11 +1896,20 @@ class Store:
         connection = self._connection()
         connection.execute("VACUUM")
         connection.execute("PRAGMA optimize")
+        # A passive/autocheckpoint recycles logical frames but retains the WAL's
+        # largest allocation. VACUUM can therefore leave a database-sized file
+        # behind even though every frame was checkpointed. Truncate before the
+        # completion marker so a blocked checkpoint keeps the rewrite due.
+        _truncate_wal(connection)
         with _transaction(connection):
             connection.execute(
                 "UPDATE schema_meta SET last_vacuumed_at = ? WHERE singleton = 1",
                 (timestamp,),
             )
+        # The marker transaction creates a few new frames after the first
+        # truncate. Remove those too so a successful rewrite has one exact
+        # physical postcondition rather than a history-dependent allocation.
+        _truncate_wal(connection)
         return timestamp
 
     def _apply_observations(
@@ -2495,6 +2515,12 @@ def _transaction(connection: sqlite3.Connection) -> Iterator[None]:
     finally:
         if not committed and connection.in_transaction:
             connection.execute("ROLLBACK")
+
+
+def _truncate_wal(connection: sqlite3.Connection) -> None:
+    result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if result is None or len(result) != 3 or int(result[0]) != 0:
+        raise StatsCurrentError("stats WAL truncate remained busy")
 
 
 def require_compatible_writer(

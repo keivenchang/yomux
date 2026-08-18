@@ -411,9 +411,116 @@ def test_record_http_response_bytes_keeps_capture_marker_out_of_metrics():
         b"capture-0123456789abcdef0123456789abcdef:43123"
     ).hexdigest()[:16]
     assert records[0][1]["details"]["request_id"] == "r-web-page-7"
+    assert records[0][1]["details"]["transport_request_id"] == "r-web-page-7"
     assert "capture-" not in repr(records[0][1])
     handler.headers = {"X-YOLOmux-Measurement": "capture-not-a-random-marker"}
     assert Handler.measurement_scope(handler) == ""
+
+
+def test_capture_metrics_keep_transport_request_id_when_response_identity_changes():
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/fs/watch-diff"
+    handler.headers = {
+        "X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
+        "X-YOLOmux-Request-ID": "r-browser-issued",
+    }
+    handler._api_request_id = ""
+    handler._http_transport_request_id = ""
+    assert Handler.api_request_id(handler) == "r-browser-issued"
+    handler._api_request_id = "r-retained-product"
+    handler.client_address = ("127.0.0.1", 43123)
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = None
+    handler._http_request_dispatch_started_at = None
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "application/json")
+
+    details = records[0][1]["details"]
+    assert details["request_id"] == "r-retained-product"
+    assert details["transport_request_id"] == "r-browser-issued"
+
+
+def test_capture_json_body_retains_only_bounded_salted_identity():
+    marker = "capture-0123456789abcdef0123456789abcdef"
+
+    def read(body):
+        handler = object.__new__(Handler)
+        handler.headers = {
+            "Content-Length": str(len(body)),
+            "X-YOLOmux-Measurement": marker,
+        }
+        handler.rfile = io.BytesIO(body)
+        assert Handler.read_json_body(handler, 4096) is not None
+        return handler._http_request_body_bytes, handler._http_request_body_identity_v1
+
+    first_body = b'{"roots":["/repo"],"client_id":"one"}'
+    second_body = b'{"roots":["/other"],"client_id":"one"}'
+    first = read(first_body)
+    repeated = read(first_body)
+    distinct = read(second_body)
+
+    assert first[0] == len(first_body)
+    assert len(first[1]) == 32
+    assert first == repeated
+    assert first[1] != distinct[1]
+    assert first_body.decode() not in repr(first)
+    assert marker not in repr(first)
+
+
+def test_dispatch_starts_request_thread_cpu_attribution(monkeypatch):
+    request = SimpleNamespace(
+        path="/missing",
+        redirect_plaintext_to_https_if_needed=lambda _parsed: False,
+        require_auth=lambda _role: False,
+    )
+    monkeypatch.setattr(http_routes.time, "perf_counter", lambda: 10.0)
+    monkeypatch.setattr(http_routes.time, "thread_time_ns", lambda: 12_000_000)
+    monkeypatch.setattr(http_routes.threading, "get_native_id", lambda: 73)
+
+    http_routes.dispatch_http_route(request, "GET")
+
+    assert request._http_request_dispatch_started_at == 10.0
+    assert request._http_request_thread_cpu_started_ns == 12_000_000
+    assert request._http_request_thread_native_id == 73
+
+
+def test_capture_response_records_request_thread_cpu_and_payload_identity(monkeypatch):
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "POST"
+    handler.path = "/api/fs/batch"
+    handler.headers = {
+        "X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef",
+        "X-YOLOmux-Request-ID": "r-web-batch-1",
+    }
+    handler._api_request_id = ""
+    handler.client_address = ("127.0.0.1", 43123)
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = None
+    handler._http_request_dispatch_started_at = 10.0
+    handler._http_request_thread_cpu_started_ns = 12_000_000
+    handler._http_request_thread_native_id = 73
+    handler._http_request_body_bytes = 481
+    handler._http_request_body_identity_v1 = "0123456789abcdef0123456789abcdef"
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: 10.025)
+    monkeypatch.setattr(server_module.time, "thread_time_ns", lambda: 15_500_000)
+    monkeypatch.setattr(server_module.threading, "get_native_id", lambda: 73)
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "application/json")
+
+    details = records[0][1]["details"]
+    assert details["process_pid"] == os.getpid()
+    assert details["thread_native_id"] == 73
+    assert details["request_thread_cpu_ms"] == pytest.approx(3.5)
+    assert details["dispatch_to_record_wall_ms"] == pytest.approx(25.0)
+    assert details["request_body_bytes"] == 481
+    assert details["request_body_identity_v1"] == "0123456789abcdef0123456789abcdef"
 
 
 def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
@@ -429,6 +536,10 @@ def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
             request._http_request_line_read_at,
             request._http_request_parse_completed_at,
             request._http_request_dispatch_started_at,
+            request._http_request_thread_cpu_started_ns,
+            request._http_request_thread_native_id,
+            request._http_request_body_bytes,
+            request._http_request_body_identity_v1,
         ))
 
     monkeypatch.setattr(server_module.BaseHTTPRequestHandler, "handle_one_request", fake_handle_one_request)
@@ -440,7 +551,7 @@ def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
 
     assert observed[0][:2] == (None, None)
     assert observed[1][:2] == (None, None)
-    assert all(item[2:] == (None, None, None) for item in observed)
+    assert all(item[2:] == (None, None, None, None, None, None, None) for item in observed)
 
 
 def test_parse_request_profiles_request_line_and_headers(monkeypatch):
@@ -803,6 +914,50 @@ def test_websocket_bridge_treats_close_before_initial_resize_as_normal_disconnec
     Handler.bridge_tmux(handler, "1")
 
 
+def test_websocket_bridge_reclaims_resize_authority_on_first_attached_pty_frame(monkeypatch):
+    """The initial browser resize can precede tmux client registration; first PTY output retries it."""
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    master_fd, slave_fd = os.pipe()
+    process = FakeProcess()
+    claims = []
+    connection = SimpleNamespace(sendall=lambda _data: None)
+    selections = iter([([master_fd], [], []), ([connection], [], [])])
+    handler = object.__new__(Handler)
+    handler.connection = connection
+    handler.rfile = object()
+    handler.server = SimpleNamespace(
+        host_pty_dimensions_for_session=lambda _session: (24, 80),
+        record_host_pty_dimensions=lambda *_args: None,
+        claim_resize_authority=lambda *args: claims.append(args) or False,
+    )
+    handler.read_initial_ws_payloads = lambda: (84, 110, True, [])
+    handler.read_ws_frame_with_timeout = lambda: (8, b"")
+    monkeypatch.setattr(server_module.pty, "openpty", lambda: (master_fd, slave_fd))
+    monkeypatch.setattr(server_module, "set_pty_size", lambda *_args: None)
+    monkeypatch.setattr(server_module, "tmux_client_name_for_fd", lambda _fd: "/dev/pts/fixture")
+    monkeypatch.setattr(server_module, "configure_session_tmux_options", lambda _session: None)
+    monkeypatch.setattr(server_module, "tmux_attach_command", lambda *, readonly: ["tmux", "attach-session"])
+    monkeypatch.setattr(server_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(server_module, "record_owned_process_group", lambda _process: None)
+    monkeypatch.setattr(server_module, "refresh_tmux_session_clients_after_attach", lambda _session: None)
+    monkeypatch.setattr(server_module, "wait_for_ws_frame", lambda *_args: False)
+    monkeypatch.setattr(server_module.select, "select", lambda *_args: next(selections))
+    monkeypatch.setattr(server_module.os, "read", lambda *_args: b"attached frame")
+    monkeypatch.setattr(server_module, "make_ws_frame", lambda data, opcode: data)
+    monkeypatch.setattr(server_module, "terminate_process_group", lambda *_args: None)
+
+    Handler.bridge_tmux(handler, "1", resize_client_id="browser-1")
+
+    assert claims == [
+        ("1", "/dev/pts/fixture", "browser-1", 110, 84),
+        ("1", "/dev/pts/fixture", "browser-1", 110, 84),
+    ]
+
+
 def test_websocket_frame_reads_are_timeout_wrapped():
     # A blocked WS frame read must not hang the handler thread forever, so the read is bounded by a
     # timeout constant and goes through the timeout-wrapped helper.
@@ -888,7 +1043,7 @@ def test_configure_session_tmux_options_skips_newer_window_size_option_on_legacy
 
 
 def _client_list_runner(stdout, calls):
-    # `#{client_name}\t#{client_session}\t#{client_width}\t#{client_flags}` per row.
+    # `#{client_name}\t#{client_session}\t#{client_width}\t#{client_height}\t#{client_flags}` per row.
     def fake_run(cmd, **kwargs):
         if "list-clients" in cmd:
             return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
@@ -898,45 +1053,40 @@ def _client_list_runner(stdout, calls):
     return fake_run
 
 
-def test_claim_tmux_resize_authority_silences_wider_clients(monkeypatch):
-    # The active surface owns the column width: every WIDER client on its session is flagged
-    # ignore-size so `window-size largest` collapses to the active width — including a foreign,
-    # hand-attached terminal, not just sibling browser surfaces. Clients at/below the active width
-    # never overflow it and are left untouched.
+def test_claim_tmux_resize_authority_silences_clients_exceeding_either_dimension(monkeypatch):
+    # A 110x84 browser must take ownership back from a 112x34 sibling in both dimensions. Width-only
+    # ownership left the larger browser displaying a 33-row shared screen until page reload.
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     stdout = (
-        "/dev/pts/1\t6\t100\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
-        "/dev/pts/2\t6\t120\tattached,UTF-8\n"              # wider browser surface -> silence
-        "/dev/pts/3\t6\t90\tattached,UTF-8\n"               # narrower co-viewer -> leave alone
-        "/dev/pts/4\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silent -> no call
-        "/dev/pts/5\t7\t200\tattached,UTF-8\n"              # other session -> not our concern
+        "/dev/pts/1\t6\t110\t84\tattached,ignore-size,UTF-8\n"  # active surface, wrongly ignored
+        "/dev/pts/2\t6\t112\t34\tattached,UTF-8\n"              # wider -> silence
+        "/dev/pts/3\t6\t90\t90\tattached,UTF-8\n"               # taller -> silence
+        "/dev/pts/4\t6\t100\t60\tattached,UTF-8\n"              # smaller in both -> harmless
+        "/dev/pts/5\t7\t200\t100\tattached,UTF-8\n"             # other session -> not our concern
     )
     monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
 
-    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 100) is True
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 110, 84) is True
 
     assert ["tmux", "refresh-client", "-t", "/dev/pts/1", "-f", "!ignore-size"] in calls
     assert ["tmux", "refresh-client", "-t", "/dev/pts/2", "-f", "ignore-size"] in calls
-    assert all("/dev/pts/3" not in call for call in calls)
+    assert ["tmux", "refresh-client", "-t", "/dev/pts/3", "-f", "ignore-size"] in calls
     assert all("/dev/pts/4" not in call for call in calls)
     assert all("/dev/pts/5" not in call for call in calls)
 
 
-def test_claim_tmux_resize_authority_noop_when_active_is_widest(monkeypatch):
-    # The "current width already == active width" fast path: when no other voting client is wider
-    # and the active surface already counts, claiming makes zero tmux calls so frequent focus/resize
-    # events stay cheap.
+def test_claim_tmux_resize_authority_noop_when_active_dominates_both_dimensions(monkeypatch):
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     calls: list[list[str]] = []
     stdout = (
-        "/dev/pts/1\t6\t120\tattached,UTF-8\n"              # active surface, already widest
-        "/dev/pts/2\t6\t100\tattached,UTF-8\n"              # narrower -> harmless
-        "/dev/pts/3\t6\t130\tattached,ignore-size,UTF-8\n"  # wider but already silenced
+        "/dev/pts/1\t6\t120\t80\tattached,UTF-8\n"
+        "/dev/pts/2\t6\t100\t60\tattached,UTF-8\n"
+        "/dev/pts/3\t6\t130\t90\tattached,ignore-size,UTF-8\n"
     )
     monkeypatch.setattr(server_module.subprocess, "run", _client_list_runner(stdout, calls))
 
-    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 120) is False
+    assert server_module.claim_tmux_resize_authority("6", "/dev/pts/1", 120, 80) is False
     assert calls == []
 
 
@@ -1418,7 +1568,7 @@ def test_client_event_stream_successful_terminal_write_does_not_acknowledge_brow
     handler.send_header = lambda *_args: None
     handler.send_auth_cookie_if_needed = lambda: None
     handler.end_headers = lambda: None
-    handler.client_event_peer_disconnected = lambda: any(event == "operation_terminal" for event, _payload in writes)
+    handler.client_event_peer_disconnected = lambda: sum(event == "operation_terminal" for event, _payload in writes) >= 2
     writes = []
 
     def write_sse_json(event, payload):
@@ -1432,8 +1582,48 @@ def test_client_event_stream_successful_terminal_write_does_not_acknowledge_brow
         replay_operation_ids=("operation-wanted",),
     )
 
-    assert [payload["payload"]["operation"]["id"] for event, payload in writes if event == "operation_terminal"] == ["operation-wanted"]
+    assert [payload["payload"]["operation"]["id"] for event, payload in writes if event == "operation_terminal"] == [
+        "operation-other",
+        "operation-wanted",
+    ]
     assert acknowledged == []
+
+
+def test_global_client_event_stream_delivers_live_operation_terminal_without_replacement_filter():
+    broker = app_module.ClientEventBroker()
+    terminal = {
+        "operation": {"id": "operation-live", "cursor": {"epoch": "epoch-live", "seq": 1}},
+        "result": {"state": "ready", "data": {"entries": []}},
+        "status": HTTPStatus.OK,
+    }
+    events = iter([
+        {"type": "operation_terminal", "payload": terminal},
+        {"type": "fs_changed", "payload": {}},
+    ])
+    broker.next_event = lambda _subscriber_id, timeout: next(events)
+    app = SimpleNamespace(
+        client_events=broker,
+        start_client_event_watcher=lambda: None,
+        wake_client_event_watcher=lambda: None,
+        stop_client_event_watcher_if_idle=lambda: None,
+        touch_client_watch_descriptor=lambda _client_id: None,
+        client_event_subscriber_disconnected=lambda _client_id: None,
+        operation_replay_payload=lambda _operation_id: None,
+    )
+    handler = object.__new__(Handler)
+    handler.server = SimpleNamespace(app=app)
+    handler.connection = SimpleNamespace()
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    writes = []
+    handler.write_sse_json = lambda event, payload: writes.append((event, payload))
+    handler.client_event_peer_disconnected = lambda: any(event == "operation_terminal" for event, _payload in writes)
+
+    Handler.stream_client_events(handler, client_id="client-live")
+
+    assert [payload["payload"] for event, payload in writes if event == "operation_terminal"] == [terminal]
 
 
 def test_client_event_stream_failed_terminal_write_keeps_exact_replay_unacknowledged():
@@ -1657,6 +1847,23 @@ def test_do_post_routes_event_with_readonly_auth_and_fs_handlers():
 
     assert calls == [("require_auth", "admin")]
     assert writes == [("json", HTTPStatus.OK, {"ok": True, "roots": {"roots": ["/repo"]}})]
+
+    validation_error = getattr(app_module, "ClientWatchRootValidationError", ValueError)
+    app = SimpleNamespace(update_client_watch_roots=lambda _roots: (_ for _ in ()).throw(validation_error("invalid root surfaces")))
+    handler, calls, writes = route_handler("/api/watch/roots", app)
+    handler.read_json_body = lambda limit: {"roots": ["/repo"], "root_surfaces_version": 1, "root_surfaces": []}
+
+    Handler.do_POST(handler)
+
+    assert calls == [("require_auth", "admin")]
+    assert writes[0][0:2] == ("json", HTTPStatus.BAD_REQUEST)
+    assert writes[0][2]["state"] == "failed"
+    assert writes[0][2]["error"]["code"] == "invalid_request"
+    assert writes[0][2]["error"]["stack"] == [{
+        "component": "server.http",
+        "operation": "POST /api/watch/roots",
+        "code": "invalid_request",
+    }]
 
     app = SimpleNamespace(run_file_drop_action=lambda payload: ({"ok": True, "action": payload["action"]}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/drop-action/run", app)
@@ -2031,13 +2238,16 @@ def test_handle_fs_batch_sets_one_privacy_safe_endpoint_record():
     assert records[0][1]["payload_bytes"] == 123
     assert records[0][1]["compute_ms"] == pytest.approx(handler._http_response_compute_ms)
     request_id = records[0][1]["details"]["request_id"]
+    transport_request_id = records[0][1]["details"]["transport_request_id"]
     assert request_id.startswith("r-")
+    assert transport_request_id.startswith("r-")
     assert records[0][1]["details"] == {
         "method": "POST",
         "path": "/api/fs/batch",
         "status": HTTPStatus.ACCEPTED,
         "content_type": "application/json",
         "request_id": request_id,
+        "transport_request_id": transport_request_id,
         **expected_details,
     }
 
@@ -2552,7 +2762,7 @@ def test_server_source_wires_routing_ws_readonly_and_pty_setup():
     assert "saw_initial_resize" in bridge_body
     assert "host_pty_dimensions_for_session(session)" in bridge_body
     assert "record_host_pty_dimensions(session, initial_rows, initial_cols)" in bridge_body
-    assert "self.server.claim_resize_authority(session, tmux_client_name, resize_client_id)" in bridge_body
+    assert "session, tmux_client_name, resize_client_id, initial_cols, initial_rows" in bridge_body
     assert 'message.get("foreground") is False' in initial_payload_body
     assert "saw_resize = True" in initial_payload_body
     assert 'message.get("foreground") is False' in payload_body

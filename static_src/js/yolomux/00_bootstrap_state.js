@@ -435,6 +435,7 @@ const layoutUrlState = {
   pending: null,
   applied: false,
   refreshTimer: null,
+  finderRootKindUnverified: false,
 };
 let activeFile = null;
 let sharedImageViewerPath = null;
@@ -537,6 +538,7 @@ const fileExplorerSessionFilesState = {
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
+  abortController: null,
 };
 // One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
@@ -701,6 +703,10 @@ const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
   inFlight: false,
+  request: null,
+  activeKey: '',
+  scheduledKey: '',
+  completedForceKeys: new Map(),
   registrationPending: false,
   registered: false,
   syncedAt: 0,
@@ -852,7 +858,9 @@ function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const yocostItemId = '__yocost__';
-function yocostTabLabel() { return 'YO!cost'; }
+const legacyYoCostItemAliases = Object.freeze(['cost', 'yocost', 'yo!cost', 'yo-cost', yocostItemId]);
+let legacyYoCostMigrationRequested = false;
+function isLegacyYoCostItemParam(item) { return legacyYoCostItemAliases.includes(String(item || '')); }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1330,24 +1338,6 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
-  virtualPanelTabType({
-    key: 'yocost',
-    id: yocostItemId,
-    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
-    label: () => yocostTabLabel(),
-    sortRank: 0.71,
-    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
-    createPanel: () => createYoCostPanel(),
-    renderAttached: () => renderYoCostPanels(),
-    relocalize: (_item, panel) => {
-      renderYoCostPanels({force: true});
-      relocalizeYoCostPanelChrome(panel);
-    },
-    className: () => 'yocost-item',
-    icon: 'chart',
-    panePlacement: panePlacementSideAllowed,
-    minWidth: () => minSplitPaneWidthPx(),
-  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1397,7 +1387,6 @@ function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
-function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1508,7 +1497,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId, ...dynamicVirtualLayoutItems];
+  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1709,16 +1698,49 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
     // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
     // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
-    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
-      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+    const pendingEntries = Array.from(apiOperationState.pending.entries())
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+    const pending = pendingEntries.map(([operationId]) => operationId);
+    // Keep teardown failures bounded but attributable. IDs alone forced a rerun with speculative
+    // owner guesses; these fields identify the producer, request and waiter without retaining bodies.
+    const pendingDetails = pendingEntries.slice(0, apiOperationReplayLimit).map(([operationId, record]) => ({
+      id: operationId,
+      kind: String(record?.kind || ''),
+      contextOperation: String(record?.context?.operation || ''),
+      contextSession: String(record?.context?.session || ''),
+      contextPath: String(record?.context?.path || '').slice(0, 512),
+      requestId: String(record?.request?.id || ''),
+      requestMethod: String(record?.request?.method || ''),
+      requestPath: String(record?.request?.path || record?.request?.url || '').slice(0, 512),
+      phase: String(record?.phase || ''),
+      terminalOwner: String(record?.terminalOwner || ''),
+      terminalOwners: Array.from(record?.terminalOwners || []).map(String).sort(),
+      waiterCount: apiOperationState.waiters.get(operationId)?.size || 0,
+    }));
+    const watchDiffPendingOperationIds = pendingEntries
+      .filter(([, record]) => record && (
+        record.terminalOwner === 'filesystem-watch-diff-refresh'
+        || record.terminalOwners?.has('filesystem-watch-diff-refresh') === true
+      ))
       .map(([operationId]) => operationId)
       .sort();
+    const watchDiffBatch = typeof fileExplorerFsBatchOwnershipState === 'function'
+      ? fileExplorerFsBatchOwnershipState('filesystem-watch-diff-refresh')
+      : {queued: 0, pending: 0, operations: 0, operationIds: []};
     return {
-      pending: Array.from(apiOperationState.pending.keys()).sort(),
+      pending,
+      pendingDetails,
+      pendingDetailsTruncated: pendingEntries.length > pendingDetails.length,
       watchDiffPendingOperationIds,
+      watchDiffBatchQueued: watchDiffBatch.queued,
+      watchDiffBatchPending: watchDiffBatch.pending,
+      watchDiffBatchOperations: watchDiffBatch.operations,
+      watchDiffBatchOperationIds: watchDiffBatch.operationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
+      startupActive: typeof startupRefreshApiCoordinator === 'undefined' ? 0 : startupRefreshApiCoordinator.active,
+      startupQueued: typeof startupRefreshApiCoordinator === 'undefined' ? 0 : startupRefreshApiCoordinator.queue.length,
       activityRefreshing: activitySummaryState.refreshing === true,
       watchRootsPending: watchRootsTimerPending || watchRootsRegistrationPending || watchRootsInFlight || watchRootsBaselinePending,
       watchRootsTimerPending,

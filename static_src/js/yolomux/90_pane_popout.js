@@ -333,6 +333,10 @@ function closeAllPanePopouts() {
 window.addEventListener('beforeunload', closeAllPanePopouts);
 
 function openPanePopout(item) {
+  if (isLegacyYoCostItemParam(item)) {
+    setDebugSubTab('cost');
+    item = debugPaneItemId;
+  }
   if (!paneCanPopout(item)) {
     console.info('[YOLOmux] pane popout unavailable', {item, reason: panePopoutDisabledReason(item)});
     return false;

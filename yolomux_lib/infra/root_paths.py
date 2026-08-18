@@ -8,12 +8,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from tools.instance_isolation import resolved_path
+from tools.instance_isolation import resolved_home_path
+from tools.instance_isolation import resolved_product_path
+from tools.instance_isolation import resolved_state_dir
+from tools.instance_isolation import rooted_product_path
+from tools.instance_isolation import YolomuxRootError
 
 YOLOMUX_ROOT_ENV = "YOLOMUX_ROOT"
-
-
-class YolomuxRootError(ValueError):
-    """A root configuration cannot safely contain every product path."""
 
 
 @dataclass(frozen=True)
@@ -32,50 +34,49 @@ class YolomuxRoots:
         return (self.config_dir, self.state_dir, self.cache_dir, self.runtime_dir)
 
 
-def resolved_path(value: str | Path) -> Path:
-    return Path(value).expanduser().resolve(strict=False)
-
-
 def rooted_override(values: Mapping[str, str], key: str, root: Path, default: Path) -> Path:
-    configured = values.get(key)
-    candidate = resolved_path(configured) if configured else default
-    if not candidate.is_relative_to(root):
-        raise YolomuxRootError(f"{key} resolves outside YOLOMUX_ROOT: {candidate}; unset {key} or choose a path inside {root}")
-    return candidate
+    return rooted_product_path(values, key, root, default)
 
 
 def config_dir_from_environ(values: Mapping[str, str]) -> Path:
     """Resolve auth's early configuration import through the shared parent."""
     configured_root = values.get(YOLOMUX_ROOT_ENV)
     if not configured_root:
-        return Path(values.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux"))).expanduser()
-    root = resolved_path(configured_root)
+        return resolved_product_path(values, "YOLOMUX_CONFIG_DIR", resolved_home_path(values) / ".config" / "yolomux")
+    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
     return rooted_override(values, "YOLOMUX_CONFIG_DIR", root, root / "config")
 
 
 def resolve_yolomux_roots(values: Mapping[str, str], *, default_runtime_dir: Path) -> YolomuxRoots:
     """Resolve all product roots without creating any directory."""
+    home = resolved_home_path(values)
     configured_root = values.get(YOLOMUX_ROOT_ENV)
     if not configured_root:
-        default_cache_home = Path(values.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        default_cache_home = resolved_product_path(
+            values,
+            "XDG_CACHE_HOME",
+            home / ".cache",
+            reject_home=False,
+        )
+        codex_home_key = "YOLOMUX_CODEX_HOME" if values.get("YOLOMUX_CODEX_HOME") else "CODEX_HOME"
         return YolomuxRoots(
             config_dir_from_environ(values),
-            Path(values.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux"))).expanduser(),
-            Path(values.get("YOLOMUX_CACHE_DIR", str(default_cache_home / "yolomux"))).expanduser(),
-            Path(values.get("YOLOMUX_CODEX_HOME") or values.get("CODEX_HOME") or str(Path.home() / ".codex")).expanduser(),
-            default_runtime_dir,
+            resolved_state_dir(values),
+            resolved_product_path(values, "YOLOMUX_CACHE_DIR", default_cache_home / "yolomux"),
+            resolved_product_path(values, codex_home_key, home / ".codex"),
+            resolved_path(default_runtime_dir),
         )
-    root = resolved_path(configured_root)
+    root = resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root)
     config_dir = config_dir_from_environ(values)
     configured_codex_home = values.get("YOLOMUX_CODEX_HOME")
     codex_home = (
         rooted_override(values, "YOLOMUX_CODEX_HOME", root, root / "codex")
         if configured_codex_home
-        else Path.home() / ".codex"
+        else home / ".codex"
     )
     return YolomuxRoots(
         config_dir,
-        rooted_override(values, "YOLOMUX_STATE_DIR", root, root / "state"),
+        resolved_state_dir(values),
         rooted_override(values, "YOLOMUX_CACHE_DIR", root, root / "cache"),
         codex_home,
         rooted_override(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime"),

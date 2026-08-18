@@ -328,6 +328,8 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
   put(resolution, 'cpu_percent:host', 20);
   put(0, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 100);
   put(10, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 900);
+  put(0, 'agent_tokens_per_minute:122_frontend-crates|1|%18|codex', 50);
+  put(10, 'agent_tokens_per_minute:122_frontend-crates|1|%18|codex', 100);
   put(0, 'model_tokens_per_minute:output:gpt', 80);
   put(10, 'model_tokens_per_minute:output:gpt', 800);
   put(0, 'model_tokens_per_minute:input:gpt', 5000);
@@ -354,6 +356,19 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
     priced: {atoms: 4, tokens: 1150},
     unpriced: {atoms: 1, tokens: 50},
   };
+  const agentAttribution = {
+    total_tokens: 600,
+    total_micro_usd: 150000,
+    total_api_list_micro_usd: 300000,
+    dimensions: costDimensions({
+      input: {tokens: 300, micro_usd: 60000, api_list_micro_usd: 120000},
+      cache_read: {tokens: 150, micro_usd: 15000, api_list_micro_usd: 30000},
+      cache_write_5m: {tokens: 50, micro_usd: 25000, api_list_micro_usd: 50000},
+      output: {tokens: 100, micro_usd: 50000, api_list_micro_usd: 100000},
+    }),
+    priced: {atoms: 2, tokens: 575},
+    unpriced: {atoms: 1, tokens: 25},
+  };
   result.cost_report = costReport({
     total_micro_usd: 300000,
     total_api_list_micro_usd: 600000,
@@ -362,7 +377,13 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
     priced: {atoms: 4, tokens: 1150},
     unpriced: {atoms: 1, tokens: 50},
     models: [{key: modelKey, provider: 'openai', model: 'gpt-5.6-sol', ...attribution}],
-    agents: [{key: agentKey, source: 'codex', label: '122_frontend-crates|0|%17|codex', ...attribution}],
+    agents: [
+      {key: agentKey, source: 'codex', label: '122_frontend-crates|0|%17|codex', ...agentAttribution},
+      {
+        key: '99abcdef0123456789abcdef', source: 'codex', label: '122_frontend-crates|1|%18|codex',
+        ...agentAttribution, unpriced: {atoms: 0, tokens: 25},
+      },
+    ],
     evidence: [{
       key: evidenceKey, provider: 'openai', model: 'gpt-5.6-sol', dimension: 'output',
       direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens',
@@ -546,9 +567,14 @@ test('accepts the service-produced backfill field and no unlisted snapshot field
   const payload = JSON.parse(execFileSync('python3', ['-c', `
 import json
 import sys
+import threading
 from yolomux_lib.stats_current.service import StatsCurrentService
 
 service = object.__new__(StatsCurrentService)
+service._snapshot_body_decoration_lock = threading.Lock()
+service._snapshot_body_decoration_cache = None
+service._snapshot_body_decoration_builds = 0
+service._snapshot_body_decoration_hits = 0
 service._usage_atom_backfill = {
     "state": "complete", "sources": 2, "missing": 0,
     "scan": {
@@ -2498,12 +2524,15 @@ test('mount owns exact capability controls and renders sparse current series wit
   assert.match(agent, /<path d="M[^"]+ M[^"]+"/);
   assert.equal(/<path d="[^"]* L/.test(agent), false, 'missing token buckets are not bridged');
   assert.ok(agent.includes('data-y-min="0"') || agent.includes('data-stats-chart="agent-tokens" data-y-min="0"'));
-  assert.ok(agent.includes('data-y-max="900"'));
-  assert.ok(modelOutput.includes('data-y-max="900"'), 'agent and model-output charts share one peak');
+  assert.ok(agent.includes('data-y-max="1000"'));
+  assert.ok(modelOutput.includes('data-y-max="1000"'), 'agent and model-output charts share one peak');
   assert.ok(modelUsage.includes('data-y-max="5000"'), 'input/cache dimensions do not distort output parity');
   assert.ok(agent.includes('data-no-data-family="agent_tokens"'));
   assert.ok(agent.includes('data-no-data-source="usage-scan"'));
   assert.ok(agent.includes('>122_frontend-crates</li>'), 'Agent tokens/min uses the canonical tmux-session label');
+  assert.equal((agent.match(/>122_frontend-crates<\/li>/g) || []).length, 1, 'pane-level usage with one visible session name has one legend entry');
+  assert.ok(agent.includes('data-point-value="150"'));
+  assert.ok(agent.includes('data-point-value="1000"'), 'same-session pane usage is summed per bucket');
   assert.ok(agent.includes('data-axis-seconds="true"'));
   assert.match(agent, />\d{2}:\d{2}:\d{2}<\/text>/);
   const visibility = root.controls.innerHTML;
@@ -2722,6 +2751,8 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('gpt-5.6-sol'));
   assert.ok(modal.includes('122_frontend-crates'), 'Cost by Agent uses the same canonical tmux-session label as Agent tokens/min');
   assert.ok(modal.includes('>122_frontend-crates</span>'), 'Cost by Agent does not waste visible space on pane-key suffixes');
+  assert.equal((modal.match(/>122_frontend-crates<\/span>/g) || []).length, 1, 'Cost by Agent consolidates pane keys with the same visible session name');
+  assert.match(modal, /yo-cost-current-agent[^>]*>122_frontend-crates<\/span><\/th><td>1\.2K<small>/, 'the consolidated agent row sums both pane attributions');
   assert.ok(modal.includes('Cost by Agent'));
   assert.ok(modal.includes('Pricing attribution'));
   assert.ok(modal.includes('$0.10 marginal · $0.20 list'));

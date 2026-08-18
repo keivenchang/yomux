@@ -388,6 +388,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Wykresy",
+  "debug.tab.cost": "Koszt",
   "debug.tab.services": "Demony",
   "debug.tab.logs": "Dzienniki",
   "debug.waitingForServerStats": "Oczekiwanie na statystyki serwera",

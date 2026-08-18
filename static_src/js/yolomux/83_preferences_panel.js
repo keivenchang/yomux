@@ -353,8 +353,7 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
-      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true, rows: 20, autosize: true}),
-      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
+      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 20, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
       preferenceSettingItem('file_explorer.companion_dirs', {type: 'list'}),
@@ -428,11 +427,43 @@ function preferenceItemByPath(path) {
 }
 
 function preferenceValue(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettings);
   return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, ''));
 }
 
 function preferenceDefault(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettingsDefaults);
   return nestedSetting(clientSettingsDefaults, path, '');
+}
+
+function quickOpenExclusionEntries(settings) {
+  const names = nestedSetting(settings, 'file_explorer.index_exclude_dir_names', []);
+  const rules = nestedSetting(settings, 'file_explorer.index_exclude_paths', []);
+  return Array.from(new Set([
+    ...(Array.isArray(names) ? names : []),
+    ...(Array.isArray(rules) ? rules : []),
+  ].map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function quickOpenExclusionSettingPatch(entries) {
+  const names = [];
+  const rules = [];
+  for (const rawEntry of Array.isArray(entries) ? entries : []) {
+    const entry = String(rawEntry || '').trim();
+    if (!entry) continue;
+    const isDirectoryName = !entry.startsWith('glob:')
+      && !entry.startsWith('regex:')
+      && !entry.startsWith('~')
+      && !entry.includes('/')
+      && !entry.includes('\\')
+      && entry !== '.'
+      && entry !== '..';
+    (isDirectoryName ? names : rules).push(entry);
+  }
+  return {file_explorer: {
+    index_exclude_dir_names: Array.from(new Set(names)),
+    index_exclude_paths: Array.from(new Set(rules)),
+  }};
 }
 
 function preferenceStatusText() {
@@ -534,8 +565,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('cost.')) add(['cost', 'price', 'pricing', 'api', 'list', 'subscription', 'marginal', 'codex', 'claude', 'openai', 'anthropic', 'tokens']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
-  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
-  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
+  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
   if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'frontend-crates']);

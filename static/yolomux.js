@@ -436,6 +436,7 @@ const layoutUrlState = {
   pending: null,
   applied: false,
   refreshTimer: null,
+  finderRootKindUnverified: false,
 };
 let activeFile = null;
 let sharedImageViewerPath = null;
@@ -538,6 +539,7 @@ const fileExplorerSessionFilesState = {
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
+  abortController: null,
 };
 // One program-wide owner for the pane the user explicitly clicked or typed in. Passive hover and
 // auto-focus never change this; Finder, Differ, Tabber, and tmux menus consume this same state.
@@ -702,6 +704,10 @@ const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
   inFlight: false,
+  request: null,
+  activeKey: '',
+  scheduledKey: '',
+  completedForceKeys: new Map(),
   registrationPending: false,
   registered: false,
   syncedAt: 0,
@@ -853,7 +859,9 @@ function searchHistoryTabLabel() { return t('tab.searchHistory'); }
 const prefsItemId = '__prefs__';
 const debugPaneItemId = '__debug__';
 const yocostItemId = '__yocost__';
-function yocostTabLabel() { return 'YO!cost'; }
+const legacyYoCostItemAliases = Object.freeze(['cost', 'yocost', 'yo!cost', 'yo-cost', yocostItemId]);
+let legacyYoCostMigrationRequested = false;
+function isLegacyYoCostItemParam(item) { return legacyYoCostItemAliases.includes(String(item || '')); }
 const FILE_MENU_PANEL_DEFINITIONS = Object.freeze([
   {itemId: finderItemId, preferenceSectionId: PREFERENCE_SECTION_IDS.fileExplorer},
   {itemId: searchHistoryItemId},
@@ -1331,24 +1339,6 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
-  virtualPanelTabType({
-    key: 'yocost',
-    id: yocostItemId,
-    aliases: ['yocost', 'yo!cost', 'yo-cost', yocostItemId],
-    label: () => yocostTabLabel(),
-    sortRank: 0.71,
-    detail: () => debugGraphCostText('debug.cost.details', 'Cost summary details'),
-    createPanel: () => createYoCostPanel(),
-    renderAttached: () => renderYoCostPanels(),
-    relocalize: (_item, panel) => {
-      renderYoCostPanels({force: true});
-      relocalizeYoCostPanelChrome(panel);
-    },
-    className: () => 'yocost-item',
-    icon: 'chart',
-    panePlacement: panePlacementSideAllowed,
-    minWidth: () => minSplitPaneWidthPx(),
-  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1398,7 +1388,6 @@ function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
-function isYoCostItem(item) { return tabTypeForItem(item)?.key === 'yocost'; }
 function isImageViewerItem(item) { return tabTypeForItem(item)?.key === 'image-viewer'; }
 function isFileEditorItem(item) {
   const key = tabTypeForItem(item)?.key;
@@ -1509,7 +1498,7 @@ function applyFileExplorerStaticLabels() {
 const syntaxLanguageByExtension = new Map(Object.entries(HIGHLIGHTABLE_EXTENSIONS));
 const dynamicVirtualLayoutItems = new Set();
 function virtualTabItems() {
-  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, yocostItemId, ...dynamicVirtualLayoutItems];
+  return [infoItemId, yoagentItemId, chatItemId, ...fileExplorerItemIds, searchHistoryItemId, prefsItemId, debugPaneItemId, ...dynamicVirtualLayoutItems];
 }
 let visibleSessions = sessions.slice(0, maxSessionTabs);
 let layoutItems = [...virtualTabItems(), ...visibleSessions];
@@ -1710,16 +1699,49 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
     // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
     // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
-    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
-      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+    const pendingEntries = Array.from(apiOperationState.pending.entries())
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+    const pending = pendingEntries.map(([operationId]) => operationId);
+    // Keep teardown failures bounded but attributable. IDs alone forced a rerun with speculative
+    // owner guesses; these fields identify the producer, request and waiter without retaining bodies.
+    const pendingDetails = pendingEntries.slice(0, apiOperationReplayLimit).map(([operationId, record]) => ({
+      id: operationId,
+      kind: String(record?.kind || ''),
+      contextOperation: String(record?.context?.operation || ''),
+      contextSession: String(record?.context?.session || ''),
+      contextPath: String(record?.context?.path || '').slice(0, 512),
+      requestId: String(record?.request?.id || ''),
+      requestMethod: String(record?.request?.method || ''),
+      requestPath: String(record?.request?.path || record?.request?.url || '').slice(0, 512),
+      phase: String(record?.phase || ''),
+      terminalOwner: String(record?.terminalOwner || ''),
+      terminalOwners: Array.from(record?.terminalOwners || []).map(String).sort(),
+      waiterCount: apiOperationState.waiters.get(operationId)?.size || 0,
+    }));
+    const watchDiffPendingOperationIds = pendingEntries
+      .filter(([, record]) => record && (
+        record.terminalOwner === 'filesystem-watch-diff-refresh'
+        || record.terminalOwners?.has('filesystem-watch-diff-refresh') === true
+      ))
       .map(([operationId]) => operationId)
       .sort();
+    const watchDiffBatch = typeof fileExplorerFsBatchOwnershipState === 'function'
+      ? fileExplorerFsBatchOwnershipState('filesystem-watch-diff-refresh')
+      : {queued: 0, pending: 0, operations: 0, operationIds: []};
     return {
-      pending: Array.from(apiOperationState.pending.keys()).sort(),
+      pending,
+      pendingDetails,
+      pendingDetailsTruncated: pendingEntries.length > pendingDetails.length,
       watchDiffPendingOperationIds,
+      watchDiffBatchQueued: watchDiffBatch.queued,
+      watchDiffBatchPending: watchDiffBatch.pending,
+      watchDiffBatchOperations: watchDiffBatch.operations,
+      watchDiffBatchOperationIds: watchDiffBatch.operationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
+      startupActive: typeof startupRefreshApiCoordinator === 'undefined' ? 0 : startupRefreshApiCoordinator.active,
+      startupQueued: typeof startupRefreshApiCoordinator === 'undefined' ? 0 : startupRefreshApiCoordinator.queue.length,
       activityRefreshing: activitySummaryState.refreshing === true,
       watchRootsPending: watchRootsTimerPending || watchRootsRegistrationPending || watchRootsInFlight || watchRootsBaselinePending,
       watchRootsTimerPending,
@@ -2631,6 +2653,85 @@ function applyApiRequestIdHeader(url, requestOptions) {
 
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
+// Route-qualified owners still decide whether roots, metadata, Finder, terminal, or stats demand is
+// equivalent. This is the one browser-wide capacity owner beneath them, so independent startup and
+// refresh work remains parallel without letting one page issue an unbounded fetch burst.
+const startupRefreshApiConcurrencyLimit = 8;
+const startupRefreshApiCoordinator = {active: 0, queue: []};
+
+function startupRefreshApiAbortError(signal) {
+  const reason = signal?.reason;
+  if (reason && typeof reason === 'object') return reason;
+  const error = new Error(reason ? String(reason) : 'The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function drainStartupRefreshApiCoordinator() {
+  while (startupRefreshApiCoordinator.active < startupRefreshApiConcurrencyLimit && startupRefreshApiCoordinator.queue.length) {
+    const item = startupRefreshApiCoordinator.queue.shift();
+    if (item.signal?.aborted) {
+      item.settle('reject', startupRefreshApiAbortError(item.signal));
+      continue;
+    }
+    item.started = true;
+    item.capacityOwned = true;
+    startupRefreshApiCoordinator.active += 1;
+    let request;
+    try {
+      request = item.run();
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    Promise.resolve(request)
+      .then(value => item.settle('resolve', value), error => item.settle('reject', error));
+  }
+}
+
+function runStartupRefreshApiRequest(run, signal = null) {
+  return new Promise((resolve, reject) => {
+    const item = {
+      run,
+      signal,
+      resolve,
+      reject,
+      started: false,
+      settled: false,
+      capacityOwned: false,
+      abort: null,
+      cleanup() {
+        if (this.abort) this.signal?.removeEventListener?.('abort', this.abort);
+        this.abort = null;
+      },
+      settle(outcome, value) {
+        if (this.settled) return;
+        this.settled = true;
+        this.cleanup();
+        if (this.capacityOwned) {
+          this.capacityOwned = false;
+          startupRefreshApiCoordinator.active -= 1;
+          drainStartupRefreshApiCoordinator();
+        }
+        if (outcome === 'resolve') this.resolve(value);
+        else this.reject(value);
+      },
+    };
+    item.abort = () => {
+      if (!item.started) {
+        const index = startupRefreshApiCoordinator.queue.indexOf(item);
+        if (index >= 0) startupRefreshApiCoordinator.queue.splice(index, 1);
+      }
+      item.settle('reject', startupRefreshApiAbortError(signal));
+    };
+    if (signal?.aborted) {
+      item.abort();
+      return;
+    }
+    signal?.addEventListener?.('abort', item.abort, {once: true});
+    startupRefreshApiCoordinator.queue.push(item);
+    drainStartupRefreshApiCoordinator();
+  });
+}
 
 function promiseDeadlineError(deadlineMs, subject = 'operation') {
   const error = new Error(`${String(subject || 'operation')} exceeded its ${Math.round(deadlineMs)}ms deadline`);
@@ -2767,7 +2868,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   };
   let response;
   try {
-    const requestPromise = fetch(url, requestOptions).catch(error => {
+    const requestPromise = runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal).catch(error => {
       if (timeoutError) throw timeoutError;
       throw error;
     });
@@ -2784,7 +2885,10 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
-    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
+    const ownerRetirementReason = !timeoutError && upstreamSignal?.aborted
+      ? String(internalOptions.abortRetirementReason || '')
+      : '';
+    const retirementReason = timeoutError ? '' : (transportLifecycle.reasonSince(transportToken) || ownerRetirementReason);
     if (timeoutError) noteTimeout();
     else if (!retirementReason) noteBackendHealthFailure();
     if (recordDebug) {
@@ -3174,6 +3278,11 @@ function waitForApiOperationResult(pending, expected = {}) {
 }
 
 function startApiOperationTransport(record) {
+  // A global stream which has fired `ready` receives every live terminal by browser client ID, so
+  // steady-state operation churn must never replace it. Before first ready, however, its immutable
+  // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
+  // cover a terminal published before the server subscribes it.
+  if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -7140,10 +7249,23 @@ function installTerminalLinkProvider(session, term) {
   });
 }
 
+function terminalRenderCellDimensions(term) {
+  const renderService = term?._core?._renderService;
+  const rendererCell = renderService?._renderer?.dimensions?.css?.cell;
+  if (rendererCell?.width > 0 && rendererCell?.height > 0) return rendererCell;
+  try {
+    const serviceCell = renderService?.dimensions?.css?.cell;
+    return serviceCell?.width > 0 && serviceCell?.height > 0 ? serviceCell : null;
+  } catch (error) {
+    // xterm's getter dereferences the renderer after dispose. An absent renderer identifies that
+    // teardown race; other getter failures still surface instead of being hidden.
+    if (error?.name !== 'TypeError' || renderService?._renderer) throw error;
+    return null;
+  }
+}
+
 function terminalCellDimensions(term, container) {
-  const cell = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || {};
+  const cell = terminalRenderCellDimensions(term) || {};
   const width = Number(cell.width || 0);
   const height = Number(cell.height || 0);
   if (width > 0 && height > 0) return {width, height};
@@ -10544,7 +10666,10 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('root' in finder) {
     const root = String(finder.root || '').trim();
-    if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+    if (root) {
+      fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+      layoutUrlState.finderRootKindUnverified = true;
+    }
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerFinderSelectedSession = String(finder.session || '').trim();
@@ -11536,6 +11661,10 @@ function registerDynamicVirtualLayoutItem(item) {
 
 function resolveLayoutItem(value) {
   const text = String(value || '');
+  if (isLegacyYoCostItemParam(text)) {
+    legacyYoCostMigrationRequested = true;
+    return debugPaneItemId;
+  }
   if (text === 'changes' || text === '__changes__') {
     fileExplorerMode = 'diff';
     writeStoredFileExplorerMode(fileExplorerMode);
@@ -19360,7 +19489,7 @@ async function fetchRawFileBlob(path, options = {}) {
       cache: 'no-store',
       deadlineMs: options.deadlineMs || apiFetchLongOperationDeadlineMs,
       ...(options.signal ? {signal: options.signal} : {}),
-    }, {returnUnauthorizedResponse: true});
+    }, {returnUnauthorizedResponse: true, abortRetirementReason: 'raw_file_media_replaced'});
     if (!response.ok) return rawFileFailureResult(response, path);
     const blob = await response.blob();
     return {
@@ -19504,14 +19633,44 @@ function toggleFileExplorer() {
   }
 }
 
+async function resolveFileExplorerDirectoryRoot(path, options = {}) {
+  const requested = normalizeDirectoryPath(expandUserPath(path));
+  try {
+    const info = await fetchFilePathInfo(requested, {fresh: true, force: true, user: options.user === true || options.manualSelection === true});
+    if (info?.kind === 'dir') {
+      const key = fileExplorerFsBatchKey('list', requested);
+      const record = fileExplorerFsResourceRecords.get(key);
+      if (record?.failureStatus) invalidateFileExplorerFsResourceRecord(key, record);
+      return requested;
+    }
+    if (info?.kind === 'file') {
+      markFileExplorerDirectoryDemandNegative(requested, 400);
+      retireFileExplorerDirectoryDemand(requested);
+      return dirnameOf(requested);
+    }
+    const error = new Error(t('fs.error.notDirectory', {path: requested}));
+    error.status = 400;
+    error.payload = {user_message: {key: 'fs.error.notDirectory', params: {path: requested}, fallback: error.message}};
+    setFileExplorerListError(requested, error, 400);
+    return '';
+  } catch (error) {
+    setFileExplorerListError(requested, error, Number(error?.status) || 0);
+    return '';
+  }
+}
+
 async function openFileExplorerAt(path, options = {}) {
   const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
-  const root = normalizeDirectoryPath(expandUserPath(path));
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
   }
   const openGeneration = fileWorkspaceState.beginOpen();
   const openStillCurrent = () => fileWorkspaceState.openIsCurrent(openGeneration);
+  const requestedRoot = normalizeDirectoryPath(expandUserPath(path));
+  const validateKind = options.validateKind === true
+    || (layoutUrlState.finderRootKindUnverified && requestedRoot === normalizeDirectoryPath(fileExplorerRoot || ''));
+  const root = validateKind ? await resolveFileExplorerDirectoryRoot(requestedRoot, options) : requestedRoot;
+  if (!root || !openStillCurrent()) return false;
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
     setFileExplorerSelectionPin(options.manualSelection === true);
@@ -19537,6 +19696,7 @@ async function openFileExplorerAt(path, options = {}) {
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
   const rootChanged = root !== currentFileExplorerRoot();
   fileExplorerRoot = root;
+  layoutUrlState.finderRootKindUnverified = false;
   if (rootChanged) pruneFileExplorerSelectionForRoot(fileExplorerRoot);
   if (options.manualSelection === true) setFileExplorerSelectionPin(true);
   if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});
@@ -19576,6 +19736,8 @@ async function saveFileExplorerRootMode(mode) {
 // (one request per dir per render — the cause of the 8001 fs/list loop). Repeated fetches of the same dir
 // within the TTL reuse the listing; the change-detection sweep and explicit reloads pass {fresh:true}.
 const fileExplorerFsResourceRecords = new Map();
+const fileExplorerFsNegativeBackoffBaseMs = 30_000;
+const fileExplorerFsNegativeBackoffMaxMs = 5 * 60_000;
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchOperations = new Map();
@@ -19583,6 +19745,7 @@ const fileExplorerRepoInfoEnrichmentState = {
   pending: new Set(),
   inFlight: new Set(),
   resolved: new Set(),
+  watchDiffOwned: new Set(),
   globalGeneration: 0,
   pathGenerations: new Map(),
   nextGeneration: 1,
@@ -19614,6 +19777,7 @@ let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
   'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation', 'repo-enrichment',
 ]);
+const FILE_EXPLORER_FS_BATCH_TERMINAL_OWNERS = new Set(['filesystem-watch-diff-refresh']);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
 const FILE_TREE_COMPACT_PAD_PX = 4;
@@ -19695,10 +19859,41 @@ function fileExplorerFsResourceRecord(type, path) {
   const key = fileExplorerFsBatchKey(type, path);
   let record = fileExplorerFsResourceRecords.get(key);
   if (!record) {
-    record = {value: undefined, storedAt: 0, request: null, requestUserInitiated: false, generation: 0};
+    record = {
+      value: undefined,
+      storedAt: 0,
+      request: null,
+      requestUserInitiated: false,
+      generation: 0,
+      failureCount: 0,
+      failureStatus: 0,
+      retryAt: 0,
+    };
     setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
   }
   return {key, record};
+}
+
+function clearFileExplorerFsResourceFailure(record) {
+  record.failureCount = 0;
+  record.failureStatus = 0;
+  record.retryAt = 0;
+}
+
+function recordFileExplorerFsResourceFailure(record, status) {
+  record.failureCount = Math.min(32, Math.max(0, Number(record.failureCount) || 0) + 1);
+  record.failureStatus = Number(status) || 0;
+  const exponent = Math.min(4, record.failureCount - 1);
+  record.retryAt = Date.now() + Math.min(fileExplorerFsNegativeBackoffMaxMs, fileExplorerFsNegativeBackoffBaseMs * (2 ** exponent));
+}
+
+function markFileExplorerDirectoryDemandNegative(path, status) {
+  const {record} = fileExplorerFsResourceRecord('list', path);
+  record.generation += 1;
+  record.value = undefined;
+  record.storedAt = 0;
+  record.request = null;
+  recordFileExplorerFsResourceFailure(record, status);
 }
 
 function fileExplorerFsResourceCurrent(key, record, generation) {
@@ -19711,6 +19906,7 @@ function setFileExplorerFsResourceValue(type, path, value) {
   record.request = null;
   record.value = value;
   record.storedAt = Date.now();
+  clearFileExplorerFsResourceFailure(record);
   return value;
 }
 
@@ -19733,6 +19929,7 @@ function invalidateFileExplorerFsResourceRecord(key, record) {
   record.value = undefined;
   record.storedAt = 0;
   record.request = null;
+  clearFileExplorerFsResourceFailure(record);
   if (fileExplorerFsResourceRecords.get(key) === record) fileExplorerFsResourceRecords.delete(key);
 }
 
@@ -19744,6 +19941,10 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
   if (canReuse && cacheTtlMs > 0 && record.value !== undefined && Date.now() - record.storedAt < cacheTtlMs) {
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
+  }
+  if (options.user !== true && record.retryAt > Date.now()) {
+    lifecycle.onNegativeReuse?.(record);
+    return Promise.resolve(Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue') ? lifecycle.errorValue : null);
   }
   // A Finder click must not wait behind an unrelated bootstrap/refresh request for the same
   // directory.  Give it one successor batch; later clicks share that user-owned request so this
@@ -19766,11 +19967,16 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
       if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
         record.value = value;
         record.storedAt = Date.now();
+        clearFileExplorerFsResourceFailure(record);
         lifecycle.onPublish?.(value);
       }
       return value;
     } catch (error) {
-      if (fileExplorerFsResourceCurrent(key, record, generation)) lifecycle.onError?.(error);
+      if (fileExplorerFsResourceCurrent(key, record, generation)) {
+        const negativeStatus = Number(lifecycle.negativeStatus?.(error)) || 0;
+        if (negativeStatus) recordFileExplorerFsResourceFailure(record, negativeStatus);
+        lifecycle.onError?.(error);
+      }
       if (Object.prototype.hasOwnProperty.call(lifecycle, 'errorValue')) return lifecycle.errorValue;
       throw error;
     } finally {
@@ -19813,6 +20019,33 @@ function recordFileExplorerFsBatchTrigger(item, trigger) {
   item.triggerCounts[trigger] = Math.min(fileExplorerFsBatchTriggerCountLimit, count + 1);
 }
 
+function recordFileExplorerFsBatchTerminalOwner(item, owner) {
+  const normalized = String(owner || '');
+  if (!FILE_EXPLORER_FS_BATCH_TERMINAL_OWNERS.has(normalized)) return;
+  item.terminalOwners.add(normalized);
+}
+
+function fileExplorerFsBatchTerminalOwners(items) {
+  const owners = new Set();
+  for (const item of items) {
+    for (const owner of item?.terminalOwners || []) owners.add(owner);
+  }
+  return owners;
+}
+
+function fileExplorerFsBatchOwnershipState(owner) {
+  const normalized = String(owner || '');
+  const owned = item => item?.terminalOwners?.has(normalized) === true;
+  const operations = Array.from(fileExplorerFsBatchOperations.entries())
+    .filter(([, items]) => Array.isArray(items) && items.some(owned));
+  return {
+    queued: fileExplorerFsBatchQueue.filter(owned).length,
+    pending: Array.from(fileExplorerFsBatchPending.values()).filter(value => owned(value?.item)).length,
+    operations: operations.length,
+    operationIds: operations.map(([operationId]) => operationId).sort(),
+  };
+}
+
 function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
   const pending = fileExplorerFsBatchPending.get(fileExplorerFsBatchKey(type, normalizeDirectoryPath(path)));
   if (pending?.item && pending.item.sent !== true) recordFileExplorerFsBatchTrigger(pending.item, fileExplorerFsBatchTrigger(options));
@@ -19835,6 +20068,7 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     const existing = fileExplorerFsBatchPending.get(key);
     if (existing) {
       if (existing.item.sent !== true) recordFileExplorerFsBatchTrigger(existing.item, fileExplorerFsBatchTrigger(options));
+      recordFileExplorerFsBatchTerminalOwner(existing.item, options.terminalOwner);
       return existing.promise;
     }
   }
@@ -19845,7 +20079,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     reject = fail;
   });
   const trigger = fileExplorerFsBatchTrigger(options);
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, promise, resolve, reject, sent: false};
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, terminalOwners: new Set(), key, promise, resolve, reject, sent: false};
+  recordFileExplorerFsBatchTerminalOwner(item, options.terminalOwner);
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -19879,6 +20114,12 @@ function applyFileExplorerFsBatchOperationResult(record, result = {}) {
 function acceptFileExplorerFsBatchOperation(items, error) {
   if (!isApiPendingResponse(error) || !error.operationId) return false;
   fileExplorerFsBatchOperations.set(error.operationId, items);
+  const record = apiOperationState.records.get(error.operationId);
+  const terminalOwners = fileExplorerFsBatchTerminalOwners(items);
+  if (record && terminalOwners.size) {
+    record.terminalOwners = terminalOwners;
+    if (terminalOwners.size === 1) record.terminalOwner = terminalOwners.values().next().value;
+  }
   const terminal = apiOperationState.terminal.get(error.operationId);
   if (terminal?.result) {
     applyFileExplorerFsBatchOperationResult({id: error.operationId, kind: 'fs_batch'}, terminal.result);
@@ -20037,13 +20278,8 @@ async function postFileExplorerFsBatchChunk(items) {
     return {ok: true};
   } catch (error) {
     if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
-    try {
-      const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
-      return {ok: results.every(result => result.ok === true)};
-    } catch (fallbackError) {
-      for (const item of items) rejectFileExplorerFsBatchItem(item, fallbackError);
-      return {ok: false};
-    }
+    for (const item of items) rejectFileExplorerFsBatchItem(item, error);
+    return {ok: false};
   }
 }
 
@@ -20103,8 +20339,10 @@ async function fetchDirectory(path, options = {}) {
           ? err.message || `${openFailed} (${status})`
           : `${openFailed}: ${err}`;
         setFileExplorerListError(root, err, status);
+        if (fileExplorerDirectoryDemandTerminalError(err)) retireFileExplorerDirectoryDemand(root);
         console.warn(status ? 'fs list failed' : 'fs list error', root, status || err, fileExplorerPathError);
       },
+      negativeStatus: err => fileExplorerDirectoryDemandTerminalError(err) ? Number(err?.status) || 400 : 0,
       errorValue: null,
     });
 }
@@ -20153,7 +20391,7 @@ function invalidateFileExplorerRoots(roots = []) {
   return normalizedRoots.some(root => pathIsInsideDirectory(currentFileExplorerRoot(), root));
 }
 
-function entriesByDirFromFilesystemPush(payload = {}) {
+function entriesByDirFromFilesystemPush(payload = {}, options = {}) {
   const entriesByDir = new Map();
   const directories = Array.isArray(payload.directories) ? payload.directories : [];
   for (const item of directories) {
@@ -20166,7 +20404,10 @@ function entriesByDirFromFilesystemPush(payload = {}) {
     markNewDirectoryEntries(path, entries);
     recordDirectorySignature(path, entries);
     setFileExplorerFsResourceValue('list', path, entries);
-    scheduleFileExplorerRepoInfoEnrichment(path, entries, {includeRoot: path === currentFileExplorerRoot()});
+    scheduleFileExplorerRepoInfoEnrichment(path, entries, {
+      includeRoot: path === currentFileExplorerRoot(),
+      watchDiffOwned: options.fromWatchDiff === true,
+    });
   }
   return entriesByDir;
 }
@@ -20303,7 +20544,7 @@ async function refreshFileExplorerFromPush(payload = {}, options = {}) {
       fileExplorerFilesystemWatchToken = nextToken;
       fileExplorerFilesystemPushToken = nextToken;
     }
-    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload) : new Map();
+    const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload, options) : new Map();
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
     if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
@@ -20432,11 +20673,13 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
   if (!repo || typeof repo !== 'object') return null;
   const root = normalizeDirectoryPath(repo.root || fallbackRoot);
   if (!root) return null;
+  const cachePath = normalizeDirectoryPath(repo.cache_path || fallbackRoot || root);
   const dirtyCount = Number(repo.dirty_count);
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
   return {
     root,
+    cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
@@ -20461,7 +20704,7 @@ function hydrateFileExplorerRepoInfoCache() {
 function persistFileExplorerRepoInfoCache() {
   try {
     const repos = Array.from(fileExplorerRepoInfoCache.entries())
-      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.root) === path)
+      .filter(([path, repo]) => path && repo?.root && normalizeDirectoryPath(repo.cache_path || repo.root) === path)
       .sort(([leftPath], [rightPath]) => leftPath.localeCompare(rightPath))
       .slice(-200)
       .map(([path, repo]) => ({path, repo}));
@@ -20475,8 +20718,12 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const info = normalizeFileExplorerRepoInfo(repo, normalized);
   if (!normalized || !info) return false;
   const repoRoot = normalizeDirectoryPath(info.root);
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, info, fileExplorerMemoryCacheLimit);
-  if (repoRoot && repoRoot !== normalized) setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, info, fileExplorerMemoryCacheLimit);
+  // Finder preserves the path the user opened while macOS APIs can return its physical alias
+  // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
+  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  if (repoRoot && repoRoot !== normalized) {
+    setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
+  }
   if (options.persist !== false) persistFileExplorerRepoInfoCache();
   return true;
 }
@@ -20487,7 +20734,9 @@ function clearFileExplorerRepoInfo(path, options = {}) {
   if (!normalized) return false;
   let changed = false;
   for (const [cachedPath, repo] of Array.from(fileExplorerRepoInfoCache.entries())) {
-    if (cachedPath !== normalized && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
+    if (cachedPath !== normalized
+        && normalizeDirectoryPath(repo?.cache_path || '') !== normalized
+        && normalizeDirectoryPath(repo?.root || '') !== normalized) continue;
     fileExplorerRepoInfoCache.delete(cachedPath);
     changed = true;
   }
@@ -20499,7 +20748,7 @@ function exactFileExplorerRepoInfo(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  return normalizeDirectoryPath(repo?.root || '') === normalized ? repo : null;
+  return normalizeDirectoryPath(repo?.cache_path || repo?.root || '') === normalized ? repo : null;
 }
 
 function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
@@ -20524,6 +20773,7 @@ function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {
     candidates.push(childPath(root, entry.name));
   }
   for (const path of candidates) {
+    if (options.watchDiffOwned === true) state.watchDiffOwned.add(path);
     if (options.refresh === true) {
       state.pathGenerations.set(path, state.nextGeneration++);
       state.resolved.delete(path);
@@ -20551,18 +20801,25 @@ async function enrichFileExplorerRepoInfoEntries() {
       path,
       globalGeneration: state.globalGeneration,
       pathGeneration: state.pathGenerations.get(path) || 0,
+      terminalOwner: state.watchDiffOwned.has(path) ? 'filesystem-watch-diff-refresh' : '',
     });
   }
   if (!requests.length) return;
   const results = await Promise.allSettled(requests.map(async request => ({
     ...request,
-    info: await fetchFilePathInfo(request.path, {fresh: true, force: true, trigger: 'repo-enrichment'}),
+    info: await fetchFilePathInfo(request.path, {
+      fresh: true,
+      force: true,
+      trigger: 'repo-enrichment',
+      terminalOwner: request.terminalOwner,
+    }),
   })));
   let changed = false;
   const enrichedPaths = new Set();
   for (let index = 0; index < requests.length; index += 1) {
     const request = requests[index];
     state.inFlight.delete(request.path);
+    if (!state.pending.has(request.path)) state.watchDiffOwned.delete(request.path);
     const result = results[index];
     if (result?.status !== 'fulfilled') continue;
     if (request.globalGeneration !== state.globalGeneration
@@ -20672,7 +20929,7 @@ function setFileExplorerManualRootMode() {
 
 function openFileExplorerManualRoot(path) {
   setFileExplorerManualRootMode();
-  return openFileExplorerAt(path, {manualSelection: true});
+  return openFileExplorerAt(path, {manualSelection: true, validateKind: true});
 }
 
 function tmuxDirectoryForItem(item) {
@@ -20754,6 +21011,93 @@ function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerE
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
     ));
+}
+
+function fileExplorerDirectoryDemandTerminalError(error) {
+  const status = Number(error?.status) || 0;
+  const messageKey = String(
+    error?.payload?.user_message?.key
+    || error?.payload?.error?.message?.key
+    || error?.payload?.message?.key
+    || '',
+  );
+  return status === 404 || (status === 400 && messageKey === 'fs.error.notDirectory');
+}
+
+function retireFileExplorerDirectoryDemand(path) {
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized) return false;
+  const retires = candidate => {
+    const value = normalizeDirectoryPath(candidate || '');
+    return value === normalized || pathIsInsideDirectory(value, normalized);
+  };
+  let changed = false;
+  for (const candidate of Array.from(fileExplorerExpanded)) {
+    if (retires(candidate)) changed = fileExplorerExpanded.delete(candidate) || changed;
+  }
+  for (const candidate of Array.from(fileExplorerPendingExpansions)) {
+    if (retires(candidate)) changed = fileExplorerPendingExpansions.delete(candidate) || changed;
+  }
+  for (const candidate of Array.from(fileExplorerSyncUserExpansionState.keys())) {
+    if (retires(candidate)) changed = fileExplorerSyncUserExpansionState.delete(candidate) || changed;
+  }
+  for (const record of fileExplorerSyncTargetRecords.values()) {
+    const previousExpanded = Array.isArray(record.expandedPaths) ? record.expandedPaths : [];
+    const nextExpanded = previousExpanded.filter(candidate => !retires(candidate));
+    if (nextExpanded.length !== previousExpanded.length) {
+      record.expandedPaths = nextExpanded;
+      changed = true;
+    }
+    if (record.manualCollapsedPaths instanceof Set) {
+      for (const candidate of Array.from(record.manualCollapsedPaths)) {
+        if (retires(candidate)) changed = record.manualCollapsedPaths.delete(candidate) || changed;
+      }
+    }
+  }
+  for (const candidate of Array.from(fileExplorerSyncManualCollapsedPaths)) {
+    if (retires(candidate)) changed = fileExplorerSyncManualCollapsedPaths.delete(candidate) || changed;
+  }
+  for (const [key, record] of Array.from(fileExplorerFsResourceRecords.entries())) {
+    const [type, candidate] = key.split('\x1f');
+    if (type === 'list' && candidate !== normalized && pathIsInsideDirectory(candidate, normalized)) {
+      invalidateFileExplorerFsResourceRecord(key, record);
+      changed = true;
+    }
+  }
+  for (const [candidate, record] of Array.from(fileExplorerDirectoryRecords.entries())) {
+    if (candidate !== normalized && pathIsInsideDirectory(candidate, normalized)) {
+      fileExplorerDirectoryRecords.delete(candidate);
+      record.knownEntryNames?.clear?.();
+      changed = true;
+    }
+  }
+  if (!changed) return false;
+  cancelPendingFileExplorerActiveSync({invalidateOpen: false});
+  refreshLayoutUrlStateSoon();
+  syncServerWatchRoots();
+  return true;
+}
+
+function qualifyFileExplorerDirectoryPaths(root, paths, entriesByDir) {
+  const normalizedRoot = normalizeDirectoryPath(root);
+  const qualified = [];
+  const retired = [];
+  for (const path of fileExplorerExpandedPathsForRoot(normalizedRoot, paths)) {
+    if (retired.some(parent => path === parent || pathIsInsideDirectory(path, parent))) continue;
+    const parent = dirnameOf(path);
+    const parentEntries = entriesByDir.get(parent);
+    if (!Array.isArray(parentEntries)) continue;
+    const name = basenameOf(path);
+    const entry = parentEntries.find(candidate => String(candidate?.name || '') === name);
+    if (entry?.kind === 'dir') {
+      qualified.push(path);
+      continue;
+    }
+    retired.push(path);
+    markFileExplorerDirectoryDemandNegative(path, entry ? 400 : 404);
+    retireFileExplorerDirectoryDemand(path);
+  }
+  return qualified;
 }
 
 function fileExplorerSyncUserExpansionEntries() {
@@ -21690,6 +22034,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   const root = normalizeDirectoryPath(plan?.root || '');
   const rootEntries = entriesByDir?.get(root);
   if (!root || !Array.isArray(rootEntries)) return false;
+  const qualifiedRenderPaths = qualifyFileExplorerDirectoryPaths(root, renderPaths, entriesByDir);
   const rootChanged = root !== currentFileExplorerRoot();
   const preserveState = options.preserveState === true && !rootChanged;
   const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
@@ -21701,7 +22046,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   if (!preserveState) fileExplorerExpanded.clear();
   for (const path of previousExpanded) fileExplorerExpanded.add(path);
   for (const path of fileExplorerSyncUserExpandedPathsForRoot(root)) fileExplorerExpanded.add(path);
-  for (const path of renderPaths) fileExplorerExpanded.add(path);
+  for (const path of qualifiedRenderPaths) fileExplorerExpanded.add(path);
   if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
     const tree = panel.querySelector?.('.file-explorer-tree-panel');
@@ -21712,29 +22057,62 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   return true;
 }
 
-async function fetchFileExplorerSyncListings(directories = [], options = {}, onListing = null) {
-  const entriesByDir = new Map();
-  const queue = [...directories];
-  const workerCount = Math.min(8, queue.length);
-  await Promise.all(Array.from({length: workerCount}, async () => {
-    while (queue.length) {
-      const directory = queue.shift();
-      const entries = await fetchDirectory(directory, options);
-      if (Array.isArray(entries)) {
-        entriesByDir.set(normalizeDirectoryPath(directory), entries);
-        onListing?.(directory, entries, entriesByDir);
+async function fetchFileExplorerSyncListings(directories = [], options = {}, onListing = null, seededEntries = null) {
+  const normalizedDirectories = Array.from(new Set(directories.map(directory => normalizeDirectoryPath(directory)).filter(Boolean)));
+  const root = normalizedDirectories[0] || '';
+  const entriesByDir = seededEntries instanceof Map ? new Map(seededEntries) : new Map();
+  if (!root) return entriesByDir;
+  if (normalizedDirectories.slice(1).some(directory => !pathIsInsideDirectory(directory, root))) {
+    const queue = [...normalizedDirectories];
+    const workerCount = Math.min(8, queue.length);
+    await Promise.all(Array.from({length: workerCount}, async () => {
+      while (queue.length) {
+        const directory = queue.shift();
+        const entries = await fetchDirectory(directory, options);
+        if (Array.isArray(entries)) {
+          entriesByDir.set(directory, entries);
+          onListing?.(directory, entries, entriesByDir);
+        }
       }
-    }
-  }));
+    }));
+    return entriesByDir;
+  }
+  if (!entriesByDir.has(root)) {
+    const entries = await fetchDirectory(root, options);
+    if (!Array.isArray(entries)) return entriesByDir;
+    entriesByDir.set(root, entries);
+    onListing?.(root, entries, entriesByDir);
+  }
+  const candidatePaths = normalizedDirectories.slice(1);
+  const maximumDepth = candidatePaths.reduce((maximum, path) => Math.max(maximum, childPathParts(root, path).length), 0);
+  for (let depth = 1; depth <= maximumDepth; depth += 1) {
+    const queue = qualifyFileExplorerDirectoryPaths(root, candidatePaths, entriesByDir)
+      .filter(path => childPathParts(root, path).length === depth && !entriesByDir.has(path));
+    const workerCount = Math.min(8, queue.length);
+    await Promise.all(Array.from({length: workerCount}, async () => {
+      while (queue.length) {
+        const directory = queue.shift();
+        const entries = await fetchDirectory(directory, options);
+        if (Array.isArray(entries)) {
+          entriesByDir.set(normalizeDirectoryPath(directory), entries);
+          onListing?.(directory, entries, entriesByDir);
+        }
+      }
+    }));
+  }
   return entriesByDir;
 }
 
 function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
+  const generation = fileExplorerSyncState.generation;
   requestAnimationFrame(() => {
+    if (fileExplorerSyncState.generation !== generation) return;
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
     void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
       if (
+        fileExplorerSyncState.generation !== generation
+        ||
         fileExplorerSyncPlanSignature(plan) !== signature
         || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
         || !fileExplorerSyncPlanTargetStillCurrent(plan)
@@ -21778,6 +22156,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
       changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings, {preserveState: !targetChanged}) || changed;
+      if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
       restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
@@ -21792,23 +22171,25 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     if (!Array.isArray(rootEntries)) return false;
     const fetchedListings = new Map([[normalizedRoot, rootEntries]]);
     changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
+    if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return changed;
     restoreFileExplorerSyncCursorState(plan.session, plan.root);
     setFileExplorerVisibleSyncTarget(plan.session, plan.root);
     rememberFileExplorerSyncExpandedState(plan.session, plan.root);
     markFileExplorerSyncPlanApplied(plan);
     updateFileExplorerSessionHighlightRows(preferredItem);
 
-    const descendantDirectories = listingDirectories.filter(directory => normalizeDirectoryPath(directory) !== normalizedRoot);
     await fetchFileExplorerSyncListings(
-      descendantDirectories,
+      listingDirectories,
       {force: true, user: options.force === true},
       (directory, entries) => {
         if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return;
         fetchedListings.set(normalizeDirectoryPath(directory), entries);
         changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: true}) || changed;
+        if (!fileExplorerSyncTransactionStillCurrent(plan, signature, options)) return;
         restoreFileExplorerSyncCursorState(plan.session, plan.root);
         updateFileExplorerSessionHighlightRows(preferredItem);
       },
+      fetchedListings,
     );
     return changed;
   } finally {
@@ -22133,7 +22514,7 @@ function fileTreeRepoBranch(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return '';
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return '';
   return repoBranchDisplayText(repo);
 }
 
@@ -22142,7 +22523,7 @@ function fileTreeRepoSyncMeta(path) {
   hydrateFileExplorerRepoInfoCache();
   const normalized = normalizeDirectoryPath(path);
   const repo = fileExplorerRepoInfoCache.get(normalized);
-  if (!repo?.root || normalizeDirectoryPath(repo.root) !== normalized) return [];
+  if (!repo?.root || normalizeDirectoryPath(repo.cache_path || repo.root) !== normalized) return [];
   const parts = [];
   const ahead = Number(repo.ahead);
   const behind = Number(repo.behind);
@@ -25172,7 +25553,11 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
+    () => fetchFilesystemBatchItem('info', normalized, {
+      dedupe: options.fresh !== true,
+      trigger: fileExplorerFsBatchTrigger(options),
+      terminalOwner: options.terminalOwner,
+    }),
     {
       skipRequest: () => suppressBackgroundFilesystemFetch(options),
       skipValue: null,
@@ -26107,19 +26492,28 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
+function fileExplorerQualifiedExpandedPaths(root, entriesByDir) {
+  return qualifyFileExplorerDirectoryPaths(root, Array.from(fileExplorerExpanded), entriesByDir);
+}
+
 async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
-  const directories = new Set([normalizedRoot]);
-  for (const path of fileExplorerExpanded) {
-    if (pathIsInsideDirectory(path, normalizedRoot) && path !== normalizedRoot) directories.add(normalizeDirectoryPath(path));
-  }
-  const listings = await Promise.all(Array.from(directories).map(async directory => ({
-    directory,
-    entries: await fetchDirectory(directory, options),
-  })));
-  for (const {directory, entries} of listings) {
-    if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+  const rootEntries = await fetchDirectory(normalizedRoot, options);
+  if (!rootEntries) return entriesByDir;
+  entriesByDir.set(normalizedRoot, rootEntries);
+  const expandedPaths = fileExplorerExpandedPathsForRoot(normalizedRoot);
+  const maximumDepth = expandedPaths.reduce((maximum, path) => Math.max(maximum, childPathParts(normalizedRoot, path).length), 0);
+  for (let depth = 1; depth <= maximumDepth; depth += 1) {
+    const qualified = fileExplorerQualifiedExpandedPaths(normalizedRoot, entriesByDir)
+      .filter(path => childPathParts(normalizedRoot, path).length === depth);
+    const listings = await Promise.all(qualified.map(async directory => ({
+      directory,
+      entries: await fetchDirectory(directory, options),
+    })));
+    for (const {directory, entries} of listings) {
+      if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
+    }
   }
   return entriesByDir;
 }
@@ -27605,13 +27999,13 @@ async function refreshOpenFilesIfChanged(options = {}) {
 
 function watchedFileExplorerDirectories() {
   const root = currentFileExplorerRoot();
-  const directories = new Set();
   if (!fileExplorerTreePaneIsVisible()) return [];
-  directories.add(root);
-  for (const path of fileExplorerExpanded) {
-    if (pathIsInsideDirectory(path, root)) directories.add(normalizeDirectoryPath(path));
+  const entriesByDir = new Map();
+  for (const directory of [root, ...fileExplorerExpandedPathsForRoot(root)]) {
+    const entries = cachedFileExplorerFsResourceValue('list', directory);
+    if (Array.isArray(entries)) entriesByDir.set(directory, entries);
   }
-  return Array.from(directories);
+  return [root, ...fileExplorerQualifiedExpandedPaths(root, entriesByDir)];
 }
 
 function visibleFileEditorWatchFiles() {
@@ -27631,14 +28025,32 @@ function backgroundFileEditorWatchFiles() {
     .sort();
 }
 
-function clientServerWatchRoots() {
-  const roots = new Set(watchedFileExplorerDirectories());
+const clientServerWatchRootSurfacesVersion = 1;
+const clientServerWatchRootSurfaceNames = new Set([
+  'finder',
+  'modified-files-parent',
+  'modified-files-repository',
+]);
+
+function addClientServerWatchRootSurface(rootSurfaces, path, surface) {
+  const normalized = normalizeDirectoryPath(path);
+  if (!normalized || !normalized.startsWith('/') || !clientServerWatchRootSurfaceNames.has(surface)) return;
+  const surfaces = rootSurfaces.get(normalized) || new Set();
+  surfaces.add(surface);
+  rootSurfaces.set(normalized, surfaces);
+}
+
+function clientServerWatchRootDescriptor() {
+  const rootSurfaces = new Map();
+  for (const directory of watchedFileExplorerDirectories()) {
+    addClientServerWatchRootSurface(rootSurfaces, directory, 'finder');
+  }
   if (fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
     for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
-      roots.add(path);
+      addClientServerWatchRootSurface(rootSurfaces, path, 'modified-files-repository');
       repoRoots.push(path);
     }
     // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
@@ -27646,13 +28058,12 @@ function clientServerWatchRoots() {
     for (const file of fileExplorerSessionFilesState.payload?.files || []) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
-      roots.add(dirnameOf(path));
+      addClientServerWatchRootSurface(rootSurfaces, dirnameOf(path), 'modified-files-parent');
     }
   }
-  return Array.from(roots)
-    .map(path => normalizeDirectoryPath(path))
-    .filter(path => path && path.startsWith('/'))
-    .sort();
+  const rows = Array.from(rootSurfaces, ([path, surfaces]) => ({path, surfaces: Array.from(surfaces).sort()}))
+    .sort((left, right) => left.path.localeCompare(right.path));
+  return {roots: rows.map(row => row.path), rootSurfaces: rows};
 }
 
 function transcriptPreviewPaneIsActive(session) {
@@ -27672,6 +28083,8 @@ function clientServerWatchState() {
   if (document.visibilityState === 'hidden') {
     return {
       roots: [],
+      root_surfaces_version: clientServerWatchRootSurfacesVersion,
+      root_surfaces: [],
       files: [],
       background_files: [],
       context_items: [],
@@ -27679,11 +28092,14 @@ function clientServerWatchState() {
       session_files: [],
     };
   }
+  const rootDescriptor = clientServerWatchRootDescriptor();
   const state = {
     // This is the existing client-event identity, not a filesystem path. The
     // server unions simultaneous tabs and releases this descriptor on SSE close.
     client_id: String(browserClientId || ''),
-    roots: clientServerWatchRoots(),
+    roots: rootDescriptor.roots,
+    root_surfaces_version: clientServerWatchRootSurfacesVersion,
+    root_surfaces: rootDescriptor.rootSurfaces,
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
     context_items: transcriptContextWatchRequests(),
@@ -27704,28 +28120,60 @@ function clientServerWatchState() {
 }
 
 function mergedServerWatchRootsOptions(options = {}) {
-  return {
+  const merged = {
     ...serverWatchRootsState.pendingOptions,
     ...options,
     force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
     immediate: serverWatchRootsState.pendingOptions.immediate === true || options.immediate === true,
   };
+  if (options.force === true) {
+    merged.forceSourceOwner = String(options.forceSourceOwner || '');
+    merged.forceSourceGeneration = String(options.forceSourceGeneration || '');
+  }
+  return merged;
+}
+
+function serverWatchRootsForceIdentity(options = {}) {
+  if (options.force !== true) return null;
+  const owner = String(options.forceSourceOwner || '');
+  const generation = String(options.forceSourceGeneration || '');
+  return owner && generation ? {owner, generation} : null;
+}
+
+function serverWatchRootsRequestKey(signature, options = {}) {
+  if (options.force !== true) return JSON.stringify([signature, '', '']);
+  const identity = serverWatchRootsForceIdentity(options);
+  return identity ? JSON.stringify([signature, identity.owner, identity.generation]) : '';
+}
+
+function serverWatchRootsForceRequestCompleted(signature, options = {}) {
+  const identity = serverWatchRootsForceIdentity(options);
+  if (!identity) return false;
+  return serverWatchRootsState.completedForceKeys.get(identity.owner) === serverWatchRootsRequestKey(signature, options);
 }
 
 function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
+  const state = clientServerWatchState();
+  const signature = JSON.stringify(state);
+  const requestKey = serverWatchRootsRequestKey(signature, options);
   if (serverWatchRootsState.inFlight) {
+    if ((options.force !== true && signature === serverWatchRootsState.signature)
+      || (requestKey && requestKey === serverWatchRootsState.activeKey)) {
+      return serverWatchRootsState.request;
+    }
     serverWatchRootsState.pendingOptions = mergedServerWatchRootsOptions(options);
     return;
   }
-  const state = clientServerWatchState();
-  const signature = JSON.stringify(state);
   if (signature === serverWatchRootsState.signature && options.force !== true) return;
+  if (serverWatchRootsForceRequestCompleted(signature, options)) return;
+  const forceIdentity = serverWatchRootsForceIdentity(options);
   serverWatchRootsState.signature = signature;
   serverWatchRootsState.inFlight = true;
+  serverWatchRootsState.activeKey = requestKey;
   serverWatchRootsState.registrationPending = true;
   serverWatchRootsState.registered = false;
-  return apiFetch('/api/watch/roots', {
+  const request = apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
@@ -27734,6 +28182,9 @@ function syncServerWatchRootsNow(options = {}) {
     serverWatchRootsState.registered = true;
     serverWatchRootsState.syncedAt = Date.now();
     return ensureFileExplorerFilesystemWatchBaseline();
+  }).then(result => {
+    if (forceIdentity && requestKey) serverWatchRootsState.completedForceKeys.set(forceIdentity.owner, requestKey);
+    return result;
   }).catch(() => {
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.signature = '';
@@ -27741,10 +28192,14 @@ function syncServerWatchRootsNow(options = {}) {
   }).finally(() => {
     serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.inFlight = false;
+    serverWatchRootsState.request = null;
+    serverWatchRootsState.activeKey = '';
     if (Object.keys(serverWatchRootsState.pendingOptions).length) {
       syncServerWatchRoots({immediate: true});
     }
   });
+  serverWatchRootsState.request = request;
+  return request;
 }
 
 function ensureFileExplorerFilesystemWatchBaseline() {
@@ -27752,7 +28207,7 @@ function ensureFileExplorerFilesystemWatchBaseline() {
     return Boolean(fileExplorerFilesystemWatchToken);
   }
   if (!serverWatchRootsState.registered) {
-    syncServerWatchRoots({immediate: true, force: true});
+    syncServerWatchRoots({immediate: true});
     return false;
   }
   const baseline = (async () => {
@@ -27765,21 +28220,36 @@ function ensureFileExplorerFilesystemWatchBaseline() {
 function syncServerWatchRoots(options = {}) {
   const pendingOptions = mergedServerWatchRootsOptions(options);
   const signature = JSON.stringify(clientServerWatchState());
+  const requestKey = serverWatchRootsRequestKey(signature, pendingOptions);
   if (signature === serverWatchRootsState.signature && pendingOptions.force !== true) {
     if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
+    serverWatchRootsState.pendingOptions = {};
+    return;
+  }
+  if (serverWatchRootsForceRequestCompleted(signature, pendingOptions)) {
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
     serverWatchRootsState.pendingOptions = {};
     return;
   }
   serverWatchRootsState.pendingOptions = pendingOptions;
   const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
-  if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) return;
+  if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) {
+    serverWatchRootsState.scheduledKey = requestKey;
+    return;
+  }
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   serverWatchRootsState.timerDelay = delay;
+  serverWatchRootsState.scheduledKey = requestKey;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
     serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.scheduledKey = '';
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};
     syncServerWatchRootsNow(pending);
@@ -27788,19 +28258,16 @@ function syncServerWatchRoots(options = {}) {
 
 async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
-  const directories = watchedFileExplorerDirectories();
-  if (!directories.length) return;
   let changed = false;
-  const entriesByDir = new Map();
+  const entriesByDir = await fileExplorerEntriesByWatchedDirectory(currentFileExplorerRoot(), {
+    recordSignature: false,
+    fresh: true,
+    trigger: options.trigger,
+  });
+  if (!entriesByDir.size) return;
   const signaturesByDir = new Map();
-  const listings = await Promise.all(directories.map(async directory => ({
-    directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
-  })));
-  for (const {directory, entries} of listings) {
-    if (!entries) continue;
+  for (const [directory, entries] of entriesByDir) {
     const normalizedDirectory = normalizeDirectoryPath(directory);
-    entriesByDir.set(normalizedDirectory, entries);
     const signature = directoryEntriesSignature(entries);
     signaturesByDir.set(normalizedDirectory, signature);
     const previous = fileExplorerDirectoryRecord(normalizedDirectory)?.signature;
@@ -35201,6 +35668,7 @@ function rekeyMap(map, oldKey, newKey) {
 function clearSessionEphemeralRuntimeState(session) {
   tmuxWindowNavigationRecords.delete(session);
   terminalTmuxInputStates.delete(session);
+  terminalFrameRecoveryAttempts.delete(session);
   terminalMobileAccessoryStates.delete(session);
   altScreenWheelRemainder.delete(session);
   clearAgentWindowActivityRecordsForSession(session);
@@ -35561,7 +36029,10 @@ function installTerminalResizeAuthorityHandlers() {
   if (terminalResizeAuthorityHandlersInstalled) return;
   terminalResizeAuthorityHandlersInstalled = true;
   window.addEventListener('focus', () => claimVisibleTerminalResizeAuthority('window-focus', {force: true}));
-  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown'), {capture: true});
+  // Another YOLOmux server can change tmux's shared ignore-size flags without changing this
+  // browser's local dimensions. Every foreground pointer transition must therefore cross the
+  // socket instead of trusting lastTerminalResizeAuthoritySignature.
+  window.addEventListener('pointerdown', () => claimVisibleTerminalResizeAuthority('pointerdown', {force: true}), {capture: true});
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') claimVisibleTerminalResizeAuthority('visible', {force: true});
   });
@@ -36546,6 +37017,7 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
+  if (terminals.get(session) === item) terminals.delete(session);
   if (item.reconnectTimer) {
     clearTimeout(item.reconnectTimer);
     tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.reconnectTimer);
@@ -36566,11 +37038,13 @@ function closeTerminalItem(session, item) {
   }
   if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
+  item.containerBindingDispose?.();
   item.fitFrame = 0;
   item.fitTimer = 0;
   item.blankScreenRefreshTimer = 0;
   item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
+  item.containerBindingDispose = null;
   tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
   const observer = resizeObservers.get(session);
   if (observer) {
@@ -36688,9 +37162,7 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
 
 function estimateTerminalSize(container, term = null) {
   const content = terminalContentSize(container);
-  const measured = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || null;
+  const measured = terminalRenderCellDimensions(term);
   if (measured?.width && measured?.height) {
     return {
       cols: Math.max(40, Math.floor((content.width - 2) / measured.width)),
@@ -42645,7 +43117,7 @@ function bindInfoPanel(panel) {
       if (typeof openFileExplorerPane === 'function') await openFileExplorerPane();
       if (typeof setFileExplorerMode === 'function') setFileExplorerMode('files');
       if (typeof openFileExplorerAt === 'function') {
-        const opened = await openFileExplorerAt(path, {manualSelection: true});
+        const opened = await openFileExplorerAt(path, {manualSelection: true, validateKind: true});
         if (opened && typeof selectFileTreePath === 'function') selectFileTreePath(path);
       }
     })().catch(error => {
@@ -44407,7 +44879,7 @@ async function startYoagentChatRequest(rawText, options = {}) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text, locale: i18nActiveLocaleId(), request_id: requestId, stream_id: streamId}),
       signal: controller?.signal,
-    });
+    }, {abortRetirementReason: 'yoagent_chat_cancelled'});
     if (yoagentChatState.activeRequest?.id !== requestId) return;
     if (payload.cancelled) {
       applyYoagentStreamPayload({stream_id: streamId, phase: 'stopped', done: true, aborted: true, auxiliary_done: true});
@@ -46331,8 +46803,7 @@ function preferenceSections() {
       ]}),
       preferenceSettingItem('file_explorer.image_preview_max_px', {type: 'number', min: 120, max: 1200, step: 20, suffix: 'px'}),
       preferenceSettingItem('file_explorer.indexed_dirs', {type: 'list'}),
-      preferenceSettingItem('file_explorer.index_exclude_dir_names', {type: 'list', wide: true, rows: 20, autosize: true}),
-      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 4, autosize: true}),
+      preferenceSettingItem('file_explorer.index_exclude_paths', {type: 'list', wide: true, rows: 20, autosize: true}),
       preferenceSettingItem('file_explorer.index_max_files', {type: 'number', min: 1000, max: 1000000, step: 1000}),
       preferenceSettingItem('file_explorer.index_refresh_seconds', {type: 'number', min: 0, max: 3600, step: 10, suffix: 's'}),
       preferenceSettingItem('file_explorer.companion_dirs', {type: 'list'}),
@@ -46406,11 +46877,43 @@ function preferenceItemByPath(path) {
 }
 
 function preferenceValue(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettings);
   return nestedSetting(clientSettings, path, nestedSetting(clientSettingsDefaults, path, ''));
 }
 
 function preferenceDefault(path) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionEntries(clientSettingsDefaults);
   return nestedSetting(clientSettingsDefaults, path, '');
+}
+
+function quickOpenExclusionEntries(settings) {
+  const names = nestedSetting(settings, 'file_explorer.index_exclude_dir_names', []);
+  const rules = nestedSetting(settings, 'file_explorer.index_exclude_paths', []);
+  return Array.from(new Set([
+    ...(Array.isArray(names) ? names : []),
+    ...(Array.isArray(rules) ? rules : []),
+  ].map(value => String(value || '').trim()).filter(Boolean)));
+}
+
+function quickOpenExclusionSettingPatch(entries) {
+  const names = [];
+  const rules = [];
+  for (const rawEntry of Array.isArray(entries) ? entries : []) {
+    const entry = String(rawEntry || '').trim();
+    if (!entry) continue;
+    const isDirectoryName = !entry.startsWith('glob:')
+      && !entry.startsWith('regex:')
+      && !entry.startsWith('~')
+      && !entry.includes('/')
+      && !entry.includes('\\')
+      && entry !== '.'
+      && entry !== '..';
+    (isDirectoryName ? names : rules).push(entry);
+  }
+  return {file_explorer: {
+    index_exclude_dir_names: Array.from(new Set(names)),
+    index_exclude_paths: Array.from(new Set(rules)),
+  }};
 }
 
 function preferenceStatusText() {
@@ -46512,8 +47015,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('cost.')) add(['cost', 'price', 'pricing', 'api', 'list', 'subscription', 'marginal', 'codex', 'claude', 'openai', 'anthropic', 'tokens']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
-  if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);
-  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
+  if (path === 'file_explorer.index_exclude_paths') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'glob', 'regex', 'pattern', 'performance', 'quick open', 'quick-open', 'search', 'scan', 'generated', 'build', 'cache', 'directories', 'folders', 'backup']);
   if (path === 'file_explorer.index_max_files') add(['index', 'limit', 'cap', 'maximum', 'partial', 'quick-open']);
   if (path === 'file_explorer.index_refresh_seconds') add(['index', 'refresh', 'auto', 'rebuild', 'background', 'quick-open', 'interval', 'stale']);
   if (path === 'file_explorer.companion_dirs') add(['companion', 'repos', 'sibling', 'extra', 'always', 'dirty', 'branch', 'status', 'frontend-crates']);
@@ -48803,7 +49305,8 @@ function bindPreferencesPanel(panel) {
   }
 
   function currentCostAttributionTable(title, rows, kind) {
-    const body = rows.map(row => {
+    const displayedRows = kind === 'agent' ? currentCostConsolidatedAgentRows(rows) : rows;
+    const body = displayedRows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
         : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
@@ -48819,6 +49322,35 @@ function bindPreferencesPanel(panel) {
         : '<p>No attributed usage in this range.</p>',
       '</section>',
     ].join('');
+  }
+
+  function currentCostConsolidatedAgentRows(rows) {
+    const consolidated = new Map();
+    for (const row of rows) {
+      const label = currentStatsCanonicalAgentLabel(row.label || row.source);
+      const existing = consolidated.get(label);
+      if (!existing) {
+        consolidated.set(label, {
+          ...row,
+          label,
+          dimensions: Object.fromEntries(CURRENT_COST_DIMENSIONS.map(dimension => [dimension, {...row.dimensions[dimension]}])),
+          priced: {...row.priced},
+          unpriced: {...row.unpriced},
+        });
+        continue;
+      }
+      for (const field of ['total_tokens', 'total_micro_usd', 'total_api_list_micro_usd']) existing[field] += row[field];
+      for (const dimension of CURRENT_COST_DIMENSIONS) {
+        for (const field of ['tokens', 'micro_usd', 'api_list_micro_usd']) {
+          existing.dimensions[dimension][field] += row.dimensions[dimension][field];
+        }
+      }
+      for (const coverage of ['priced', 'unpriced']) {
+        existing[coverage].atoms += row[coverage].atoms;
+        existing[coverage].tokens += row[coverage].tokens;
+      }
+    }
+    return [...consolidated.values()];
   }
 
   function currentCostDimensionCell(value) {
@@ -48864,8 +49396,12 @@ function bindPreferencesPanel(panel) {
         if (!groupId) continue;
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
-        if (!series.has(name)) series.set(name, []);
-        series.get(name).push(Object.freeze({
+        const seriesName = groupId === 'agent-tokens'
+          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          : name;
+        if (!series.has(seriesName)) series.set(seriesName, []);
+        const points = series.get(seriesName);
+        const point = {
           start: bucket.start,
           duration: bucket.duration,
           value: item.value,
@@ -48873,7 +49409,19 @@ function bindPreferencesPanel(panel) {
           source_count: item.source_count,
           first_timestamp: item.first_timestamp,
           last_timestamp: item.last_timestamp,
-        }));
+        };
+        const existing = points.at(-1);
+        if (existing?.start === point.start && existing.duration === point.duration && existing.unit === point.unit) {
+          points[points.length - 1] = Object.freeze({
+            ...existing,
+            value: existing.value + point.value,
+            source_count: existing.source_count + point.source_count,
+            first_timestamp: Math.min(existing.first_timestamp, point.first_timestamp),
+            last_timestamp: Math.max(existing.last_timestamp, point.last_timestamp),
+          });
+        } else {
+          points.push(Object.freeze(point));
+        }
       }
     }
     for (const series of groups.values()) {
@@ -49716,7 +50264,7 @@ function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-expl
 }
 
 function normalizedJsDebugSubTab(value) {
-  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
+  return value === 'cost' || value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
 }
 
 function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
@@ -49739,7 +50287,7 @@ function loadJsDebugStatsUiPreferences() {
   debugRuntimeState.statsUiPreferencesLoaded = true;
   let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-  debugRuntimeState.subTab = normalizedJsDebugSubTab(saved.subTab);
+  debugRuntimeState.subTab = legacyYoCostMigrationRequested ? 'cost' : normalizedJsDebugSubTab(saved.subTab);
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
@@ -49756,6 +50304,7 @@ function loadJsDebugStatsUiPreferences() {
     : null;
   jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
   syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+  if (legacyYoCostMigrationRequested) saveJsDebugStatsUiPreferences();
 }
 
 function saveJsDebugStatsUiPreferences() {
@@ -50890,6 +51439,7 @@ function debugSubTabsHtml() {
   loadJsDebugStatsUiPreferences();
   return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
     ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
+    ${debugSubTabButtonHtml('cost', t('debug.tab.cost'))}
     ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
     ${debugSubTabButtonHtml('system', t('debug.tab.services'))}
     ${debugSubTabButtonHtml('logs', t('debug.tab.logs'))}
@@ -56420,6 +56970,7 @@ async function refreshDebugCostPricing() {
 }
 
 function scheduleDebugCostPricingStatusRefresh() {
+  if (!jsDebugCostSubviewVisible()) return false;
   if (jsDebugPricingRefreshState.timer !== null) debugPricingRefreshLifecycleScope().release('status', jsDebugPricingRefreshState.timer);
   const scope = debugPricingRefreshLifecycleScope();
   const timer = setTimeout(() => {
@@ -56430,6 +56981,7 @@ function scheduleDebugCostPricingStatusRefresh() {
   }, 750);
   jsDebugPricingRefreshState.timer = timer;
   scope.ownTimer('status', timer);
+  return true;
 }
 
 function disposeDebugPricingRefreshLifecycle(reason = 'disposed') {
@@ -56591,7 +57143,7 @@ function jsDebugStatsPanelVisible() {
   return debugModeEnabled === true
     && document.visibilityState !== 'hidden'
     && typeof itemIsActivePaneTab === 'function'
-    && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
+    && itemIsActivePaneTab(debugPaneItemId);
 }
 
 function jsDebugStatsDocumentVisible() {
@@ -56599,7 +57151,7 @@ function jsDebugStatsDocumentVisible() {
 }
 
 function jsDebugStatsLayoutItemsVisible(items) {
-  return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
+  return Array.isArray(items) && items.includes(debugPaneItemId);
 }
 
 function jsDebugCurrentStatsSelection() {
@@ -56660,6 +57212,7 @@ function ensureJsDebugCurrentStatsClient() {
   loadJsDebugStatsUiPreferences();
   const selection = jsDebugCurrentStatsSelection();
   const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
+    fetch: apiFetch,
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
@@ -59164,12 +59717,19 @@ const DEBUG_SUBVIEWS = Object.freeze([
   }),
   debugSubviewDescriptor({
     id: 'cost',
-    html: yoCostPanelHtml,
-    render: (panel, options = {}) => renderYoCostPanels(options),
+    html: () => `<div class="js-debug-subview js-debug-cost-view" ${debugSubViewAttrs('cost')}><div class="preferences-scroll js-yocost-scroll"></div></div>`,
+    render: renderYoCostPanel,
     bind: bindYoCostPanel,
-    activate: () => syncDebugGraphLiveTicker(),
-    deactivate: () => syncDebugGraphLiveTicker(),
-    relocalize: relocalizeYoCostPanelChrome,
+    activate: () => {
+      renderYoCostPanels({force: true});
+      if (jsDebugPricingRefreshState.inFlight) scheduleDebugCostPricingStatusRefresh();
+      syncDebugGraphLiveTicker();
+    },
+    deactivate: () => {
+      disposeDebugPricingRefreshLifecycle('cost-subtab-deactivated');
+      syncDebugGraphLiveTicker();
+    },
+    relocalize: panel => renderYoCostPanel(panel, {force: true}),
   }),
 ]);
 
@@ -59178,7 +59738,7 @@ function debugSubview(id) {
 }
 
 function debugPanelSubviewDescriptors() {
-  return DEBUG_SUBVIEWS.filter(view => view.id !== 'cost');
+  return DEBUG_SUBVIEWS;
 }
 
 function syncDebugSubviewActivation({pollNow = false} = {}) {
@@ -59191,7 +59751,7 @@ function syncDebugSubviewActivation({pollNow = false} = {}) {
 function debugPanelHtml() {
   return `
     ${debugSubTabsHtml()}
-    ${['events', 'graph', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
+    ${['graph', 'cost', 'events', 'system', 'logs'].map(id => debugSubview(id).html()).join('\n    ')}`;
 }
 
 function relocalizeDebugPanelChrome(panel = document.getElementById(panelDomId(debugPaneItemId))) {
@@ -59269,58 +59829,42 @@ function bindYoCostPanel(panel) {
   });
 }
 
-function createYoCostPanel() {
-  enableDebugMode();
-  return createFramedPanel({
-    item: yocostItemId,
-    className: 'panel js-yocost-panel',
-    frame: {
-      headClass: 'preferences-panel-head',
-      controlsHtml: virtualPanelInnerControlsHtml(yocostItemId),
-      afterHeadHtml: `<div class="pane-info-bar panel-detail-row"><div class="pane-info-bar-copy panel-copy"><div id="panel-tab-${yocostItemId}" class="panel-session-label"><span class="session-button-dir">${esc(yocostTabLabel())}</span></div><div id="meta-${yocostItemId}" class="pane-info-bar-meta meta">${esc(debugGraphCostText('debug.cost.details', 'Cost summary details'))}</div></div>${panelDetailCloseButtonHtml(yocostItemId)}</div>`,
-      bodyClass: 'preferences-body js-yocost-body',
-      bodyHtml: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-    },
-    bind: panel => debugSubview('cost').bind(panel),
-  });
-}
-
 function debugCostAgeRefreshDelayMs(randomValue = Math.random()) {
   return 3000 + Math.floor(Math.max(0, Math.min(1, Number(randomValue) || 0)) * 7000);
 }
 
-function renderYoCostPanels({force = false} = {}) {
+function jsDebugCostSubviewVisible() {
+  return typeof document !== 'undefined'
+    && document.visibilityState !== 'hidden'
+    && debugRuntimeState.subTab === 'cost'
+    && itemIsActivePaneTab(debugPaneItemId);
+}
+
+function renderYoCostPanel(panel, {force = false} = {}) {
   if (dragState.item != null) {
     jsDebugRenderForce ||= force;
     jsDebugRenderDragDeferred = true;
     return false;
   }
   const nowMs = Date.now();
-  const visible = typeof document !== 'undefined'
-    && document.visibilityState !== 'hidden'
-    && itemIsActivePaneTab(yocostItemId);
-  if (!force && (!visible || nowMs < jsDebugCostPanelNextRefreshAtMs)) return false;
-  let rendered = false;
-  for (const panel of document.querySelectorAll('.js-yocost-panel')) {
-    const recentlyScrolled = nowMs - Number(panel.dataset.jsDebugCostLastScrollMs || 0) < 1000;
-    if (debugGraphInteractionBelongsToPanel(panel) || recentlyScrolled) {
-      panel.dataset.jsDebugGraphRefreshPending = 'true';
-      continue;
-    }
-    const body = panel.querySelector('.js-yocost-body');
-    reconcilePanelBody({
-      body,
-      html: `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
-      anchors: [
-        elementScrollAnchor('.js-yocost-scroll'),
-        keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
-      ],
-    });
-    delete panel.dataset.jsDebugGraphRefreshPending;
-    bindYoCostPanel(panel);
-    rendered = true;
+  if (!panel || !jsDebugCostSubviewVisible()) return false;
+  if (!force && nowMs < jsDebugCostPanelNextRefreshAtMs) return false;
+  const recentlyScrolled = nowMs - Number(panel.dataset.jsDebugCostLastScrollMs || 0) < 1000;
+  if (debugGraphInteractionBelongsToPanel(panel) || recentlyScrolled) {
+    panel.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
   }
-  if (!rendered) return false;
+  const body = panel.querySelector('[data-js-debug-subview="cost"]');
+  reconcilePanelBody({
+    body,
+    html: `<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`,
+    anchors: [
+      elementScrollAnchor('.js-yocost-scroll'),
+      keyedScrollAnchor('.js-debug-cost-table-wrap [data-js-debug-cost-table]'),
+    ],
+  });
+  delete panel.dataset.jsDebugGraphRefreshPending;
+  bindYoCostPanel(panel);
   commitJsDebugCurrentStatsPaint();
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
@@ -59329,15 +59873,19 @@ function renderYoCostPanels({force = false} = {}) {
   return true;
 }
 
+function renderYoCostPanels(options = {}) {
+  let rendered = false;
+  for (const panel of document.querySelectorAll('.js-debug-panel')) {
+    rendered = renderYoCostPanel(panel, options) || rendered;
+  }
+  return rendered;
+}
+
 function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     refreshDebugGraphElement(graph, {force, deferFocusedControl});
   }
   renderYoCostPanels({force});
-}
-
-function relocalizeYoCostPanelChrome(panel = document.getElementById(panelDomId(yocostItemId))) {
-  return relocalizeVirtualPanelChrome(panel, yocostTabLabel());
 }
 
 function createDebugPanel() {
@@ -59413,7 +59961,6 @@ function renderDebugPanels(options = {}) {
     refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
-  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -59426,7 +59973,6 @@ function refreshDebugPanelsFromEvents(options = {}) {
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     refreshDebugPanelFromEvents(panel, options);
   }
-  debugSubview('cost').render(null, options);
   if (typeof refreshPanePopouts === 'function') refreshPanePopouts(debugPaneItemId);
 }
 
@@ -59528,7 +60074,7 @@ function preserveDebugGraphBodyControls(graph, nextBody) {
 }
 
 function debugCostAgeLabels() {
-  if (typeof document === 'undefined' || !itemIsActivePaneTab(yocostItemId)) return [];
+  if (!jsDebugCostSubviewVisible()) return [];
   return [...document.querySelectorAll('[data-js-yocost-data-age-label]')].filter(label => !label.closest('[hidden]') && label.getClientRects().length > 0);
 }
 
@@ -59565,12 +60111,12 @@ function debugGraphLiveTickerNextDueMs(nowMs = Date.now()) {
   const slidingActive = jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive();
   const intervalMs = slidingActive ? debugGraphSlideIntervalMs(debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs)) : Infinity;
   const nextSlideMs = slidingActive ? Math.ceil((nowMs + 1) / intervalMs) * intervalMs : Infinity;
-  const nextAgeMs = itemIsActivePaneTab(yocostItemId) ? jsDebugCostAgeNextRefreshAtMs || nowMs : Infinity;
+  const nextAgeMs = jsDebugCostSubviewVisible() ? jsDebugCostAgeNextRefreshAtMs || nowMs : Infinity;
   return Math.min(nextSlideMs, nextAgeMs);
 }
 
 function debugGraphLiveTickerNeeded() {
-  return (jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive()) || itemIsActivePaneTab(yocostItemId);
+  return (jsDebugStatsPanelVisible() && debugGraphSlidingAxisActive()) || jsDebugCostSubviewVisible();
 }
 
 function debugGraphSlideLiveViews(nowMs = Date.now()) {
@@ -59627,7 +60173,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
-  if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel, .js-yocost-panel'))) {
+  if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel'))) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
@@ -59678,7 +60224,8 @@ function bindDebugCostSummaryTabButtons(graph) {
     bindOnce(anchor, 'debug-cost-details', () => {
       const handleClick = event => {
       event.preventDefault();
-      selectSession(yocostItemId, {userInitiated: true});
+      void Promise.resolve(selectSession(debugPaneItemId, {userInitiated: true}))
+        .then(() => setDebugSubTab('cost'));
       };
       anchor.addEventListener('click', handleClick);
       return () => anchor.removeEventListener('click', handleClick);
@@ -60132,7 +60679,7 @@ function flushDeferredDebugGraphInteractionRefresh(panel) {
   for (const graph of panel.querySelectorAll?.('[data-js-debug-graph]') || []) {
     flushed = flushDeferredDebugGraphRefresh(graph) || flushed;
   }
-  if (panel.matches?.('.js-yocost-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
+  if (panel.matches?.('.js-debug-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
     delete panel.dataset.jsDebugGraphRefreshPending;
     flushed = renderYoCostPanels({force: true}) || flushed;
   }
@@ -60571,7 +61118,6 @@ function bindDebugPanel(panel) {
 
 registerDebugRuntimeFacade('panel', {
   createDebugPanel,
-  createYoCostPanel,
   renderDebugPanels,
   renderYoCostPanels,
 });
@@ -61553,8 +62099,18 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
   }, sessionFilesProducerDeadlineMs);
 }
 
+function retireSessionFilesRequest(reason = 'session-files request superseded') {
+  fileExplorerSessionFilesState.guard.invalidate();
+  const controller = fileExplorerSessionFilesState.abortController;
+  fileExplorerSessionFilesState.abortController = null;
+  if (!controller || controller.signal.aborted) return;
+  const error = new Error(reason);
+  error.name = 'AbortError';
+  controller.abort(error);
+}
+
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
-  if (options.invalidateRequest !== false) fileExplorerSessionFilesState.guard.invalidate();
+  if (options.invalidateRequest !== false) retireSessionFilesRequest(options.retirementReason);
   fileExplorerSessionFilesState.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
@@ -61654,19 +62210,22 @@ async function fetchSessionFiles(options = {}) {
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, emptyPayload, {invalidateRequest: false});
+    setSessionFilesPayloadForDestination(destination, emptyPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
+  retireSessionFilesRequest('session-files request replaced');
+  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
+  const requestController = typeof AbortController === 'function' ? new AbortController() : null;
+  fileExplorerSessionFilesState.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
@@ -61683,7 +62242,11 @@ async function fetchSessionFiles(options = {}) {
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
-      payload = await apiFetchJson(requestUrl, {deadlineMs: 5000});
+      payload = await apiFetchJson(
+        requestUrl,
+        {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+        {abortRetirementReason: 'session_files_request_superseded'},
+      );
     } catch (err) {
       // A producer can return the same accepted receipt again while its terminal result is still
       // retained locally. Reuse that exact result instead of painting a terminal Differ as queued.
@@ -61734,6 +62297,9 @@ async function fetchSessionFiles(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
+    if (fileExplorerSessionFilesState.abortController === requestController) {
+      fileExplorerSessionFilesState.abortController = null;
+    }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
     if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
@@ -61761,7 +62327,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -63082,7 +63648,7 @@ async function openChangedDirectoryInFinder(path) {
         return;
       }
     }
-    const opened = await openFileExplorerAt(path);
+    const opened = await openFileExplorerAt(path, {validateKind: true});
     if (!opened) return;
     selectFileTreePath(path);
     statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
@@ -63166,6 +63732,7 @@ function codexModelDefaultEffort(model) {
 }
 
 function settingPatchForPath(path, value) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
@@ -63281,7 +63848,7 @@ function savePreferenceControl(control) {
 function resetPreference(path) {
   const item = preferenceItemByPath(path);
   if (!item) return;
-  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+  saveSettingsPatch(settingPatchForPath(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = t('status.settingReset', {path}); })
@@ -67157,6 +67724,10 @@ function closeAllPanePopouts() {
 window.addEventListener('beforeunload', closeAllPanePopouts);
 
 function openPanePopout(item) {
+  if (isLegacyYoCostItemParam(item)) {
+    setDebugSubTab('cost');
+    item = debugPaneItemId;
+  }
   if (!paneCanPopout(item)) {
     console.info('[YOLOmux] pane popout unavailable', {item, reason: panePopoutDisabledReason(item)});
     return false;
@@ -75687,8 +76258,8 @@ function connectTerminalSocket(session, item) {
     if (!socketIsCurrent() || !item.term) return;
     try {
       processTerminalSocketFrame(session, item, event.data);
-    } catch (_) {
-      if (terminals.get(session) === item) closeTerminalItem(session, item);
+    } catch (error) {
+      recoverTerminalAfterFrameFailure(session, item, error);
     }
   };
   socket.onclose = event => {
@@ -75708,6 +76279,30 @@ function connectTerminalSocket(session, item) {
     updateStatus();
     refreshTrackedSessionChrome(session);
   };
+}
+
+const terminalFrameRecoveryAttempts = new Map();
+
+function recoverTerminalAfterFrameFailure(session, item, error) {
+  recordJsDebugEvent('client_failure', {
+    ...jsDebugFailureDetails('client_failure', error),
+    component: 'terminal-websocket-frame',
+    session,
+  });
+  if (terminals.get(session) !== item) return false;
+  const attempt = Math.max(1, Number(terminalFrameRecoveryAttempts.get(session) || 0) + 1);
+  terminalFrameRecoveryAttempts.set(session, attempt);
+  closeTerminalItem(session, item);
+  if (!activeSessions.includes(session)) return false;
+  const delay = Math.min(2000, 100 * 2 ** Math.min(4, attempt - 1));
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {
+    seconds: Math.max(1, Math.round(delay / 1000)),
+  }));
+  setTimeout(() => {
+    if (terminals.has(session) || !activeSessions.includes(session) || !document.getElementById(terminalDomId(session))) return;
+    startTerminal(session);
+  }, delay);
+  return true;
 }
 
 // One frame-processing owner for the terminal WebSocket. PTY output stays raw binary; small
@@ -75732,10 +76327,16 @@ function processTerminalSocketFrame(session, item, data) {
     item.term.write(String(data));
   }
   clientPerfEnd(writePerf, {bytes: dataBytes});
+  terminalFrameRecoveryAttempts.delete(session);
   if (consumedControl) return;
   const firstOutput = item.terminalOutputSeen !== true;
   item.terminalOutputSeen = true;
   clearTerminalConnectionState(session);
+  // The first resize frame can reach the server before tmux has registered its new attach client.
+  // First PTY output proves the attach exists, so repeat the visible surface's authority claim once.
+  if (firstOutput && terminalIsVisible(session, item.container)) {
+    sendRemoteResize(session, {activate: true});
+  }
   item.fileUnderlineController?.schedule?.({reason: 'output'});
   if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
   scheduleTerminalAttentionHighlight(session);
@@ -75858,10 +76459,11 @@ function startTerminal(session) {
     attentionHighlightFrame: 0,
     terminalOutputSeen: false,
     fileUnderlineController: null,
+    containerBindingDispose: null,
   };
   terminals.set(session, item);
   item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
-  bindTerminalContainerForSession(session, term, container);
+  item.containerBindingDispose = bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);
   });
@@ -77625,10 +78227,41 @@ function applyClientEventReadyEnvelope(envelope = {}) {
   return true;
 }
 
-function repairClientEventReadyChannels(channels) {
+function clientEventWatchRootsForceOptions(owner, generation) {
+  return {
+    forceSourceOwner: String(owner || ''),
+    forceSourceGeneration: String(generation || ''),
+  };
+}
+
+function clientEventEnvelopeForceGeneration(envelope = {}) {
+  return JSON.stringify([
+    String(envelope.epoch || clientEventTransportState.resourceEpoch || ''),
+    String(envelope.resource || ''),
+    Number(envelope.resource_revision || 0),
+    Number(envelope.id || 0),
+  ]);
+}
+
+function clientEventReadyWatchRootsGeneration(envelope = {}, recoveryEpisodeId = 0) {
+  const revisions = envelope.resource_revisions && typeof envelope.resource_revisions === 'object'
+    ? Object.entries(envelope.resource_revisions)
+      .map(([resource, revision]) => [String(resource), Number(revision) || 0])
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    : [];
+  return JSON.stringify([
+    String(envelope.epoch || 'legacy'),
+    revisions,
+    Number(recoveryEpisodeId || 0),
+  ]);
+}
+
+function repairClientEventReadyChannels(channels, watchRootsForceOptions = {}) {
   if (channels.has('files')) {
     if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    if (typeof syncServerWatchRoots === 'function') {
+      syncServerWatchRoots({immediate: true, force: true, ...watchRootsForceOptions});
+    }
   }
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
   if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
@@ -77711,14 +78344,19 @@ function repairClientEventPatchResource(resource, envelope = {}) {
   return true;
 }
 
-function repairClientEventResources(resources = [], envelope = {}) {
+function repairClientEventResources(resources = [], envelope = {}, watchRootsForceOptions = null) {
   const genericResources = [];
   for (const rawResource of resources || []) {
     const resource = String(rawResource || '');
     if (!repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
   }
   const channels = clientEventRepairChannels(genericResources);
-  if (channels.size) repairClientEventReadyChannels(channels);
+  if (channels.size) {
+    repairClientEventReadyChannels(
+      channels,
+      watchRootsForceOptions || clientEventWatchRootsForceOptions('client-event-repair', clientEventEnvelopeForceGeneration(envelope)),
+    );
+  }
 }
 
 function clientEventReadyGapResources(envelope = {}) {
@@ -78032,7 +78670,7 @@ function handleClientPushEvent(type, payload = {}, envelope = {}) {
   return true;
 }
 
-function handleClientPushEventNowByType(type, payload = {}) {
+function handleClientPushEventNowByType(type, payload = {}, envelope = {}) {
   if (type === 'operation_terminal') {
     applyApiOperationTerminal(payload);
     return;
@@ -78199,7 +78837,13 @@ function handleClientPushEventNowByType(type, payload = {}) {
     return;
   }
   if (type === 'roots_changed') {
-    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    if (typeof syncServerWatchRoots === 'function') {
+      syncServerWatchRoots({
+        immediate: true,
+        force: true,
+        ...clientEventWatchRootsForceOptions('roots-changed', clientEventEnvelopeForceGeneration(envelope)),
+      });
+    }
     return;
   }
   if (type === 'search_progress') {
@@ -78210,12 +78854,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
 }
 
 const clientPushEventHandlers = Object.freeze(Object.fromEntries(
-  clientPushEventTypes.map(type => [type, payload => handleClientPushEventNowByType(type, payload)])
+  clientPushEventTypes.map(type => [type, (payload, envelope) => handleClientPushEventNowByType(type, payload, envelope)])
 ));
 
-function handleClientPushEventNow(type, payload = {}) {
+function handleClientPushEventNow(type, payload = {}, envelope = {}) {
   const handler = clientPushEventHandlers[type];
-  if (handler) handler(payload);
+  if (handler) handler(payload, envelope);
 }
 
 function clientEventDemandDescriptor() {
@@ -78239,7 +78883,7 @@ function clientEventDemandDescriptor() {
       channels.add('transcripts');
     }
     if (activeItems.some(item => isTmuxSession(item) && panelActiveTabName(item) === 'events')) channels.add('events');
-    if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
+    if (activeItems.includes(debugPaneItemId)
         && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
       channels.add('activity');
@@ -78296,7 +78940,12 @@ function normalizeClientEventDemandDescriptor(descriptor = {}) {
 }
 
 function clientEventDemandSignature(descriptor) {
-  return JSON.stringify(normalizeClientEventDemandDescriptor(descriptor));
+  const normalized = normalizeClientEventDemandDescriptor(descriptor);
+  // Operation IDs are replay fences, not connection identity. The global client stream receives
+  // live operation terminals through its browser client ID; changing accepted work must not replace
+  // that stream. A newly opened stream still carries the current IDs so reconnect can replay exact
+  // terminals which completed while no subscriber was serving.
+  return JSON.stringify({...normalized, operations: []});
 }
 
 function clearClientEventDisconnectEpisode(source, options = {}) {
@@ -78376,6 +79025,19 @@ function closeClientEventStream() {
   if (replacementSource !== source && !currentClientEventTransportLifecycleScope().release('candidate-stream', replacementSource)) replacementSource?.close?.();
 }
 
+const clientEventSourceOperationReplayIds = new WeakMap();
+
+function prepareClientEventOperationReplay(operationId) {
+  const normalized = String(operationId || '');
+  const source = clientEventTransportState.source;
+  if (!normalized || !source || clientEventTransportState.connected) return false;
+  if (clientEventSourceOperationReplayIds.get(source)?.has(normalized)) return false;
+  // There is no serving stream yet: close the stale pre-ready source and any candidate atomically.
+  // applyClientEventDemand will immediately open one URL containing every currently pending ID.
+  closeClientEventStream();
+  return true;
+}
+
 function openClientEventStream(descriptor, options = {}) {
   descriptor = normalizeClientEventDemandDescriptor(descriptor);
   if (!descriptor.channels.length) return null;
@@ -78400,6 +79062,7 @@ function openClientEventStream(descriptor, options = {}) {
     scheduleClientEventDisconnectEpisode(null);
     return null;
   }
+  clientEventSourceOperationReplayIds.set(source, new Set(descriptor.operations));
   if (clientEventTransportState.disconnectEpisode?.source === null) {
     clientEventTransportState.disconnectEpisode.source = source;
   }
@@ -78442,13 +79105,20 @@ function openClientEventStream(descriptor, options = {}) {
     } else if (clientEventTransportState.source !== source) {
       return;
     }
-    clearClientEventDisconnectEpisode(source, {recovered: true});
     const isRecoveryReady = clientEventTransportState.reconnectPending;
+    const recoveryEpisodeId = isRecoveryReady && clientEventTransportState.disconnectEpisode?.source === source
+      ? clientEventTransportState.disconnectEpisode.id
+      : 0;
+    clearClientEventDisconnectEpisode(source, {recovered: true});
     clientEventTransportState.reconnectPending = false;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     const envelope = clientEventEnvelope(event);
     const readyEpoch = String(envelope.epoch || '');
+    const watchRootsForceOptions = clientEventWatchRootsForceOptions(
+      'client-events-ready',
+      clientEventReadyWatchRootsGeneration(envelope, recoveryEpisodeId),
+    );
     // Older servers did not include an epoch/revision summary. Treat that compatibility frame
     // as an unknown reconnect and conservatively repair current demand rather than assuming it
     // is the same generation with zero gaps.
@@ -78460,14 +79130,18 @@ function openClientEventStream(descriptor, options = {}) {
     }
     if (freshEpoch) {
       const readyResources = Object.keys(envelope.resource_revisions || {});
-      repairClientEventResources(readyResources, envelope);
+      repairClientEventResources(readyResources, envelope, watchRootsForceOptions);
       const unrepairedChannels = new Set(channels);
       for (const channel of clientEventRepairChannels(readyResources)) unrepairedChannels.delete(channel);
-      repairClientEventReadyChannels(unrepairedChannels);
+      repairClientEventReadyChannels(unrepairedChannels, watchRootsForceOptions);
     } else {
       const gapResources = clientEventReadyGapResources(envelope);
       repairReadyEventLogRevisions(gapResources, envelope);
-      repairClientEventResources(gapResources.filter(resource => !/^event_log_changed/.test(resource)), envelope);
+      repairClientEventResources(
+        gapResources.filter(resource => !/^event_log_changed/.test(resource)),
+        envelope,
+        watchRootsForceOptions,
+      );
     }
   });
   source.addEventListener('ping', event => {
@@ -78534,8 +79208,8 @@ function applyClientEventDemand(timer = clientEventTransportState.demandTimer, s
   const descriptor = clientEventDemandDescriptor();
   const signature = clientEventDemandSignature(descriptor);
   const sameDemand = signature === clientEventTransportState.demandSignature;
-  if (sameDemand && clientEventTransportState.source) return false;
   clientEventTransportState.demand = descriptor;
+  if (sameDemand && clientEventTransportState.source) return false;
   clientEventTransportState.demandSignature = signature;
   if (!descriptor.channels.length) {
     if (!sameDemand) closeClientEventStream();

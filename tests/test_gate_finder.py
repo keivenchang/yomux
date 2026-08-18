@@ -200,6 +200,97 @@ def test_expansion_uses_one_direct_fast_list_and_never_batches_list_work(browser
 
 
 @pytest.mark.browser
+def test_background_directory_demand_retires_files_and_backs_off_deleted_paths(browser, tmp_path):
+    _load_finder(browser, tmp_path)
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        (async () => {
+          const root = '/home/test';
+          const directory = '/home/test/project';
+          const file = '/home/test/project/nested.txt';
+          let mode = 'classify';
+          let directoryRequests = 0;
+          let fileRequests = 0;
+          window.fetch = (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            const path = url.searchParams.get('path');
+            if (url.pathname === '/api/fs/fast/list' && path === directory) {
+              directoryRequests += 1;
+              if (mode === 'deleted') {
+                return Promise.resolve(new Response(JSON.stringify({
+                  error: 'path not found',
+                  user_message: {key: 'common.pathNotFound', params: {path}, fallback: 'path not found'},
+                }), {status: 404, headers: {'Content-Type': 'application/json'}}));
+              }
+            }
+            if (url.pathname === '/api/fs/fast/list' && path === file) fileRequests += 1;
+            return originalFetch(input, options);
+          };
+
+          fileExplorerExpanded.clear();
+          fileExplorerExpanded.add(directory);
+          fileExplorerExpanded.add(file);
+          await fileExplorerEntriesByWatchedDirectory(root, {fresh: true});
+          const classified = {
+            fileRequests,
+            expanded: Array.from(fileExplorerExpanded).sort(),
+          };
+
+          mode = 'deleted';
+          directoryRequests = 0;
+          fileExplorerExpanded.add(directory);
+          await fileExplorerEntriesByWatchedDirectory(root, {fresh: true});
+          await fileExplorerEntriesByWatchedDirectory(root, {fresh: true});
+          const negative = fileExplorerFsResourceRecords.get(`list\x1f${directory}`);
+          window.fetch = originalFetch;
+          done({
+            classified,
+            deleted: {
+              directoryRequests,
+              expanded: Array.from(fileExplorerExpanded).sort(),
+              failureStatus: Number(negative?.failureStatus || 0),
+              retryPending: Number(negative?.retryAt || 0) > Date.now(),
+            },
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        });
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["classified"] == {"fileRequests": 0, "expanded": [FINDER_DIRECTORY]}, metrics
+    assert metrics["deleted"] == {
+        "directoryRequests": 1,
+        "expanded": [],
+        "failureStatus": 404,
+        "retryPending": True,
+    }, metrics
+    expected_api_errors = consume_only_expected_js_debug_api_errors(
+        browser,
+        ({
+            "path": "/api/fs/fast/list",
+            "method": "GET",
+            "query": {"path": FINDER_DIRECTORY},
+            "status": 404,
+            "ok": False,
+        },),
+    )
+    assert len(expected_api_errors) == 1, metrics
+    assert len(metrics["errors"]) == 1 and metrics["rejections"] == [], metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="fs list failed",
+        correlation=f'"{FINDER_DIRECTORY}" 404 "path not found: {FINDER_DIRECTORY}"',
+    )
+
+
+@pytest.mark.browser
 def test_deferred_git_info_patches_after_fast_paint_in_bounded_waves(browser, tmp_path):
     entries = [
         {"name": f"repo-{index:02d}", "kind": "dir", "mtime": 1786640000 + index, "repo_info_deferred": True}

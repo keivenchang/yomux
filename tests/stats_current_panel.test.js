@@ -12,6 +12,7 @@ const source = [
   'static_src/js/yolomux/85_debug_panel.js',
 ].map(path => fs.readFileSync(path, 'utf8')).join('\n');
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
+const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const lifecycleScopeSource = coreSource.slice(
@@ -749,6 +750,8 @@ test('System renders bounded recurring-work diagnostics without client identity 
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {
   assert.match(currentSource, /exactUrl\('\/api\/stats-snapshot'/);
   assert.doesNotMatch(source, /\/api\/stats-snapshot/);
+  const clientOwner = sourceFunction('ensureJsDebugCurrentStatsClient', 'syncJsDebugCurrentStatsClient');
+  assert.match(clientOwner, /createBrowserClient\(\{\s*fetch: apiFetch,/, 'YO!stats routes snapshot reads through the browser-wide API capacity owner');
   assert.match(source, /function applyJsDebugCurrentSnapshot\(/);
   assert.match(source, /debugGraphApplyServerRecord\(jsDebugCurrentBucketRecord/);
   assert.doesNotMatch(source, /fetchJsDebugStatsJson\(jsDebugStatsSampleQuery/);
@@ -894,6 +897,7 @@ test('observation and pricing timer replacement rejects stale callbacks without 
 
     const jsDebugPricingRefreshState = {timer: null};
     let jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
+    function jsDebugCostSubviewVisible() { return true; }
     function debugPricingRefreshLifecycleScope() {
       if (jsDebugPricingRefreshLifecycleScope.disposed()) jsDebugPricingRefreshLifecycleScope = createLifecycleScope();
       return jsDebugPricingRefreshLifecycleScope;
@@ -2578,6 +2582,7 @@ test('hidden boot loads saved exact selection before constructing the one curren
     function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
     function itemIsActivePaneTab() { return false; }
     function jsDebugStatsClientIdForRequest() { return 'saved-selection'; }
+    function apiFetch() {}
     function recordJsDebugCurrentStatsFailure() {}
     function recordJsDebugCurrentStatsRetirement() {}
     function acceptJsDebugCurrentStatsPushProof() {}
@@ -2763,8 +2768,7 @@ test('live ticker sleeps until the next slide boundary instead of polling animat
     let queryCount = 0;
     const timers = [];
     const document = {visibilityState: 'visible', querySelectorAll() { queryCount += 1; return [{offsetParent: {}, dataset: {jsDebugGraphRenderedAt: '0'}}]; }};
-    const yocostItemId = '__yocost__';
-    function itemIsActivePaneTab() { return false; }
+    function jsDebugCostSubviewVisible() { return false; }
     function jsDebugStatsPanelVisible() { return true; }
     function debugGraphZoomDomainValid() { return false; }
     function debugGraphDomain(now) { return {startMs: now - 300000, endMs: now}; }
@@ -2808,10 +2812,9 @@ test('cost-age refresh checks its due time before querying label DOM', () => {
     let queries = 0;
     const label = {textContent: '', closest() { return null; }, getClientRects() { return [{}]; }};
     const document = {querySelectorAll() { queries += 1; return [label]; }};
-    const yocostItemId = '__yocost__';
     const jsDebugStatsPollState = {lastSampleAtMs: 1};
     const jsDebugPricingRefreshState = {lastRequestedAtMs: 0};
-    function itemIsActivePaneTab() { return true; }
+    function jsDebugCostSubviewVisible() { return true; }
     function debugCostAgeRefreshDelayMs() { return 3000; }
     function debugGraphCostText(_key, fallback) { return fallback; }
     function relativeTimeFormat(value) { return String(value); }
@@ -2865,10 +2868,10 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
     let jsDebugRenderForce = false;
     let jsDebugRenderDragDeferred = false;
     let jsDebugCostPanelNextRefreshAtMs = 0;
-    const yocostItemId = '__yocost__';
     const document = {visibilityState: 'visible', querySelectorAll: () => [panel]};
-    function itemIsActivePaneTab() { return true; }
+    function jsDebugCostSubviewVisible() { return true; }
     ${interactionSource}
+    ${sourceFunction('renderYoCostPanel', 'renderYoCostPanels')}
     ${sourceFunction('renderYoCostPanels', 'refreshDebugGraphSurfaces')}
     result = {
       rendered: renderYoCostPanels({force: true}),
@@ -3086,6 +3089,26 @@ test('the YO!cost report renders one shared always-visible column legend with tr
     assert.ok(String(catalog['debug.cost.cacheWrite.gloss'] || '').trim(), `${name} has debug.cost.cacheWrite.gloss`);
     assert.ok(String(catalog['debug.modelTokens.cacheRead'] || '').trim(), `${name} has debug.modelTokens.cacheRead`);
     assert.ok(String(catalog['debug.modelTokens.cacheWrite'] || '').trim(), `${name} has debug.modelTokens.cacheWrite`);
+  }
+});
+
+test('YO!stats owns Cost between Graphs and API/SSE with persistence, activation, and every locale label', () => {
+  const tabs = sourceFunction('debugSubTabsHtml', 'debugSubViewAttrs');
+  assert.match(tabs, /debugSubTabButtonHtml\('graph',[\s\S]*debugSubTabButtonHtml\('cost',[\s\S]*debugSubTabButtonHtml\('events',[\s\S]*debugSubTabButtonHtml\('system',[\s\S]*debugSubTabButtonHtml\('logs'/);
+  assert.match(debugRuntimeSource, /function normalizedJsDebugSubTab\(value\) \{[\s\S]*value === 'cost'/);
+  assert.match(debugRuntimeSource, /legacyYoCostMigrationRequested \? 'cost' : normalizedJsDebugSubTab\(saved\.subTab\)/);
+  assert.match(debugRuntimeSource, /if \(legacyYoCostMigrationRequested\) saveJsDebugStatsUiPreferences\(\)/);
+  assert.match(debugRuntimeSource, /subTab: debugRuntimeState\.subTab/);
+  assert.match(sourceFunction('debugPanelSubviewDescriptors', 'syncDebugSubviewActivation'), /return DEBUG_SUBVIEWS;/);
+  assert.match(sourceFunction('scheduleDebugCostPricingStatusRefresh', 'disposeDebugPricingRefreshLifecycle'), /if \(!jsDebugCostSubviewVisible\(\)\) return false;/);
+  assert.doesNotMatch(source, /key: 'yocost'/);
+  assert.doesNotMatch(source, /function createYoCostPanel\(/);
+
+  const sourceLocales = fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'));
+  assert.equal(sourceLocales.length, 19);
+  for (const name of sourceLocales) {
+    const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${name}`, 'utf8'));
+    assert.ok(String(catalog['debug.tab.cost'] || '').trim(), `${name} has debug.tab.cost`);
   }
 });
 

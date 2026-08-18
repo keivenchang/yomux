@@ -31,6 +31,7 @@ from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.gate_harness import assert_api_journey_error_free
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
+from tests.helpers.browser_contracts import send_native_key
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
@@ -239,8 +240,16 @@ def test_authenticated_normal_session_journey_has_no_unowned_non_2xx(
     )
     terminal_screen = api_sweep_browser.driver.find_element("css selector", f"#term-{session} .xterm-screen")
     terminal_screen.click()
+    WebDriverWait(api_sweep_browser.driver, 8).until(
+        lambda driver: driver.execute_script(
+            "const input = document.querySelector(`#term-${arguments[0]} textarea`); "
+            "return document.activeElement === input;",
+            session,
+        )
+    )
     marker = f"apiinput{os.getpid()}"
-    ActionChains(api_sweep_browser.driver).send_keys(marker).perform()
+    for character in marker:
+        send_native_key(api_sweep_browser.driver, character)
     observed, panes = wait_for_isolated_tmux_panes(
         api_sweep_browser.runtime.tmux,
         (session,),

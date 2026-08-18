@@ -120,6 +120,36 @@ def test_configured_excluded_directory_names_are_absent_from_memory_and_sqlite(t
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"source.py"}
 
 
+def test_bare_path_exclusion_is_a_directory_name_at_any_depth(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "repo"
+    root.mkdir()
+    for relative in ("node_modules/root.js", "a/node_modules/nested.js", "src/app.js"):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("content\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    monkeypatch.setattr(
+        filesystem.search,
+        "settings_payload",
+        lambda: {"settings": {"file_explorer": {
+            "index_exclude_dir_names": [],
+            "index_exclude_paths": ["node_modules"],
+        }}},
+    )
+
+    policy = filesystem.search._search_index_policy(root)
+    built = file_index.build_now(
+        root,
+        policy["skip_dirs"],
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+    )
+
+    assert policy["skip_dirs"] == {"node_modules"}
+    assert {entry[2] for entry in built.entries} == {"src/app.js"}
+
+
 def test_index_storage_inside_root_is_never_indexed(tmp_path, monkeypatch):
     _clear_registry()
     root = tmp_path / "root"

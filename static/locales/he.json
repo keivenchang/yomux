@@ -427,6 +427,7 @@
   "debug.system.sampler.header.lateMiss.short": "מאוחר/פספוס",
   "debug.system.sampler.header.runtime.full": "זמן ריצה אחרון",
   "debug.system.sampler.header.runtime.short": "זמן ריצה",
+  "debug.tab.cost": "עלות",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "גרפים",
   "debug.tab.logs": "יומנים",

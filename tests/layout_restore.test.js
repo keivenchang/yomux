@@ -462,7 +462,7 @@ async function runLayoutRestoreSuite() {
   test('frontend orchestration facades expose the registered runtime families', () => {
     const api = loadYolomux();
     const debugPanel = api.debugRuntimeFacadeForTest('panel');
-    assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'createYoCostPanel', 'renderDebugPanels', 'renderYoCostPanels']);
+    assert.deepStrictEqual(Object.keys(debugPanel).sort(), ['createDebugPanel', 'renderDebugPanels', 'renderYoCostPanels']);
     assert.ok(Object.values(debugPanel).every(value => typeof value === 'function'));
     assert.deepStrictEqual(Object.keys(api.debugRuntimeFacadeForTest('observation')).sort(), [
       'disposeJsDebugCurrentObservationLifecycle',
@@ -2292,8 +2292,9 @@ async function runLayoutRestoreSuite() {
     const autoStatusRenderFn = source.slice(source.indexOf('function renderAutoApproveStatusSurfaces'), source.indexOf('function applyAutoApprovePayload'));
     assert.ok(loadAutoStatusesFn.includes('renderAutoApproveStatusSurfaces(result)') && autoStatusRenderFn.includes('updateDocumentTitle();') && autoStatusRenderFn.includes('renderAutoApproveButtons();'), '#46: the auto-status poll routes through the shared status renderer, which re-syncs the title and YO markers together so a done pane stops spinning on the same poll');
     assert.ok(/preferenceSettingItem\('file_explorer\.indexed_dirs', \{type: 'list'\}\)/.test(source), '#32: Preferences exposes indexed directories through the shared setting builder');
-    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_dir_names', \{type: 'list', wide: true, rows: 20, autosize: true\}\)/.test(source), 'Preferences exposes 20-line autosizing Quick Open directory-name skips');
-    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_paths', \{type: 'list', wide: true, rows: 4, autosize: true\}\)/.test(source), 'Preferences exposes machine-specific Quick Open exclusions');
+    assert.equal(/preferenceSettingItem\('file_explorer\.index_exclude_dir_names'/.test(source), false, 'Preferences does not expose a second directory-name exclusion control');
+    assert.ok(/preferenceSettingItem\('file_explorer\.index_exclude_paths', \{type: 'list', wide: true, rows: 20, autosize: true\}\)/.test(source), 'Preferences exposes one autosizing Quick Open exclusions control');
+    assert.ok(/function quickOpenExclusionSettingPatch\(entries\)[\s\S]*index_exclude_dir_names:[\s\S]*index_exclude_paths:/.test(source), 'the combined Quick Open control preserves the two compatible backend fields');
     assert.ok(/preferenceSettingItem\('file_explorer\.index_max_files', \{type: 'number'/.test(source), 'Preferences exposes the Quick Open file cap');
     assert.ok(/function reconcileIndexedDirsFromSetting[\s\S]*setFileExplorerDirectoryIndexed\(dir, true\)[\s\S]*setFileExplorerDirectoryIndexed\(dir, false\)/.test(source), '#32: editing the indexed-dirs setting adds/removes indexed dirs (bi-directional sync)');
     assert.ok(source.includes('/api/fs/unindex?root='), '#32: removing an indexed dir wires to the backend unindex');
@@ -2631,6 +2632,36 @@ async function runLayoutRestoreSuite() {
     assert.equal(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/ensure-session\?session=/.test(source), false, 'terminal close no longer routes through the mutating ensure-session endpoint');
     assert.ok(/terminalSocketCloseLooksFinal\(event\)[\s\S]*pruneDeadSession\(session\);/.test(source), 'a clean terminal close prunes immediately');
     assert.ok(source.includes('scheduleTerminalReconnect(session, item, lifecycleToken);'), 'a transient disconnect reconnects only through the current generation token');
+  });
+
+  test('terminal teardown cannot leave a disposed xterm live in the session map', () => {
+    const api = loadYolomux('', ['1']);
+    const socket = {readyState: WebSocket.OPEN, closeCount: 0, close() { this.closeCount += 1; }};
+    const term = {disposeCount: 0, dispose() { this.disposeCount += 1; }};
+    const item = api.registerTerminalForTest('1', term, socket);
+
+    api.closeTerminalItemForTest('1', item);
+
+    assert.equal(api.terminalItemForTest('1'), null, 'teardown removes the item before xterm is disposed');
+    assert.equal(socket.closeCount, 1);
+    assert.equal(term.disposeCount, 1);
+  });
+
+  test('terminal sizing falls back safely after xterm has disposed its renderer', () => {
+    const api = loadYolomux('', ['1']);
+    const renderService = {_renderer: undefined};
+    Object.defineProperty(renderService, 'dimensions', {
+      get() { throw new TypeError('disposed renderer dimensions getter'); },
+    });
+    const container = api.testElementForId('terminal-pane-1');
+    container.clientWidth = 800;
+    container.clientHeight = 400;
+
+    const size = api.estimateTerminalSizeForTest(container, {_core: {_renderService: renderService}});
+
+    assert.ok(size.cols >= 40);
+    assert.ok(size.rows >= 10);
+    assert.equal(size.measuredCell, 'probe');
   });
 
   await testAsync('exited Xterm tab prunes through read-only tmux existence without stale roster fallback', async () => {
@@ -3002,6 +3033,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(parts.html.includes('file-tree-repo-branch') && parts.html.includes('feature/x'), 'repo dir annotation shows the branch');
     assert.ok(parts.html.includes('file-tree-repo-ahead') && parts.html.includes('↑2'), 'repo dir annotation shows ahead count inline');
     assert.ok(parts.html.includes('file-tree-repo-dirty') && parts.html.includes('●3'), 'repo dir annotation shows dirty count inline');
+    api.cacheFileExplorerRepoInfoForTest('/tmp/repo-alias', {root: '/private/tmp/repo-alias', name: 'repo-alias', branch: 'alias-branch'});
+    const aliasParts = api.fileTreeDisplayParts('/tmp/repo-alias', {kind: 'dir', is_repo: true, name: 'repo-alias'});
+    assert.ok(aliasParts.html.includes('alias-branch'), 'a macOS lexical /tmp Finder row retains metadata from its /private/tmp Git root');
     // Rich hover popover (replaces the native title tooltip) carries branch / upstream / stat / path.
     const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
     assert.ok(pop.includes('feature/x') && pop.includes('2 ahead') && pop.includes('1 behind') && pop.includes('3 dirty'), 'repo popover shows branch + ahead/behind/dirty');

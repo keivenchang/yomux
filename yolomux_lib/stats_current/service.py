@@ -14,6 +14,7 @@ import random
 import sqlite3
 import threading
 import time
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
@@ -35,11 +36,10 @@ SOCKET_FILENAME = storage.SOCKET_FILENAME
 MAX_ID_BYTES = 512
 MAX_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_IDLE_SECONDS = 60.0
-# Retention cleanup is nightly (prune_schedule), not periodic. This is only how
-# often the daemon asks the schedule "is tonight's prune still owed?" -- a cheap
-# localtime comparison plus one preference read, off the request path. It bounds
-# how late a due prune can start, including the catch-up case where the machine
-# was asleep at the configured time.
+# The configured local time owns the daily maintenance occurrence, while this
+# interval also bounds physical retention drift between daily runs. Each check
+# deletes only facts older than the current cutoff, so the frequent path stays
+# incremental instead of allowing a 48-hour policy to retain nearly 72 hours.
 PRUNE_CHECK_SECONDS = 60.0
 # Ten seconds keeps the 10-second views at most one bucket behind durable ingest.
 # A 60-second writer cadence would make that view trail by as many as six buckets.
@@ -265,6 +265,14 @@ def _bounded_migration_issue(issue: migration.MigrationIssue) -> dict[str, str]:
 class CacheEntry:
     metadata: Mapping[str, object]
     binary: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class DecoratedSnapshotBody:
+    base: bytes
+    base_digest: bytes
+    status_signature: tuple[object, ...]
+    body: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,18 +535,56 @@ def _ring_no_data_by_bucket(
 ) -> dict[int, tuple[materializer.NoData, ...]]:
     """Clip each no-data span into its overlapping ring buckets in one pass."""
 
-    buckets = layer.buckets
-    if not buckets or not layer.no_data:
+    return _ring_no_data_for_cells(
+        layer,
+        frozenset(bucket.start for bucket in layer.buckets),
+    )
+
+
+def _ring_no_data_cell_starts(
+    layer: materializer.Layer,
+    item: materializer.NoData,
+) -> range:
+    """Return aligned cells where one no-data span can affect ring bytes."""
+
+    first = max(0, math.floor((item.start - layer.start) / layer.resolution))
+    last = min(
+        len(layer.buckets),
+        math.ceil((item.end - layer.start) / layer.resolution),
+    )
+    return range(
+        layer.start + first * layer.resolution,
+        layer.start + last * layer.resolution,
+        layer.resolution,
+    )
+
+
+def _ring_no_data_for_cells(
+    layer: materializer.Layer,
+    starts: frozenset[int] | set[int],
+) -> dict[int, tuple[materializer.NoData, ...]]:
+    """Materialize no-data fragments only for selected cells in this layer."""
+
+    if not layer.buckets or not layer.no_data or not starts:
         return {}
-    bucket_count = len(buckets)
+    bucket_count = len(layer.buckets)
     resolution = layer.resolution
+    selected_starts = tuple(sorted(
+        start for start in starts
+        if layer.start <= start < layer.end and (start - layer.start) % resolution == 0
+    ))
+    if not selected_starts:
+        return {}
     indexed: dict[int, list[materializer.NoData]] = {}
     for item in layer.no_data:
         first = max(0, math.floor((item.start - layer.start) / resolution))
         last = min(bucket_count, math.ceil((item.end - layer.start) / resolution))
-        for index in range(first, last):
-            bucket = buckets[index]
-            start, end = bucket.start, bucket.start + bucket.duration
+        first_start = layer.start + first * resolution
+        last_start = layer.start + last * resolution
+        selected_first = bisect_left(selected_starts, first_start)
+        selected_last = bisect_left(selected_starts, last_start)
+        for start in selected_starts[selected_first:selected_last]:
+            end = start + resolution
             if item.end <= start or item.start >= end:
                 continue
             indexed.setdefault(start, []).append(replace(
@@ -547,6 +593,62 @@ def _ring_no_data_by_bucket(
                 end=min(item.end, end),
             ))
     return {start: tuple(items) for start, items in indexed.items()}
+
+
+def _ring_no_data_signatures_for_cells(
+    layer: materializer.Layer,
+    starts: frozenset[int] | set[int],
+) -> dict[int, tuple[tuple[object, ...], ...]]:
+    """Compare selected no-data cells without constructing ring fragments."""
+
+    selected_starts = tuple(sorted(
+        start for start in starts
+        if layer.start <= start < layer.end
+        and (start - layer.start) % layer.resolution == 0
+    ))
+    if not selected_starts:
+        return {}
+    signatures: dict[int, list[tuple[object, ...]]] = {}
+    for item in layer.no_data:
+        item_starts = _ring_no_data_cell_starts(layer, item)
+        selected_first = bisect_left(selected_starts, item_starts.start)
+        selected_last = bisect_left(selected_starts, item_starts.stop)
+        for start in selected_starts[selected_first:selected_last]:
+            end = start + layer.resolution
+            if item.end <= start or item.start >= end:
+                continue
+            signatures.setdefault(start, []).append((
+                item.family,
+                item.source_id,
+                item.epoch_id,
+                max(item.start, start),
+                min(item.end, end),
+                item.native_cadence_seconds,
+                item.reason,
+            ))
+    return {start: tuple(items) for start, items in signatures.items()}
+
+
+def _changed_ring_no_data_starts(
+    previous: materializer.Layer,
+    candidate: materializer.Layer,
+) -> frozenset[int]:
+    """Find exact changed no-data cells without folding unchanged fragments."""
+
+    if previous.no_data == candidate.no_data:
+        return frozenset()
+    changed_items = set(previous.no_data).symmetric_difference(candidate.no_data)
+    potential = {
+        start
+        for item in changed_items
+        for start in _ring_no_data_cell_starts(candidate, item)
+    }
+    previous_signatures = _ring_no_data_signatures_for_cells(previous, potential)
+    candidate_signatures = _ring_no_data_signatures_for_cells(candidate, potential)
+    return frozenset(
+        start for start in potential
+        if previous_signatures.get(start, ()) != candidate_signatures.get(start, ())
+    )
 
 
 def _ring_cost_detail_json(detail: materializer.BucketCostDetail) -> str:
@@ -1071,6 +1173,7 @@ class StatsCurrentService:
         self._ring_waiting_for_source = 0
         self._ring_publications = 0
         self._ring_buckets_published = 0
+        self._statsd_unchanged_cell_materialization = 0
         self._last_ring_published_at = 0.0
         self._last_ring_publish_seconds = 0.0
         self._last_ring_source_generation = 0
@@ -1155,6 +1258,10 @@ class StatsCurrentService:
         self._last_failure_component = ""
         self._last_failure_at = 0.0
         self._usage_atom_backfill: dict[str, object] | None = None
+        self._snapshot_body_decoration_lock = threading.Lock()
+        self._snapshot_body_decoration_cache: DecoratedSnapshotBody | None = None
+        self._snapshot_body_decoration_builds = 0
+        self._snapshot_body_decoration_hits = 0
         self._migration_state = "pending"
         self._migration_result = ""
         self._migration_failure = ""
@@ -1285,7 +1392,11 @@ class StatsCurrentService:
                 or self._pending_coverage_refresh
                 or bool(self._pending_ring_dirty)
             )
-            if self._building or pending:
+            # A live SQLite read must finish before VACUUM, but queued work is
+            # only a scheduling preference. Once the max-defer cap fires, keep
+            # the queue intact and compact before taking its next generation;
+            # otherwise one dirty cell per tick defeats the cap forever.
+            if self._building or (pending and not capped):
                 self._next_vacuum_at = self.monotonic() + VACUUM_RETRY_SECONDS
                 return False
             started = self.monotonic()
@@ -1371,46 +1482,71 @@ class StatsCurrentService:
             for layer in previous_layers.values()
             for bucket in layer.buckets
         }
-        previous_no_data = {
-            (layer.resolution, bucket_start): items
-            for layer in previous_layers.values()
-            for bucket_start, items in _ring_no_data_by_bucket(layer).items()
-        }
-        candidate_no_data = {
-            (layer.resolution, bucket_start): items
-            for layer in candidate.layers
-            for bucket_start, items in _ring_no_data_by_bucket(layer).items()
-        }
-        carrier_starts = {
-            layer.resolution: frozenset(
-                carrier_start
-                for _range_seconds, carrier_start in _ring_view_carriers(layer)
-            )
-            for layer in candidate.layers
-        }
-        return frozenset(
+        changed = {
             materializer.DirtyCell(layer.resolution, bucket.start)
             for layer in candidate.layers
             for bucket in layer.buckets
-            if (
-                bucket.start in carrier_starts[layer.resolution]
-                or previous_buckets.get((layer.resolution, bucket.start)) != bucket
-                or (
-                    layer.resolution in previous_layers
-                    and previous_no_data.get((layer.resolution, bucket.start), ())
-                    != candidate_no_data.get((layer.resolution, bucket.start), ())
+            if previous_buckets.get((layer.resolution, bucket.start)) != bucket
+        }
+        for layer in candidate.layers:
+            previous_layer = previous_layers.get(layer.resolution)
+            if previous_layer is None:
+                changed.update(
+                    materializer.DirtyCell(layer.resolution, start)
+                    for item in layer.no_data
+                    for start in _ring_no_data_cell_starts(layer, item)
+                )
+                continue
+            if previous_layer.no_data == layer.no_data:
+                continue
+            changed.update(
+                materializer.DirtyCell(layer.resolution, start)
+                for start in _changed_ring_no_data_starts(previous_layer, layer)
+            )
+        for layer in candidate.layers:
+            changed_starts = {
+                cell.start for cell in changed if cell.resolution == layer.resolution
+            }
+            changed.update(
+                materializer.DirtyCell(layer.resolution, carrier_start)
+                for range_seconds, carrier_start in _ring_view_carriers(layer)
+                if any(
+                    layer.end - range_seconds <= start < layer.end
+                    for start in changed_starts
                 )
             )
-        )
+        return frozenset(changed)
 
     def _stage_ring_candidate(
         self,
         previous: materializer.Generation | None,
         candidate: materializer.Generation,
     ) -> None:
-        changed = self._changed_ring_cells(previous, candidate)
+        changed = set(self._changed_ring_cells(previous, candidate))
+        with self.cache_lock:
+            active_public_views = {
+                (range_seconds, resolution_seconds)
+                for range_seconds, resolution_seconds, private_source_id in self._ring_views
+                if private_source_id is None
+            }
+        for layer in candidate.layers:
+            changed.update(
+                materializer.DirtyCell(layer.resolution, carrier_start)
+                for range_seconds, carrier_start in _ring_view_carriers(layer)
+                if (range_seconds, layer.resolution) in active_public_views
+            )
+        previous_no_data = {
+            layer.resolution: layer.no_data
+            for layer in (() if previous is None else previous.layers)
+        }
+        no_data_changed = any(
+            previous_no_data.get(layer.resolution) != layer.no_data
+            for layer in candidate.layers
+        )
         with self.work_lock:
-            self._stage_ring_cells_locked(changed, candidate.source_generation)
+            if previous is not None and no_data_changed:
+                self._statsd_unchanged_cell_materialization += 1
+            self._stage_ring_cells_locked(frozenset(changed), candidate.source_generation)
             if (
                 self._ring_waiting_for_source
                 and candidate.source_generation >= self._ring_waiting_for_source
@@ -1439,8 +1575,13 @@ class StatsCurrentService:
             for layer in candidate.layers
             for bucket in layer.buckets
         }
+        starts_by_resolution: dict[int, set[int]] = {}
+        for cell in cells:
+            starts_by_resolution.setdefault(cell.resolution, set()).add(cell.start)
         no_data = {
-            layer.resolution: _ring_no_data_by_bucket(layer)
+            layer.resolution: _ring_no_data_for_cells(
+                layer, starts_by_resolution.get(layer.resolution, set()),
+            )
             for layer in candidate.layers
         }
         writes = []
@@ -1481,8 +1622,13 @@ class StatsCurrentService:
 
         if self._ring_publications:
             return cells
+        starts_by_resolution: dict[int, set[int]] = {}
+        for cell in cells:
+            starts_by_resolution.setdefault(cell.resolution, set()).add(cell.start)
         no_data = {
-            layer.resolution: _ring_no_data_by_bucket(layer)
+            layer.resolution: _ring_no_data_for_cells(
+                layer, starts_by_resolution.get(layer.resolution, set()),
+            )
             for layer in candidate.layers
         }
         persisted: dict[tuple[int, int], bool] = {}
@@ -3114,6 +3260,7 @@ class StatsCurrentService:
             reports = self._browser_reports_accepted
             observations_accepted = self._browser_observations_accepted
             last_accepted_at = self._last_browser_report_accepted_at
+            unchanged_cell_materialization = self._statsd_unchanged_cell_materialization
         return {
             "ok": True,
             "receipt_scope": "statsd_process",
@@ -3122,6 +3269,9 @@ class StatsCurrentService:
             "accepted_observations": observations_accepted,
             "last_accepted_at": last_accepted_at or None,
             "last_accepted_age_seconds": round(max(0.0, self.clock() - last_accepted_at), 3) if last_accepted_at else None,
+            "owner_counters": {
+                "statsd_unchanged_cell_materialization": unchanged_cell_materialization,
+            },
             **self.writer.browser_observation_status(self.clock()),
         }
 
@@ -3330,15 +3480,54 @@ class StatsCurrentService:
     def _snapshot(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
         return StatsSnapshotProjector._snapshot(self, request)
 
+    @staticmethod
+    def _backfill_status_signature(status: Mapping[str, object]) -> tuple[object, ...]:
+        scan = status["scan"]
+        if not isinstance(scan, Mapping):
+            raise ValueError("usage atom backfill scan must be an object")
+        reasons = scan["rejection_reasons"]
+        if not isinstance(reasons, Mapping):
+            raise ValueError("usage atom backfill rejection reasons must be an object")
+        return (
+            status["state"],
+            status["sources"],
+            status["missing"],
+            scan["files_read"],
+            scan["records_parsed"],
+            scan["atoms_emitted"],
+            scan["atoms_accepted"],
+            scan["atoms_rejected"],
+            tuple(sorted((str(reason), count) for reason, count in reasons.items())),
+        )
+
     def _snapshot_body_with_backfill_status(self, body: bytes) -> bytes:
-        status = self._usage_atom_backfill
-        if status is None:
-            return body
-        payload = json.loads(body)
-        if not isinstance(payload, dict):
-            raise ValueError("cached snapshot body must be an object")
-        payload["usage_atom_backfill"] = status
-        return self.encoder(payload)
+        with self._snapshot_body_decoration_lock:
+            status = self._usage_atom_backfill
+            if status is None:
+                return body
+            signature = self._backfill_status_signature(status)
+            cached = self._snapshot_body_decoration_cache
+            if cached is not None and cached.status_signature == signature:
+                same_base = cached.base is body
+                if not same_base:
+                    digest = hashlib.sha256(body).digest()
+                    same_base = cached.base_digest == digest and cached.base == body
+                if same_base:
+                    self._snapshot_body_decoration_hits += 1
+                    return cached.body
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("cached snapshot body must be an object")
+            payload["usage_atom_backfill"] = status
+            decorated = self.encoder(payload)
+            self._snapshot_body_decoration_cache = DecoratedSnapshotBody(
+                base=body,
+                base_digest=hashlib.sha256(body).digest(),
+                status_signature=signature,
+                body=decorated,
+            )
+            self._snapshot_body_decoration_builds += 1
+            return decorated
 
     def _set_usage_atom_backfill_status(self, request: Mapping[str, object]) -> dict[str, object]:
         data = _object(request, "usage_atom_backfill request", CONTROL_FIELDS["usage_atom_backfill"])
@@ -3358,7 +3547,21 @@ class StatsCurrentService:
             raise ValueError("invalid usage_atom_backfill rejection reasons")
         if scan["atoms_accepted"] + scan["atoms_rejected"] != scan["atoms_emitted"] or sum(reasons.values()) != scan["atoms_rejected"]:
             raise ValueError("invalid usage_atom_backfill atom counts")
-        self._usage_atom_backfill = {"state": state, "sources": sources, "missing": missing, "scan": dict(scan)}
+        status = {
+            "state": state,
+            "sources": sources,
+            "missing": missing,
+            "scan": {**scan, "rejection_reasons": dict(reasons)},
+        }
+        signature = self._backfill_status_signature(status)
+        with self._snapshot_body_decoration_lock:
+            previous = self._usage_atom_backfill
+            previous_signature = (
+                None if previous is None else self._backfill_status_signature(previous)
+            )
+            self._usage_atom_backfill = status
+            if previous_signature != signature:
+                self._snapshot_body_decoration_cache = None
         return {"ok": True}
 
     def _delta(self, request: Mapping[str, object]) -> tuple[dict[str, object], bytes]:
@@ -3444,7 +3647,7 @@ class StatsCurrentService:
         return prune_schedule.resolve_local_time(configured)
 
     def _prune_if_due(self) -> bool:
-        """Run the once-a-night retention prune when the last one is still owed.
+        """Run an owed daily prune or the bounded cutoff sweep between runs.
 
         This is the ONLY pruner. It runs on the listener's accept-timeout idle
         hook, never on a request, and asks the schedule at most once per
@@ -3457,8 +3660,12 @@ class StatsCurrentService:
         self._next_prune_check_at = now_monotonic + PRUNE_CHECK_SECONDS
         self._prune_time = self._resolved_prune_time()
         now = self.clock()
-        # prune_schedule owns the rule; the daemon must not re-spell it.
-        if not prune_schedule.is_due(now, self._last_pruned_at, self._prune_time):
+        # prune_schedule still owns the configured daily occurrence. The second
+        # condition owns the retention ceiling between occurrences; without it,
+        # a healthy once-nightly delete necessarily permits almost one extra day.
+        scheduled_due = prune_schedule.is_due(now, self._last_pruned_at, self._prune_time)
+        cutoff_sweep_due = now - self._last_pruned_at >= PRUNE_CHECK_SECONDS
+        if not scheduled_due and not cutoff_sweep_due:
             return False
         due_at = prune_schedule.most_recent_occurrence(now, self._prune_time)
         started = self.monotonic()
@@ -3820,6 +4027,7 @@ class StatsStatusProjector:
             usage_atoms_accepted = self._usage_atoms_accepted
             last_usage_atom_accepted_at = self._last_usage_atom_accepted_at
             usage_identity_conflict_attempts = self._usage_identity_conflict_attempts
+            unchanged_cell_materialization = self._statsd_unchanged_cell_materialization
             usage_identity_conflicts = tuple(
                 dict(item)
                 for item in sorted(
@@ -3912,6 +4120,11 @@ class StatsStatusProjector:
         )
         with self.trace_lock:
             request_traces = tuple(dict(item) for item in self._request_traces)
+        wal_path = self.database_path.with_name(f"{self.database_path.name}-wal")
+        try:
+            wal_allocated_bytes = wal_path.stat().st_size
+        except FileNotFoundError:
+            wal_allocated_bytes = 0
         return {
             "ok": True,
             "version": storage.MIN_WRITER_PROTOCOL,
@@ -3961,6 +4174,9 @@ class StatsStatusProjector:
                 "dirty_cells": dirty,
                 "building": self._building,
                 "failed_builds": self._failed_builds,
+            },
+            "owner_counters": {
+                "statsd_unchanged_cell_materialization": unchanged_cell_materialization,
             },
             "ring_writer": {
                 "cadence_seconds": RING_FLUSH_SECONDS,
@@ -4073,6 +4289,7 @@ class StatsStatusProjector:
             },
             "retention_prune": {
                 "retention_seconds": storage.RETENTION_SECONDS,
+                "cutoff_sweep_interval_seconds": PRUNE_CHECK_SECONDS,
                 "display_window_seconds": stats_resolution.MAX_RANGE_SECONDS,
                 "at_local_time": self._prune_time.text,
                 "configured_local_time": self._prune_time.configured,
@@ -4093,6 +4310,11 @@ class StatsStatusProjector:
                 "last_at": self._last_prune_at,
                 "last_seconds": round(self._last_prune_seconds, 6),
                 "last_due_at": self._last_prune_due_at,
+            },
+            "wal": {
+                "allocated_bytes": wal_allocated_bytes,
+                "allocation_ceiling_bytes": storage.WAL_ALLOCATION_CEILING_BYTES,
+                "autocheckpoint_pages": storage.WAL_AUTOCHECKPOINT_PAGES,
             },
             "vacuum": {
                 "interval_seconds": VACUUM_INTERVAL_SECONDS,

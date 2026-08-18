@@ -1438,7 +1438,10 @@ function applyLayoutUrlFinderSeed(finder = {}) {
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('root' in finder) {
     const root = String(finder.root || '').trim();
-    if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+    if (root) {
+      fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
+      layoutUrlState.finderRootKindUnverified = true;
+    }
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
     fileExplorerFinderSelectedSession = String(finder.session || '').trim();
@@ -2430,6 +2433,10 @@ function registerDynamicVirtualLayoutItem(item) {
 
 function resolveLayoutItem(value) {
   const text = String(value || '');
+  if (isLegacyYoCostItemParam(text)) {
+    legacyYoCostMigrationRequested = true;
+    return debugPaneItemId;
+  }
   if (text === 'changes' || text === '__changes__') {
     fileExplorerMode = 'diff';
     writeStoredFileExplorerMode(fileExplorerMode);

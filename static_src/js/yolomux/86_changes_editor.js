@@ -976,8 +976,18 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
   }, sessionFilesProducerDeadlineMs);
 }
 
+function retireSessionFilesRequest(reason = 'session-files request superseded') {
+  fileExplorerSessionFilesState.guard.invalidate();
+  const controller = fileExplorerSessionFilesState.abortController;
+  fileExplorerSessionFilesState.abortController = null;
+  if (!controller || controller.signal.aborted) return;
+  const error = new Error(reason);
+  error.name = 'AbortError';
+  controller.abort(error);
+}
+
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
-  if (options.invalidateRequest !== false) fileExplorerSessionFilesState.guard.invalidate();
+  if (options.invalidateRequest !== false) retireSessionFilesRequest(options.retirementReason);
   fileExplorerSessionFilesState.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
@@ -1077,19 +1087,22 @@ async function fetchSessionFiles(options = {}) {
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
   const session = options.session || fileExplorerSessionFilesTargetSession();
   let shouldRender = options.silent !== true;
   if (!session) {
     const emptyPayload = emptySessionFilesPayload('', true);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
-    setSessionFilesPayloadForDestination(destination, emptyPayload, {invalidateRequest: false});
+    setSessionFilesPayloadForDestination(destination, emptyPayload);
     setSessionFilesSignatureForDestination(destination, signature);
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(emptyPayload));
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
+  retireSessionFilesRequest('session-files request replaced');
+  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
+  const requestController = typeof AbortController === 'function' ? new AbortController() : null;
+  fileExplorerSessionFilesState.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
@@ -1106,7 +1119,11 @@ async function fetchSessionFiles(options = {}) {
     const requestUrl = `/api/session-files?${params.toString()}`;
     let payload;
     try {
-      payload = await apiFetchJson(requestUrl, {deadlineMs: 5000});
+      payload = await apiFetchJson(
+        requestUrl,
+        {deadlineMs: 5000, ...(requestController ? {signal: requestController.signal} : {})},
+        {abortRetirementReason: 'session_files_request_superseded'},
+      );
     } catch (err) {
       // A producer can return the same accepted receipt again while its terminal result is still
       // retained locally. Reuse that exact result instead of painting a terminal Differ as queued.
@@ -1157,6 +1174,9 @@ async function fetchSessionFiles(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
+    if (fileExplorerSessionFilesState.abortController === requestController) {
+      fileExplorerSessionFilesState.abortController = null;
+    }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
     if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
@@ -1184,7 +1204,7 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
   setSessionFilesSignatureForDestination(destination, signature);
   fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -2505,7 +2525,7 @@ async function openChangedDirectoryInFinder(path) {
         return;
       }
     }
-    const opened = await openFileExplorerAt(path);
+    const opened = await openFileExplorerAt(path, {validateKind: true});
     if (!opened) return;
     selectFileTreePath(path);
     statusEl.textContent = t('status.expandedIn', {path, finder: fileExplorerLabel()});
@@ -2589,6 +2609,7 @@ function codexModelDefaultEffort(model) {
 }
 
 function settingPatchForPath(path, value) {
+  if (path === 'file_explorer.index_exclude_paths') return quickOpenExclusionSettingPatch(value);
   const patch = settingPatch(path, value);
   if (path === 'yoagent.codex_model') {
     const defaultEffort = codexModelDefaultEffort(value);
@@ -2704,7 +2725,7 @@ function savePreferenceControl(control) {
 function resetPreference(path) {
   const item = preferenceItemByPath(path);
   if (!item) return;
-  saveSettingsPatch(settingPatch(path, preferenceDefault(path)), {
+  saveSettingsPatch(settingPatchForPath(path, preferenceDefault(path)), {
     applyEditorDefaults: path === 'terminal_editor.word_wrap' || path === 'terminal_editor.line_numbers',
   })
     .then(() => { statusEl.textContent = t('status.settingReset', {path}); })

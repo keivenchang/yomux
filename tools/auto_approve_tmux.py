@@ -407,8 +407,12 @@ def main() -> None:
         log.info("Caught %s — exiting. %s", sig_name, " | ".join(parts))
         sys.exit(0)
 
-    signal.signal(signal.SIGINT, on_exit)
-    signal.signal(signal.SIGTERM, on_exit)
+    previous_sigint = signal.signal(signal.SIGINT, on_exit)
+    previous_sigterm = signal.signal(signal.SIGTERM, on_exit)
+
+    def restore_signal_handlers() -> None:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
     def should_exit_once(st: SessionState, outcome: str) -> bool:
         """Return True when --once has processed its first prompt."""
@@ -416,6 +420,7 @@ def main() -> None:
             return False
         log.info("ONCE complete after %s on %s (%d approved, %d blocked)",
                  outcome, st.label, st.approved, st.blocked)
+        restore_signal_handlers()
         return True
 
     # Adaptive polling: lerp from base to max over ramp_duration seconds of inactivity

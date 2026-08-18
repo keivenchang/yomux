@@ -115,7 +115,7 @@ function bindInfoPanel(panel) {
       if (typeof openFileExplorerPane === 'function') await openFileExplorerPane();
       if (typeof setFileExplorerMode === 'function') setFileExplorerMode('files');
       if (typeof openFileExplorerAt === 'function') {
-        const opened = await openFileExplorerAt(path, {manualSelection: true});
+        const opened = await openFileExplorerAt(path, {manualSelection: true, validateKind: true});
         if (opened && typeof selectFileTreePath === 'function') selectFileTreePath(path);
       }
     })().catch(error => {

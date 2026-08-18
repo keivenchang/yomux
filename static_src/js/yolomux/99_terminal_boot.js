@@ -4929,8 +4929,8 @@ function connectTerminalSocket(session, item) {
     if (!socketIsCurrent() || !item.term) return;
     try {
       processTerminalSocketFrame(session, item, event.data);
-    } catch (_) {
-      if (terminals.get(session) === item) closeTerminalItem(session, item);
+    } catch (error) {
+      recoverTerminalAfterFrameFailure(session, item, error);
     }
   };
   socket.onclose = event => {
@@ -4950,6 +4950,30 @@ function connectTerminalSocket(session, item) {
     updateStatus();
     refreshTrackedSessionChrome(session);
   };
+}
+
+const terminalFrameRecoveryAttempts = new Map();
+
+function recoverTerminalAfterFrameFailure(session, item, error) {
+  recordJsDebugEvent('client_failure', {
+    ...jsDebugFailureDetails('client_failure', error),
+    component: 'terminal-websocket-frame',
+    session,
+  });
+  if (terminals.get(session) !== item) return false;
+  const attempt = Math.max(1, Number(terminalFrameRecoveryAttempts.get(session) || 0) + 1);
+  terminalFrameRecoveryAttempts.set(session, attempt);
+  closeTerminalItem(session, item);
+  if (!activeSessions.includes(session)) return false;
+  const delay = Math.min(2000, 100 * 2 ** Math.min(4, attempt - 1));
+  showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {
+    seconds: Math.max(1, Math.round(delay / 1000)),
+  }));
+  setTimeout(() => {
+    if (terminals.has(session) || !activeSessions.includes(session) || !document.getElementById(terminalDomId(session))) return;
+    startTerminal(session);
+  }, delay);
+  return true;
 }
 
 // One frame-processing owner for the terminal WebSocket. PTY output stays raw binary; small
@@ -4974,10 +4998,16 @@ function processTerminalSocketFrame(session, item, data) {
     item.term.write(String(data));
   }
   clientPerfEnd(writePerf, {bytes: dataBytes});
+  terminalFrameRecoveryAttempts.delete(session);
   if (consumedControl) return;
   const firstOutput = item.terminalOutputSeen !== true;
   item.terminalOutputSeen = true;
   clearTerminalConnectionState(session);
+  // The first resize frame can reach the server before tmux has registered its new attach client.
+  // First PTY output proves the attach exists, so repeat the visible surface's authority claim once.
+  if (firstOutput && terminalIsVisible(session, item.container)) {
+    sendRemoteResize(session, {activate: true});
+  }
   item.fileUnderlineController?.schedule?.({reason: 'output'});
   if (firstOutput) scheduleTerminalBlankScreenRefresh(session, {reason: 'first-output'});
   scheduleTerminalAttentionHighlight(session);
@@ -5100,10 +5130,11 @@ function startTerminal(session) {
     attentionHighlightFrame: 0,
     terminalOutputSeen: false,
     fileUnderlineController: null,
+    containerBindingDispose: null,
   };
   terminals.set(session, item);
   item.fileUnderlineController = installTerminalFileReferenceUnderlines(session, term, container);
-  bindTerminalContainerForSession(session, term, container);
+  item.containerBindingDispose = bindTerminalContainerForSession(session, term, container);
   term.onFocus?.(() => {
     setFocusedTerminal(session);
   });

@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "遲到/錯過",
   "debug.system.sampler.header.runtime.full": "上次運行時間",
   "debug.system.sampler.header.runtime.short": "運行時",
+  "debug.tab.cost": "成本",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "圖表",
   "debug.tab.logs": "日誌",

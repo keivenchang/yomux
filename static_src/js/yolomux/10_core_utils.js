@@ -251,6 +251,85 @@ function applyApiRequestIdHeader(url, requestOptions) {
 
 const apiFetchDefaultDeadlineMs = 15000;
 const apiFetchLongOperationDeadlineMs = 300000;
+// Route-qualified owners still decide whether roots, metadata, Finder, terminal, or stats demand is
+// equivalent. This is the one browser-wide capacity owner beneath them, so independent startup and
+// refresh work remains parallel without letting one page issue an unbounded fetch burst.
+const startupRefreshApiConcurrencyLimit = 8;
+const startupRefreshApiCoordinator = {active: 0, queue: []};
+
+function startupRefreshApiAbortError(signal) {
+  const reason = signal?.reason;
+  if (reason && typeof reason === 'object') return reason;
+  const error = new Error(reason ? String(reason) : 'The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function drainStartupRefreshApiCoordinator() {
+  while (startupRefreshApiCoordinator.active < startupRefreshApiConcurrencyLimit && startupRefreshApiCoordinator.queue.length) {
+    const item = startupRefreshApiCoordinator.queue.shift();
+    if (item.signal?.aborted) {
+      item.settle('reject', startupRefreshApiAbortError(item.signal));
+      continue;
+    }
+    item.started = true;
+    item.capacityOwned = true;
+    startupRefreshApiCoordinator.active += 1;
+    let request;
+    try {
+      request = item.run();
+    } catch (error) {
+      request = Promise.reject(error);
+    }
+    Promise.resolve(request)
+      .then(value => item.settle('resolve', value), error => item.settle('reject', error));
+  }
+}
+
+function runStartupRefreshApiRequest(run, signal = null) {
+  return new Promise((resolve, reject) => {
+    const item = {
+      run,
+      signal,
+      resolve,
+      reject,
+      started: false,
+      settled: false,
+      capacityOwned: false,
+      abort: null,
+      cleanup() {
+        if (this.abort) this.signal?.removeEventListener?.('abort', this.abort);
+        this.abort = null;
+      },
+      settle(outcome, value) {
+        if (this.settled) return;
+        this.settled = true;
+        this.cleanup();
+        if (this.capacityOwned) {
+          this.capacityOwned = false;
+          startupRefreshApiCoordinator.active -= 1;
+          drainStartupRefreshApiCoordinator();
+        }
+        if (outcome === 'resolve') this.resolve(value);
+        else this.reject(value);
+      },
+    };
+    item.abort = () => {
+      if (!item.started) {
+        const index = startupRefreshApiCoordinator.queue.indexOf(item);
+        if (index >= 0) startupRefreshApiCoordinator.queue.splice(index, 1);
+      }
+      item.settle('reject', startupRefreshApiAbortError(signal));
+    };
+    if (signal?.aborted) {
+      item.abort();
+      return;
+    }
+    signal?.addEventListener?.('abort', item.abort, {once: true});
+    startupRefreshApiCoordinator.queue.push(item);
+    drainStartupRefreshApiCoordinator();
+  });
+}
 
 function promiseDeadlineError(deadlineMs, subject = 'operation') {
   const error = new Error(`${String(subject || 'operation')} exceeded its ${Math.round(deadlineMs)}ms deadline`);
@@ -387,7 +466,7 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   };
   let response;
   try {
-    const requestPromise = fetch(url, requestOptions).catch(error => {
+    const requestPromise = runStartupRefreshApiRequest(() => fetch(url, requestOptions), requestOptions.signal).catch(error => {
       if (timeoutError) throw timeoutError;
       throw error;
     });
@@ -404,7 +483,10 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     });
     response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
-    const retirementReason = timeoutError ? '' : transportLifecycle.reasonSince(transportToken);
+    const ownerRetirementReason = !timeoutError && upstreamSignal?.aborted
+      ? String(internalOptions.abortRetirementReason || '')
+      : '';
+    const retirementReason = timeoutError ? '' : (transportLifecycle.reasonSince(transportToken) || ownerRetirementReason);
     if (timeoutError) noteTimeout();
     else if (!retirementReason) noteBackendHealthFailure();
     if (recordDebug) {
@@ -794,6 +876,11 @@ function waitForApiOperationResult(pending, expected = {}) {
 }
 
 function startApiOperationTransport(record) {
+  // A global stream which has fired `ready` receives every live terminal by browser client ID, so
+  // steady-state operation churn must never replace it. Before first ready, however, its immutable
+  // URL may predate this receipt; retire only that stale pre-ready stream so reconnect replay can
+  // cover a terminal published before the server subscribes it.
+  if (typeof prepareClientEventOperationReplay === 'function') prepareClientEventOperationReplay(record?.id);
   if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
   return null;
 }
@@ -4760,10 +4847,23 @@ function installTerminalLinkProvider(session, term) {
   });
 }
 
+function terminalRenderCellDimensions(term) {
+  const renderService = term?._core?._renderService;
+  const rendererCell = renderService?._renderer?.dimensions?.css?.cell;
+  if (rendererCell?.width > 0 && rendererCell?.height > 0) return rendererCell;
+  try {
+    const serviceCell = renderService?.dimensions?.css?.cell;
+    return serviceCell?.width > 0 && serviceCell?.height > 0 ? serviceCell : null;
+  } catch (error) {
+    // xterm's getter dereferences the renderer after dispose. An absent renderer identifies that
+    // teardown race; other getter failures still surface instead of being hidden.
+    if (error?.name !== 'TypeError' || renderService?._renderer) throw error;
+    return null;
+  }
+}
+
 function terminalCellDimensions(term, container) {
-  const cell = term?._core?._renderService?._renderer?.dimensions?.css?.cell
-    || term?._core?._renderService?.dimensions?.css?.cell
-    || {};
+  const cell = terminalRenderCellDimensions(term) || {};
   const width = Number(cell.width || 0);
   const height = Number(cell.height || 0);
   if (width > 0 && height > 0) return {width, height};

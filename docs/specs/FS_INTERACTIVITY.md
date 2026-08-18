@@ -31,7 +31,7 @@ The queue entry is one bounded typed record with at least `root`, `directory`, `
 For one dequeued directory, the worker must:
 
 1. Revalidate that the root is still configured, the generation is current, the canonical directory remains beneath the root, and the shared exclusion/symlink policy permits background traversal.
-2. List only that directory with the existing path policy, partial descriptor protections, and configured entry/file limits. The current implementation does not yet retain an authorized descriptor generation through every listing/index metadata consumer; that security gap belongs to [`DOIT.p0.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.filesystem-descriptor-authorization.md).
+2. List only that directory with the existing path policy, partial descriptor protections, and configured entry/file limits. The current implementation does not yet retain an authorized descriptor generation through every listing/index metadata consumer; that security gap belongs to [`DOIT.p0.e5.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md).
 3. Publish file rows and directory metadata for that directory in one bounded transaction; publish removals or renames from the previous directory snapshot in the same generation.
 4. Enqueue eligible child directories at `depth + 1` without opening them.
 5. Check cancellation and yield to higher-priority work before taking another frontier item.

@@ -39,6 +39,7 @@ from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
 from ..host_identity import process_identity_snapshot
 from ..host_identity import recorded_start_identity
+from ..infra.worktree_writer import child_process_artifact_environment
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request
@@ -1481,15 +1482,15 @@ class LocalServiceRegistry:
             str(idle_seconds),
             *self.spec.extra_args,
         ]
-        self.stderr_path.parent.mkdir(parents=True, exist_ok=True)
         self.spawn_ownership = None
         # A local service is shared per user, so this inherited environment belongs to whichever
         # server happened to launch it first and is NOT authority for any other server's request.
         # Filesystem access policy in particular travels on the job descriptor
         # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOLOMUX_FS_ROOTS` here.
-        spawn_environ = dict(os.environ)
+        spawn_environ = child_process_artifact_environment(Path(__file__).resolve().parents[2], environ=os.environ)
         spawn_environ[LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation_marker
         spawn_environ["PYTHONPATH"] = inherited_python_path(spawn_environ)
+        self.stderr_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             with self.stderr_path.open("wb") as output:
                 process = self.popen(
@@ -1974,7 +1975,7 @@ class LocalServiceRegistry:
         return self._request("release", {"lease_id": lease_id}, timeout=0.25)
 
     def status(self) -> dict[str, Any]:
-        status = (
+        status: dict[str, Any] = (
             {
                 "ok": False,
                 "error": f"{self.spec.name} client upgrade required",

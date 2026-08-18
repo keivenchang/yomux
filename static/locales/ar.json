@@ -445,6 +445,7 @@
   "debug.system.sampler.header.lateMiss.short": "متأخر/ملكة جمال",
   "debug.system.sampler.header.runtime.full": "وقت التشغيل الأخير",
   "debug.system.sampler.header.runtime.short": "وقت التشغيل",
+  "debug.tab.cost": "التكلفة",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "الرسوم البيانية",
   "debug.tab.logs": "السجلات",

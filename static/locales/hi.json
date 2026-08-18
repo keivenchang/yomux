@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "देर/चूक",
   "debug.system.sampler.header.runtime.full": "अंतिम रनटाइम",
   "debug.system.sampler.header.runtime.short": "रनटाइम",
+  "debug.tab.cost": "लागत",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "ग्राफ़",
   "debug.tab.logs": "लॉग",

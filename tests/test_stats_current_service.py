@@ -5,9 +5,11 @@
 import json
 import math
 import os
+import random
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType
@@ -1537,13 +1539,13 @@ def test_delta_carries_the_full_precomputed_candidate_cost_report(tmp_path):
 
 def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cells(tmp_path):
     monotonic_now = [10.0]
-    wall_now = 1_700_000_000.0
+    wall_now = [1_700_000_000.0]
     store = FakeStore()
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
         monotonic=lambda: monotonic_now[0],
-        clock=lambda: wall_now,
+        clock=lambda: wall_now[0],
         prune_time_reader=lambda: "02:30",
     )
     service.writer = store
@@ -1563,6 +1565,14 @@ def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cell
     assert service._prunes == 1
     assert service._next_prune_check_at == 200.0 + service_module.PRUNE_CHECK_SECONDS
 
+    # The nightly preference still gets its exact run, but it cannot turn a
+    # 48-hour retention policy into a nearly 72-hour physical span. Once one
+    # check interval has elapsed, another bounded cutoff sweep is due.
+    monotonic_now[0] += service_module.PRUNE_CHECK_SECONDS + 1.0
+    wall_now[0] += service_module.PRUNE_CHECK_SECONDS + 1.0
+    assert service._prune_if_due() is True
+    assert store.prunes == 2
+
     # A prune that DID delete originals marks exactly the cutoff-straddling cell
     # per resolution dirty (the incremental builder skips out-of-window ones);
     # it never requests a full rebuild.
@@ -1570,7 +1580,7 @@ def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cell
     service._last_pruned_at = 0.0
     monotonic_now[0] = 400.0
     assert service._prune_if_due() is True
-    cutoff = wall_now - storage.RETENTION_SECONDS
+    cutoff = wall_now[0] - storage.RETENTION_SECONDS
     expected = frozenset(
         materializer.DirtyCell(resolution, math.floor(cutoff / resolution) * resolution)
         for resolution in stats_resolution.RESOLUTION_CHOICES
@@ -1680,12 +1690,16 @@ def test_vacuum_cap_overrides_quiet_gate_on_a_continuously_busy_box(tmp_path):
     assert service._vacuum_due_since == 100.0
 
     # Still busy (a fresh RPC each tick) just past the cap, measured from the
-    # first due tick rather than the last vacuum: the rewrite runs regardless.
+    # first due tick rather than the last vacuum: queued materialization must
+    # remain queued, but it cannot nullify the cap and defer the rewrite forever.
     monotonic_now[0] = 100.0 + service_module.VACUUM_MAX_DEFER_SECONDS + 1.0
     service._on_client()  # last_client_at = 3701.0; quiet is still False
+    pending = materializer.DirtyCell(1, 3_700)
+    service._pending_dirty.add(pending)
     assert service._vacuum_if_due_while_idle() is True
     assert store.vacuums == [5_000.0]
     assert service._vacuum_due_since is None
+    assert service._pending_dirty == {pending}
 
 
 @pytest.mark.parametrize(
@@ -2659,11 +2673,17 @@ def test_system_status_exposes_current_pipeline_health_without_private_values(tm
         assert item["cache_generation"] >= 0
     assert status["requests"]["rejected_old"] == 1
     assert status["retention_prune"]["check_interval_seconds"] == service_module.PRUNE_CHECK_SECONDS
+    assert status["retention_prune"]["cutoff_sweep_interval_seconds"] == service_module.PRUNE_CHECK_SECONDS
     assert status["retention_prune"]["retention_seconds"] == storage.RETENTION_SECONDS
     assert status["retention_prune"]["display_window_seconds"] == stats_resolution.MAX_RANGE_SECONDS
     assert status["retention_prune"]["at_local_time"] == prune_schedule.DEFAULT_PRUNE_LOCAL_TIME
     assert status["retention_prune"]["next_at"] > status["retention_prune"]["due_at"]
     assert status["retention_prune"]["next_check_at"] >= 1_000.0
+    assert status["wal"] == {
+        "allocated_bytes": 0,
+        "allocation_ceiling_bytes": storage.WAL_ALLOCATION_CEILING_BYTES,
+        "autocheckpoint_pages": storage.WAL_AUTOCHECKPOINT_PAGES,
+    }
     assert status["failure"] == {
         "component": "materializer",
         "kind": "ValueError",
@@ -2935,21 +2955,11 @@ def test_incremental_build_reuses_compacted_legacy_coverage_model(tmp_path, monk
     assert len(service._cached_coverage_epochs) == 6_066
 
 
-def test_ring_change_detection_indexes_each_gap_once_at_live_scale():
+def test_ring_change_detection_materializes_zero_unchanged_no_data_cells_at_live_scale(
+    tmp_path,
+    monkeypatch,
+):
     gap_count = 4_909
-
-    class CountingGaps(tuple):
-        def __new__(cls, values):
-            return super().__new__(cls, values)
-
-        def __init__(self, _values):
-            self.visits = 0
-
-        def __iter__(self):
-            for item in super().__iter__():
-                self.visits += 1
-                yield item
-
     buckets = tuple(
         materializer.Bucket(start, 1, (), 0, None, None, True)
         for start in range(stats_resolution.RING_CAPACITIES[1])
@@ -2965,21 +2975,126 @@ def test_ring_change_detection_indexes_each_gap_once_at_live_scale():
         )
         for index in range(gap_count)
     )
-    previous_gaps = CountingGaps(gap_values)
-    candidate_gaps = CountingGaps(gap_values)
-    previous_layer = materializer.Layer(1, 0, len(buckets), buckets, previous_gaps)
-    candidate_layer = materializer.Layer(1, 0, len(buckets), buckets, candidate_gaps)
+    previous_layer = materializer.Layer(1, 0, len(buckets), buckets, gap_values)
     previous = materializer.Generation(1, 10, 100.0, 100.0, (previous_layer,))
-    candidate = materializer.Generation(1, 20, 101.0, 101.0, (candidate_layer,))
+    materialized = 0
+    original_replace = service_module.replace
 
-    changed = service_module.StatsCurrentService._changed_ring_cells(previous, candidate)
-    carrier_starts = {
-        start for _range_seconds, start in service_module._ring_view_carriers(candidate_layer)
-    }
+    def count_materialization(value, **changes):
+        nonlocal materialized
+        if isinstance(value, materializer.NoData):
+            materialized += 1
+        return original_replace(value, **changes)
 
-    assert changed == frozenset(materializer.DirtyCell(1, start) for start in carrier_starts)
-    assert previous_gaps.visits == gap_count
-    assert candidate_gaps.visits == gap_count
+    monkeypatch.setattr(service_module, "replace", count_materialization)
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    for revision in range(10):
+        candidate_layer = materializer.Layer(
+            1, 0, len(buckets), buckets, tuple(list(gap_values)),
+        )
+        candidate = materializer.Generation(
+            1, 20 + revision, 101.0 + revision, 101.0 + revision,
+            (candidate_layer,),
+        )
+        changed = service._changed_ring_cells(previous, candidate)
+        service._ring_writes(candidate, changed)
+        service._stage_ring_candidate(previous, candidate)
+        previous = candidate
+
+    assert changed == frozenset()
+    assert materialized == 0
+    assert service._status()["owner_counters"]["statsd_unchanged_cell_materialization"] == 0
+
+
+def test_one_changed_no_data_input_invokes_only_its_ring_materialization_owner_once(tmp_path):
+    buckets = tuple(
+        materializer.Bucket(start, 1, (), 0, None, None, True)
+        for start in range(stats_resolution.RING_CAPACITIES[1])
+    )
+    original_gap = materializer.NoData("cpu", "host", "epoch", 10.1, 10.9, 1)
+    changed_gap = replace(original_gap, end=11.2)
+    previous_layer = materializer.Layer(1, 0, len(buckets), buckets, (original_gap,))
+    changed_layer = materializer.Layer(1, 0, len(buckets), buckets, (changed_gap,))
+    previous = materializer.Generation(1, 10, 100.0, 100.0, (previous_layer,))
+    changed = materializer.Generation(2, 20, 101.0, 101.0, (changed_layer,))
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+
+    service._stage_ring_candidate(previous, changed)
+    first_status = service._status()
+    identical = materializer.Generation(2, 21, 102.0, 102.0, (
+        materializer.Layer(1, 0, len(buckets), buckets, (replace(changed_gap),)),
+    ))
+    service._stage_ring_candidate(changed, identical)
+
+    assert {
+        materializer.DirtyCell(1, 10),
+        materializer.DirtyCell(1, 11),
+    } <= service._changed_ring_cells(previous, changed)
+    assert first_status["owner_counters"]["statsd_unchanged_cell_materialization"] == 1
+    assert service._status()["owner_counters"]["statsd_unchanged_cell_materialization"] == 1
+
+
+def test_changed_no_data_cell_selection_matches_full_index_differential():
+    rng = random.Random(20260815)
+    bucket_count = stats_resolution.RING_CAPACITIES[1]
+    buckets = tuple(
+        materializer.Bucket(start, 1, (), 0, None, None, True)
+        for start in range(bucket_count)
+    )
+    previous_gaps = tuple(
+        materializer.NoData(
+            "cpu", f"source:{index}", f"epoch:{index}",
+            rng.randrange(bucket_count - 2) + 0.1,
+            rng.randrange(bucket_count - 2) + 1.1,
+            1,
+        )
+        for index in range(64)
+    )
+    previous_gaps = tuple(
+        replace(item, end=max(item.start + 0.1, item.end))
+        for item in previous_gaps
+    )
+    previous_layer = materializer.Layer(1, 0, bucket_count, buckets, previous_gaps)
+    previous = materializer.Generation(1, 10, 100.0, 100.0, (previous_layer,))
+
+    for revision in range(25):
+        changed_index = rng.randrange(len(previous_gaps))
+        changed_gap = replace(
+            previous_gaps[changed_index],
+            end=min(bucket_count - 0.1, previous_gaps[changed_index].end + 1.0),
+        )
+        candidate_gaps = tuple(
+            changed_gap if index == changed_index else replace(item)
+            for index, item in enumerate(previous_gaps)
+        )
+        candidate_layer = materializer.Layer(1, 0, bucket_count, buckets, candidate_gaps)
+        candidate = materializer.Generation(
+            2 + revision, 20 + revision, 101.0 + revision, 101.0 + revision,
+            (candidate_layer,),
+        )
+        previous_index = service_module._ring_no_data_by_bucket(previous_layer)
+        candidate_index = service_module._ring_no_data_by_bucket(candidate_layer)
+        direct_starts = {
+            start for start in range(bucket_count)
+            if previous_index.get(start, ()) != candidate_index.get(start, ())
+        }
+        expected_starts = set(direct_starts)
+        expected_starts.update(
+            carrier_start
+            for range_seconds, carrier_start in service_module._ring_view_carriers(candidate_layer)
+            if any(candidate_layer.end - range_seconds <= start < candidate_layer.end for start in direct_starts)
+        )
+
+        assert service_module.StatsCurrentService._changed_ring_cells(
+            previous, candidate,
+        ) == frozenset(materializer.DirtyCell(1, start) for start in expected_starts)
+        previous_layer, previous, previous_gaps = candidate_layer, candidate, candidate_gaps
 
 
 @pytest.mark.parametrize("range_seconds", stats_resolution.RANGE_SECONDS)
@@ -3831,9 +3946,10 @@ def test_browser_observation_status_distinguishes_current_receipts_from_retained
         "receipt_scope_started_at": service.started_at,
         "accepted_reports": 0,
         "accepted_observations": 0,
-        "last_accepted_at": None,
-        "last_accepted_age_seconds": None,
-        "retained_observations": 4,
+            "last_accepted_at": None,
+            "last_accepted_age_seconds": None,
+            "owner_counters": {"statsd_unchanged_cell_materialization": 0},
+            "retained_observations": 4,
         "retained_failures": 3,
         "confirmed_real_failures": 1,
         "probe_failures": 1,
@@ -3982,6 +4098,84 @@ def test_snapshot_wire_includes_only_the_latest_scanner_backfill_status(tmp_path
     }
     service._usage_atom_backfill = {"state": "complete", "sources": 2, "missing": 0, "scan": scan}
     assert json.loads(service._snapshot_body_with_backfill_status(body))["usage_atom_backfill"]["state"] == "complete"
+
+
+def test_snapshot_backfill_decoration_reuses_one_encoded_body_for_an_unchanged_retained_base_and_status(tmp_path):
+    encodes = 0
+
+    def encode(wire):
+        nonlocal encodes
+        encodes += 1
+        return json.dumps(wire, sort_keys=True).encode()
+
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        encoder=encode,
+    )
+    scan = {
+        "files_read": 1, "records_parsed": 2, "atoms_emitted": 3,
+        "atoms_accepted": 2, "atoms_rejected": 1,
+        "rejection_reasons": {"invalid model": 1},
+    }
+    service._set_usage_atom_backfill_status({
+        **FENCE, "action": "usage_atom_backfill", "state": "pending",
+        "sources": 2, "missing": 1, "scan": scan,
+    })
+    retained_base = b'{"cache_generation":7,"protocol_version":2}'
+
+    first = service._snapshot_body_with_backfill_status(retained_base)
+    service._set_usage_atom_backfill_status({
+        **FENCE, "action": "usage_atom_backfill", "state": "pending",
+        "sources": 2, "missing": 1, "scan": scan,
+    })
+    second = service._snapshot_body_with_backfill_status(retained_base)
+
+    assert second is first
+    assert encodes == 1
+    assert service._snapshot_body_decoration_builds == 1
+    assert service._snapshot_body_decoration_hits == 1
+
+
+def test_snapshot_backfill_decoration_replaces_on_changed_base_or_status_signature(tmp_path):
+    encodes = 0
+
+    def encode(wire):
+        nonlocal encodes
+        encodes += 1
+        return json.dumps(wire, sort_keys=True).encode()
+
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        encoder=encode,
+    )
+    scan = {
+        "files_read": 1, "records_parsed": 2, "atoms_emitted": 3,
+        "atoms_accepted": 2, "atoms_rejected": 1,
+        "rejection_reasons": {"invalid model": 1},
+    }
+    service._set_usage_atom_backfill_status({
+        **FENCE, "action": "usage_atom_backfill", "state": "pending",
+        "sources": 2, "missing": 1, "scan": scan,
+    })
+    first_base = b'{"cache_generation":7,"protocol_version":2}'
+    second_base = b'{"cache_generation":8,"protocol_version":2}'
+
+    first = service._snapshot_body_with_backfill_status(first_base)
+    changed_base = service._snapshot_body_with_backfill_status(second_base)
+    service._set_usage_atom_backfill_status({
+        **FENCE, "action": "usage_atom_backfill", "state": "complete",
+        "sources": 2, "missing": 0, "scan": scan,
+    })
+    changed_status = service._snapshot_body_with_backfill_status(second_base)
+
+    assert first != changed_base
+    assert json.loads(changed_base)["cache_generation"] == 8
+    assert json.loads(changed_status)["usage_atom_backfill"]["state"] == "complete"
+    assert encodes == 3
+    assert service._snapshot_body_decoration_builds == 3
+    assert service._snapshot_body_decoration_hits == 0
 
 
 def test_usage_atom_backfill_control_publishes_scan_counters(tmp_path):

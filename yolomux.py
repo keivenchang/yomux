@@ -14,16 +14,9 @@ from pathlib import Path
 # The package installs the host-local prefix; suppress its own first cache until then.
 sys.dont_write_bytecode = True
 
-# Cap glibc malloc arenas before any allocation-heavy import or thread pool spawns,
-# so a direct `python yolomux.py` launch stays lean like a boot.sh launch does.
-from yolomux_lib.infra.malloc_tuning import cap_malloc_arenas
-
-cap_malloc_arenas()
-
-from yolomux_lib.infra.root_paths import YolomuxRootError
-
 # This must happen before importing yolomux_lib: common.py resolves every mutable
-# root at import time. The normal CLI parser later asserts the same port.
+# root at import time and package initialization routes host-local artifacts. The
+# normal CLI parser later asserts the same port.
 _resolver_spec = spec_from_file_location("yolomux_instance_isolation", Path(__file__).with_name("tools") / "instance_isolation.py")
 if _resolver_spec is None or _resolver_spec.loader is None:
     raise RuntimeError("cannot load YOLOmux instance-isolation resolver")
@@ -37,6 +30,14 @@ except RuntimeError as _error:
     raise SystemExit(2) from _error
 del _resolver
 del _resolver_spec
+
+# Cap glibc malloc arenas before any allocation-heavy import or thread pool spawns,
+# so a direct `python yolomux.py` launch stays lean like a boot.sh launch does.
+from yolomux_lib.infra.malloc_tuning import cap_malloc_arenas
+
+cap_malloc_arenas()
+
+from yolomux_lib.infra.root_paths import YolomuxRootError
 
 try:
     from yolomux_lib.cli import main

@@ -142,6 +142,23 @@ def test_retired_share_surface_guard_allows_only_named_paths_and_done_archive(tm
     assert violations == (f"retired_share_surface: forbidden filename copies/{allowed[0]}",)
 
 
+def test_retired_share_surface_guard_never_reads_churning_document_lock_control_files(tmp_path, monkeypatch):
+    control = tmp_path / "docs" / "DEVELOPMENT.md.agent-edit.lock" / ".owner.json.transient"
+    control.parent.mkdir(parents=True)
+    control.write_text("/api/" + "sha" + "re", encoding="utf-8")
+    read_bytes = Path.read_bytes
+
+    def reject_control_file_read(path):
+        if any(part.endswith(".agent-edit.lock") for part in path.parts):
+            path.unlink()
+            raise AssertionError("document-lock control metadata entered the source scan")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_control_file_read)
+
+    assert architecture_budgets._retired_share_surface_violations(tmp_path) == ()
+
+
 def test_evaluate_and_cli_add_retired_share_guard_without_losing_budget_results(tmp_path, monkeypatch):
     manifest = current_manifest()
     manifest_path = tmp_path / "manifest.json"

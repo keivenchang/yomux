@@ -27,8 +27,7 @@ from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_live_server  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
-from tests.gate_harness import load_gate_browser
-from tests.gate_harness import run_when_browser_ready
+from tests.gate_harness import load_gate_terminal_only_browser
 from tests.tmux_runtime import run_isolated_tmux
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux import tmux_utils
@@ -265,27 +264,7 @@ def _nearest_rank_ms(samples: list[float], quantile: float) -> float:
 def _focus_gate_terminal(browser, runtime) -> str:
     """Load the fixture server and leave the keyboard focus on the first session's xterm textarea."""
 
-    session = runtime.tmux.sessions[0]
-    load_gate_browser(browser, runtime)
-    run_when_browser_ready(
-        browser,
-        "return terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN"
-        " && Boolean(document.querySelector(`#term-${CSS.escape(arguments[0])} .xterm-screen`));",
-        session,
-        globals_required={"clientPerfSummary": "function", "clearClientPerfCounters": "function"},
-        dom_anchors=("#grid",),
-        timeout=8,
-    )
-    browser.find_element("css selector", f"#term-{session} .xterm-screen").click()
-    run_when_browser_ready(
-        browser,
-        "return document.activeElement === document.querySelector(`#term-${CSS.escape(arguments[0])} textarea`);",
-        session,
-        globals_required={"clientPerfSummary": "function"},
-        dom_anchors=(f"#term-{session} .xterm-screen",),
-        timeout=8,
-    )
-    return session
+    return load_gate_terminal_only_browser(browser, runtime)
 
 
 def _keystroke_round(

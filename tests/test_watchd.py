@@ -9,6 +9,7 @@ import threading
 import time
 import hashlib
 import json
+from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +23,8 @@ from yolomux_lib.filesystem.paths import FilesystemAccessPolicy, FS_ACCESS_POLIC
 from yolomux_lib.watchd import PersistentWatchService
 from yolomux_lib.local_services import rpc
 from yolomux_lib.common import TmuxPaneInfo
+from yolomux_lib.infra.common import AgentInfo
+from yolomux_lib.infra.common import SessionInfo
 from yolomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_RESYNC_SECONDS
 from yolomux_lib.watchd_protocol import WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS
 from yolomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
@@ -1635,6 +1638,64 @@ def test_watchd_reconcile_tracks_indexed_directory_changes(tmp_path):
     assert changed["changed_paths"] == [str(indexed)]
 
 
+@pytest.mark.parametrize("reason", ("periodic", "fallback"))
+def test_watchd_reconcile_detects_content_edit_with_unchanged_directory_mtime(tmp_path, reason):
+    """Both bounded loss paths retain child evidence; directory metadata alone is insufficient."""
+
+    root = tmp_path / "root"
+    root.mkdir()
+    child = root / "file.txt"
+    child.write_text("before", encoding="utf-8")
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = EffectiveWatchConfiguration(
+        roots=(str(root),),
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(root),),
+    )
+    service.reconcile(reason="configuration", watch_generation=1)
+    root_stat = root.stat()
+
+    child.write_text("after!", encoding="utf-8")
+    os.utime(root, ns=(root_stat.st_atime_ns, root_stat.st_mtime_ns))
+    assert root.stat().st_mtime_ns == root_stat.st_mtime_ns
+
+    revision = service.reconcile(reason=reason, watch_generation=1)
+
+    assert revision is not None
+    assert revision["changed_paths"] == [str(root)]
+    assert revision["root_generations"] == {str(root): 2}
+
+
+def test_watchd_native_content_event_advances_touched_root_before_periodic_reconcile(tmp_path):
+    """The native event owns the immediate generation; reconciliation remains only a backstop."""
+
+    root = tmp_path / "root"
+    root.mkdir()
+    child = root / "file.txt"
+    child.write_text("before", encoding="utf-8")
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = EffectiveWatchConfiguration(
+        roots=(str(root),),
+        repo_roots=(str(root),),
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(root),),
+    )
+    service.reconcile(reason="configuration", watch_generation=1)
+    root_stat = root.stat()
+
+    child.write_text("after!", encoding="utf-8")
+    os.utime(root, ns=(root_stat.st_atime_ns, root_stat.st_mtime_ns))
+    revision = service.admit_native_changes({(Change.modified, str(child))}, watch_generation=1)
+
+    assert revision is not None
+    assert revision["changed_paths"] == [str(child)]
+    assert revision["root_generations"] == {str(root): 2}
+    assert revision["repo_generations"] == {str(root): 2}
+    assert service.next_reconcile_at > time.monotonic()
+
+
 @pytest.mark.parametrize("directory_field", ("roots", "indexed_dirs"))
 def test_watchd_coarse_reconcile_projects_ancestor_change_to_nested_repo_generation(tmp_path, directory_field):
     service = PersistentWatchService(tmp_path / "watchd.sock")
@@ -2208,11 +2269,158 @@ def test_watchd_transcript_paths_rebuild_on_topology_change_and_within_the_resyn
         webapp.watchd_transcript_paths()
         assert len(rebuilds) == 5
 
-    # A descriptor cannot expire because a resync was served from the memo: sync_watchd_descriptors
-    # still upserts every descriptor on every revision, so expires_at is refreshed at the loop's
-    # rate, not the memo's. The interval margin is the second line of defence.
-    assert WATCHD_DESCRIPTOR_RESYNC_SECONDS * 2 < WATCHD_DESCRIPTOR_TTL_SECONDS
-    assert WATCHD_DESCRIPTOR_RESYNC_SECONDS <= WATCHD_DESCRIPTOR_TTL_SECONDS / 6
+    # Descriptor expiry is independent: sync_watchd_descriptors still renews expires_at every
+    # revision. Expensive discovery shares the daemon's one bounded reconciliation cadence.
+    assert WATCHD_DESCRIPTOR_RESYNC_SECONDS == watchd.WATCHD_RECONCILE_SECONDS
+    assert WATCHD_DESCRIPTOR_TTL_SECONDS < WATCHD_DESCRIPTOR_RESYNC_SECONDS
+
+
+def test_ten_unchanged_watchd_revisions_run_no_refresh_fanout_and_one_topology_change_discovers_once(monkeypatch):
+    """A healthy native watcher uses the daemon's bounded 300-second reconcile cadence.
+
+    The descriptor bridge used a separate 15-second timer, so ten unchanged long-poll
+    revisions still rediscovered every session even though no descriptor source moved.
+    """
+
+    webapp = app_module.TmuxWebtermApp(["alpha"], status_service_mode=True)
+    record = ClientEventWatcherRecord(watchd_lease_id="lease", watchd_epoch="epoch")
+    webapp.client_watch_service.event_watcher_record = record
+    panes = [_pane("alpha", pane_id="%1", pid=101)]
+    clock = [1000.0]
+    calls = {"discover": 0, "transcript_tail": 0, "session_files": 0}
+
+    def fake_discover(sessions, **kwargs):
+        del sessions, kwargs
+        calls["discover"] += 1
+        return {}, []
+
+    monkeypatch.setattr(app_module, "list_tmux_panes", lambda: (list(panes), None))
+    monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        webapp,
+        "transcript_tail",
+        lambda *_args, **_kwargs: calls.__setitem__("transcript_tail", calls["transcript_tail"] + 1),
+    )
+    monkeypatch.setattr(
+        webapp,
+        "publish_session_files_ready_events",
+        lambda **_kwargs: calls.__setitem__("session_files", calls["session_files"] + 1) or [],
+    )
+
+    assert webapp.sync_watchd_descriptors(record) is True
+    assert calls == {"discover": 1, "transcript_tail": 0, "session_files": 0}
+    assert webapp.client_watch_service.owner_invocation_snapshot() == {
+        "session_discovery": 1,
+        "transcript_tail_scan": 0,
+        "session_files_materialization": 0,
+        "jobd_work_graph_rebuild": 0,
+    }
+
+    for revision in range(1, 11):
+        clock[0] += watchd.WATCHD_RECONCILE_SECONDS / 20
+        assert webapp.sync_watchd_descriptors(record) is True
+        assert webapp.apply_watchd_revision(record, {
+            "epoch": "epoch",
+            "revision": revision,
+            "watch_generation": 1,
+            "active_watch_generation": 1,
+            "roots": [],
+            "changed_paths": [],
+            "healthy": True,
+        }) == []
+
+    assert calls == {"discover": 1, "transcript_tail": 0, "session_files": 0}
+    assert webapp.client_watch_service.owner_invocation_snapshot() == {
+        "session_discovery": 1,
+        "transcript_tail_scan": 0,
+        "session_files_materialization": 0,
+        "jobd_work_graph_rebuild": 0,
+    }
+
+    panes.append(_pane("alpha", pane="1", pane_id="%2", pid=102))
+    assert webapp.sync_watchd_descriptors(record) is True
+    assert webapp.sync_watchd_descriptors(record) is True
+    assert calls == {"discover": 2, "transcript_tail": 0, "session_files": 0}
+    expected_counters = {
+        "session_discovery": 2,
+        "transcript_tail_scan": 0,
+        "session_files_materialization": 0,
+        "jobd_work_graph_rebuild": 0,
+    }
+    assert webapp.client_watch_service.owner_invocation_snapshot() == expected_counters
+    assert webapp.runtime_refresh_state({}, {"services": []})["owner_invocations"] == expected_counters
+
+
+def test_transcript_tail_owner_counter_advances_only_for_the_cache_miss(tmp_path, monkeypatch):
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text("one\ntwo\n", encoding="utf-8")
+    info = SessionInfo(
+        session="alpha",
+        panes=[],
+        selected_pane=None,
+        agents=[AgentInfo(
+            session="alpha",
+            kind="claude",
+            pid=1,
+            pane_target="alpha:0.0",
+            command="claude",
+            cwd=str(tmp_path),
+            status="idle",
+            session_id="run-alpha",
+            transcript=str(transcript),
+            error=None,
+        )],
+    )
+    webapp = app_module.TmuxWebtermApp(["alpha"], status_service_mode=True)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"alpha": info}, []))
+
+    first, first_status = webapp.transcript_tail("alpha", 20)
+    second, second_status = webapp.transcript_tail("alpha", 20)
+
+    assert first_status == second_status == HTTPStatus.OK
+    assert first["text"] == second["text"] == "one\ntwo\n"
+    assert webapp.client_watch_service.owner_invocation_snapshot() == {
+        "session_discovery": 0,
+        "transcript_tail_scan": 1,
+        "session_files_materialization": 0,
+        "jobd_work_graph_rebuild": 0,
+    }
+
+
+def test_session_files_owner_counter_advances_only_for_the_materialized_cache_miss(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    info = SessionInfo(session="alpha", panes=[], selected_pane=None, agents=[])
+    payload = {"session": "alpha", "files": [], "repos": [], "errors": []}
+    cache_reads = iter((None, (payload, HTTPStatus.OK, True, 0.0)))
+    materializations = []
+
+    monkeypatch.setattr(webapp, "session_files_cache_key", lambda *_args, **_kwargs: ("key",))
+    monkeypatch.setattr(webapp, "get_session_files_cache", lambda *_args, **_kwargs: next(cache_reads))
+    monkeypatch.setattr(
+        webapp,
+        "compute_session_files_payload_via_jobd",
+        lambda *_args, **_kwargs: materializations.append("run") or (payload, HTTPStatus.OK),
+    )
+    monkeypatch.setattr(
+        webapp,
+        "compute_session_files_cache_entry",
+        lambda _key, compute: (*compute(), False, 0.0),
+    )
+    monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
+
+    first, first_status = webapp.session_files_payload_for_infos("alpha", {"alpha": info}, 24.0)
+    second, second_status = webapp.session_files_payload_for_infos("alpha", {"alpha": info}, 24.0)
+
+    assert first_status == second_status == HTTPStatus.OK
+    assert first["files"] == second["files"] == []
+    assert materializations == ["run"]
+    assert webapp.client_watch_service.owner_invocation_snapshot() == {
+        "session_discovery": 0,
+        "transcript_tail_scan": 0,
+        "session_files_materialization": 1,
+        "jobd_work_graph_rebuild": 0,
+    }
 
 
 class _PacingClient:

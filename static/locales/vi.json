@@ -421,6 +421,7 @@
   "debug.system.sampler.header.lateMiss.short": "trễ/trễ",
   "debug.system.sampler.header.runtime.full": "Lần chạy cuối cùng",
   "debug.system.sampler.header.runtime.short": "thời gian chạy",
+  "debug.tab.cost": "Chi phí",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Đồ thị",
   "debug.tab.logs": "Nhật ký",

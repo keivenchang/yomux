@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +25,12 @@ from .host_identity import current_host_identity
 from .host_identity import HostIdentity
 from .host_identity import is_current_local_process
 from .host_identity import LocalProcessReason
+from .root_paths import YOLOMUX_ROOT_ENV
+from .root_paths import resolved_product_path
+from tools.instance_isolation import GENERATED_PYTHON_CACHE_PREFIX_ENV
+from tools.instance_isolation import resolved_path
+from tools.instance_isolation import rooted_product_path
+from tools.instance_isolation import YolomuxRootError
 
 
 WRITER_TOKEN_ENV = "YOLOMUX_WORKTREE_WRITER_TOKEN"
@@ -33,16 +38,6 @@ WRITER_RECORD_NAME = "owner.json"
 WRITER_SCHEMA = 1
 DEFAULT_STALE_SECONDS = 30.0
 DEFAULT_HEARTBEAT_SECONDS = 5.0
-
-# Package directories that were part of the abandoned 0.6.12 topology and were removed from
-# the tree. A rolling worktree update deletes their tracked `.py` sources, but a `__pycache__/`
-# that Git ignores survives inside the otherwise-empty directory, and that directory alone is
-# enough for `importlib.util.find_spec("yolomux_lib.<name>")` to resolve a PEP 420 namespace
-# package. The backend-health catalog forbids exactly that (a retired topology name coming back
-# as an importable module), and manual cache deletion is not a real answer. Purging the residue
-# on package import fixes it for every upgraded checkout without touching the oracle.
-ABANDONED_NAMESPACE_RESIDUE = ("daemon", "storaged", "storaged_process")
-
 
 @dataclass(frozen=True)
 class WorktreeWriterStatus:
@@ -91,28 +86,6 @@ def _resolved(path: Path) -> Path:
 
 def _path_is_inside(path: Path, parent: Path) -> bool:
     return _resolved(path).is_relative_to(_resolved(parent))
-
-
-def purge_abandoned_namespace_residue(package_dir: Path) -> list[str]:
-    """Remove ignored bytecode-only residue of abandoned-topology packages.
-
-    Returns the names purged. A directory is removed only when it is pure cache
-    residue -- it carries no importable `.py` source anywhere beneath it -- so a
-    genuine re-introduction of one of these names (a real `.py` reappearing) is
-    left in place for the catalog oracle to fail on, and never silently deleted.
-    """
-
-    purged: list[str] = []
-    for name in ABANDONED_NAMESPACE_RESIDUE:
-        candidate = Path(package_dir) / name
-        if not candidate.is_dir() or candidate.is_symlink():
-            continue
-        if any(candidate.rglob("*.py")):
-            # Real source, not residue: this is a reintroduction, not upgrade debris.
-            continue
-        shutil.rmtree(candidate)
-        purged.append(name)
-    return purged
 
 
 def worktree_declaration_slot(worktree_root: Path) -> Path:
@@ -540,14 +513,36 @@ def host_artifact_paths(
 
     values = os.environ if environ is None else environ
     explicit = str(values.get("YOLOMUX_HOST_ARTIFACT_DIR") or "").strip()
-    runtime_base = str(values.get("YOLOMUX_RUNTIME_DIR") or values.get("XDG_RUNTIME_DIR") or "").strip()
     if explicit:
-        base = _resolved(Path(explicit))
-    elif runtime_base:
-        base = _resolved(Path(runtime_base)) / "yolomux-worktree-artifacts"
+        configured_root = str(values.get(YOLOMUX_ROOT_ENV) or "").strip()
+        base = (
+            rooted_product_path(
+                values,
+                "YOLOMUX_HOST_ARTIFACT_DIR",
+                resolved_product_path(values, YOLOMUX_ROOT_ENV, configured_root),
+                explicit,
+            )
+            if configured_root
+            else resolved_product_path(values, "YOLOMUX_HOST_ARTIFACT_DIR", explicit)
+        )
+    elif values.get(YOLOMUX_ROOT_ENV):
+        root = resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV])
+        runtime = rooted_product_path(values, "YOLOMUX_RUNTIME_DIR", root, root / "runtime")
+        base = runtime / "yolomux-worktree-artifacts"
+    elif values.get("YOLOMUX_RUNTIME_DIR"):
+        base = resolved_product_path(values, "YOLOMUX_RUNTIME_DIR", values["YOLOMUX_RUNTIME_DIR"]) / "yolomux-worktree-artifacts"
+    elif values.get("XDG_RUNTIME_DIR"):
+        base = resolved_product_path(
+            values,
+            "XDG_RUNTIME_DIR",
+            values["XDG_RUNTIME_DIR"],
+            reject_home=False,
+        ) / "yolomux-worktree-artifacts"
     else:
         active_uid = os.getuid() if uid is None else int(uid)
-        base = _resolved(Path(temporary_dir or tempfile.gettempdir())) / f"yolomux-{active_uid}" / "worktree-artifacts"
+        configured_tmp = str(values.get("TMPDIR") or "").strip()
+        default_tmp = temporary_dir or tempfile.gettempdir()
+        base = resolved_product_path(values, "TMPDIR", configured_tmp or default_tmp) / f"yolomux-{active_uid}" / "worktree-artifacts"
     worktree = _resolved(worktree_root)
     digest = hashlib.sha256(str(worktree).encode("utf-8")).hexdigest()[:16]
     root = base / f"w-{digest}"
@@ -580,10 +575,22 @@ def configure_host_local_artifacts(
         uid=uid,
     )
     configured_prefix = str(values.get("PYTHONPYCACHEPREFIX") or "").strip()
-    python_cache = _resolved(Path(configured_prefix)) if configured_prefix else paths.python_cache
+    generated_marker = str(values.get(GENERATED_PYTHON_CACHE_PREFIX_ENV) or "").strip()
+    generated_prefix = not configured_prefix or generated_marker == configured_prefix
+    if configured_prefix and values.get(YOLOMUX_ROOT_ENV):
+        root = resolved_product_path(values, YOLOMUX_ROOT_ENV, values[YOLOMUX_ROOT_ENV])
+        python_cache = rooted_product_path(values, "PYTHONPYCACHEPREFIX", root, configured_prefix)
+    elif configured_prefix:
+        python_cache = resolved_product_path(values, "PYTHONPYCACHEPREFIX", configured_prefix)
+    else:
+        python_cache = paths.python_cache
     if _path_is_inside(python_cache, worktree_root):
         raise WorktreeArtifactError(f"PYTHONPYCACHEPREFIX resolves inside shared worktree: {python_cache}")
     values["PYTHONPYCACHEPREFIX"] = str(python_cache)
+    if generated_prefix:
+        values[GENERATED_PYTHON_CACHE_PREFIX_ENV] = str(python_cache)
+    else:
+        values.pop(GENERATED_PYTHON_CACHE_PREFIX_ENV, None)
     values["GIT_OPTIONAL_LOCKS"] = "0"
     values["PIP_CACHE_DIR"] = str(paths.package_cache / "pip")
     values["NPM_CONFIG_CACHE"] = str(paths.package_cache / "npm")
@@ -600,6 +607,31 @@ def configure_host_local_artifacts(
         package_cache=paths.package_cache,
         logs=paths.logs,
     )
+
+
+def child_process_artifact_environment(
+    worktree_root: Path,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Rebase only product-generated artifacts when a child uses a newer root."""
+
+    child = dict(os.environ if environ is None else environ)
+    configured_root = str(child.get(YOLOMUX_ROOT_ENV) or "").strip()
+    configured_prefix = str(child.get("PYTHONPYCACHEPREFIX") or "").strip()
+    generated_marker = str(child.get(GENERATED_PYTHON_CACHE_PREFIX_ENV) or "").strip()
+    active_python_cache = str(sys.pycache_prefix or "").strip()
+    if configured_root and configured_prefix and generated_marker == configured_prefix == active_python_cache:
+        root = resolved_product_path(child, YOLOMUX_ROOT_ENV, configured_root)
+        try:
+            prefix = resolved_product_path(child, "PYTHONPYCACHEPREFIX", configured_prefix)
+        except YolomuxRootError:
+            prefix = resolved_path(configured_prefix)
+        if not prefix.is_relative_to(root):
+            child.pop("PYTHONPYCACHEPREFIX", None)
+            child.pop(GENERATED_PYTHON_CACHE_PREFIX_ENV, None)
+    configure_host_local_artifacts(worktree_root, environ=child, apply_process=False)
+    return child
 
 
 def main(argv: list[str] | None = None) -> int:

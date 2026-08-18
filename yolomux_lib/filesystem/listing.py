@@ -256,7 +256,7 @@ def _watch_signature_from_entries(
         (
             str(info.get("name") or ""),
             str(info.get("kind") or "other"),
-            int(info.get("mtime") or 0),
+            int(info.get("mtime_ns") or 0),
             int(info.get("size") or 0),
         )
         for info in entries[:max(1, int(child_limit))]

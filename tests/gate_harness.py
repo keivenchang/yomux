@@ -49,6 +49,7 @@ from yolomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
 from yolomux_lib.infra.inotify_capacity import inotify_instance_census
 from yolomux_lib.infra.inotify_capacity import process_fd_owners
 from yolomux_lib.infra.inotify_capacity import read_kernel_limit
+from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
 from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import LocalServiceRegistry
@@ -77,6 +78,8 @@ from tests.gate_helpers import RepeatFailure
 from tests.gate_helpers import assert_counter_delta
 from tests.gate_helpers import repeat
 from tests.gate_helpers import sample_counter_delta
+from tools.test_plan import CHECK_LANE_ENV
+from tools.test_plan import PYTEST_LANE_NAMES
 
 
 UNIX_SOCKET_PATH_LIMIT_BYTES = 107
@@ -89,12 +92,19 @@ def gate_http_port_candidates(
     *,
     worker: str | None = None,
     worker_count: int | None = None,
+    lane: str | None = None,
 ) -> tuple[int, ...]:
-    """Return the 7900s ports owned by one xdist worker."""
+    """Return the 7900s ports owned by one check lane and xdist worker."""
 
+    active_lane = os.environ.get(CHECK_LANE_ENV) if lane is None else lane
+    candidates = tuple(GATE_HTTP_PORT_RANGE)
+    if active_lane:
+        if active_lane not in PYTEST_LANE_NAMES:
+            raise ValueError(f"invalid YOLOmux check lane: {active_lane!r}")
+        candidates = candidates[PYTEST_LANE_NAMES.index(active_lane)::len(PYTEST_LANE_NAMES)]
     active_worker = os.environ.get("PYTEST_XDIST_WORKER") if worker is None else worker
     if active_worker is None:
-        return tuple(GATE_HTTP_PORT_RANGE)
+        return candidates
     if not active_worker.startswith("gw") or not active_worker[2:].isdigit():
         raise ValueError(f"invalid pytest-xdist worker id: {active_worker!r}")
     worker_index = int(active_worker[2:])
@@ -109,7 +119,7 @@ def gate_http_port_candidates(
         raise ValueError(
             f"pytest-xdist worker {active_worker!r} is outside worker count {worker_count}"
         )
-    candidates = tuple(GATE_HTTP_PORT_RANGE)[worker_index::worker_count]
+    candidates = candidates[worker_index::worker_count]
     if not candidates:
         raise ValueError(
             f"pytest-xdist worker count {worker_count} exceeds the {len(GATE_HTTP_PORT_RANGE)}-port gate range"
@@ -391,6 +401,20 @@ def gate_runtime_paths(monkeypatch: pytest.MonkeyPatch) -> Iterable[GateRuntimeP
     # Keep the default Finder-root lookup and its native filesystem watcher
     # inside this test's owned HOME tree.
     monkeypatch.setenv(GATE_HOME_ENV_VAR, str(home_dir))
+
+    # Package import installed one bootstrap artifact root before this fixture
+    # selected its per-test product root. Rebase the package-owned paths before
+    # the fixture starts tmux or any other child that imports yolomux_lib.
+    child_environment = child_process_artifact_environment(Path(__file__).resolve().parents[1])
+    for name in set(os.environ) | set(child_environment):
+        current = os.environ.get(name)
+        replacement = child_environment.get(name)
+        if current == replacement:
+            continue
+        if replacement is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, replacement)
 
     patched_module_paths = patch_imported_writable_constants(
         monkeypatch,
@@ -2568,7 +2592,8 @@ def wait_for_fixture_client_event_demand(driver, timeout: float = 4.0, *, expect
             demandPresent: state.demand !== null,
             demandChannels: Array.isArray(state.demand?.channels) ? [...state.demand.channels] : [],
             demandSignatureEmpty: state.demandSignature === '',
-            signatureMatches: state.demandSignature === JSON.stringify(state.demand),
+            signatureMatches: typeof clientEventDemandSignature === 'function'
+              && state.demandSignature === clientEventDemandSignature(state.demand),
           };
         };
         const activeOwned = state => state.available === true
@@ -2636,6 +2661,20 @@ def _read_fixture_operation_state(driver) -> dict[str, Any]:
     pending = state.get("pending")
     if not isinstance(pending, list) or not all(isinstance(operation_id, str) for operation_id in pending):
         raise AssertionError(f"fixture lifecycle pending operations are malformed: {state}")
+    pending_details = state.get("pendingDetails")
+    if pending_details is not None:
+        if not isinstance(pending_details, list) or not all(isinstance(detail, Mapping) for detail in pending_details):
+            raise AssertionError(f"fixture lifecycle pending operation details are malformed: {state}")
+        detail_ids = [detail.get("id") for detail in pending_details]
+        if not all(isinstance(operation_id, str) for operation_id in detail_ids):
+            raise AssertionError(f"fixture lifecycle pending operation detail IDs are malformed: {state}")
+        if not set(detail_ids) <= set(pending):
+            raise AssertionError(f"fixture lifecycle pending operation details are not a subset of pending: {state}")
+        truncated = state.get("pendingDetailsTruncated")
+        if not isinstance(truncated, bool):
+            raise AssertionError(f"fixture lifecycle pending operation truncation state is malformed: {state}")
+        if not truncated and sorted(detail_ids) != sorted(pending):
+            raise AssertionError(f"fixture lifecycle pending operation details are incomplete: {state}")
     if (
         state.get("diagnosticMode") == "retained-js"
         and not isinstance(state.get("watchRootsPending"), bool)
@@ -2657,6 +2696,28 @@ def _read_fixture_operation_state(driver) -> dict[str, Any]:
             raise AssertionError(f"fixture lifecycle watch-diff pending ownership is malformed: {state}")
         if not set(owned_ids) <= set(pending):
             raise AssertionError(f"fixture lifecycle watch-diff pending ownership is not a subset of pending: {state}")
+    owned_batch_fields = (
+        ("batchQueued", "watchDiffBatchQueued"),
+        ("batchPending", "watchDiffBatchPending"),
+        ("batchOperations", "watchDiffBatchOperations"),
+    )
+    if state.get("diagnosticMode") == "retained-js":
+        for total_field, owned_field in owned_batch_fields:
+            total = state.get(total_field)
+            owned = state.get(owned_field)
+            if not isinstance(total, int) or not isinstance(owned, int) or owned < 0 or owned > total:
+                raise AssertionError(f"fixture lifecycle watch-diff batch ownership is malformed: {state}")
+        batch_operation_ids = state.get("watchDiffBatchOperationIds")
+        if not isinstance(batch_operation_ids, list) or not all(
+            isinstance(operation_id, str) for operation_id in batch_operation_ids
+        ):
+            raise AssertionError(f"fixture lifecycle watch-diff batch operation ownership is malformed: {state}")
+        if not set(batch_operation_ids) <= set(pending):
+            raise AssertionError(f"fixture lifecycle watch-diff batch operation ownership is not pending: {state}")
+    for field in ("startupActive", "startupQueued"):
+        value = state.get(field)
+        if value is not None and (not isinstance(value, int) or value < 0):
+            raise AssertionError(f"fixture lifecycle startup coordinator state is malformed: {state}")
     return dict(state)
 
 
@@ -2668,6 +2729,8 @@ def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
         and int(state.get("batchQueued") or 0) == 0
         and int(state.get("batchPending") or 0) == 0
         and int(state.get("batchOperations") or 0) == 0
+        and int(state.get("startupActive") or 0) == 0
+        and int(state.get("startupQueued") or 0) == 0
         and state.get("activityRefreshing") is not True
         and state.get("watchRootsPending", False) is False
         and state.get("finderWatchReady", True) is True
@@ -2679,9 +2742,9 @@ def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
 
     A held watch-root timer/registration/in-flight registration is not a baseline receipt: those are
     ordinary pending work that must fail closed at the general timeout. The baseline parks its own
-    operation record in `pending` while it awaits a 202 result, so a bare "a pending op exists" check
-    would reject the very state this gate must open on. Disregard ONLY the baseline-owned operation
-    IDs (`watchDiffPendingOperationIds`); any unrelated pending ID still fails closed.
+    operation record in `pending` while it awaits a 202 result, and its tree application may enqueue
+    repo-info batch descendants before that promise settles. Disregard ONLY operation IDs and batch
+    lifecycle counts attributed to the same terminal owner; any unrelated work still fails closed.
     """
 
     if state.get("diagnosticMode") != "retained-js":
@@ -2700,9 +2763,23 @@ def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
     ]
     if unrelated_pending:
         return False
-    # Every other surface must be terminal; the baseline's own pending op and its watchRootsPending
-    # flag are the only remaining work, and both clear when the receipt lands.
-    return _fixture_operation_state_quiescent({**state, "pending": [], "watchRootsPending": False})
+    batch_ownership = (
+        ("batchQueued", "watchDiffBatchQueued"),
+        ("batchPending", "watchDiffBatchPending"),
+        ("batchOperations", "watchDiffBatchOperations"),
+    )
+    if any(int(state.get(total) or 0) != int(state.get(owned) or 0) for total, owned in batch_ownership):
+        return False
+    # Every other surface must be terminal. The shared receipt path waits for the baseline plus these
+    # explicitly attributed batch descendants within one fail-closed bound.
+    return _fixture_operation_state_quiescent({
+        **state,
+        "pending": [],
+        "batchQueued": 0,
+        "batchPending": 0,
+        "batchOperations": 0,
+        "watchRootsPending": False,
+    })
 
 
 def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str, Any]:
@@ -2733,10 +2810,9 @@ def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str,
 def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
     """Wait for the in-flight baseline receipt, honoring its outcome; fail closed on a real hang.
 
-    Only an actually in-flight async promise consumes the fail-closed bound. Every other outcome is
-    resolved without spinning: a state that claims a baseline is pending while no promise exists is a
-    contradiction and fails immediately, and a promise that resolves or rejects is followed by exactly
-    one state re-read that either accepts quiescence or raises the exact contradictory state.
+    Only an actually in-flight async promise consumes the fail-closed bound. Once that promise settles,
+    work it scheduled may still be delivering its own terminal receipt. Keep that descendant work inside
+    the same bound; a baseline flag that remains set after its promise is gone is still a contradiction.
     """
 
     frozen_blocked = dict(blocked_state)
@@ -2750,27 +2826,56 @@ def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, An
             )
         receipt = _await_in_flight_watch_diff_baseline(driver, remaining)
         if receipt.get("hadPromise") is not True:
-            # The state claimed a baseline was pending, but there is no in-flight promise to wait on.
-            # That is a contradiction, not an in-flight receipt; do not spin the bound waiting for it.
-            raise AssertionError(
-                "watch-diff baseline was reported pending with no in-flight promise to await: "
-                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
-                f"state={json.dumps(frozen_blocked, sort_keys=True)}"
-            )
+            # The promise may settle between the operation-state snapshot and the separate WebDriver
+            # await call. Re-read before classifying any remaining work.
+            state = _read_fixture_operation_state(driver)
+            if state.get("watchRootsBaselinePending", False) is True:
+                raise AssertionError(
+                    "watch-diff baseline was reported pending with no in-flight promise to await: "
+                    f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                    f"state={json.dumps(state, sort_keys=True)}"
+                )
+            break
         if receipt.get("settled") is not True:
             # The promise is genuinely still in flight; this await consumed its slice of the bound.
             continue
-        # The promise resolved or rejected. Re-read state exactly once and decide; a still-pending
-        # flag after a settled/rejected receipt is a contradiction, not a reason to keep waiting.
+        # The promise resolved or rejected. A still-set baseline flag is contradictory; other pending
+        # work may be a concrete descendant (for example deferred Finder repo-info enrichment).
         state = _read_fixture_operation_state(driver)
-        if _fixture_operation_state_quiescent(state):
-            state["watchDiffBaselineReceipt"] = dict(receipt)
-            return state
-        raise AssertionError(
-            "watch-diff baseline receipt settled but fixture work is still not quiescent: "
-            f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
-            f"state={json.dumps(state, sort_keys=True)}"
-        )
+        if state.get("watchRootsBaselinePending", False) is True:
+            raise AssertionError(
+                "watch-diff baseline receipt settled but its lifecycle flag is still pending: "
+                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                f"state={json.dumps(state, sort_keys=True)}"
+            )
+        break
+
+    if not _fixture_operation_state_quiescent(state):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise AssertionError(
+                "watch-diff baseline descendants did not quiesce before the receipt bound: "
+                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                f"state={json.dumps(state, sort_keys=True)}"
+            )
+
+        last_state = state
+
+        def descendants_settled(current):
+            nonlocal last_state
+            last_state = _read_fixture_operation_state(current)
+            return last_state if _fixture_operation_state_quiescent(last_state) else False
+
+        try:
+            state = WebDriverWait(driver, remaining).until(descendants_settled)
+        except TimeoutException as error:
+            raise AssertionError(
+                "watch-diff baseline descendants did not quiesce before the receipt bound: "
+                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                f"state={json.dumps(last_state, sort_keys=True)}"
+            ) from error
+    state["watchDiffBaselineReceipt"] = dict(receipt)
+    return state
 
 
 def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, Any]:
@@ -3089,6 +3194,43 @@ def load_gate_browser(driver, runtime: GateLiveServer, path: str = "/") -> None:
     assert runtime.app.session_files_service.wait_for_idle(3), (
         "fixture session-files work did not settle before the browser evidence boundary"
     )
+
+
+def load_gate_terminal_only_browser(driver, runtime: GateLiveServer, *, timeout: float = 8.0) -> str:
+    """Load and focus one terminal without admitting unrelated Finder/watch work."""
+
+    session = runtime.tmux.sessions[0]
+    encoded_session = quote(session)
+    load_gate_browser(
+        driver,
+        runtime,
+        f"/?sessions={encoded_session}&layout=left&tabs=left:{encoded_session}",
+    )
+    run_when_browser_ready(
+        driver,
+        "return terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN"
+        " && Boolean(document.querySelector(`#term-${CSS.escape(arguments[0])} .xterm-screen`))"
+        " && !fileExplorerPaneIsOpen()"
+        " && !fileExplorerTreePaneIsVisible()"
+        " && !fileExplorerSessionFilesPaneIsVisible();",
+        session,
+        globals_required={
+            "fileExplorerPaneIsOpen": "function",
+            "fileExplorerTreePaneIsVisible": "function",
+            "fileExplorerSessionFilesPaneIsVisible": "function",
+        },
+        dom_anchors=("#grid",),
+        timeout=timeout,
+    )
+    driver.find_element("css selector", f"#term-{session} .xterm-screen").click()
+    run_when_browser_ready(
+        driver,
+        "return document.activeElement === document.querySelector(`#term-${CSS.escape(arguments[0])} textarea`);",
+        session,
+        dom_anchors=(f"#term-{session} .xterm-screen",),
+        timeout=timeout,
+    )
+    return session
 
 
 def open_gate_stats_surface(driver, *, timeout: float = 8.0) -> dict[str, Any]:

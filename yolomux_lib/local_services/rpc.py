@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from tools.instance_isolation import local_rpc_socket_path_bytes
+
 
 LOCAL_RPC_VERSION = 1
 LOCAL_RPC_MAX_METADATA_BYTES = 256 * 1024
@@ -35,7 +37,7 @@ LOCAL_RPC_HEADER_BYTES = 4
 # the kernel, so reserve that seven-byte prefix rather than rejecting ordinary
 # absolute project paths everywhere. This is the actual bind budget shared by
 # fallback routing and rooted-run preflight, not an arbitrary safety margin.
-LOCAL_RPC_SOCKET_PATH_BYTES = 96 if sys.platform == "darwin" else 107
+LOCAL_RPC_SOCKET_PATH_BYTES = local_rpc_socket_path_bytes()
 
 
 class LocalRpcError(ValueError):

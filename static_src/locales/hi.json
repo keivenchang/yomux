@@ -376,6 +376,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "ग्राफ़",
+  "debug.tab.cost": "लागत",
   "debug.tab.services": "डेमन",
   "debug.tab.logs": "लॉग",
   "debug.waitingForServerStats": "सर्वर आँकड़ों की प्रतीक्षा है",

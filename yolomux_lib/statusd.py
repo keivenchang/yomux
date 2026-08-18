@@ -17,8 +17,10 @@ from typing import Any
 from .app import TmuxWebtermApp
 from .polling_policy import quiet_poll_interval
 from .tmux.sessions import discover_status_sessions
+from .tmux.tmux_utils import cmd_error
 from .tmux.tmux_utils import list_tmux_session_activity
 from .tmux.tmux_utils import list_tmux_session_names
+from .tmux.tmux_utils import tmux
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
@@ -68,6 +70,48 @@ STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
 })
 
 
+def list_tmux_pane_source_signatures() -> tuple[dict[str, tuple[str, str]], str | None]:
+    fields = (
+        "session_name",
+        "window_index",
+        "pane_index",
+        "pane_id",
+        "pane_active",
+        "window_active",
+        "window_activity",
+        "history_size",
+        "history_bytes",
+        "cursor_x",
+        "cursor_y",
+        "cursor_character",
+        "pane_pid",
+        "pane_current_command",
+        "pane_dead",
+        "pane_in_mode",
+        "alternate_on",
+        "pane_width",
+        "pane_height",
+    )
+    result = tmux(
+        ["list-panes", "-a", "-F", "\t".join(f"#{{{field}}}" for field in fields)],
+        timeout=3.0,
+    )
+    if result.returncode != 0:
+        return {}, cmd_error(result, "tmux pane source scan failed")
+    signatures: dict[str, tuple[str, str]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != len(fields):
+            continue
+        session = parts[0]
+        pane_target = parts[3] or f"{session}:{parts[1]}.{parts[2]}"
+        signature = hashlib.sha1("\0".join(parts[1:]).encode("utf-8")).hexdigest()[:16]
+        signatures[pane_target] = (session, signature)
+        if parts[4] == "1" and parts[5] == "1":
+            signatures[session] = (session, signature)
+    return signatures, None
+
+
 class PersistentStatusService(LocalRpcServiceState):
     """One per-state-directory status owner with retained immutable bytes."""
 
@@ -79,12 +123,14 @@ class PersistentStatusService(LocalRpcServiceState):
         wall_clock: Callable[[], float] | None = None,
         monotonic: Callable[[], float] | None = None,
         session_activity_reader: Callable[[], tuple[dict[str, int], str | None]] | None = None,
+        pane_source_reader: Callable[[], tuple[dict[str, tuple[str, str]], str | None]] | None = None,
         session_jitter: Callable[[float, float], float] | None = None,
     ):
         super().__init__(socket_path, prefix="yolomux-statusd", idle_seconds=idle_seconds)
         self.wall_clock = wall_clock or time.time
         self.monotonic = monotonic or time.monotonic
         self.session_activity_reader = session_activity_reader or list_tmux_session_activity
+        self.pane_source_reader = pane_source_reader or list_tmux_pane_source_signatures
         self.session_jitter = session_jitter or random.uniform
         self.lock = threading.Condition(threading.RLock())
         self.build_lock = threading.Lock()
@@ -124,6 +170,10 @@ class PersistentStatusService(LocalRpcServiceState):
         self.session_activity: dict[str, int] = {}
         self.session_capture_attempts = 0
         self.session_capture_promotions = 0
+        self.pane_source_signatures: dict[str, tuple[str, str]] = {}
+        # The external schema fixed this key before the implementation. Its value counts actual
+        # roster classify_agent_pane calls, including mandatory due-at safety recaptures.
+        self.owner_invocations = {"statusd_unchanged_pane_capture": 0}
 
     def _session_capture_interval(self, activity_timestamp: int | None) -> float:
         age = max(0.0, self.wall_clock() - float(activity_timestamp or 0))
@@ -139,7 +189,12 @@ class PersistentStatusService(LocalRpcServiceState):
         jitter = self.session_jitter(-jitter_bound, jitter_bound)
         return quiet_poll_interval(STATUSD_SNAPSHOT_MAX_AGE_SECONDS, target, 1.0, jitter)
 
-    def _capture_sessions(self, sessions: tuple[str, ...], *, force: bool) -> tuple[set[str], str | None]:
+    def _capture_sessions(
+        self,
+        sessions: tuple[str, ...],
+        *,
+        force: bool,
+    ) -> tuple[set[str], set[str] | None, dict[str, tuple[str, str]] | None, str | None]:
         now = self.monotonic()
         roster = set(sessions)
         self.session_payload_cache = {
@@ -151,25 +206,59 @@ class PersistentStatusService(LocalRpcServiceState):
         self.session_activity = {
             name: timestamp for name, timestamp in self.session_activity.items() if name in roster
         }
-        activity, error = self.session_activity_reader()
-        if error:
+        activity, activity_error = self.session_activity_reader()
+        pane_sources, pane_source_error = self.pane_source_reader()
+        if activity_error or pane_source_error:
             selected = roster
+            deadline_reset_sessions = roster
+            capture_targets = None
+            retained_pane_sources = None
         else:
             selected = set()
+            recapture_sessions = set()
             for name in sessions:
                 timestamp = activity.get(name)
                 previous = self.session_activity.get(name)
                 promoted = previous is not None and timestamp != previous
                 if promoted and now < self.session_capture_due_at.get(name, 0.0):
                     self.session_capture_promotions += 1
-                if force or name not in self.session_payload_cache or promoted or now >= self.session_capture_due_at.get(name, 0.0):
+                due = now >= self.session_capture_due_at.get(name, 0.0)
+                missing = name not in self.session_payload_cache
+                if force or missing or promoted or due:
                     selected.add(name)
+                if missing or promoted or due:
+                    recapture_sessions.add(name)
                 if timestamp is not None:
                     self.session_activity[name] = timestamp
-        for name in selected:
+            retained_pane_sources = {
+                target: (session, signature)
+                for target, (session, signature) in pane_sources.items()
+                if session in roster
+            }
+            # Pane metadata is an early invalidation signal, not a correctness TTL. A session whose
+            # established due-at has arrived remains in recapture_sessions even when every cheap
+            # field collides, so same-size/same-cursor screen rewrites cannot freeze status.
+            capture_targets = {
+                target
+                for target, (session, signature) in retained_pane_sources.items()
+                if session in recapture_sessions
+                or self.pane_source_signatures.get(target) != (session, signature)
+            }
+            selected.update(
+                session
+                for target, (session, signature) in retained_pane_sources.items()
+                if self.pane_source_signatures.get(target) != (session, signature)
+            )
+            deadline_reset_sessions = recapture_sessions | {
+                session
+                for target, (session, signature) in retained_pane_sources.items()
+                if self.pane_source_signatures.get(target) != (session, signature)
+            }
+        for name in deadline_reset_sessions:
             self.session_capture_due_at[name] = now + self._session_capture_interval(activity.get(name))
         self.session_capture_attempts += len(selected)
-        return selected, error
+        errors = [error for error in (activity_error, pane_source_error) if error]
+        return selected, capture_targets, retained_pane_sources, "; ".join(errors) if errors else None
 
     def _sessions(self, request: dict[str, Any]) -> tuple[str, ...]:
         raw = request.get("sessions", [])
@@ -201,12 +290,21 @@ class PersistentStatusService(LocalRpcServiceState):
             force_capture = bool(self.invalidation_reason) or sessions != self.snapshot_session_names
         app = self._ensure_app(sessions)
         timings: dict[str, float] = {}
-        capture_sessions, activity_error = self._capture_sessions(sessions, force=force_capture)
+        capture_sessions, capture_targets, pane_sources, activity_error = self._capture_sessions(
+            sessions,
+            force=force_capture,
+        )
         payload, status = app.build_auto_approve_status(
             timings=timings,
             sync_workers=False,
             session_payload_cache=self.session_payload_cache,
             capture_sessions=capture_sessions,
+            pane_source_signatures=(
+                {target: signature for target, (_session, signature) in pane_sources.items()}
+                if pane_sources is not None
+                else None
+            ),
+            capture_targets=capture_targets,
         )
         if not isinstance(payload, dict):
             raise StatusProtocolError("invalid status payload")
@@ -217,6 +315,11 @@ class PersistentStatusService(LocalRpcServiceState):
                 for name, value in sessions_payload.items()
                 if name in sessions and isinstance(value, dict)
             }
+        if pane_sources is not None:
+            self.pane_source_signatures = pane_sources
+        pane_capture_count = timings.get("pane_capture_count", 0.0)
+        if isinstance(pane_capture_count, (int, float)):
+            self.owner_invocations["statusd_unchanged_pane_capture"] += max(0, int(pane_capture_count))
         if activity_error:
             errors = payload.get("errors")
             if isinstance(errors, list):
@@ -550,6 +653,7 @@ class PersistentStatusService(LocalRpcServiceState):
                 "snapshot_refresh_supersessions": self.snapshot_refresh_supersessions,
                 "session_capture_attempts": self.session_capture_attempts,
                 "session_capture_promotions": self.session_capture_promotions,
+                "owner_invocations": dict(self.owner_invocations),
                 "invalidation_generation": self.invalidation_generation,
                 "inventory_generation": self.inventory_generation,
                 "cache": {"ready": snapshot is not None, "stale": False}, "invalidation_reason": self.invalidation_reason,

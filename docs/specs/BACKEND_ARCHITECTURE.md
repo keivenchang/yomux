@@ -81,7 +81,7 @@ The background owner is a role elected among web processes sharing one local `YO
 
 ## Filesystem boundaries
 
-`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the current path policy and partial descriptor protections, filters secret or credential-blocked paths, stats direct children, applies the entry bound, sorts the result, and can omit repository enrichment. It does not yet pin every listed child generation from authorization through consumption; listing, recursive ZIP, diff, and indexed-search metadata remain in [`DOIT.p0.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.filesystem-descriptor-authorization.md). Search/index exclusion rules are separate from directory listing. A listing is one directory level; it does not recursively enumerate descendants.
+`filesystem.list_directory()` is the shared listing owner. It validates the requested path through the current path policy and partial descriptor protections, filters secret or credential-blocked paths, stats direct children, applies the entry bound, sorts the result, and can omit repository enrichment. It does not yet pin every listed child generation from authorization through consumption; listing, recursive ZIP, diff, and indexed-search metadata remain in [`DOIT.p0.e5.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md). Search/index exclusion rules are separate from directory listing. A listing is one directory level; it does not recursively enumerate descendants.
 
 | Surface | Execution path | Current use |
 | --- | --- | --- |

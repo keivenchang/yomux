@@ -427,6 +427,7 @@
   "debug.system.sampler.header.lateMiss.short": "en retard/manqué",
   "debug.system.sampler.header.runtime.full": "Dernière exécution",
   "debug.system.sampler.header.runtime.short": "durée d'exécution",
+  "debug.tab.cost": "Coût",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Graphiques",
   "debug.tab.logs": "Journaux",

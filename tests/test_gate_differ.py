@@ -1272,11 +1272,11 @@ def test_c3_git_control_only_change_publishes_no_ignored_path_as_a_transport_sig
           return descriptor.channels.includes('files')
             && descriptor.active_panes.includes(differItemId)
             && clientEventTransportState.connected === true
-            && clientServerWatchRoots().includes(repo)
+            && clientServerWatchRootDescriptor().roots.includes(repo)
             && Number(serverWatchRootsState.syncedAt || 0) > previousSyncedAt
             && serverWatchRootsState.inFlight !== true;
         }, {timeoutMs: 10000, description: `real watchd registration for ${repo}`}).then(
-          () => done({ok: true, roots: clientServerWatchRoots(), descriptor: clientEventDemandDescriptor()}),
+          () => done({ok: true, roots: clientServerWatchRootDescriptor().roots, descriptor: clientEventDemandDescriptor()}),
           error => done({error: String(error?.stack || error)}),
         );
         """,

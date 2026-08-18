@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import time
 from types import SimpleNamespace
 import types
@@ -98,6 +99,8 @@ def test_auto_approve_cli_state_keeps_normal_questions_out_of_approval_path():
 
 def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
     sent = []
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
     state = SimpleNamespace(
         prompt={
             "visible": True,
@@ -133,6 +136,8 @@ def test_auto_approve_cli_once_sends_from_central_approval_state(monkeypatch):
     auto_approve_tmux.main()
 
     assert sent == [("6", 1, 1)]
+    assert signal.getsignal(signal.SIGINT) is previous_sigint
+    assert signal.getsignal(signal.SIGTERM) is previous_sigterm
 
 
 def test_capture_prompt_fixture_harness_contract(monkeypatch, tmp_path):

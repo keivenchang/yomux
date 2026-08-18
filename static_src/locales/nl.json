@@ -376,6 +376,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafieken",
+  "debug.tab.cost": "Kosten",
   "debug.tab.services": "Systeemdaemons",
   "debug.tab.logs": "Logboeken",
   "debug.waitingForServerStats": "Wachten op serverstatistieken",

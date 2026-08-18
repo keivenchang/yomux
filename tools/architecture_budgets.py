@@ -98,6 +98,7 @@ RETIRED_SHARE_CONTENT_EXCEPTIONS: Final[frozenset[str]] = frozenset((
 RETIRED_SHARE_SKIPPED_PARTS: Final[frozenset[str]] = frozenset((
     ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 ))
+RETIRED_SHARE_SKIPPED_SUFFIXES: Final[tuple[str, ...]] = (".agent-edit.lock",)
 
 
 @dataclass(frozen=True)
@@ -345,7 +346,10 @@ def _retired_share_surface_violations(root: Path) -> tuple[str, ...]:
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         relative = path.relative_to(root).as_posix()
         parts = Path(relative).parts
-        if any(part in RETIRED_SHARE_SKIPPED_PARTS for part in parts):
+        if any(
+            part in RETIRED_SHARE_SKIPPED_PARTS or part.endswith(RETIRED_SHARE_SKIPPED_SUFFIXES)
+            for part in parts
+        ):
             continue
         if len(parts) >= 2 and parts[0] == "docs" and parts[1] == "DONE":
             continue

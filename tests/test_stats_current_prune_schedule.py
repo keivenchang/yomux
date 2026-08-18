@@ -303,11 +303,11 @@ def test_a_fixed_offset_captured_once_would_drift_but_the_local_time_does_not():
 
 
 # --------------------------------------------------------------------------
-# The daemon runs it, once, off the request path
+# The daemon runs bounded cutoff sweeps off the request path
 # --------------------------------------------------------------------------
 
 
-def test_service_prunes_once_a_night_and_catches_up_a_missed_window(tmp_path):
+def test_service_bounds_cutoff_sweeps_and_catches_up_after_a_missed_window(tmp_path):
     with local_zone(PACIFIC):
         wall = [local_epoch(2026, 6, 1, 12, 0)]
         monotonic = [0.0]
@@ -319,42 +319,41 @@ def test_service_prunes_once_a_night_and_catches_up_a_missed_window(tmp_path):
             prune_time_reader=lambda: "02:30",
         )
         service.writer = store
-        service._last_pruned_at = local_epoch(2026, 6, 1, 2, 30)
+        service._last_pruned_at = wall[0] - 30.0
 
-        # Midday: nothing owed, and the check is bounded to once a minute.
+        # The cutoff is still fresh, and checks cannot run more than once a minute.
         assert service._prune_if_due() is False
         assert service._next_prune_check_at == service_module.PRUNE_CHECK_SECONDS
         assert store.prunes == []
 
-        # 01:00 the next morning, still before the configured time.
-        wall[0] = local_epoch(2026, 6, 2, 1, 0)
-        monotonic[0] += service_module.PRUNE_CHECK_SECONDS
+        monotonic[0] += service_module.PRUNE_CHECK_SECONDS - 1.0
+        wall[0] += service_module.PRUNE_CHECK_SECONDS - 1.0
         assert service._prune_if_due() is False
         assert store.prunes == []
 
-        # 02:31: the night is owed exactly once.
-        wall[0] = local_epoch(2026, 6, 2, 2, 31)
-        monotonic[0] += service_module.PRUNE_CHECK_SECONDS
+        # At the one-minute boundary the cutoff sweep runs, independent of the daily preference.
+        monotonic[0] += 1.0
+        wall[0] += 1.0
         assert service._prune_if_due() is True
         assert store.prunes == [wall[0]]
-        for offset in (1, 2, 3):
-            wall[0] = local_epoch(2026, 6, 2, 2 + offset, 31)
-            monotonic[0] += service_module.PRUNE_CHECK_SECONDS
-            assert service._prune_if_due() is False
-        assert len(store.prunes) == 1
-        assert service._prunes == 1
 
-        # The machine is then off for two days and comes back at 09:00. The
-        # missed night runs at once instead of waiting for the next 02:30.
+        monotonic[0] += service_module.PRUNE_CHECK_SECONDS
+        wall[0] += service_module.PRUNE_CHECK_SECONDS
+        assert service._prune_if_due() is True
+        assert len(store.prunes) == 2
+        assert service._prunes == 2
+
+        # The machine is then off for two days and comes back at 09:00. Cleanup
+        # catches up at once instead of waiting for the next configured occurrence.
         wall[0] = local_epoch(2026, 6, 4, 9, 0)
         monotonic[0] += service_module.PRUNE_CHECK_SECONDS
         assert service._prune_if_due() is True
-        assert len(store.prunes) == 2
+        assert len(store.prunes) == 3
         status = service._status()["retention_prune"]
         assert status["at_local_time"] == "02:30"
         assert status["preference_fell_back"] is False
         assert status["overdue"] is False
-        assert status["count"] == 2
+        assert status["count"] == 3
         assert local_text(status["next_at"]) == "2026-06-05 02:30 PDT"
 
 
@@ -394,9 +393,9 @@ def test_service_falls_back_to_the_default_time_when_the_preference_is_unusable(
             prune_time_reader=lambda: "banana",
         )
         service.writer = store
-        service._last_pruned_at = local_epoch(2026, 6, 1, 2, 30)
+        service._last_pruned_at = wall[0] - 30.0
 
-        # 01:00 is before the DEFAULT time, so an honest fallback is still quiet.
+        # The cutoff is fresh, so an honest fallback does not force an early sweep.
         assert service._prune_if_due() is False
         status = service._status()["retention_prune"]
         assert status["configured_local_time"] == "banana"

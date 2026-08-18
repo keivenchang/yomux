@@ -887,7 +887,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
             const panel = document.querySelector('.js-debug-panel');
             const tabs = [...(panel?.querySelectorAll('[data-js-debug-subtab]') || [])];
             const graph = panel?.querySelector('[data-js-debug-graph]');
-            if (!panel || !graph || tabs.length !== 4 || graph.getAttribute('aria-busy') !== 'false') return false;
+            if (!panel || !graph || tabs.length !== 5 || graph.getAttribute('aria-busy') !== 'false') return false;
             return {
               labels: tabs.map(button => button.textContent.replace(/\\s+/g, ' ').trim()),
               keys: tabs.map(button => button.dataset.jsDebugSubtab),
@@ -906,8 +906,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         )
     )
     assert metrics == {
-        "labels": ["Graphs", "API/SSE", "Daemons", "Logs"],
-        "keys": ["graph", "events", "system", "logs"],
+        "labels": ["Graphs", "Cost", "API/SSE", "Daemons", "Logs"],
+        "keys": ["graph", "cost", "events", "system", "logs"],
         "primitive": False,
         "range": True,
         "resolution": True,
@@ -1121,6 +1121,63 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
     assert metrics["scrollBefore"]["view"] > 0 and metrics["scrollBefore"]["body"] > 0, metrics
     assert metrics["scrollAfter"] == metrics["scrollBefore"], metrics
     assert all(metrics["narrow"].values()), metrics
+
+
+def test_current_stats_cost_subtab_migrates_legacy_layout_and_survives_reload_without_hidden_work(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=cost")
+
+    def cost_state(driver):
+        return driver.execute_script(
+            """
+            const panel = document.querySelector('.js-debug-panel');
+            const button = panel?.querySelector('[data-js-debug-subtab="cost"]');
+            const view = panel?.querySelector('[data-js-debug-subview="cost"]');
+            const stored = JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}');
+            if (!panel || !button || !view || view.hidden || !view.querySelector('.js-debug-cost-report')) return false;
+            return {
+              active: button.getAttribute('aria-selected'),
+              labels: [...panel.querySelectorAll('[data-js-debug-subtab]')].map(item => item.textContent.trim()),
+              keys: [...panel.querySelectorAll('[data-js-debug-subtab]')].map(item => item.dataset.jsDebugSubtab),
+              standalone: document.querySelector('.js-yocost-panel') !== null,
+              storedSubTab: stored.subTab,
+              legacyType: tabTypeForItem('__yocost__')?.key || '',
+              migratedItem: resolveLayoutItem('__yocost__'),
+            };
+            """
+        )
+
+    first = WebDriverWait(browser, 8).until(cost_state)
+    assert first == {
+        "active": "true",
+        "labels": ["Graphs", "Cost", "API/SSE", "Daemons", "Logs"],
+        "keys": ["graph", "cost", "events", "system", "logs"],
+        "standalone": False,
+        "storedSubTab": "cost",
+        "legacyType": "",
+        "migratedItem": "__debug__",
+    }
+
+    browser.refresh()
+    reloaded = WebDriverWait(browser, 8).until(cost_state)
+    assert reloaded == first
+
+    hidden = browser.execute_script(
+        """
+        document.querySelector('[data-js-debug-subtab="graph"]').click();
+        return {
+          costVisible: jsDebugCostSubviewVisible(),
+          renderedHiddenCost: renderYoCostPanels({force: true}),
+          pricingTimer: jsDebugPricingRefreshState.timer,
+          storedSubTab: JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}').subTab,
+        };
+        """
+    )
+    assert hidden == {
+        "costVisible": False,
+        "renderedHiddenCost": False,
+        "pricingTimer": None,
+        "storedSubTab": "graph",
+    }
 
 
 def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(browser, tmp_path):
@@ -8002,7 +8059,7 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, lab
         )
         consume_only_expected_js_debug_api_errors(
             browser,
-            ({"path": "/api/yoagent/chat", "method": "POST", "query": {}, "error": "aborted"},),
+            (),
         )
         assert metrics.get("error") is None, (label, metrics)
         assert metrics["errors"] == [], (label, metrics)
@@ -11753,7 +11810,9 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             openai: Boolean(costSection?.querySelector('[data-setting-path="cost.openai_pricing_profile"]')),
             anthropic: Boolean(costSection?.querySelector('[data-setting-path="cost.anthropic_pricing_profile"]')),
           };
-          await selectSession('__yocost__');
+          await selectSession('__debug__');
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          document.querySelector('[data-js-debug-subtab="cost"]')?.click();
           await new Promise(resolve => requestAnimationFrame(resolve));
           clearJsDebugGraphData();
           jsDebugCostSummaryCache = {signature: '', summary: null};
@@ -11815,7 +11874,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           });
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const report = document.querySelector('.js-yocost-panel .js-debug-cost-report');
+          const report = document.querySelector('[data-js-debug-subview="cost"] .js-debug-cost-report');
           const pricingAnchor = report?.querySelector('a[href^="http"]');
           const opened = [];
           const priorOpen = window.open;
@@ -11828,7 +11887,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const expectedScrollLeft = agentWrap.scrollLeft;
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
-          const renderedReport = document.querySelector('.js-yocost-panel .js-debug-cost-report');
+          const renderedReport = document.querySelector('[data-js-debug-subview="cost"] .js-debug-cost-report');
           return {
             preferences,
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',

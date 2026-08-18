@@ -48,7 +48,7 @@ function debugGraphExplainAttrs(label, descKey, {attribute = 'data-js-debug-expl
 }
 
 function normalizedJsDebugSubTab(value) {
-  return value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
+  return value === 'cost' || value === 'events' || value === 'system' || value === 'logs' ? value : 'graph';
 }
 
 function normalizedJsDebugGraphRange(value, nowMs = Date.now()) {
@@ -71,7 +71,7 @@ function loadJsDebugStatsUiPreferences() {
   debugRuntimeState.statsUiPreferencesLoaded = true;
   let saved = safeJsonParse(window.localStorage?.getItem(jsDebugStatsUiPreferencesStorageKey), {});
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
-  debugRuntimeState.subTab = normalizedJsDebugSubTab(saved.subTab);
+  debugRuntimeState.subTab = legacyYoCostMigrationRequested ? 'cost' : normalizedJsDebugSubTab(saved.subTab);
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
@@ -88,6 +88,7 @@ function loadJsDebugStatsUiPreferences() {
     : null;
   jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
   syncDebugGraphResolutionOverride(Date.now(), {persist: true});
+  if (legacyYoCostMigrationRequested) saveJsDebugStatsUiPreferences();
 }
 
 function saveJsDebugStatsUiPreferences() {

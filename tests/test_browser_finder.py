@@ -2036,10 +2036,13 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
         const input = document.querySelector('.file-explorer-path-inline');
         const realFetchDirectory = fetchDirectory;
         let releaseTmp = null;
+        let notifyTmpListingStarted = null;
+        const tmpListingStarted = new Promise(resolve => { notifyTmpListingStarted = resolve; });
         fetchDirectory = (path, options = {}) => {
           if (path === '/tmp') {
             return new Promise(resolve => {
               releaseTmp = () => resolve([{name: 'scratch.txt', kind: 'file'}]);
+              notifyTmpListingStarted();
             });
           }
           return realFetchDirectory(path, options);
@@ -2047,7 +2050,7 @@ def test_sync_mode_typed_manual_path_disables_sync_before_slow_listing(browser, 
         input.focus();
         input.value = '/tmp';
         const openPromise = commitFileExplorerPathInput(input);
-        requestAnimationFrame(() => {
+        tmpListingStarted.then(() => {
           const duringTree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
           const duringOpen = {
             path: document.querySelector('.file-explorer-path-inline')?.value || '',
@@ -2242,6 +2245,10 @@ def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(bro
         const realFetchDirectory = fetchDirectory;
         let releaseDev2 = null;
         let releaseTmp = null;
+        let notifyDev2ListingStarted = null;
+        let notifyTmpListingStarted = null;
+        const dev2ListingStarted = new Promise(resolve => { notifyDev2ListingStarted = resolve; });
+        const tmpListingStarted = new Promise(resolve => { notifyTmpListingStarted = resolve; });
         const snapshot = () => {
           const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
           const searchingRow = tree.querySelector('.file-tree-status-searching');
@@ -2261,11 +2268,13 @@ def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(bro
           if (path === '/home/test/yolomux.dev2') {
             return new Promise(resolve => {
               releaseDev2 = () => resolve([{name: 'src', kind: 'dir'}]);
+              notifyDev2ListingStarted();
             });
           }
           if (path === '/tmp') {
             return new Promise(resolve => {
               releaseTmp = () => resolve([{name: 'scratch.txt', kind: 'file'}]);
+              notifyTmpListingStarted();
             });
           }
           return realFetchDirectory(path, options);
@@ -2276,16 +2285,11 @@ def test_sync_mode_stale_session_root_open_cannot_override_typed_manual_path(bro
           expandPaths: [],
           affectedDirs: ['/home/test/yolomux.dev2'],
         }, '8002', {force: true});
-        requestAnimationFrame(() => {
-          if (!releaseDev2) {
-            fetchDirectory = realFetchDirectory;
-            done({error: 'stale session fetch was not started'});
-            return;
-          }
+        dev2ListingStarted.then(() => {
           input.focus();
           input.value = '/tmp';
           const manualOpenPromise = commitFileExplorerPathInput(input);
-          requestAnimationFrame(() => {
+          tmpListingStarted.then(() => {
             const duringManual = snapshot();
             releaseDev2();
             staleSyncPromise.then(staleOpened => {
@@ -2633,14 +2637,17 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         """
         const done = arguments[arguments.length - 1];
         const input = document.querySelector('.file-explorer-path-inline');
+        const realCommitFileExplorerPathInput = commitFileExplorerPathInput;
+        let commitPromise = null;
+        commitFileExplorerPathInput = target => {
+          commitFileExplorerPathInput = realCommitFileExplorerPathInput;
+          commitPromise = realCommitFileExplorerPathInput(target);
+          return commitPromise;
+        };
         input.focus();
         input.value = '/home/test';
         input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-        const waitForCommit = () => {
-          if (currentFileExplorerRoot() !== '/home/test') {
-            requestAnimationFrame(waitForCommit);
-            return;
-          }
+        Promise.resolve(commitPromise).then(() => {
           scheduleFileExplorerActiveTabSync();
           setSessionFilesPayloadForDestination('finder', {session: '5', loaded: true, errors: [], repos: [{repo: '/home/test/yolomux.dev'}], files: []});
           requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -2651,10 +2658,12 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
               explicitSession: fileExplorerExplicitSyncSessionTarget(),
               planRoot: fileExplorerSyncPlan('5').root,
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
-            });
-          }));
-        };
-        requestAnimationFrame(waitForCommit);
+                });
+              }));
+        }).catch(error => {
+          commitFileExplorerPathInput = realCommitFileExplorerPathInput;
+          done({error: String(error)});
+        });
         """
     )
     assert "error" not in manual_metrics, manual_metrics

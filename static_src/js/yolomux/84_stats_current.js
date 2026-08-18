@@ -1815,7 +1815,8 @@
   }
 
   function currentCostAttributionTable(title, rows, kind) {
-    const body = rows.map(row => {
+    const displayedRows = kind === 'agent' ? currentCostConsolidatedAgentRows(rows) : rows;
+    const body = displayedRows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
         : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
@@ -1831,6 +1832,35 @@
         : '<p>No attributed usage in this range.</p>',
       '</section>',
     ].join('');
+  }
+
+  function currentCostConsolidatedAgentRows(rows) {
+    const consolidated = new Map();
+    for (const row of rows) {
+      const label = currentStatsCanonicalAgentLabel(row.label || row.source);
+      const existing = consolidated.get(label);
+      if (!existing) {
+        consolidated.set(label, {
+          ...row,
+          label,
+          dimensions: Object.fromEntries(CURRENT_COST_DIMENSIONS.map(dimension => [dimension, {...row.dimensions[dimension]}])),
+          priced: {...row.priced},
+          unpriced: {...row.unpriced},
+        });
+        continue;
+      }
+      for (const field of ['total_tokens', 'total_micro_usd', 'total_api_list_micro_usd']) existing[field] += row[field];
+      for (const dimension of CURRENT_COST_DIMENSIONS) {
+        for (const field of ['tokens', 'micro_usd', 'api_list_micro_usd']) {
+          existing.dimensions[dimension][field] += row.dimensions[dimension][field];
+        }
+      }
+      for (const coverage of ['priced', 'unpriced']) {
+        existing[coverage].atoms += row[coverage].atoms;
+        existing[coverage].tokens += row[coverage].tokens;
+      }
+    }
+    return [...consolidated.values()];
   }
 
   function currentCostDimensionCell(value) {
@@ -1876,8 +1906,12 @@
         if (!groupId) continue;
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
-        if (!series.has(name)) series.set(name, []);
-        series.get(name).push(Object.freeze({
+        const seriesName = groupId === 'agent-tokens'
+          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          : name;
+        if (!series.has(seriesName)) series.set(seriesName, []);
+        const points = series.get(seriesName);
+        const point = {
           start: bucket.start,
           duration: bucket.duration,
           value: item.value,
@@ -1885,7 +1919,19 @@
           source_count: item.source_count,
           first_timestamp: item.first_timestamp,
           last_timestamp: item.last_timestamp,
-        }));
+        };
+        const existing = points.at(-1);
+        if (existing?.start === point.start && existing.duration === point.duration && existing.unit === point.unit) {
+          points[points.length - 1] = Object.freeze({
+            ...existing,
+            value: existing.value + point.value,
+            source_count: existing.source_count + point.source_count,
+            first_timestamp: Math.min(existing.first_timestamp, point.first_timestamp),
+            last_timestamp: Math.max(existing.last_timestamp, point.last_timestamp),
+          });
+        } else {
+          points.push(Object.freeze(point));
+        }
       }
     }
     for (const series of groups.values()) {

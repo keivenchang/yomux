@@ -1434,7 +1434,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(installedSettled, false, 'raw image installation stays pending until authoritative load readiness');
       media.listeners.get('load')[0]();
       const installed = await installedPending;
-      assert.equal(installed.ok, true);
+      assert.equal(installed.ok, true, 'loaded raw image installation remains successful');
       assert.equal(media.src, 'blob:test-1');
       assert.equal(installedSettled, true, 'raw image installation settles with usable decoded dimensions');
       assert.equal(created.length, 1, 'only a successful response creates a blob URL');
@@ -1461,7 +1461,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       decodeHandler();
       decodeHandler();
       const broken = await brokenPending;
-      assert.equal(broken.ok, false);
+      assert.equal(broken.ok, false, 'broken raw image installation returns a typed failure');
       assert.equal(broken.decodeFailed, true, 'the installation promise resolves with a typed decode failure');
       api.releaseRawFileMediaSourceForTest(decodeMedia);
       assert.equal(decodeFailures, 1, 'decode failure is reported exactly once');
@@ -1472,7 +1472,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       await flushAsyncWork();
       zeroDimensionMedia.listeners.get('load')[0]();
       const zeroDimension = await zeroDimensionPending;
-      assert.equal(zeroDimension.ok, false);
+      assert.equal(zeroDimension.ok, false, 'zero-dimension raw image installation is not successful');
       assert.equal(zeroDimension.decodeFailed, true, 'a load event without usable decoded dimensions is a typed failure');
       assert.deepStrictEqual(revoked, ['blob:test-1', 'blob:test-2', 'blob:test-3'], 'zero-dimension load revokes its unusable object URL');
 
@@ -1484,7 +1484,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       api.releaseRawFileMediaSourceForTest(staleMedia);
       settleFetch(response({}, 200, blob));
       const stale = await pending;
-      assert.equal(stale.ok, true);
+      assert.equal(stale.ok, false, 'releasing raw media retires its transport before late bytes arrive');
+      assert.equal(stale.aborted, true, 'the retired raw-media result stays typed as an abort');
       assert.equal(staleMedia.src, undefined, 'an aborted/stale owner cannot install late bytes');
       assert.equal(created.length, 3, 'an aborted/stale owner creates no object URL');
     } finally {
@@ -2380,7 +2381,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.itemIsBackgroundPaneTab('__info__'), true);
     assert.equal(api.itemIsBackgroundPaneTab('1'), false);
     assert.deepStrictEqual(canonical(api.backgroundTabItems()), ['__info__']);
-    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '__yocost__', '3']);
+    assert.deepStrictEqual(canonical(api.inactiveTabItems()), ['__yoagent__', '__chat__', '__finder__', '__differ__', '__tabber__', '__search_history__', '__prefs__', '__debug__', '3']);
   });
 
   test('new file editors reuse the existing editor pane', () => {
@@ -5535,7 +5536,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(infoPanelSource.includes("info-tree-order-label\">${esc(t('info.group.orderBy'))}</span>") && infoPanelSource.includes('info-tree-order-separator') && infoPanelSource.includes('&gt;'), 'YO!info grouping controls render their localized Order by: label before select > select > select > select');
     assert.equal(/<span>\$\{index \+ 1\}<\/span>/.test(infoPanelSource), false, 'YO!info grouping controls do not render numeric 1/2/3/4 labels');
     assert.ok(infoPanelSource.includes('data-info-sort-mode') && !infoPanelSource.includes('data-info-sort-key') && !infoPanelSource.includes('data-info-sort-dir'), 'YO!info toolbar exposes one sort-mode select instead of separate Sort and Dir selects');
-    assert.ok(/ownDelegate\('click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true\}\)/.test(infoPanelSource), 'YO!info path clicks open Finder at the clicked path');
+    assert.ok(/ownDelegate\('click', '\[data-info-open-path\]'[\s\S]*openFileExplorerPane[\s\S]*openFileExplorerAt\(path, \{manualSelection: true, validateKind: true\}\)/.test(infoPanelSource), 'YO!info path clicks validate the target kind before opening Finder');
     assert.ok(/function bindInfoPanel\(panel\)[\s\S]*bindScopedOnce\(panel, 'info-panel'[\s\S]*ownDelegate\('click', '\[data-info-refresh\]'[\s\S]*ownDelegate\('click', '\[data-info-preset\]'[\s\S]*ownDelegate\('click', '\[data-info-open-path\]'/.test(infoPanelSource), 'YO!info tree click actions bind once on the persistent panel root');
     assert.ok(/scope\.ownEvent\('toggle', panel, 'toggle'[\s\S]*details\[data-info-group-key\][\s\S]*setInfoTreeGroupCollapsed/.test(infoPanelSource), 'YO!info tree group collapse state is captured on the persistent panel root');
     assert.ok(/const infoCollapsedGroupKeys = new Set\(\)[\s\S]*function infoTreeGroupCollapseKey[\s\S]*data-info-group-key="\$\{esc\(groupKey\)\}"\$\{openAttr\}/.test(infoSource), 'YO!info group renderer uses stable group keys instead of forcing every details node open');
@@ -7075,9 +7076,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(source.includes('refreshWatchedFilesystemFromRuntime'), false, 'filesystem fallback poll wrapper is removed');
     assert.equal(source.includes("resetRuntimeInterval('filesystem'"), false, 'Finder must not restore the removed client filesystem polling interval');
     assert.equal(source.includes('refreshSettingsFromRuntime'), false, 'settings fallback poll wrapper is removed');
-    assert.ok(source.includes('syncServerWatchRoots({immediate: true, force: true})'), 'SSE ready/reconnect restores watched roots without a browser renewal interval');
+    assert.ok(source.includes('syncServerWatchRoots({immediate: true, force: true, ...watchRootsForceOptions})'), 'SSE ready/reconnect restores watched roots through the generation-keyed registration owner');
+    assert.ok(source.includes('function clientEventReadyWatchRootsGeneration(envelope = {}, recoveryEpisodeId = 0)') && source.includes('clientEventReadyWatchRootsGeneration(envelope, recoveryEpisodeId)'), 'SSE ready repairs use the stable epoch/resource generation plus genuine recovery episode identity');
+    assert.ok(source.includes('clientEventTransportState.disconnectEpisode?.source === source') && !source.includes('watchRootsReadyGeneration'), 'duplicate ready frames cannot mint force generations while real disconnect recovery remains distinct');
+    assert.ok(source.includes("...clientEventWatchRootsForceOptions('roots-changed', clientEventEnvelopeForceGeneration(envelope))"), 'roots_changed supplies its exact event envelope as the force generation');
     assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');
-    assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched directory roots from Finder/session-file state');
+    assert.ok(source.includes('function clientServerWatchRootDescriptor()'), 'client derives watched directory roots and requesting surfaces from Finder/session-file state');
     assert.ok(/function visibleFileEditorWatchFiles\(\)[\s\S]*?activePaneItems\(\)/.test(source), 'client reports active visible editor files separately from directory roots');
     assert.ok(/function backgroundFileEditorWatchFiles\(\)[\s\S]*?paneItems\(\)[\s\S]*?!visible\.has\(path\)[\s\S]*?fileStateFor\(path\)\?\.dirty === true/.test(source), 'client reports only dirty background editor files separately from active visible editor files');
     assert.ok(source.includes('files: visibleFileEditorWatchFiles()'), 'watch state includes visible editor file paths for the fast files_changed stream');
@@ -7086,8 +7090,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
     assert.ok(source.includes("const clientPushEventHandlers = Object.freeze(") && source.includes("for (const type of Object.keys(clientPushEventHandlers))"), 'one browser dispatch table drives every EventSource listener');
     assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
-    assert.ok(/function repairClientEventReadyChannels\(channels\)[\s\S]*refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status through its scoped repair owner');
-    assert.ok(/function repairClientEventReadyChannels\(channels\)[\s\S]*refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status through its scoped repair owner');
+    assert.ok(/function repairClientEventReadyChannels\(channels, watchRootsForceOptions = \{\}\)[\s\S]*refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status through its scoped repair owner');
+    assert.ok(/function repairClientEventReadyChannels\(channels, watchRootsForceOptions = \{\}\)[\s\S]*refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status through its scoped repair owner');
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
@@ -7124,7 +7128,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes("backgroundOwnerRoleSummary('stats-sampler'") && source.includes("backgroundOwnerRoleSummary('session-files'"), 'topbar owner indicator uses the shared stats-sampler and session-files roles');
     assert.equal(source.includes('function infoServerRoleHtml()'), false, 'YO!info does not render a server-role strip');
     assert.equal(source.includes('info-server-role'), false, 'YO!info server-role markup is removed');
-    const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRoots()'), source.indexOf('function clientServerWatchState()'));
+    const watchRootsHelper = source.slice(source.indexOf('function clientServerWatchRootDescriptor()'), source.indexOf('function clientServerWatchState()'));
     assert.equal(watchRootsHelper.includes('fileState.keys()'), false, 'open editor file dirs are not folded into the slower directory watch roots');
     assert.ok(/function applyLayoutSlots[\s\S]*?syncServerWatchRoots\(\)/.test(source), 'layout/tab changes immediately resync the server watch state');
     const fsPushHelper = source.slice(source.indexOf('async function refreshFileExplorerFromPush'), source.indexOf('function expandUserPath'));
@@ -8319,6 +8323,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux('', ['1']);
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     api.setActiveLocaleForTest('en');
+    api.setClientSettingsPatchForTest({file_explorer: {index_exclude_dir_names: ['node_modules', 'backup'], index_exclude_paths: ['glob:**/.uploads/**']}});
     const html = api.preferencesPanelHtmlForTest('');
     const sectionOrder = [...html.matchAll(/data-preference-section="([^"]+)"/g)].map(match => match[1]);
     const expectedOrder = ['general', 'appearance', 'terminal_editor', 'notifications', 'file_explorer', 'uploads', 'yoagent', 'performance', 'chat', 'github', 'cost', 'yolo'];
@@ -8345,8 +8350,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(costHtml.includes('API list prices') && costHtml.includes('Subscription ($0 marginal)'), 'YO!cost offers localized API-list and subscription choices');
     const fileExplorerHtml = sectionHtml('file_explorer');
     assert.ok(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_paths"'), 'Finder Preferences exposes explicit Quick Open exclusions');
+    assert.equal(fileExplorerHtml.includes('data-setting-path="file_explorer.index_exclude_dir_names"'), false, 'Finder Preferences combines directory names and advanced rules into one control');
+    assert.ok(fileExplorerHtml.includes('node_modules\nbackup\nglob:**/.uploads/**'), 'the combined Quick Open control renders directory names and advanced rules in one list');
     assert.ok(/data-setting-path="file_explorer\.index_exclude_paths"[^>]*data-setting-type="list"/.test(fileExplorerHtml), 'Quick Open exclusions use the shared multiline list control');
-    assert.ok(fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents glob and regex rule syntax');
+    assert.ok(fileExplorerHtml.includes('bare directory name') && fileExplorerHtml.includes('glob:&lt;root-relative glob&gt;') && fileExplorerHtml.includes('regex:&lt;regular expression&gt;'), 'Quick Open exclusion help documents bare directory names plus glob and regex rules');
+    assert.deepStrictEqual(canonical(api.quickOpenExclusionSettingPatchForTest(['node_modules', 'backup', '/tmp/generated', 'glob:**/.uploads/**', 'regex:(^|/)target(?:/|$)', 'backup'])), {
+      file_explorer: {
+        index_exclude_dir_names: ['node_modules', 'backup'],
+        index_exclude_paths: ['/tmp/generated', 'glob:**/.uploads/**', 'regex:(^|/)target(?:/|$)'],
+      },
+    }, 'the combined Quick Open control splits exact directory names from advanced path rules without duplicates');
     const excludeItem = {path: 'file_explorer.index_exclude_paths', label: 'Quick Open exclusions', help: 'Exclude generated files with glob or regex patterns.'};
     assert.equal(api.preferenceItemMatches(excludeItem, 'performance ignore glob'), true, 'Preferences search finds Quick Open exclusions through shared performance/ignore/glob aliases');
     const appearanceHtml = sectionHtml('appearance');

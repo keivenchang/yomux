@@ -126,15 +126,13 @@ def tmux_session_target(session: str) -> str:
 
 
 def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
-    """Every client attached to `session`, with its column width and flags.
+    """Every client attached to `session`, with its dimensions and flags.
 
-    Deliberately NOT limited to yolomux-spawned clients: under `window-size largest` ANY wider
-    client pins the shared window wider than the focused browser surface, so the active surface
+    Deliberately NOT limited to yolomux-spawned clients: under `window-size largest` any wider or
+    taller client pins the shared window beyond the focused browser surface, so the active surface
     must be able to see -- and silence -- a hand-attached terminal too, not just sibling browsers.
-    Only columns are collected; rows never overflow the browser the same way, and tmux's status
-    line makes window rows differ from client rows, which would only muddy the comparison.
     """
-    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_flags}"))
+    fmt = "\t".join(("#{client_name}", "#{client_session}", "#{client_width}", "#{client_height}", "#{client_flags}"))
     result = tmux(["list-clients", "-F", fmt])
     if result.returncode != 0:
         return []
@@ -142,13 +140,14 @@ def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
     clean_session = str(session or "")
     for line in result.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 4 or parts[1] != clean_session:
+        if len(parts) != 5 or parts[1] != clean_session:
             continue
         try:
             width = int(parts[2])
+            height = int(parts[3])
         except ValueError:
             continue
-        rows.append({"name": parts[0], "session": parts[1], "width": width, "flags": parts[3]})
+        rows.append({"name": parts[0], "session": parts[1], "width": width, "height": height, "flags": parts[4]})
     return rows
 
 

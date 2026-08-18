@@ -7,9 +7,11 @@ from yolomux_lib import cli
 from tools.instance_isolation import EARLY_PORT_ENV
 from tools.instance_isolation import INSTANCE_ENV
 from tools.instance_isolation import MANAGED_INSTANCE_PORT_ENV
+from tools.instance_isolation import PRODUCT_ROOT_KEYS
 from tools.instance_isolation import YOLOMUX_ROOT_ENV
 from tools.instance_isolation import InstanceIdentity
 from tools.instance_isolation import RowPlan
+from tools.instance_isolation import apply_early_instance_environment
 from tools.instance_isolation import apply_row_plan
 from tools.instance_isolation import assert_early_port
 from tools.instance_isolation import clean_row_environment
@@ -20,10 +22,12 @@ from tools.instance_isolation import resolve_row_plan
 from tools.instance_isolation import scan_port
 from yolomux_lib.infra.root_paths import YolomuxRoots
 
+SHORT_TEMP_ROOT = Path("/tmp/yi")
+
 
 def test_one_instance_descriptor_owns_port_and_managed_capability(tmp_path: Path):
     """W1: one typed descriptor replaces the three drifting same-valued env vars."""
-    res = resolve_instance_environment(7771, {}, platform="Linux", tempdir=tmp_path / "tmp")
+    res = resolve_instance_environment(7771, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
     assert not res.error
     # exactly one identity carrier; the two separate drift vars are gone
     assert INSTANCE_ENV in res.environment
@@ -60,8 +64,11 @@ def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: P
         INSTANCE_ENV: "9999:managed",
         "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": "9999",
         "YOLOMUX_STATE_DIR": "/tmp/foreign/state",
+        "YOLOMUX_CODEX_HOME": "/tmp/foreign/codex",
+        "CODEX_HOME": "relative-codex",
+        "XDG_RUNTIME_DIR": "relative-runtime",
     }
-    child = clean_row_environment(7771, contaminated, platform="Linux", tempdir=tmp_path / "tmp")
+    child = clean_row_environment(7771, contaminated, platform="Linux", tempdir=SHORT_TEMP_ROOT)
 
     # unrelated inherited vars survive
     assert child["PATH"] == "/usr/bin"
@@ -70,15 +77,35 @@ def test_clean_row_environment_strips_inherited_and_resolves_the_row(tmp_path: P
     assert child[YOLOMUX_ROOT_ENV].endswith("/p7771")
     assert "foreign" not in child[YOLOMUX_ROOT_ENV]
     assert "YOLOMUX_STATE_DIR" not in child
+    assert "YOLOMUX_CODEX_HOME" not in child
+    assert "CODEX_HOME" not in child
+    assert "XDG_RUNTIME_DIR" not in child
     # the parent environment is left untouched
     assert contaminated[YOLOMUX_ROOT_ENV] == "/tmp/foreign/p9999"
     assert contaminated[INSTANCE_ENV] == "9999:managed"
 
 
+def test_row_plans_strip_every_inherited_writable_path_across_platform_modes(tmp_path: Path):
+    path_keys = (*PRODUCT_ROOT_KEYS, "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")
+    contaminated = {key: f"relative-{index}" for index, key in enumerate(path_keys)}
+
+    for port, platform_name in ((7770, "Linux"), (7771, "Linux"), (8881, "Darwin")):
+        plan = resolve_row_plan(port, contaminated, platform=platform_name, tempdir=SHORT_TEMP_ROOT)
+        child = apply_row_plan(plan, contaminated)
+
+        assert (set(path_keys) - {YOLOMUX_ROOT_ENV}).isdisjoint(child)
+        assert child.get(YOLOMUX_ROOT_ENV) != contaminated[YOLOMUX_ROOT_ENV]
+        assert set(path_keys).issubset(plan.unset)
+        if port == 7770:
+            assert plan.assign == {}
+        else:
+            assert plan.assign[YOLOMUX_ROOT_ENV].endswith(f"/p{port}")
+
+
 def test_row_plan_resolves_once_serializes_and_applies_without_secrets(tmp_path: Path):
     """W1: one row plan (unset+assign, no inherited values/secrets) resolved once,
     serialized as bounded JSON, and applied to a clean copy of any environment."""
-    plan = resolve_row_plan(7771, {}, platform="Linux", tempdir=tmp_path / "tmp")
+    plan = resolve_row_plan(7771, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
     # the plan carries only roots/ports/identity - never inherited values
     assert INSTANCE_ENV in plan.assign
     assert plan.assign[INSTANCE_ENV] == "7771:managed"
@@ -105,7 +132,7 @@ def test_row_plan_resolves_once_serializes_and_applies_without_secrets(tmp_path:
 def test_exec_mode_strips_inherited_and_applies_the_row_before_the_command(tmp_path: Path):
     """W1: the exec mode applies a resolved plan (strip inherited, overlay row) to
     a copy of the environment and runs the command with that clean environment."""
-    plan = resolve_row_plan(7771, {}, platform="Linux", tempdir=tmp_path / "tmp")
+    plan = resolve_row_plan(7771, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
     plan_file = tmp_path / "plan.json"
     plan_file.write_text(plan.to_json())
 
@@ -113,14 +140,111 @@ def test_exec_mode_strips_inherited_and_applies_the_row_before_the_command(tmp_p
         **os.environ,
         YOLOMUX_ROOT_ENV: "/tmp/foreign/p9999",
         INSTANCE_ENV: "9999:managed",
+        "YOLOMUX_HOST_ARTIFACT_DIR": "/tmp/foreign/artifacts",
+        "PYTHONPYCACHEPREFIX": "/tmp/foreign/pycache",
     }
     result = subprocess.run(
-        [sys.executable, "tools/instance_isolation.py", "exec", "--plan-file", str(plan_file), "--", "printenv", INSTANCE_ENV],
+        [
+            sys.executable,
+            "tools/instance_isolation.py",
+            "exec",
+            "--plan-file",
+            str(plan_file),
+            "--",
+            sys.executable,
+            "-c",
+            "import os; print('|'.join((os.environ.get('YOLOMUX_INSTANCE', ''), os.environ.get('YOLOMUX_HOST_ARTIFACT_DIR', ''), os.environ.get('PYTHONPYCACHEPREFIX', ''))))",
+        ],
         capture_output=True, text=True, env=contaminated,
     )
     assert result.returncode == 0, result.stderr
     # the inherited foreign row was stripped and this row applied
-    assert result.stdout.strip() == "7771:managed"
+    assert result.stdout.strip() == "7771:managed||"
+
+
+def test_explicit_root_preflight_rejects_outside_overrides_and_deep_socket_paths(tmp_path: Path):
+    root = tmp_path / "root"
+    outside = resolve_instance_environment(
+        7771,
+        {YOLOMUX_ROOT_ENV: str(root), "YOLOMUX_CONFIG_DIR": str(tmp_path / "outside")},
+        platform="Linux",
+    )
+    deep = resolve_instance_environment(
+        7771,
+        {YOLOMUX_ROOT_ENV: str(tmp_path / ("x" * 100))},
+        platform="Linux",
+    )
+
+    assert "YOLOMUX_CONFIG_DIR resolves outside YOLOMUX_ROOT" in outside.error
+    assert "too deep for product socket" in deep.error
+
+
+def test_explicit_root_ignores_ambient_relative_xdg_bases(tmp_path: Path):
+    root = Path("/tmp") / f"yolomux-explicit-xdg-{os.getpid()}"
+    values = {
+        YOLOMUX_ROOT_ENV: str(root),
+        "XDG_CONFIG_HOME": "relative-config",
+        "XDG_STATE_HOME": "relative-state",
+        "XDG_CACHE_HOME": "relative-cache",
+        "XDG_RUNTIME_DIR": "relative-runtime",
+    }
+    resolution = resolve_instance_environment(7771, values, platform="Linux")
+
+    assert resolution.error == ""
+    apply_early_instance_environment(["--port", "7771"], values)
+    assert all(key not in values for key in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"))
+
+
+def test_explicit_root_preserves_contained_artifact_and_python_cache_overrides():
+    root = SHORT_TEMP_ROOT / f"explicit-{os.getpid()}"
+    values = {
+        YOLOMUX_ROOT_ENV: str(root),
+        "YOLOMUX_HOST_ARTIFACT_DIR": str(root / "artifacts"),
+        "PYTHONPYCACHEPREFIX": str(root / "pycache"),
+    }
+
+    resolution = resolve_instance_environment(7771, values, platform="Linux")
+
+    assert resolution.error == ""
+    apply_early_instance_environment(["--port", "7771"], values)
+    assert values["YOLOMUX_HOST_ARTIFACT_DIR"] == str(root / "artifacts")
+    assert values["PYTHONPYCACHEPREFIX"] == str(root / "pycache")
+
+
+def test_auto_root_ignores_ambient_artifact_cache_codex_and_xdg_values_and_uses_mapped_tmpdir(tmp_path: Path):
+    temp_root = Path("/tmp/yolomux-configured-temp")
+    managed_root = temp_root / f"y{os.getuid()}" / "p7771"
+    values = {
+        "TMPDIR": str(temp_root),
+        "YOLOMUX_CODEX_HOME": str(managed_root / "codex"),
+        "YOLOMUX_HOST_ARTIFACT_DIR": str(tmp_path / "foreign-artifacts"),
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "foreign-pycache"),
+        "CODEX_HOME": "relative-codex",
+        "XDG_CONFIG_HOME": "relative-config",
+        "XDG_STATE_HOME": "relative-state",
+        "XDG_CACHE_HOME": "relative-cache",
+        "XDG_RUNTIME_DIR": "relative-runtime",
+    }
+    resolution = resolve_instance_environment(7771, values, platform="Linux")
+
+    assert resolution.error == ""
+    assert resolution.environment[YOLOMUX_ROOT_ENV] == str(managed_root)
+
+    applied = dict(values)
+    apply_early_instance_environment(["--port", "7771"], applied)
+    assert applied["YOLOMUX_CODEX_HOME"] == str(managed_root / "codex")
+    assert all(
+        key not in applied
+        for key in (
+            "YOLOMUX_HOST_ARTIFACT_DIR",
+            "PYTHONPYCACHEPREFIX",
+            "CODEX_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_RUNTIME_DIR",
+        )
+    )
 
 
 def test_scan_port_accepts_both_cli_spellings_and_ignores_values_after_double_dash():
@@ -133,8 +257,8 @@ def test_scan_port_accepts_both_cli_spellings_and_ignores_values_after_double_da
 
 
 def test_nondefault_ports_receive_disjoint_single_roots(tmp_path: Path):
-    one = resolve_instance_environment(7771, {}, platform="Linux", home=tmp_path / "home", tempdir=tmp_path / "tmp")
-    two = resolve_instance_environment(7772, {}, platform="Linux", home=tmp_path / "home", tempdir=tmp_path / "tmp")
+    one = resolve_instance_environment(7771, {}, platform="Linux", home=tmp_path / "home", tempdir=SHORT_TEMP_ROOT)
+    two = resolve_instance_environment(7772, {}, platform="Linux", home=tmp_path / "home", tempdir=SHORT_TEMP_ROOT)
     assert not one.error and not two.error
     assert one.environment[YOLOMUX_ROOT_ENV] != two.environment[YOLOMUX_ROOT_ENV]
     # one identity descriptor, not two separate drift vars
@@ -153,7 +277,7 @@ def test_caller_set_root_never_selects_the_managed_local_owner_adapter(tmp_path:
 def test_legacy_default_and_explicit_root_are_quiet(tmp_path: Path):
     assert resolve_instance_environment(7770, {}, platform="Linux").environment == {}
     assert is_managed_instance_port(7770, {}) is False
-    custom = {YOLOMUX_ROOT_ENV: str(tmp_path / "root")}
+    custom = {YOLOMUX_ROOT_ENV: f"/tmp/yolomux-explicit-{os.getpid()}"}
     assert resolve_instance_environment(7771, custom, platform="Linux").error == ""
 
 
@@ -170,7 +294,7 @@ def test_legacy_individual_overrides_are_left_to_the_product_resolver(tmp_path: 
 
 
 def test_startup_path_line_names_auto_derived_root_and_resolved_paths(tmp_path: Path):
-    resolution = resolve_instance_environment(17775, {}, platform="Linux", tempdir=tmp_path / "tmp")
+    resolution = resolve_instance_environment(17775, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
     root = Path(resolution.environment[YOLOMUX_ROOT_ENV])
     paths = YolomuxRoots(root / "config", root / "state", root / "cache", root / "codex", root / "runtime", root)
 

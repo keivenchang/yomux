@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -32,9 +33,13 @@ from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import run_fixture_cleanup_phases
+from tests.serving_process import pid_is_serving
+from tests.serving_process import serving_process_table
 from yolomux_lib import auth as auth_module
 from yolomux_lib import common
 from yolomux_lib import server_auth
+from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
+from yolomux_lib.local_services.registry import inherited_python_path
 from yolomux_lib.stats_current import client as stats_client
 from yolomux_lib.stats_current import service as stats_service
 from yolomux_lib.stats_current import storage
@@ -71,6 +76,8 @@ def _launch_server(port: int, session: str, log_path: Path, runtime_dir: Path) -
     environment["YOLOMUX_START_LOAD_WAIT_SECONDS"] = "30"
     environment["YOLOMUX_RUNTIME_DIR"] = str(runtime_dir)
     environment["PYTHONUNBUFFERED"] = "1"
+    environment = child_process_artifact_environment(REPO_ROOT, environ=environment)
+    environment["PYTHONPATH"] = inherited_python_path(environment)
     process = subprocess.Popen(
         (
             sys.executable,
@@ -155,21 +162,15 @@ def test_ring_server_stop_preserves_retirement_failure_after_stopping_process(mo
 
 
 def _pid_alive(pid: int) -> bool:
-    return pid > 0 and Path(f"/proc/{pid}").exists()
+    return pid > 0 and pid_is_serving(pid)
 
 
 def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object]]:
     matches = []
-    for process_dir in Path("/proc").iterdir():
-        if not process_dir.name.isdigit():
-            continue
+    for pid, process in serving_process_table().items():
         try:
-            arguments = [
-                item.decode("utf-8", errors="replace")
-                for item in (process_dir / "cmdline").read_bytes().split(b"\x00")
-                if item
-            ]
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            arguments = shlex.split(process.command)
+        except ValueError:
             continue
         if "yolomux_lib.stats_current.service" not in arguments:
             continue
@@ -178,9 +179,9 @@ def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object
             socket_value = arguments[arguments.index("--socket") + 1]
         except (IndexError, ValueError):
             continue
-        if database != str(database_path):
+        if Path(database).resolve() != database_path.resolve():
             continue
-        matches.append({"pid": int(process_dir.name), "socket": socket_value, "arguments": arguments})
+        matches.append({"pid": pid, "socket": socket_value, "arguments": arguments})
     return matches
 
 
@@ -209,7 +210,7 @@ def _stop_fixture_statsd(
 ) -> bool:
     if not _pid_alive(pid):
         return False
-    cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace")
+    cmdline = serving_process_table()[pid].command
     assert "yolomux_lib.stats_current.service" in cmdline, cmdline
     assert str(paths.state_dir) in cmdline, cmdline
     expected_socket = stats_service.safe_socket_path(requested_socket, prefix="yolomux-statsd")

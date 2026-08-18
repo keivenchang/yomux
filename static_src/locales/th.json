@@ -376,6 +376,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "กราฟ",
+  "debug.tab.cost": "ค่าใช้จ่าย",
   "debug.tab.services": "ดีมอน",
   "debug.tab.logs": "บันทึก",
   "debug.waitingForServerStats": "กำลังรอสถิติเซิร์ฟเวอร์",

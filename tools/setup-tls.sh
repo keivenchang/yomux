@@ -50,15 +50,21 @@ done
 
 command -v openssl >/dev/null || die "openssl not found"
 command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
+CA_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-product-path YOLOMUX_CA_DIR "$CA_DIR")" \
+  || die "CA directory refused by product-root policy"
 if [ -z "$STATE_DIR" ]; then
-  STATE_DIR="$(cd "$REPO_ROOT" && "$PYTHON_BIN" -c 'from yolomux_lib.common import STATE_DIR; print(STATE_DIR)')"
+  STATE_DIR="$("$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+    || die "state directory refused by product-root policy"
+else
+  STATE_DIR="$(YOLOMUX_STATE_DIR="$STATE_DIR" "$PYTHON_BIN" "$REPO_ROOT/tools/instance_isolation.py" resolve-state-dir)" \
+    || die "state directory refused by product-root policy"
 fi
 TLS_DIR="$STATE_DIR/tls"
 
 # --- Reuse the server's portable SAN owner, then append explicit extras.
 build_san() {
   local out e
-  out="$(cd "$REPO_ROOT" && "$PYTHON_BIN" -c 'from yolomux_lib.cli import self_signed_san; print(self_signed_san())')"
+  out="$("$PYTHON_BIN" "$REPO_ROOT/tools/tls_san.py")"
   for e in "${EXTRA_SANS[@]}"; do
     if printf '%s' "$e" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$|:'; then
       out="$out,IP:$e"

@@ -1329,6 +1329,8 @@ def test_metadata_warm_view_task_populates_cache_entries_from_a_real_session_wor
     assert entry["value"][0]["number"] == 5
     assert 0 < entry["ttl_remaining"] <= metadata_module.METADATA_CACHE_TTL_SECONDS
     assert result["profile"]["work"]["sessions"] == 1
+    assert result["profile"]["work"]["jobd_work_graph_rebuild"] == 1
+    assert result["profile"]["work"]["provider_metadata_rebuild"] == 1
     assert result["profile"]["work"]["git_spawns"] > 0
     assert result["profile"]["work"]["github_http_calls"] == 0
     assert result["profile"]["work"]["linear_http_calls"] == 0
@@ -1737,6 +1739,55 @@ def test_jobd_supersedes_stale_queued_generations_and_keeps_payloads_bounded(tmp
     assert oversized == {"ok": False, "error": "payload too large"}
 
 
+def test_jobd_submission_encodes_payload_once_and_preserves_exact_boundary_and_default_key(tmp_path, monkeypatch):
+    empty = json.dumps(
+        {"text": ""},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload = {"text": "x" * (jobd.JOBD_MAX_PAYLOAD_BYTES - len(empty))}
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    oversized_payload = {"text": payload["text"] + "x"}
+    assert len(encoded) == jobd.JOBD_MAX_PAYLOAD_BYTES
+
+    original_dumps = jobd.json.dumps
+    payload_encodes = 0
+
+    def counted_dumps(value, *args, **kwargs):
+        nonlocal payload_encodes
+        if value is payload:
+            payload_encodes += 1
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(jobd.json, "dumps", counted_dumps)
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    accepted = service._submit({
+        "task": "text_facts",
+        "payload": payload,
+        "priority": "interactive",
+    })
+    rejected = service._submit({
+        "task": "text_facts",
+        "payload": oversized_payload,
+        "priority": "interactive",
+    })
+
+    assert accepted["ok"] is True and accepted["coalesced"] is False
+    assert rejected == {"ok": False, "error": "payload too large"}
+    assert payload_encodes == 1
+    assert len(service.records) == 1
+    record = next(iter(service.records.values()))
+    assert record.payload == encoded
+    assert record.coalesce_key == f"text_facts:{encoded.hex()}"[:256]
+
+
 def test_jobd_prevents_maintenance_starvation_and_times_out_before_worker_start(tmp_path, monkeypatch):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     interactive = [
@@ -2054,6 +2105,41 @@ def test_jobd_coalesces_identical_in_flight_point_reads_into_one_execution(tmp_p
     assert changed_metadata["state"] == "none" and changed_body == b""
 
 
+@pytest.mark.parametrize("task", ["session_files_view", "metadata_warm_view"])
+def test_jobd_completion_validates_and_aggregates_json_result_with_one_parse(tmp_path, monkeypatch, task):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    result = json.dumps({
+        "profile": {"phases": {}, "work": {"sessions": 1}},
+    }).encode("utf-8")
+    decoded_inputs = []
+    real_loads = jobd.json.loads
+
+    def counted_loads(value, *args, **kwargs):
+        decoded_inputs.append(value)
+        return real_loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(jobd.json, "loads", counted_loads)
+    completed = service._queue_record(task, {}, "maintenance", 1, f"{task}:completed")
+    completed.status = "running"
+    completed.future = Future()
+    completed.future.set_result(result)
+    service._pump()
+
+    malformed = service._queue_record(task, {}, "maintenance", 2, f"{task}:malformed")
+    malformed.status = "running"
+    malformed.future = Future()
+    malformed.future.set_result(b"not-json")
+    service._pump()
+
+    assert completed.status == "completed"
+    assert malformed.status == "failed"
+    assert "Expecting value" in malformed.error
+    assert decoded_inputs == [result.decode("utf-8"), "not-json"]
+    assert service.product_counters[task]["completed"] == 1
+    assert service.product_counters[task]["failed"] == 1
+    assert service.product_work_totals[task] == {"sessions": 1}
+
+
 def test_jobd_rejects_malformed_worker_result_and_bounds_retained_records(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     malformed = service._queue_record("text_facts", {"text": "bad"}, "interactive", 1, "bad")
@@ -2259,14 +2345,15 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, and v22 retires the blocking `relay` action in favor of zero-wait produce plus a web-side product poll.
-    assert jobd.JOBD_PROTOCOL_VERSION == 23
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, v22 retires the blocking `relay` action, v23 adds private file-backed artifacts, and v24 registers queued-delivery compaction.
+    assert jobd.JOBD_PROTOCOL_VERSION == 24
     assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS
     assert "tabber_activity_view" in jobd.REGISTERED_TASKS
     assert "metadata_warm_view" in jobd.REGISTERED_TASKS
+    assert "queued_delivery_compact" in jobd.REGISTERED_TASKS
     assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION
 
 
@@ -2735,6 +2822,7 @@ def test_jobd_runtime_status_aggregates_broker_and_reported_workers(tmp_path, mo
             "started_at": 123.0,
             "worker_count": 2,
             "worker_pids": [101, 102],
+            "owner_invocations": {"jobd_work_graph_rebuild": 7, "provider_metadata_rebuild": 3},
         },
     })
     captured = {}
@@ -2751,6 +2839,7 @@ def test_jobd_runtime_status_aggregates_broker_and_reported_workers(tmp_path, mo
     assert captured == {"parent_pid": 100, "worker_pids": [101, 102]}
     assert status["started_at"] == 123.0
     assert status["worker_count"] == 2
+    assert status["owner_invocations"] == {"jobd_work_graph_rebuild": 7, "provider_metadata_rebuild": 3}
     assert status["resources"] == {"cpu_percent": 12.5, "rss_bytes": 300, "process_count": 3}
 
 
@@ -2852,11 +2941,15 @@ def test_jobd_records_only_bounded_session_files_phase_aggregates(tmp_path):
     assert status["source_change_counters"] == {"initial": 1}
     assert status["session_files_requester_counters"] == {"api-session-files": 1}
 
-    service._record_phase_runtime_ms("metadata_warm_view", json.dumps({
-        "profile": {"work": {"sessions": 2, "entries": 5, "git_spawns": 7, "github_http_calls": 3, "linear_http_calls": 1, "result_bytes": 256, "unbounded": 99}},
-    }).encode("utf-8"))
+    service._record_phase_runtime_ms("metadata_warm_view", {
+        "profile": {"work": {"sessions": 2, "entries": 5, "git_spawns": 7, "github_http_calls": 3, "linear_http_calls": 1, "result_bytes": 256, "jobd_work_graph_rebuild": 2, "provider_metadata_rebuild": 1, "unbounded": 99}},
+    })
     assert service.common_status()["product_work_totals"]["metadata_warm_view"] == {
         "sessions": 2, "entries": 5, "git_spawns": 7, "github_http_calls": 3, "linear_http_calls": 1, "result_bytes": 256,
+    }
+    assert service.common_status()["owner_invocations"] == {
+        "jobd_work_graph_rebuild": 2,
+        "provider_metadata_rebuild": 1,
     }
 
     changed = service._queue_record("session_files_view", {}, "freshness", 2, "session-files-changed")
@@ -2869,6 +2962,46 @@ def test_jobd_records_only_bounded_session_files_phase_aggregates(tmp_path):
     service._pump()
     assert service.common_status()["source_change_counters"] == {"initial": 1, "repository-state": 1, "dirty-generation-changed": 1}
     assert service.common_status()["session_files_requester_counters"] == {"api-session-files": 1, "unknown": 1}
+
+
+def test_jobd_metadata_owner_invocations_do_not_advance_for_ten_unchanged_submissions(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    result = json.dumps({
+        "entries": {},
+        "profile": {"work": {
+            "sessions": 1,
+            "jobd_work_graph_rebuild": 1,
+            "provider_metadata_rebuild": 1,
+        }},
+    }).encode("utf-8")
+
+    first = service._queue_record("metadata_warm_view", {"sessions": {}}, "maintenance", 1, "metadata:same")
+    first.status = "running"
+    first.future = Future()
+    first.future.set_result(result)
+    service._pump()
+    baseline = service.common_status()["owner_invocations"]
+
+    for _revision in range(10):
+        response = service._submit({
+            "task": "metadata_warm_view",
+            "payload": {"sessions": {}},
+            "priority": "maintenance",
+            "generation": 1,
+            "coalesce_key": "metadata:same",
+        })
+        assert response["coalesced"] is True
+    assert service.common_status()["owner_invocations"] == baseline
+
+    changed = service._queue_record("metadata_warm_view", {"sessions": {}}, "maintenance", 2, "metadata:changed")
+    changed.status = "running"
+    changed.future = Future()
+    changed.future.set_result(result)
+    service._pump()
+    assert service.common_status()["owner_invocations"] == {
+        "jobd_work_graph_rebuild": baseline["jobd_work_graph_rebuild"] + 1,
+        "provider_metadata_rebuild": baseline["provider_metadata_rebuild"] + 1,
+    }
 
 
 def test_jobd_records_session_files_requester_when_product_is_accepted(tmp_path):

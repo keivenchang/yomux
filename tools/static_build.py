@@ -155,7 +155,7 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
         ("debug subtab controls", "function debugSubTabButtonHtml", "toolbarButtonHtml("),
     ),
     "static_src/js/yolomux/85_debug_panel.js": (
-        ("debug panel close controls", "panelDetailCloseButtonHtml(yocostItemId)", "panelDetailCloseButtonHtml(debugPaneItemId)"),
+        ("debug panel close controls", "panelDetailCloseButtonHtml(debugPaneItemId)"),
         ("debug subtab dispatch", "'debug-subtab':"),
     ),
     "static_src/js/yolomux/98_terminal_runtime_facade.js": (
