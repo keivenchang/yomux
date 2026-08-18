@@ -6337,7 +6337,7 @@ body :is(
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
 }
 .js-debug-line--systemCpu {
-  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-rose));
 }
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);

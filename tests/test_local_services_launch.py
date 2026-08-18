@@ -104,6 +104,7 @@ def test_process_record_diagnostic_rejects_a_real_unreaped_zombie():
         assert registry_mod.process_state(child) == "Z"
         identity = current_host_identity()
         record = identity.process_record_fields(pid=child, start_identity=registry_mod.process_start_identity(child))
+        assert registry_mod.process_record_diagnostic(record).current is False
         assert registry_mod.process_record_diagnostic(record, table=registry_mod.bounded_process_table()).current is False
     finally:
         os.waitpid(child, 0)
@@ -195,6 +196,49 @@ def test_adopted_demand_daemon_is_reaped_not_left_a_zombie(tmp_path):
             os.close(write_fd)
         except OSError:
             pass
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
+            pass
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="adopted-child recovery is POSIX-only")
+def test_ensure_started_reaps_an_adopted_child_that_already_exited(tmp_path, monkeypatch):
+    """A daemon that exits before post-reexec adoption must not block replacement."""
+
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    spawned = []
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 24),
+        popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
+    )
+    try:
+        deadline = time.monotonic() + 2.0
+        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry_mod.process_state(child) == "Z"
+        registry._write_record({
+            **current_host_identity().process_record_fields(
+                pid=child,
+                start_identity=registry_mod.process_start_identity(child),
+            ),
+            "service": "statsd",
+            "socket": str(registry.socket_path),
+            "protocol_version": 24,
+            "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+            "launcher_pid": os.getpid(),
+        })
+        monkeypatch.setattr(registry, "_request", lambda *args, **kwargs: {})
+
+        assert registry.ensure_started() is False
+        assert spawned == [True]
+        assert not registry.record_path.exists()
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child, os.WNOHANG)
+    finally:
         try:
             os.waitpid(child, 0)
         except ChildProcessError:
