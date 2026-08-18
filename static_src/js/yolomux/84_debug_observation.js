@@ -393,8 +393,8 @@ function debugGraphAgentStatusSeriesDef(key) {
     hasData: bucket => Number(bucket?.agentActivitySamples || 0) > 0,
   };
 }
-// One theme-aware series palette for every chart family. The active-pane accent is chrome, not data:
-// a red/orange accent must not turn CPU series and the selection overlay into the same visual state.
+// One theme-aware series palette for every chart family. System CPU deliberately owns the red
+// data identity; its dotted cadence keeps it distinct when red also appears in surrounding chrome.
 const jsDebugGraphSeriesPalette = Object.freeze({
   cyan: 'var(--js-debug-agent-token-cyan)',
   orange: 'var(--js-debug-agent-token-orange)',
@@ -403,7 +403,7 @@ const jsDebugGraphSeriesPalette = Object.freeze({
   turquoise: 'var(--js-debug-agent-token-turquoise)',
   rose: 'var(--js-debug-agent-token-rose)',
   violet: 'var(--js-debug-agent-token-violet)',
-  systemCpu: 'var(--js-debug-agent-token-cyan)',
+  systemCpu: 'var(--js-debug-agent-token-rose)',
   currentProcessCpu: 'var(--js-debug-agent-token-violet)',
 });
 const jsDebugGraphAgentTokenColors = Object.freeze([
@@ -451,7 +451,7 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphSeriesPalette.systemCpu, value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'dot', color: jsDebugGraphSeriesPalette.systemCpu, value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
     key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
     value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,

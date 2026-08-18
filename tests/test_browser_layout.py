@@ -1207,7 +1207,16 @@ def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(brows
             if (!chart || !svg) return false;
             const rect = svg.getBoundingClientRect();
             const ratio = 0.45;
-            debugGraphSetHoverTooltip(mount, {target: svg, clientX: rect.left + rect.width * ratio, clientY: rect.top + rect.height / 2}, ratio);
+            const timestamp = domain.startMs + (domain.endMs - domain.startMs) * ratio;
+            const data = jsDebugGraphHoverChartData.get('serversLoad');
+            const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+            const lowSeries = data.groupSeries.find(series => series.key === 'serviceLoad:low');
+            const axisMax = Number(chart.dataset.jsDebugChartAxisMax);
+            const scale = chart.dataset.jsDebugChartScale === 'broken-linear'
+              ? {mode: 'broken-linear', threshold: Number(chart.dataset.jsDebugChartAxisBreak), upperFraction: 0.18}
+              : chart.dataset.jsDebugChartScale === 'log';
+            const lowY = debugGraphPlotYForValue(lowSeries.values[index], axisMax, scale);
+            debugGraphSetHoverTooltip(mount, {target: svg, clientX: rect.left + rect.width * ratio, clientY: rect.top + rect.height * (lowY / jsDebugGraphGeometry.height)}, ratio);
             const tooltip = chart.querySelector('[data-js-debug-hover-tooltip]');
             const result = {
               scale: chart.dataset.jsDebugChartScale,
@@ -1223,6 +1232,8 @@ def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(brows
     assert result["scale"] == "broken-linear", result
     assert float(result["breakValue"]) > 0, result
     assert result["visible"] is True and re.search(r"low daemon: 5(?:\.0+)?%", result["tooltip"]), result
+    assert "spike daemon" not in result["tooltip"], result
+    assert not re.search(r"\b(?:min|avg|max)\b", result["tooltip"], re.IGNORECASE), result
 
 
 def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_persist(browser, tmp_path):

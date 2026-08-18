@@ -282,6 +282,8 @@ test('CPU charts preserve multi-core peaks and expand their axis beyond 100%', (
   const systemCpu = /\{key: 'systemCpu',[^\n]+/.exec(source)?.[0] || '';
   assert.doesNotMatch(cpuGroup, /fixedMax: 100/);
   assert.doesNotMatch(systemCpu, /Math\.min\(100/);
+  assert.match(systemCpu, /linePattern: 'dot'/, 'System CPU owns the dotted stroke identity');
+  assert.match(systemCpu, /color: jsDebugGraphSeriesPalette\.systemCpu/, 'System CPU owns the semantic red palette entry');
   const context = {Number, Math, result: null, debugGraphNiceAxisMax: value => Math.ceil(value / 10) * 10};
   vm.runInNewContext(`${axisSource}\nresult = debugGraphChartAxisMax({unit: 'percent'}, 157.973);`, context);
   assert.equal(context.result, 160);
@@ -346,7 +348,7 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
 });
 
-test('CPU series keep a theme-independent semantic palette under the red accent', () => {
+test('CPU reserves red dotted for System and violet solid for yolomux.py under the red accent', () => {
   const paletteSource = slice(
     source,
     'const jsDebugGraphSeriesPalette = Object.freeze({',
@@ -370,7 +372,7 @@ test('CPU series keep a theme-independent semantic palette under the red accent'
     ${paletteSource}
     ${renderSource}
     ${sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues')}
-    const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'solid', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
+    const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'dot', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
     const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
     result = {
       colors: [debugGraphSeriesDisplayColor(system), debugGraphSeriesDisplayColor(current)],
@@ -378,12 +380,14 @@ test('CPU series keep a theme-independent semantic palette under the red accent'
       legends: [debugGraphLegendSwatchHtml(system), debugGraphLegendSwatchHtml(current)],
     };
   `, context);
-  assert.deepEqual([...context.result.colors], ['var(--js-debug-agent-token-cyan)', 'var(--js-debug-agent-token-violet)']);
-  assert.match(context.result.lines[0], /--js-debug-series-color: var\(--js-debug-agent-token-cyan\)/);
+  assert.deepEqual([...context.result.colors], ['var(--js-debug-agent-token-rose)', 'var(--js-debug-agent-token-violet)']);
+  assert.match(context.result.lines[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
+  assert.match(context.result.lines[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.lines[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
   assert.match(context.result.lines[0], /<title>system avg CPU %<\/title>/);
   assert.match(context.result.lines[1], /<title>yolomux\.py \(web\) CPU %<\/title>/);
-  assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-cyan\)/);
+  assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
+  assert.match(context.result.legends[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.legends[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
 
   const presetSource = slice(editorSettingsSource, 'const UI_COLOR_CHOICES =', '\nfunction normalizeEditorCursorColor(');
@@ -402,12 +406,11 @@ test('CPU series keep a theme-independent semantic palette under the red accent'
   };
   const rgb = value => [1, 3, 5].map(index => parseInt(value.slice(index, index + 2), 16));
   const distance = (left, right) => Math.hypot(...rgb(left).map((value, index) => value - rgb(right)[index]));
-  const systemColors = themeTokenValues('js-debug-agent-token-cyan');
+  const systemColors = themeTokenValues('js-debug-agent-token-rose');
   const currentColors = themeTokenValues('js-debug-agent-token-violet');
   for (const theme of ['dark', 'light']) {
     const redAccent = presetContext.result[theme].bright;
-    assert.ok(distance(systemColors[theme], currentColors[theme]) >= 120, `${theme}: simultaneous CPU series stay separated`);
-    assert.ok(distance(systemColors[theme], redAccent) >= 120, `${theme}: system CPU stays separated from red selection chrome`);
+    assert.ok(distance(systemColors[theme], currentColors[theme]) >= 70, `${theme}: red System and violet web series stay separated`);
     assert.ok(distance(currentColors[theme], redAccent) >= 120, `${theme}: current web CPU stays separated from red selection chrome`);
   }
 });

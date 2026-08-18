@@ -2499,30 +2499,64 @@ function debugGraphHoverBucketIndex(buckets, timestamp) {
   return timestamp < end ? index : -1;
 }
 
+function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+  const data = jsDebugGraphHoverChartData.get(String(chart?.dataset?.jsDebugChart || ''));
+  if (data?.group?.key !== 'serversLoad') return null;
+  const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+  if (index < 0) return null;
+  const available = data.groupSeries.filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  if (!available.length) return null;
+  const directKey = String(event?.target?.closest?.('[data-js-debug-series]')?.dataset?.jsDebugSeries || '');
+  const direct = available.find(series => series.key === directKey);
+  if (direct) return direct;
+  const svg = chart?.querySelector?.('.js-debug-line-chart');
+  const rect = svg?.getBoundingClientRect?.();
+  const clientY = Number(event?.clientY);
+  if (!Number.isFinite(clientY) || !Number.isFinite(Number(rect?.top)) || !Number.isFinite(Number(rect?.height)) || Number(rect.height) <= 0) return available[0];
+  const pointerY = ((clientY - Number(rect.top)) / Number(rect.height)) * jsDebugGraphGeometry.height;
+  const axisMax = Math.max(1, Number(chart?.dataset?.jsDebugChartAxisMax) || 0);
+  const scaleName = String(chart?.dataset?.jsDebugChartScale || 'linear');
+  const scale = scaleName === 'broken-linear'
+    ? {mode: 'broken-linear', threshold: Number(chart?.dataset?.jsDebugChartAxisBreak) || axisMax, upperFraction: 0.18}
+    : scaleName === 'log';
+  return available.reduce((nearest, series) => {
+    const startValue = Math.max(0, Number(series.values?.[index]) || 0);
+    const startTime = Number(series.times?.[index]);
+    const nextIndex = index + 1;
+    const nextAvailable = nextIndex < series.values.length
+      && (!Array.isArray(series.hasDataValues) || series.hasDataValues[nextIndex] === true);
+    const nextTime = Number(series.times?.[nextIndex]);
+    const nextValue = Math.max(0, Number(series.values?.[nextIndex]) || 0);
+    const fraction = nextAvailable && Number.isFinite(startTime) && Number.isFinite(nextTime) && nextTime > startTime
+      ? Math.max(0, Math.min(1, (Number(timestamp) - startTime) / (nextTime - startTime)))
+      : 0;
+    const renderedValue = startValue + ((nextValue - startValue) * fraction);
+    const distance = Math.abs(debugGraphPlotYForValue(renderedValue, axisMax, scale) - pointerY);
+    return !nearest || distance < nearest.distance ? {series, distance} : nearest;
+  }, null)?.series || available[0];
+}
+
+function debugGraphHoverDetailAtTime(chart, timestamp, event) {
+  const key = String(chart?.dataset?.jsDebugChart || '');
+  const data = jsDebugGraphHoverChartData.get(key);
+  if (data?.group?.key === 'serversLoad') {
+    const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+    const series = debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event);
+    if (index < 0 || !series) return {text: debugGraphValueText(0, data.group.unit), seriesKey: ''};
+    return {
+      text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+      seriesKey: series.key,
+    };
+  }
+  return {text: debugGraphHoverValueAtTime(chart, timestamp), seriesKey: ''};
+}
+
 function debugGraphHoverValueAtTime(chart, timestamp) {
   const key = String(chart?.dataset?.jsDebugChart || '');
   const data = jsDebugGraphHoverChartData.get(key);
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
-  if (data.group.key === 'serversLoad') {
-    const bucket = data.buckets[index];
-    const details = data.groupSeries.flatMap(series => {
-      const key = String(series.key || '').replace(/^serviceLoad:/, '');
-      const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
-      const samples = Number(item?.cpuSamples || 0);
-      if (samples <= 0) return [];
-      const avg = Number(item.cpuTotalPercent || 0) / samples;
-      const mode = debugGraphServiceLoadEffectiveMode(data.buckets);
-      const rangeAvailable = item.cpuRangeAvailable === true;
-      return [`${series.label}: ${debugGraphValueText(debugGraphServiceLoadValue(item, mode), 'percent')} (${t('debug.graph.serviceLoad.range', {
-        minimum: rangeAvailable ? debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent') : t('common.notAvailable'),
-        average: debugGraphValueText(avg, 'percent'),
-        maximum: rangeAvailable ? debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent') : t('common.notAvailable'),
-      })})`];
-    });
-    return details.join(' · ') || debugGraphValueText(0, data.group.unit);
-  }
   const series = data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
@@ -2563,13 +2597,14 @@ function debugGraphTokenHoverDetailAtTime(chart, timestamp) {
   return {span, detail: `${value} · ${debugSystemNumber(sampleCount)} ${sampleLabel}`, noData: false};
 }
 
-function debugGraphHoverProvenanceAtTime(chart, timestamp) {
+function debugGraphHoverProvenanceAtTime(chart, timestamp, seriesKey = '') {
   const key = String(chart?.dataset?.jsDebugChart || '');
   const data = jsDebugGraphHoverChartData.get(key);
   if (!data) return [];
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return [];
   return data.groupSeries.flatMap(series => {
+    if (seriesKey && series.key !== seriesKey) return [];
     if (Array.isArray(series.hasDataValues) && series.hasDataValues[index] !== true) return [];
     const provenance = Array.isArray(series.provenanceValues) ? series.provenanceValues[index] : null;
     return provenance ? [{series: series.key, ...provenance}] : [];
@@ -7415,10 +7450,11 @@ function debugGraphSetHoverTooltip(panel, event, ratio) {
   if (!Number.isFinite(spanMs) || spanMs <= 0) return;
   const timestamp = Number(domain.startMs) + (Math.max(0, Math.min(1, Number(ratio))) * spanMs);
   const tokenDetail = debugGraphTokenHoverDetailAtTime(chart, timestamp);
-  tooltip.querySelector('[data-js-debug-hover-max]').textContent = tokenDetail?.span || debugGraphHoverValueAtTime(chart, timestamp);
+  const hoverDetail = tokenDetail ? null : debugGraphHoverDetailAtTime(chart, timestamp, event);
+  tooltip.querySelector('[data-js-debug-hover-max]').textContent = tokenDetail?.span || hoverDetail?.text || debugGraphHoverValueAtTime(chart, timestamp);
   tooltip.querySelector('[data-js-debug-hover-time]').textContent = tokenDetail?.detail || debugGraphExactTimeLabel(timestamp);
   tooltip.toggleAttribute('data-js-debug-hover-no-data', tokenDetail?.noData === true);
-  const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp);
+  const provenance = debugGraphHoverProvenanceAtTime(chart, timestamp, hoverDetail?.seriesKey || '');
   if (provenance.length) tooltip.setAttribute('data-js-debug-hover-provenance', JSON.stringify(provenance));
   else tooltip.removeAttribute('data-js-debug-hover-provenance');
   const sourceText = debugGraphHeldProvenanceText(provenance);

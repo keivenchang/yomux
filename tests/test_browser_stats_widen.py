@@ -527,6 +527,13 @@ def _cpu_graph_state(harness: Any) -> dict[str, Any]:
         const cpuAxisMax = Number(cpuChart?.dataset?.jsDebugChartAxisMax || 0);
         const lines = [...document.querySelectorAll('.js-debug-panel polyline[data-js-debug-series]')];
         const cpuLines = lines.filter(line => line.dataset.jsDebugSeries === 'systemCpu');
+        const systemLine = cpuLines[0] || null;
+        const systemStyle = systemLine ? getComputedStyle(systemLine) : null;
+        const colorProbe = document.createElement('span');
+        colorProbe.style.color = systemStyle?.getPropertyValue('--js-debug-agent-token-rose') || '';
+        document.body.append(colorProbe);
+        const expectedSystemStroke = getComputedStyle(colorProbe).color;
+        colorProbe.remove();
         const points = cpuLines.flatMap(line => String(line.getAttribute('points') || '')
           .trim().split(/\s+/).filter(Boolean).map(point => {
             const [x, y] = point.split(',').map(Number);
@@ -542,6 +549,10 @@ def _cpu_graph_state(harness: Any) -> dict[str, Any]:
           cpuPointCount: points.length,
           cpuAxisMax,
           points,
+          systemStroke: systemStyle?.stroke || '',
+          expectedSystemStroke,
+          systemDasharray: systemStyle?.strokeDasharray || '',
+          systemLinePattern: systemLine?.dataset?.jsDebugLinePattern || '',
           historyState: graph?.dataset?.jsDebugHistoryState || '',
           busy: graph?.getAttribute('aria-busy') || '',
           overlayHidden: overlay?.hidden === true,
@@ -558,6 +569,9 @@ def _assert_seeded_cpu_graph(state: dict[str, Any]) -> None:
     assert state["cpuAxisMax"] == 50, state
     assert all(8 <= point["y"] <= 116 for point in state["points"]), state
     assert all(abs(point["percent"] - CPU_GRAPH_PERCENT) < 0.2 for point in state["points"]), state
+    assert state["systemStroke"] == state["expectedSystemStroke"], state
+    assert state["systemLinePattern"] == "dot", state
+    assert state["systemDasharray"] not in {"", "none", "0px"}, state
     assert state["historyState"] == "ready", state
     assert state["busy"] == "false", state
     assert state["overlayHidden"] is True, state
