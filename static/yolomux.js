@@ -1972,7 +1972,15 @@ const tabStripOverflowCheckSet = new Set();
 let tabStripOverflowCheckFrame = null;
 let latencySamples = [];
 let tabMetaVisible = readStoredTabMetaVisible();
-let authRedirectStarted = false;
+// Authentication expiry is one one-way browser transition: retain its terminal outcome, redirect
+// claim, visible state, and transport retirements together so no poller invents a local retry policy.
+const authRedirectStarted = {
+  redirect: false,
+  terminalError: null,
+  loginUrl: '',
+  retirements: new Map(),
+};
+let devAutoReloadSource = null;
 let openAppMenuId = null;
 let openAppMenuPinned = false;
 let openAppMenuOpenedAt = 0;
@@ -2822,6 +2830,13 @@ function apiFetchResponseWithDeadline(response, deadlineState) {
 }
 
 async function apiFetch(url, options = {}, internalOptions = {}) {
+  if (terminalAuthenticationActive() && String(url || '').split(/[?#]/, 1)[0].startsWith('/api/')) {
+    const route = typeof registeredCommandRouteForRequest === 'function'
+      ? registeredCommandRouteForRequest(url, options)
+      : null;
+    if (!terminalAuthenticationRequestIsBackground(url, options, route)) redirectToLoginUrl(authRedirectStarted.loginUrl);
+    throw authRedirectStarted.terminalError;
+  }
   const transportLifecycle = pageTransportLifecycle;
   const transportToken = transportLifecycle.begin();
   const requestOptions = {...options};
@@ -2921,15 +2936,15 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
     noteApiDebugHeaders(debugEvent, url, startedAt);
   }
   if (response.status === 401 && internalOptions.returnUnauthorizedResponse !== true) {
-    if (registeredCommandRouteForRequest(url, requestOptions)?.contractClass === 'background') {
+    const terminalError = claimTerminalAuthentication(response);
+    const route = registeredCommandRouteForRequest(url, requestOptions);
+    if (terminalAuthenticationRequestIsBackground(url, requestOptions, route)) {
       cleanup();
-      const error = new Error('authentication required');
-      error.status = 401;
-      throw error;
+      throw terminalError;
     }
     await redirectToLogin(response);
     cleanup();
-    throw new Error('authentication required');
+    throw terminalError;
   }
   return apiFetchResponseWithDeadline(response, {
     cleanup,
@@ -3546,15 +3561,83 @@ function loginRedirectUrlForCurrentLocation() {
   return `/login?next=${encodeURIComponent(nextPath || '/')}`;
 }
 
+function terminalAuthenticationActive() {
+  return authRedirectStarted.terminalError !== null;
+}
+
+const terminalAuthenticationBackgroundReadPaths = new Set([
+  '/api/ping',
+]);
+
+function terminalAuthenticationRequestIsBackground(url, options = {}, route = null) {
+  if (options?.yolomuxBackgroundRead === true) return true;
+  if (route?.contractClass === 'background') return true;
+  const method = typeof commandRequestMethod === 'function'
+    ? commandRequestMethod(options)
+    : String(options?.method || 'GET').trim().toUpperCase();
+  const path = typeof commandRequestPath === 'function'
+    ? commandRequestPath(url)
+    : String(url || '').split(/[?#]/, 1)[0];
+  return method === 'GET' && terminalAuthenticationBackgroundReadPaths.has(path);
+}
+
+function terminalAuthenticationError(value = null) {
+  if (value?.terminalAuthentication === true && value?.status === 401) return value;
+  const error = value instanceof Error ? value : new Error('authentication required');
+  error.status = 401;
+  error.code = 'authentication_required';
+  error.reason = 'authentication_required';
+  error.terminalAuthentication = true;
+  return error;
+}
+
+function publishTerminalAuthenticationState() {
+  if (document.body?.dataset) document.body.dataset.authenticationState = 'signed-out';
+  const status = document.getElementById?.('status');
+  if (!status) return;
+  status.textContent = t('auth.error.authenticationRequired');
+  status.setAttribute?.('role', 'alert');
+  status.setAttribute?.('aria-live', 'assertive');
+  status.setAttribute?.('aria-atomic', 'true');
+  status.classList?.add?.('layout-status-visible', 'layout-status-danger');
+  status.classList?.remove?.('layout-status-advisory');
+  if (status.dataset) status.dataset.layoutStatusKind = 'danger';
+}
+
+function registerTerminalAuthenticationRetirement(owner, retire) {
+  const key = String(owner || '').trim();
+  if (!key) throw new TypeError('terminal authentication retirement owner is required');
+  if (typeof retire !== 'function') throw new TypeError(`terminal authentication retirement ${key} must be a function`);
+  authRedirectStarted.retirements.set(key, retire);
+  if (terminalAuthenticationActive()) retire(authRedirectStarted.terminalError);
+  return () => authRedirectStarted.retirements.delete(key);
+}
+
+function claimTerminalAuthentication(value = null) {
+  if (terminalAuthenticationActive()) return authRedirectStarted.terminalError;
+  const error = terminalAuthenticationError(value);
+  authRedirectStarted.terminalError = error;
+  publishTerminalAuthenticationState();
+  for (const [owner, retire] of authRedirectStarted.retirements) {
+    try {
+      retire(error);
+    } catch (retirementError) {
+      console.error(`terminal authentication retirement failed: ${owner}`, retirementError);
+    }
+  }
+  return error;
+}
+
 function claimLoginRedirect() {
-  if (authRedirectStarted) return;
-  authRedirectStarted = true;
+  if (authRedirectStarted.redirect) return;
+  authRedirectStarted.redirect = true;
   return true;
 }
 
 function redirectToLoginUrl(loginUrl = '') {
   if (!claimLoginRedirect()) return false;
-  window.location.assign(loginUrl || loginRedirectUrlForCurrentLocation());
+  authRedirectStarted.loginUrl = loginUrl || loginRedirectUrlForCurrentLocation();
+  window.location.assign(authRedirectStarted.loginUrl);
   return true;
 }
 
@@ -3565,6 +3648,7 @@ async function redirectToLogin(response) {
     const payload = await response.clone().json();
     if (payload?.login_url) loginUrl = payload.login_url;
   } catch (_) {}
+  authRedirectStarted.loginUrl = loginUrl;
   window.location.assign(loginUrl);
 }
 
@@ -48744,6 +48828,7 @@ function bindPreferencesPanel(panel) {
       clearTimeout: globalThis.clearTimeout?.bind(globalThis),
     };
     const onState = options.onState || (() => {});
+    const onTerminalAuthentication = options.onTerminalAuthentication || (() => {});
     const userOnGeneration = controllerOptions.onGeneration || (() => {});
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
@@ -48764,6 +48849,7 @@ function bindPreferencesPanel(panel) {
     let readFenceRecovery = null;
     let readinessEpoch = 0;
     let healthy = false;
+    let terminalAuthenticationError = null;
     let deliverySequence = 0;
     let acceptedDeltaSequence = 0;
     let lastDeliveryKind = '';
@@ -48842,6 +48928,22 @@ function bindPreferencesPanel(panel) {
       healthy = false;
     }
 
+    function retireForTerminalAuthentication(error) {
+      if (!isCurrentStatsTerminalAuthentication(error) || terminalAuthenticationError) return false;
+      terminalAuthenticationError = error;
+      running = false;
+      readinessEpoch += 1;
+      clearReadinessTimer();
+      closeStream();
+      if (controller) {
+        controller.setVisible(false);
+        controller.stop();
+      }
+      onState('signed-out', error);
+      onTerminalAuthentication(error);
+      return true;
+    }
+
     function scheduleReadinessRetry() {
       const scope = ensureLifecycleScope();
       if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
@@ -48854,6 +48956,7 @@ function bindPreferencesPanel(panel) {
 
     function handleReadinessFailure(error, epoch) {
       if (epoch !== readinessEpoch) return false;
+      if (retireForTerminalAuthentication(error)) return false;
       readinessEpoch += 1;
       clearReadinessTimer();
       resetUnreadyClient();
@@ -48887,7 +48990,7 @@ function bindPreferencesPanel(panel) {
     function fetchCapabilities() {
       if (!capabilitiesPromise) {
         onState('loading');
-        capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities');
+        capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities', false, {background: true});
       }
       return capabilitiesPromise;
     }
@@ -48900,8 +49003,9 @@ function bindPreferencesPanel(panel) {
           ['resolution', request.resolution],
           ['client_id', request.client_id],
           ['since_generation', request.since_generation],
-        ]), true);
+        ]), true, {background: true});
       } catch (error) {
+        if (retireForTerminalAuthentication(error)) throw error;
         if (error?.recoverableReadFence === true) await recoverReadFence(error);
         onState(error.pending === true ? 'pending' : 'error', error);
         throw error;
@@ -49083,6 +49187,7 @@ function bindPreferencesPanel(panel) {
     }
 
     function start() {
+      if (terminalAuthenticationError) return Promise.reject(terminalAuthenticationError);
       if (running) {
         if (startPromise) return startPromise;
         if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
@@ -49122,6 +49227,7 @@ function bindPreferencesPanel(panel) {
         return result;
       },
       setVisible(value) {
+        if (terminalAuthenticationError) return;
         const nextVisible = value === true;
         if (visible === nextVisible) return;
         visible = nextVisible;
@@ -50120,6 +50226,7 @@ function bindPreferencesPanel(panel) {
       credentials: 'same-origin',
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
+      yolomuxBackgroundRead: requestOptions.background === true,
     }));
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
     let failurePayload = null;
@@ -50148,6 +50255,8 @@ function bindPreferencesPanel(panel) {
       const error = new Error(reason || `stats request failed with HTTP ${response?.status ?? 'unknown'}`);
       error.status = response?.status ?? 0;
       error.reason = reason;
+      error.code = String(failurePayload?.code || reason || '').trim();
+      error.terminalAuthentication = error.status === 401 || error.code === 'authentication_required';
       error.terminal = failurePayload?.terminal === true;
       error.versionFence = response?.status === 426
         && failurePayload?.status === 'upgrade_required';
@@ -50161,6 +50270,13 @@ function bindPreferencesPanel(panel) {
       throw error;
     }
     return currentStatsResponsePayload(await response.json());
+  }
+
+  function isCurrentStatsTerminalAuthentication(error) {
+    return error?.terminalAuthentication === true
+      || error?.status === 401
+      || error?.code === 'authentication_required'
+      || error?.reason === 'authentication_required';
   }
 
   function currentStatsResponsePayload(value) {
@@ -57907,6 +58023,7 @@ function ensureJsDebugCurrentStatsClient() {
   const selection = jsDebugCurrentStatsSelection();
   const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
     fetch: apiFetch,
+    onTerminalAuthentication: claimTerminalAuthentication,
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
@@ -78237,6 +78354,14 @@ function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
   return scope.dispose('stopped');
 }
 
+function stopAllTmuxSessionStreamScopes(scopes, reason = 'stopped') {
+  let stopped = 0;
+  for (const scope of [...scopes.values()]) {
+    if (scope.dispose(reason)) stopped += 1;
+  }
+  return stopped;
+}
+
 function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));
@@ -80306,8 +80431,12 @@ function scheduleClientEventDisconnectEpisode(source) {
     source,
     startedAt: performance.now(),
     reported: false,
+    authenticationProbeStarted: false,
   };
   clientEventTransportState.disconnectEpisode = episode;
+  // EventSource does not expose its HTTP status. One immediate authenticated probe prevents the
+  // browser's native reconnect loop from spending the whole grace window repeating a hidden 401.
+  if (source !== null) probeClientEventAuthentication(episode);
   const scope = currentClientEventTransportLifecycleScope();
   const timer = setTimeout(() => {
     if (!scope.current() || clientEventTransportState.disconnectTimer !== timer) return;
@@ -80326,6 +80455,13 @@ function scheduleClientEventDisconnectEpisode(source) {
   }, clientEventDisconnectGraceMs);
   clientEventTransportState.disconnectTimer = timer;
   scope.ownTimer('disconnect-episode', timer);
+  return true;
+}
+
+function probeClientEventAuthentication(episode) {
+  if (!episode || episode.authenticationProbeStarted) return false;
+  episode.authenticationProbeStarted = true;
+  void apiFetchJson('/api/ping?client_event_auth_probe=1', {cache: 'no-store'}).catch(() => {});
   return true;
 }
 
@@ -80409,6 +80545,7 @@ function openClientEventStream(descriptor, options = {}) {
       demandSignature: String(options.demandSignature || ''),
       attempts: 0,
       startedAt: performance.now(),
+      authenticationProbeStarted: false,
     };
     if (!currentClientEventTransportLifecycleScope().release('candidate-stream', priorReplacement)) priorReplacement?.close?.();
     currentClientEventTransportLifecycleScope().ownStream('candidate-stream', source);
@@ -80490,6 +80627,7 @@ function openClientEventStream(descriptor, options = {}) {
       // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
       const episode = clientEventTransportState.candidateEpisode;
       if (!episode || episode.source !== source) return;
+      probeClientEventAuthentication(episode);
       episode.attempts += 1;
       if (episode.attempts < clientEventCandidateRetryLimit) return;
       abandonClientEventCandidate(source);
@@ -80581,6 +80719,19 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportState.resyncTimer = null;
 }
 
+registerTerminalAuthenticationRetirement('long-lived-browser-transports', () => {
+  clearRuntimeInterval('latency');
+  clearRuntimeInterval('debug-stats');
+  jsDebugCurrentStatsClientState.client?.stop?.();
+  jsDebugCurrentStatsClientState.startPromise = null;
+  clientEventTransportState.enabled = false;
+  disposeClientEventTransportLifecycle('authentication_required');
+  stopAllTmuxSessionStreamScopes(summaryLifecycleScopes, 'authentication_required');
+  stopAllTmuxSessionStreamScopes(transcriptLifecycleScopes, 'authentication_required');
+  devAutoReloadSource?.close?.();
+  devAutoReloadSource = null;
+});
+
 if (typeof window !== 'undefined' && window?.addEventListener) {
   window.addEventListener('pagehide', () => disposeClientEventTransportLifecycle('pagehide'));
   window.addEventListener('pageshow', event => {
@@ -80603,14 +80754,15 @@ registerTerminalRuntimeFacade('client-events', {
 // "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
 // no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
 function installDevAutoReload() {
-  if (!devMode || typeof EventSource === 'undefined') return;
-  let source;
+  if (!devMode || typeof EventSource === 'undefined' || devAutoReloadSource) return;
   try {
     const revision = encodeURIComponent(String(bootstrap.devBundleRevision || ''));
-    source = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
+    devAutoReloadSource = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
   } catch (_error) {
+    devAutoReloadSource = null;
     return;
   }
+  const source = devAutoReloadSource;
   source.addEventListener('ready', event => {
     // A client reconnects after a server restart, which means it misses the old process's
     // `reload` event. The fresh server's revision makes that stale bundle observable at once.

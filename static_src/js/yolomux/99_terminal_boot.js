@@ -5646,6 +5646,14 @@ function stopTmuxSessionStreamScope(scopes, session, expectedSource = null) {
   return scope.dispose('stopped');
 }
 
+function stopAllTmuxSessionStreamScopes(scopes, reason = 'stopped') {
+  let stopped = 0;
+  for (const scope of [...scopes.values()]) {
+    if (scope.dispose(reason)) stopped += 1;
+  }
+  return stopped;
+}
+
 function startSummaryStream(session) {
   stopSummaryStream(session);
   const node = document.getElementById(summaryDomId(session));

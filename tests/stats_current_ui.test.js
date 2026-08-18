@@ -1838,6 +1838,105 @@ test('browser transport uses one authenticated current stream and exact snapshot
   assert.ok(fetches.every(item => !item.url.includes('/api/stats-delta')));
 });
 
+test('snapshot authentication failure retires the client instead of polling at repair cadence', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const terminalFailures = [];
+  let snapshotFetches = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      snapshotFetches += 1;
+      return response(401, {reason: 'authentication_required'});
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-auth-retirement',
+    savedRange: 300,
+    savedResolution: 1,
+    onState: state => states.push(state),
+    onTerminalAuthentication: error => terminalFailures.push(error),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  assert.equal(snapshotFetches, 1, 'the first 401 is the only snapshot request');
+  assert.equal(FakeEventSource.instances.length, 0, 'no stats stream opens without an authenticated snapshot');
+  await clock.advance(60_000);
+  assert.equal(snapshotFetches, 1, 'terminal authentication cannot re-enter the repair timer');
+  assert.deepEqual(states, ['loading', 'signed-out']);
+  assert.equal(terminalFailures.length, 1, 'one owner observes the terminal authentication transition');
+  assert.equal(terminalFailures[0].status, 401);
+});
+
+test('capabilities authentication failure is terminal before snapshot or stream startup', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const terminalFailures = [];
+  let capabilityFetches = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      assert.equal(url, '/api/stats-capabilities');
+      capabilityFetches += 1;
+      return response(401, {code: 'authentication_required'});
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-capability-auth-retirement',
+    onState: state => states.push(state),
+    onTerminalAuthentication: error => terminalFailures.push(error),
+    controllerOptions: {clock},
+  });
+
+  await assert.rejects(client.start(), error => error?.terminalAuthentication === true);
+  await clock.advance(60_000);
+  assert.equal(capabilityFetches, 1, 'readiness retry cannot refetch capabilities after a 401');
+  assert.equal(FakeEventSource.instances.length, 0);
+  assert.deepEqual(states, ['loading', 'signed-out']);
+  assert.equal(terminalFailures.length, 1);
+});
+
+test('a stream failure whose repair receives 401 closes the stream and stops repair', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const terminalFailures = [];
+  let snapshotFetches = 0;
+  let authenticationExpired = false;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      snapshotFetches += 1;
+      return authenticationExpired
+        ? response(401, {code: 'authentication_required'})
+        : response(200, snapshot({requested: 1}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-stream-auth-retirement',
+    savedRange: 300,
+    savedResolution: 1,
+    onState: state => states.push(state),
+    onTerminalAuthentication: error => terminalFailures.push(error),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  assert.equal(snapshotFetches, 1);
+  assert.equal(FakeEventSource.instances.length, 1);
+  authenticationExpired = true;
+  FakeEventSource.instances[0].emit('error');
+  await clock.advance(100);
+  assert.equal(snapshotFetches, 2, 'the ambiguous native error gets one authenticated repair read');
+  assert.equal(FakeEventSource.instances[0].closeCount, 1);
+  await clock.advance(60_000);
+  assert.equal(snapshotFetches, 2, 'the repair 401 retires rather than reopening the stream');
+  assert.equal(FakeEventSource.instances.length, 1);
+  assert.equal(states.at(-1), 'signed-out');
+  assert.equal(terminalFailures.length, 1);
+});
+
 test('a snapshot from a newer server that grew a top-level field is reported, not silently blanked', async () => {
   // The v0.6.10 -> v0.7.1 upgrade of port 7770: the running server grew the
   // `usage_atom_backfill` snapshot field while an already-open tab kept running the

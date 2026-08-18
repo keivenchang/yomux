@@ -6,14 +6,15 @@
 // "is the bundle stale?" misdiagnoses). Listens to the server's /api/dev-reload SSE 'reload' event;
 // no-op outside dev mode. The EventSource auto-reconnects across the backend re-exec (#1c).
 function installDevAutoReload() {
-  if (!devMode || typeof EventSource === 'undefined') return;
-  let source;
+  if (!devMode || typeof EventSource === 'undefined' || devAutoReloadSource) return;
   try {
     const revision = encodeURIComponent(String(bootstrap.devBundleRevision || ''));
-    source = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
+    devAutoReloadSource = new EventSource(`/api/dev-reload?bundle_revision=${revision}`);
   } catch (_error) {
+    devAutoReloadSource = null;
     return;
   }
+  const source = devAutoReloadSource;
   source.addEventListener('ready', event => {
     // A client reconnects after a server restart, which means it misses the old process's
     // `reload` event. The fresh server's revision makes that stale bundle observable at once.

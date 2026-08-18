@@ -770,8 +770,12 @@ function scheduleClientEventDisconnectEpisode(source) {
     source,
     startedAt: performance.now(),
     reported: false,
+    authenticationProbeStarted: false,
   };
   clientEventTransportState.disconnectEpisode = episode;
+  // EventSource does not expose its HTTP status. One immediate authenticated probe prevents the
+  // browser's native reconnect loop from spending the whole grace window repeating a hidden 401.
+  if (source !== null) probeClientEventAuthentication(episode);
   const scope = currentClientEventTransportLifecycleScope();
   const timer = setTimeout(() => {
     if (!scope.current() || clientEventTransportState.disconnectTimer !== timer) return;
@@ -790,6 +794,13 @@ function scheduleClientEventDisconnectEpisode(source) {
   }, clientEventDisconnectGraceMs);
   clientEventTransportState.disconnectTimer = timer;
   scope.ownTimer('disconnect-episode', timer);
+  return true;
+}
+
+function probeClientEventAuthentication(episode) {
+  if (!episode || episode.authenticationProbeStarted) return false;
+  episode.authenticationProbeStarted = true;
+  void apiFetchJson('/api/ping?client_event_auth_probe=1', {cache: 'no-store'}).catch(() => {});
   return true;
 }
 
@@ -873,6 +884,7 @@ function openClientEventStream(descriptor, options = {}) {
       demandSignature: String(options.demandSignature || ''),
       attempts: 0,
       startedAt: performance.now(),
+      authenticationProbeStarted: false,
     };
     if (!currentClientEventTransportLifecycleScope().release('candidate-stream', priorReplacement)) priorReplacement?.close?.();
     currentClientEventTransportLifecycleScope().ownStream('candidate-stream', source);
@@ -954,6 +966,7 @@ function openClientEventStream(descriptor, options = {}) {
       // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
       const episode = clientEventTransportState.candidateEpisode;
       if (!episode || episode.source !== source) return;
+      probeClientEventAuthentication(episode);
       episode.attempts += 1;
       if (episode.attempts < clientEventCandidateRetryLimit) return;
       abandonClientEventCandidate(source);
@@ -1044,6 +1057,19 @@ function disposeClientEventTransportLifecycle(reason = 'disposed') {
   clientEventTransportState.frame = 0;
   clientEventTransportState.resyncTimer = null;
 }
+
+registerTerminalAuthenticationRetirement('long-lived-browser-transports', () => {
+  clearRuntimeInterval('latency');
+  clearRuntimeInterval('debug-stats');
+  jsDebugCurrentStatsClientState.client?.stop?.();
+  jsDebugCurrentStatsClientState.startPromise = null;
+  clientEventTransportState.enabled = false;
+  disposeClientEventTransportLifecycle('authentication_required');
+  stopAllTmuxSessionStreamScopes(summaryLifecycleScopes, 'authentication_required');
+  stopAllTmuxSessionStreamScopes(transcriptLifecycleScopes, 'authentication_required');
+  devAutoReloadSource?.close?.();
+  devAutoReloadSource = null;
+});
 
 if (typeof window !== 'undefined' && window?.addEventListener) {
   window.addEventListener('pagehide', () => disposeClientEventTransportLifecycle('pagehide'));

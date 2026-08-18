@@ -1772,6 +1772,9 @@ class StatsCurrentService:
             self._record_build_failure(error)
             if reader is not None:
                 reader.close()
+            # The listener must not keep accepting facts after its sole
+            # retention/materialization owner failed to start.
+            self.stop_event.set()
             return
         try:
             while not self.stop_event.is_set():
@@ -1787,8 +1790,13 @@ class StatsCurrentService:
                     self._build_once(reader, *work)
                 self._flush_ring_if_due(publisher)
         finally:
-            reader.close()
-            publisher.close()
+            try:
+                reader.close()
+                publisher.close()
+            finally:
+                # An unexpected worker exit is fatal to the listener. Without
+                # this, append RPCs can outlive the only scheduled pruner.
+                self.stop_event.set()
 
     def _append_host_facts(self, publisher: storage.Store, facts: collectors.CollectorFacts) -> None:
         """Append daemon-owned facts through the same dirty/materialization path as RPC ingest."""
@@ -1800,7 +1808,6 @@ class StatsCurrentService:
             result = publisher.append_batch(
                 observations=facts.observations,
                 coverage_epochs=facts.coverage_epochs,
-                retention_now=append_now,
             )
             accepted = result.observations_accepted + result.coverage_changed
             pruned = 0 if result.retention_prune is None else result.retention_prune.changed
@@ -2027,8 +2034,13 @@ class StatsCurrentService:
             with self.cache_lock:
                 previous = None if self._cache is None else self._cache.generation
             used_full = full or previous is None
+            observed_until = self.clock()
             dirty_intervals = None if used_full else tuple(
                 (cell.start, cell.start + cell.resolution) for cell in dirty
+            )
+            read_window = (
+                max(0.0, observed_until - stats_resolution.MAX_RANGE_SECONDS),
+                max(observed_until, math.nextafter(0.0, math.inf)),
             )
             with ExitStack() as snapshot_stack:
                 with self.work_lock:
@@ -2046,6 +2058,7 @@ class StatsCurrentService:
                         reader.pinned_snapshot(
                             dirty_intervals=dirty_intervals,
                             include_coverage=include_coverage,
+                            read_window=read_window,
                         )
                     )
                 snapshot = read_snapshot()
@@ -2086,7 +2099,7 @@ class StatsCurrentService:
                 source_generation=source_generation,
                 cache_generation=cache_generation,
                 generated_at=now,
-                observed_until=now,
+                observed_until=observed_until,
                 price_resolver=self.price_resolver,
             )
             if build is self.full_builder:
@@ -2960,16 +2973,9 @@ class StatsCurrentService:
         self,
         result: storage.AppendResult,
     ) -> set[materializer.DirtyCell]:
-        """Retain cutoff cells even when the accepted-fact horizon filters them."""
+        """Map accepted facts into cells still owned by a rendered layer."""
 
-        dirty = self._accepted_dirty_cells(result.accepted_original_timestamps)
-        if (
-            result.retention_cutoff is not None
-            and result.retention_prune is not None
-            and result.retention_prune.changed
-        ):
-            dirty.update(self._dirty_cells_at((result.retention_cutoff,)))
-        return dirty
+        return self._accepted_dirty_cells(result.accepted_original_timestamps)
 
     def _update_cached_coverage_locked(
         self,
@@ -3164,7 +3170,6 @@ class StatsCurrentService:
                     usage_tombstones=tombstones,
                     coverage_epochs=coverage,
                     unavailable_spans=unavailable,
-                    retention_now=append_now,
                 )
             except storage.UsageAtomIdentityConflict as error:
                 self._append_requests += 1

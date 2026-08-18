@@ -2145,6 +2145,90 @@ def test_transcript_scan_store_keeps_incomplete_stats_backfill_cursors(tmp_path,
     assert completed.exists() is False
 
 
+def test_transcript_scan_store_silently_accepts_file_vanishing_before_sort_metadata_read(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    store_dir = session_files.transcript_scan_store_dir()
+    store_dir.mkdir(parents=True)
+    cache_path = store_dir / "vanishing-before-sort.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    original_stat = Path.stat
+    target_stat_calls = 0
+
+    def vanish_before_first_stat(path, *args, **kwargs):
+        nonlocal target_stat_calls
+        if path == cache_path:
+            target_stat_calls += 1
+            if target_stat_calls == 1:
+                path.unlink()
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanish_before_first_stat)
+    with caplog.at_level("WARNING"):
+        session_files.prune_transcript_scan_store(max_entries=1, max_bytes=10_000)
+
+    assert target_stat_calls == 1
+    assert "failed to inspect transcript scan cache" not in caplog.text
+    assert "failed to prune transcript scan cache" not in caplog.text
+
+
+@pytest.mark.parametrize("protected", [False, True])
+def test_transcript_scan_store_silently_accepts_file_vanishing_before_size_read(tmp_path, monkeypatch, caplog, protected):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    store_dir = session_files.transcript_scan_store_dir()
+    store_dir.mkdir(parents=True)
+    cache_path = store_dir / "vanishing.json"
+    payload = {}
+    if protected:
+        payload = {
+            "schema_version": session_files._TRANSCRIPT_SCAN_STORE_VERSION,
+            "identity": ["stats-current-codex", 3, 1, 2, "/tmp/vanishing.jsonl"],
+            "state": {"offset": 10, "size": 20},
+        }
+    cache_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_stat = Path.stat
+    target_stat_calls = 0
+
+    def vanish_before_second_stat(path, *args, **kwargs):
+        nonlocal target_stat_calls
+        if path == cache_path:
+            target_stat_calls += 1
+            if target_stat_calls == 2:
+                path.unlink()
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanish_before_second_stat)
+    with caplog.at_level("WARNING"):
+        session_files.prune_transcript_scan_store(max_entries=1, max_bytes=10_000)
+
+    assert target_stat_calls == 2
+    assert "failed to prune transcript scan cache" not in caplog.text
+
+
+def test_transcript_scan_store_keeps_stat_errors_loud(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    store_dir = session_files.transcript_scan_store_dir()
+    store_dir.mkdir(parents=True)
+    cache_path = store_dir / "unreadable.json"
+    cache_path.write_text("{}", encoding="utf-8")
+    original_stat = Path.stat
+    target_stat_calls = 0
+
+    def deny_second_stat(path, *args, **kwargs):
+        nonlocal target_stat_calls
+        if path == cache_path:
+            target_stat_calls += 1
+            if target_stat_calls == 2:
+                raise PermissionError("denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", deny_second_stat)
+    with caplog.at_level("WARNING"):
+        session_files.prune_transcript_scan_store(max_entries=1, max_bytes=10_000)
+
+    assert target_stat_calls == 2
+    assert "failed to prune transcript scan cache unreadable.json: denied" in caplog.text
+
+
 def test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids():
     state = session_files.new_claude_transcript_scan_state()
     for index in range(session_files._TRANSCRIPT_SCAN_MESSAGE_ID_MAX + 3):

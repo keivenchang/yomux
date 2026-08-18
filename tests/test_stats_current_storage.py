@@ -28,6 +28,7 @@ from yolomux_lib.stats_current import UnavailableSpan
 from yolomux_lib.stats_current import UsageAtom
 from yolomux_lib.stats_current import UsageAtomTombstone
 from yolomux_lib.stats_current import WRITER_FENCE_FILENAME
+from yolomux_lib.stats_current import materializer as materializer_module
 from yolomux_lib.stats_current import resolution as stats_resolution
 from yolomux_lib.stats_current import storage as storage_module
 
@@ -856,6 +857,62 @@ def test_snapshot_reads_every_fact_in_one_explicit_transaction(tmp_path):
     assert statements[-1] == "COMMIT"
 
 
+def test_read_window_bounds_history_and_preserves_overlap_predecessor_boundaries(tmp_path):
+    window = (100.0, 200.0)
+    coverage = (
+        CoverageEpoch("cpu", "host", "too-old", 0.0, 50.0, 1.0, 7),
+        CoverageEpoch("cpu", "host", "predecessor", 50.0, 100.0, 1.0, 7),
+        CoverageEpoch("cpu", "host", "inside", 120.0, 180.0, 1.0, 7),
+        CoverageEpoch("cpu", "open", "open", 90.0, None, 1.0, 7),
+        CoverageEpoch("gpu", "ancient", "ancient-only", 0.0, 90.0, 10.0, 7),
+        CoverageEpoch("gpu", "future", "future", 200.0, 220.0, 10.0, 7),
+    )
+    unavailable = (
+        UnavailableSpan("agent", "old", "old", 0.0, 100.0, 10.0, "old", 7),
+        UnavailableSpan("agent", "span", "span", 90.0, 110.0, 10.0, "span", 7),
+        UnavailableSpan("agent", "inside", "inside", 100.0, 200.0, 10.0, "inside", 7),
+        UnavailableSpan("agent", "future", "future", 200.0, 220.0, 10.0, "future", 7),
+    )
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        result = store.append_batch(
+            observations=tuple(
+                _observation("cpu", f"at-{observed_at}", observed_at)
+                for observed_at in (99.0, 100.0, 199.0, 200.0, 250.0)
+            ),
+            usage_atoms=tuple(
+                _usage(f"usage-{observed_at}", observed_at)
+                for observed_at in (99.0, 100.0, 199.0, 200.0, 250.0)
+            ),
+            coverage_epochs=coverage,
+            unavailable_spans=unavailable,
+        )
+        snapshot = store.read_snapshot(read_window=window)
+        predecessor_plan = store._connection().execute(
+            "EXPLAIN QUERY PLAN " + storage_module._COVERAGE_PREDECESSOR_SQL,
+            ("cpu", "host", window[0]),
+        ).fetchall()
+    gaps = materializer_module._coverage_gaps(snapshot, *window)
+
+    # Full reads use only the lower bound for point facts. A fact stamped at
+    # observed_until, or slightly in the future by a skewed producer, keeps the
+    # established behavior; materializer bucket ownership remains unchanged.
+    assert [item.observed_at for item in snapshot.observations] == [100.0, 199.0, 200.0, 250.0]
+    assert [item.observed_at for item in snapshot.usage_atoms] == [100.0, 199.0, 200.0, 250.0]
+    assert [item.epoch_id for item in snapshot.coverage_epochs] == [
+        "predecessor", "open", "inside",
+    ]
+    assert [item.epoch_id for item in snapshot.unavailable_spans] == ["span", "inside"]
+    assert snapshot.schema.source_generation == result.source_generation
+    predecessor_plan_text = " ".join(str(row[3]) for row in predecessor_plan)
+    assert "SEARCH coverage_epochs USING INDEX coverage_epochs_end" in predecessor_plan_text
+    assert "ended_at<" in predecessor_plan_text
+    assert any(
+        item.source_id == "host" and item.start == 100.0 and item.end == 120.0
+        for item in gaps
+    )
+    assert all(item.source_id != "ancient" for item in gaps)
+
+
 def test_dirty_snapshot_reads_only_coalesced_original_windows_but_all_coverage(tmp_path):
     reconciliation = MigrationReconciliation("migration", 1.0, "digest", {"ok": True})
     with Store.open(tmp_path / DATABASE_FILENAME) as store:
@@ -1291,6 +1348,48 @@ def test_prune_retains_exactly_24_hours_and_clips_spanning_coverage(tmp_path):
     assert {item.started_at for item in snapshot.coverage_epochs} == {cutoff}
     assert result.source_generation == generation_before + 1
     assert snapshot.schema.source_generation == result.source_generation
+
+
+def test_prune_uses_half_open_interval_boundaries_without_zero_length_rows(tmp_path):
+    now = 200_000.0
+    cutoff = now - RETENTION_SECONDS
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        store.append_batch(
+            observations=(
+                _observation("cpu", "before", cutoff - 0.001),
+                _observation("cpu", "boundary", cutoff),
+            ),
+            usage_atoms=(
+                _usage("before", cutoff - 0.001),
+                _usage("boundary", cutoff),
+            ),
+            coverage_epochs=(
+                CoverageEpoch("cpu", "ends-at", "ends-at", cutoff - 10.0, cutoff, 1.0, 1),
+                CoverageEpoch("cpu", "starts-at", "starts-at", cutoff, cutoff + 10.0, 1.0, 1),
+                CoverageEpoch("cpu", "spans", "spans", cutoff - 10.0, cutoff + 10.0, 1.0, 1),
+                CoverageEpoch("cpu", "open", "open", cutoff - 10.0, None, 1.0, 1),
+            ),
+            unavailable_spans=(
+                UnavailableSpan("gpu", "ends-at", "ends-at", cutoff - 10.0, cutoff, 10.0, "test", 1),
+                UnavailableSpan("gpu", "starts-at", "starts-at", cutoff, cutoff + 10.0, 10.0, "test", 1),
+                UnavailableSpan("gpu", "spans", "spans", cutoff - 10.0, cutoff + 10.0, 10.0, "test", 1),
+            ),
+        )
+
+        result = store.prune(now=now)
+        snapshot = store.read_snapshot()
+
+    assert result.observations_deleted == result.usage_atoms_deleted == 1
+    assert result.coverage_epochs_deleted == 1
+    assert result.coverage_epochs_clipped == 2
+    assert result.unavailable_spans_deleted == 1
+    assert result.unavailable_spans_clipped == 1
+    assert [item.source_id for item in snapshot.observations] == ["boundary"]
+    assert [item.event_id for item in snapshot.usage_atoms] == ["boundary"]
+    assert {item.source_id for item in snapshot.coverage_epochs} == {"starts-at", "spans", "open"}
+    assert {item.started_at for item in snapshot.coverage_epochs} == {cutoff}
+    assert {item.source_id for item in snapshot.unavailable_spans} == {"starts-at", "spans"}
+    assert {item.started_at for item in snapshot.unavailable_spans} == {cutoff}
 
 
 def test_append_batch_prunes_expired_observations_in_the_same_transaction(tmp_path):

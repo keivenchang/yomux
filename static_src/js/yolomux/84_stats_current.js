@@ -784,6 +784,7 @@
       clearTimeout: globalThis.clearTimeout?.bind(globalThis),
     };
     const onState = options.onState || (() => {});
+    const onTerminalAuthentication = options.onTerminalAuthentication || (() => {});
     const userOnGeneration = controllerOptions.onGeneration || (() => {});
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
@@ -804,6 +805,7 @@
     let readFenceRecovery = null;
     let readinessEpoch = 0;
     let healthy = false;
+    let terminalAuthenticationError = null;
     let deliverySequence = 0;
     let acceptedDeltaSequence = 0;
     let lastDeliveryKind = '';
@@ -882,6 +884,22 @@
       healthy = false;
     }
 
+    function retireForTerminalAuthentication(error) {
+      if (!isCurrentStatsTerminalAuthentication(error) || terminalAuthenticationError) return false;
+      terminalAuthenticationError = error;
+      running = false;
+      readinessEpoch += 1;
+      clearReadinessTimer();
+      closeStream();
+      if (controller) {
+        controller.setVisible(false);
+        controller.stop();
+      }
+      onState('signed-out', error);
+      onTerminalAuthentication(error);
+      return true;
+    }
+
     function scheduleReadinessRetry() {
       const scope = ensureLifecycleScope();
       if (!running || !visible || scope.value('readiness-timer') !== null || typeof clock.setTimeout !== 'function') return;
@@ -894,6 +912,7 @@
 
     function handleReadinessFailure(error, epoch) {
       if (epoch !== readinessEpoch) return false;
+      if (retireForTerminalAuthentication(error)) return false;
       readinessEpoch += 1;
       clearReadinessTimer();
       resetUnreadyClient();
@@ -927,7 +946,7 @@
     function fetchCapabilities() {
       if (!capabilitiesPromise) {
         onState('loading');
-        capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities');
+        capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities', false, {background: true});
       }
       return capabilitiesPromise;
     }
@@ -940,8 +959,9 @@
           ['resolution', request.resolution],
           ['client_id', request.client_id],
           ['since_generation', request.since_generation],
-        ]), true);
+        ]), true, {background: true});
       } catch (error) {
+        if (retireForTerminalAuthentication(error)) throw error;
         if (error?.recoverableReadFence === true) await recoverReadFence(error);
         onState(error.pending === true ? 'pending' : 'error', error);
         throw error;
@@ -1123,6 +1143,7 @@
     }
 
     function start() {
+      if (terminalAuthenticationError) return Promise.reject(terminalAuthenticationError);
       if (running) {
         if (startPromise) return startPromise;
         if (controller || lifecycleScope?.value('readiness-timer') !== null) return Promise.resolve(controller);
@@ -1162,6 +1183,7 @@
         return result;
       },
       setVisible(value) {
+        if (terminalAuthenticationError) return;
         const nextVisible = value === true;
         if (visible === nextVisible) return;
         visible = nextVisible;
@@ -2160,6 +2182,7 @@
       credentials: 'same-origin',
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
+      yolomuxBackgroundRead: requestOptions.background === true,
     }));
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
     let failurePayload = null;
@@ -2188,6 +2211,8 @@
       const error = new Error(reason || `stats request failed with HTTP ${response?.status ?? 'unknown'}`);
       error.status = response?.status ?? 0;
       error.reason = reason;
+      error.code = String(failurePayload?.code || reason || '').trim();
+      error.terminalAuthentication = error.status === 401 || error.code === 'authentication_required';
       error.terminal = failurePayload?.terminal === true;
       error.versionFence = response?.status === 426
         && failurePayload?.status === 'upgrade_required';
@@ -2201,6 +2226,13 @@
       throw error;
     }
     return currentStatsResponsePayload(await response.json());
+  }
+
+  function isCurrentStatsTerminalAuthentication(error) {
+    return error?.terminalAuthentication === true
+      || error?.status === 401
+      || error?.code === 'authentication_required'
+      || error?.reason === 'authentication_required';
   }
 
   function currentStatsResponsePayload(value) {

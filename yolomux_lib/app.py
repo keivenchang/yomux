@@ -241,6 +241,7 @@ from .state_services import ClientEventWatcherRecord
 from .state_services import ClientWatchDescriptor
 from .state_services import ClientWatchRootValidationError
 from .state_services import ClientWatchService
+from .state_services import JobdOperationFlight
 from .state_services import JobdOperationService
 from .state_services import JobdOperationReservation
 from .state_services import jobd_operation_lane
@@ -1386,25 +1387,12 @@ class FilesystemWatchBatchProduct:
     root_count: int = 0
 
 
-@dataclass
-class FilesystemWatchReceiptFence:
-    """Join a warm jobd product to the receipt persisted in parallel."""
+@dataclass(frozen=True)
+class FilesystemWatchCompletionOutcome:
+    """One shared raw watch product or failure, framed separately for every receipt."""
 
-    receipt_ready: threading.Event = field(default_factory=threading.Event)
-    cancelled: threading.Event = field(default_factory=threading.Event)
-    operation_id: str = ""
-
-    def accept(self, operation_id: str) -> None:
-        self.operation_id = str(operation_id)
-        self.receipt_ready.set()
-
-    def cancel(self) -> None:
-        self.cancelled.set()
-        self.receipt_ready.set()
-
-    def wait_for_operation_id(self) -> str:
-        self.receipt_ready.wait()
-        return "" if self.cancelled.is_set() else self.operation_id
+    data: dict[str, Any] | None = None
+    failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -3626,14 +3614,11 @@ class WatchBridge:
 
     def complete_filesystem_watch_diff_operation(
         self, app,
-        receipt_fence: FilesystemWatchReceiptFence,
-        request_id: str,
+        flight: JobdOperationFlight,
         base_payload: dict[str, Any],
         roots: list[str],
-        deadline_at: float,
         identity_seed: str,
     ) -> None:
-        route = "GET /api/fs/watch-diff"
         operation = "jobd.produce"
         data: dict[str, Any] | None = None
         failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
@@ -3655,8 +3640,8 @@ class WatchBridge:
             operation = "jobd.product"
             products = app.resolve_filesystem_watch_batches(
                 batches,
-                deadline_at,
-                cancel_event=receipt_fence.cancelled,
+                flight.deadline_at,
+                cancel_event=flight.cancelled,
             )
             # The HTTP path looks the retained product up under the whole-request key, so a
             # partitioned request has to publish that key beside its per-chunk keys or the next
@@ -3679,19 +3664,31 @@ class WatchBridge:
             )
         finally:
             app.jobd_fs_batch_lease.release()
-        operation_id = receipt_fence.wait_for_operation_id()
-        if not operation_id:
-            return
-        if failure is None:
-            assert data is not None
-            result = app.operation_ready_result(request_id, data)
+        flight.future.set_result(FilesystemWatchCompletionOutcome(data=data, failure=failure))
+        # The producer may finish before the owner persists its receipt. Keep the in-flight claim
+        # until that receipt either exists or is cancelled, so an equivalent caller cannot start a
+        # second producer in the gap between product publication and owner acceptance.
+        flight.wait_for_owner()
+        app.jobd_operation_service.release_flight(flight)
+
+    def terminalize_filesystem_watch_diff_receipt(
+        self,
+        app,
+        completed: Future[FilesystemWatchCompletionOutcome],
+        operation_id: str,
+        request_id: str,
+    ) -> None:
+        outcome = completed.result()
+        if outcome.failure is None:
+            assert outcome.data is not None
+            result = app.operation_ready_result(request_id, outcome.data)
             status = HTTPStatus.OK
         else:
-            failure_payload, failure_operation, status, code = failure
+            failure_payload, failure_operation, status, code = outcome.failure
             result = app.jobd_operation_failure_result(
                 request_id,
                 failure_payload,
-                route=route,
+                route="GET /api/fs/watch-diff",
                 operation_id=operation_id,
                 operation=failure_operation,
                 code=code,
@@ -3703,37 +3700,18 @@ class WatchBridge:
         request_id: str,
         base_payload: dict[str, Any],
         roots: list[str],
-        identity_seed: str,
-        reservation: JobdOperationReservation,
+        flight: JobdOperationFlight,
+        *,
+        owns_producer: bool,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
         # The receipt is the only place the caller learns how much bounded work it is waiting on.
         # Submission itself stays on the completion worker, so this is a count, not a wait.
         batch_count = math.ceil(len(roots) / filesystem.MAX_BATCH_REQUESTS)
-        receipt_fence = FilesystemWatchReceiptFence()
-        submitted = app.jobd_operation_service.submit_reserved(
-            reservation,
-            app.complete_filesystem_watch_diff_operation,
-            receipt_fence,
-            request_id,
-            base_payload,
-            roots,
-            deadline_at,
-            identity_seed,
-        )
-        if not submitted:
-            return app.jobd_operation_failure_result(
-                request_id,
-                {"error": "filesystem watch completion worker could not start"},
-                route="GET /api/fs/watch-diff",
-                operation="jobd.produce",
-                code="producer_failed",
-            ), HTTPStatus.SERVICE_UNAVAILABLE
         try:
             receipt = app.queued_delivery_ledger.accept_operation(
                 request_id=request_id,
                 route="GET /api/fs/watch-diff",
-                deadline_at=deadline_at,
+                deadline_at=flight.deadline_at,
                 progress={
                     "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
                     "producer": "jobd",
@@ -3754,10 +3732,18 @@ class WatchBridge:
                 },
             )
         except Exception:
-            receipt_fence.cancel()
+            app.jobd_operation_service.release_flight_participant(flight)
+            if owns_producer:
+                flight.cancel_owner()
             raise
         operation_id = str(receipt["operation"]["id"])
-        receipt_fence.accept(operation_id)
+        flight.future.add_done_callback(partial(
+            app.terminalize_filesystem_watch_diff_receipt,
+            operation_id=operation_id,
+            request_id=request_id,
+        ))
+        if owns_producer:
+            flight.accept_owner(operation_id)
         return receipt, HTTPStatus.ACCEPTED
 
     def filesystem_watch_diff_http_payload(
@@ -3792,7 +3778,9 @@ class WatchBridge:
             ), HTTPStatus.BAD_REQUEST
         identity_seed = app.filesystem_watch_batch_identity_seed(base_payload, roots)
         product_key = filesystem_watch_request_product_key(roots, identity_seed)
-        cached_products = app.cached_filesystem_watch_products(product_key)
+        with self.state.lock:
+            ready = self.state.filesystem_ready_product
+            cached_products = copy.deepcopy(list(ready.products)) if product_key in ready.keys else None
         if cached_products is not None:
             return app.materialize_filesystem_watch_products(
                 base_payload,
@@ -3800,8 +3788,12 @@ class WatchBridge:
                 cached_products,
                 product_keys={product_key},
             ), HTTPStatus.OK
-        reservation = app.jobd_operation_service.reserve("bulk")
-        if reservation is None:
+        flight, reservation, owns_producer = app.jobd_operation_service.claim(
+            "bulk",
+            product_key,
+            time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS,
+        )
+        if flight is None:
             result = app.jobd_operation_failure_result(
                 request_id,
                 {"error": "jobd operation completion pool is full", "status": "service_busy"},
@@ -3811,7 +3803,79 @@ class WatchBridge:
             )
             app.record_operation_failure("", result)
             return result, HTTPStatus.SERVICE_UNAVAILABLE
-        return app.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed, reservation)
+        if owns_producer:
+            # Product publication and the generic in-flight claim use different owners. Recheck
+            # after claiming to close the one race where a prior producer publishes between the
+            # first cache miss and this new flight claim.
+            cached_products = app.cached_filesystem_watch_products(product_key)
+            if cached_products is not None:
+                assert reservation is not None
+                try:
+                    data = app.materialize_filesystem_watch_products(
+                        base_payload,
+                        roots,
+                        cached_products,
+                        product_keys={product_key},
+                    )
+                    outcome = FilesystemWatchCompletionOutcome(data=data)
+                except Exception as error:
+                    failure = (
+                        {"error": str(error), "cause": local_service_exception_cause(error)},
+                        "filesystem-watch-diff.complete",
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        "producer_failed",
+                    )
+                    outcome = FilesystemWatchCompletionOutcome(failure=failure)
+                # Another request may have joined after its own cache miss but before this recheck.
+                # Resolve the shared future before removing the flight so every accepted follower
+                # terminalizes from the cached product instead of waiting on a producer we skip.
+                flight.cancel_owner()
+                flight.future.set_result(outcome)
+                app.jobd_operation_service.release_flight(flight)
+                reservation.release()
+                if outcome.failure is not None:
+                    failure_payload, failure_operation, status, code = outcome.failure
+                    return app.jobd_operation_failure_result(
+                        request_id,
+                        failure_payload,
+                        route="GET /api/fs/watch-diff",
+                        operation=failure_operation,
+                        code=code,
+                    ), status
+                return data, HTTPStatus.OK
+        if owns_producer:
+            assert reservation is not None
+            submitted = app.jobd_operation_service.submit_reserved(
+                reservation,
+                app.complete_filesystem_watch_diff_operation,
+                flight,
+                base_payload,
+                roots,
+                identity_seed,
+            )
+            if not submitted:
+                app.jobd_operation_service.release_flight(flight)
+                flight.cancel_owner()
+                flight.future.set_result(FilesystemWatchCompletionOutcome(failure=(
+                    {"error": "filesystem watch completion worker could not start"},
+                    "jobd.produce",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    "producer_failed",
+                )))
+                return app.jobd_operation_failure_result(
+                    request_id,
+                    {"error": "filesystem watch completion worker could not start"},
+                    route="GET /api/fs/watch-diff",
+                    operation="jobd.produce",
+                    code="producer_failed",
+                ), HTTPStatus.SERVICE_UNAVAILABLE
+        return app.accept_filesystem_watch_diff_operation(
+            request_id,
+            base_payload,
+            roots,
+            flight,
+            owns_producer=owns_producer,
+        )
 
     def clear_transcript_content_caches(self, app) -> None:
         with app.activity_transcript_service.transcript_tail_cache_lock:
@@ -10351,24 +10415,43 @@ class TmuxWebtermApp:
 
     def complete_filesystem_watch_diff_operation(
         self,
-        receipt_fence: FilesystemWatchReceiptFence,
-        request_id: str,
+        flight: JobdOperationFlight,
         base_payload: dict[str, Any],
         roots: list[str],
-        deadline_at: float,
         identity_seed: str,
     ) -> None:
-        return self._watch_bridge.complete_filesystem_watch_diff_operation(self, receipt_fence, request_id, base_payload, roots, deadline_at, identity_seed)
+        return self._watch_bridge.complete_filesystem_watch_diff_operation(self, flight, base_payload, roots, identity_seed)
+
+    def terminalize_filesystem_watch_diff_receipt(
+        self,
+        completed: Future[FilesystemWatchCompletionOutcome],
+        operation_id: str,
+        request_id: str,
+    ) -> None:
+        return self._watch_bridge.terminalize_filesystem_watch_diff_receipt(
+            self,
+            completed,
+            operation_id,
+            request_id,
+        )
 
     def accept_filesystem_watch_diff_operation(
         self,
         request_id: str,
         base_payload: dict[str, Any],
         roots: list[str],
-        identity_seed: str,
-        reservation: JobdOperationReservation,
+        flight: JobdOperationFlight,
+        *,
+        owns_producer: bool,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        return self._watch_bridge.accept_filesystem_watch_diff_operation(self, request_id, base_payload, roots, identity_seed, reservation)
+        return self._watch_bridge.accept_filesystem_watch_diff_operation(
+            self,
+            request_id,
+            base_payload,
+            roots,
+            flight,
+            owns_producer=owns_producer,
+        )
 
     def filesystem_watch_diff_http_payload(
         self,

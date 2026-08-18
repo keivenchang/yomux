@@ -1,3 +1,4 @@
+import fcntl
 import importlib.util
 import json
 import os
@@ -33,6 +34,139 @@ from tests.helpers.local_service_records import FixtureProcessRecordBuilder
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_local_rpc_service_exits_when_its_launching_process_dies(tmp_path):
+    socket_path = tmp_path / "parent-bound.sock"
+    lock_path = tmp_path / "parent-bound.lock"
+    child_pid_path = tmp_path / "child.pid"
+    service_script = """
+import multiprocessing
+import sys
+from pathlib import Path
+from yolomux_lib.local_services.runtime import run_local_rpc_service
+
+stop = multiprocessing.get_context("spawn").Event()
+raise SystemExit(run_local_rpc_service(
+    socket_path=Path(sys.argv[1]),
+    lock_path=Path(sys.argv[2]),
+    service_name="parent-bound-test",
+    stop_event=stop,
+    handle=lambda _request, _body: ({"ok": True}, b""),
+    on_idle=lambda: False,
+    on_client=lambda: None,
+))
+"""
+    launcher_script = """
+import subprocess
+import signal
+import sys
+from pathlib import Path
+
+child = subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]])
+Path(sys.argv[4]).write_text(str(child.pid), encoding="utf-8")
+signal.pause()
+"""
+    launcher = subprocess.Popen(
+        [sys.executable, "-c", launcher_script, service_script, str(socket_path), str(lock_path), str(child_pid_path)],
+        cwd=REPO_ROOT,
+    )
+    child_pid = 0
+    try:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if child_pid_path.exists() and socket_path.exists():
+                child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+                break
+            time.sleep(0.01)
+        assert child_pid > 1 and socket_path.exists()
+
+        launcher.kill()
+        launcher.wait(timeout=2.0)
+        deadline = time.monotonic() + 3.0
+        while registry_mod.pid_is_alive(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert registry_mod.pid_is_alive(child_pid) is False
+        assert socket_path.exists() is False
+    finally:
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=2.0)
+        if child_pid > 1 and registry_mod.pid_is_alive(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def test_registry_prunes_only_unlocked_stale_runtime_lock_generations(tmp_path):
+    service_dir = tmp_path / "services"
+    active_socket = service_dir / "statsd.p24s7.active.sock"
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", active_socket.name, 24),
+        socket_path=active_socket,
+        service_dir=service_dir,
+    )
+    registry._socket_path = active_socket
+    service_dir.mkdir(parents=True)
+    active_lock = active_socket.with_suffix(".lock")
+    stale_lock = service_dir / "statsd.p24s7.stale.lock"
+    held_lock = service_dir / "statsd.p24s7.held.lock"
+    foreign_lock = service_dir / "jobd.p31.foreign.lock"
+    for path in (active_lock, stale_lock, held_lock, foreign_lock, registry.lock_path):
+        path.write_text("", encoding="utf-8")
+    held_fd = os.open(held_lock, os.O_RDWR)
+    fcntl.flock(held_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        removed = registry._prune_stale_runtime_locks()
+    finally:
+        fcntl.flock(held_fd, fcntl.LOCK_UN)
+        os.close(held_fd)
+
+    assert removed == [stale_lock]
+    assert active_lock.exists()
+    assert held_lock.exists()
+    assert foreign_lock.exists()
+    assert registry.lock_path.exists()
+
+
+def test_registry_prunes_runtime_locks_before_adopting_a_recently_healthy_service(tmp_path, monkeypatch):
+    service_dir = tmp_path / "services"
+    active_socket = service_dir / "statsd.p24s7.active.sock"
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", active_socket.name, 24),
+        socket_path=active_socket,
+        service_dir=service_dir,
+    )
+    service_dir.mkdir(parents=True)
+    active_socket.with_suffix(".lock").write_text("", encoding="utf-8")
+    stale_lock = service_dir / "statsd.p24s7.stale.lock"
+    stale_lock.write_text("", encoding="utf-8")
+    monkeypatch.setattr(registry, "recently_healthy", lambda: True)
+    monkeypatch.setattr(registry, "_arm_adopted_reaper", lambda: None)
+
+    assert registry.ensure_started() is True
+    assert stale_lock.exists() is False
+
+    later_stale_lock = service_dir / "statsd.p24s7.later.lock"
+    later_stale_lock.write_text("", encoding="utf-8")
+    assert registry.ensure_started() is True
+    assert later_stale_lock.exists() is True
+
+
+def test_stats_current_client_prunes_runtime_locks_before_its_healthy_shortcut(tmp_path, monkeypatch):
+    service_dir = tmp_path / "services"
+    socket_path = service_dir / "statsd.p24s7.active.sock"
+    client = stats_current_client.StatsCurrentClient(socket_path, tmp_path / "stats-v7.sqlite3")
+    registry = client._transport.registry
+    service_dir.mkdir(parents=True)
+    socket_path.with_suffix(".lock").write_text("", encoding="utf-8")
+    stale_lock = service_dir / "statsd.p24s7.stale.lock"
+    stale_lock.write_text("", encoding="utf-8")
+    monkeypatch.setattr(registry, "recently_healthy", lambda: True)
+
+    assert client.ensure_started() is True
+    assert stale_lock.exists() is False
 
 
 def test_query_if_running_does_not_launch_an_absent_local_service(tmp_path, monkeypatch):
@@ -1635,7 +1769,8 @@ def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypat
     assert actions == ["ping"]
 
 
-def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, monkeypatch):
+@pytest.mark.parametrize("stale_version", [21, 22])
+def test_registry_reclaims_service_left_by_a_dead_web_launcher(tmp_path, monkeypatch, stale_version):
     spawned = []
 
     class FakeProcess:
@@ -1670,7 +1805,9 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
             return {"ok": True}
         if spawned:
             return {"ok": True, "version": 21, "pid": replacement_pid, "started_at": 1}
-        return {"ok": False, "error_code": "upgrade_required", "version": 22, "pid": stale_pid}
+        if stale_version > 21:
+            return {"ok": False, "error_code": "upgrade_required", "version": stale_version, "pid": stale_pid}
+        return {"ok": True, "version": stale_version, "pid": stale_pid}
 
     monkeypatch.setattr(registry, "_request", fake_request)
     monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))

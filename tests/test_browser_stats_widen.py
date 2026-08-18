@@ -73,6 +73,94 @@ def _browser_failure_fingerprint(client: Any, signature: str, minimum_count: int
     return False
 
 
+def test_stats_authentication_expiry_paints_signed_out_and_stops_real_browser_polling(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return typeof claimTerminalAuthentication === 'function' "
+            "&& typeof ensureJsDebugCurrentStatsClient === 'function' "
+            "&& typeof apiFetch === 'function' "
+            "&& document.querySelector('#status') !== null"
+        )
+    )
+    browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        const nativeFetch = globalThis.fetch.bind(globalThis);
+        const fixture = {snapshotRequests: 0, startedAt: Date.now()};
+        globalThis.fetch = (input, ...rest) => {
+          const url = new URL(typeof input === 'string' ? input : input?.url || '', location.href);
+          if (url.pathname === '/api/stats-snapshot') {
+            fixture.snapshotRequests += 1;
+            return Promise.resolve(new Response(JSON.stringify({code: 'authentication_required'}), {
+              status: 401,
+              headers: {'Content-Type': 'application/json'},
+            }));
+          }
+          return nativeFetch(input, ...rest);
+        };
+        jsDebugCurrentStatsClientState.client?.stop?.();
+        jsDebugCurrentStatsClientState.client = null;
+        jsDebugCurrentStatsClientState.startPromise = null;
+        const client = ensureJsDebugCurrentStatsClient();
+        fixture.client = client;
+        globalThis.__statsAuthenticationFixture = fixture;
+        client.setVisible(true);
+        client.start().then(() => done(true), error => done({error: String(error?.message || error)}));
+        """
+    )
+    result = WebDriverWait(browser, 8, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
+            const fixture = globalThis.__statsAuthenticationFixture;
+            if (!fixture || Date.now() - fixture.startedAt < 1200) return false;
+            const status = document.querySelector('#status');
+            return {
+              snapshotRequests: fixture.snapshotRequests,
+              applicationClient: jsDebugCurrentStatsClientState.client === fixture.client,
+              authenticationState: document.body?.dataset?.authenticationState || '',
+              statusText: status?.textContent || '',
+              statusRole: status?.getAttribute('role') || '',
+            };
+            """
+        )
+    )
+    browser.execute_script("globalThis.__statsAuthenticationFixture.client.stop();")
+
+    assert result["snapshotRequests"] == 1, result
+    assert result["applicationClient"] is True, result
+    assert result["authenticationState"] == "signed-out", result
+    assert result["statusText"] == "Authentication required.", result
+    assert result["statusRole"] == "alert", result
+    retired = browser.execute_script(
+        """
+        const failures = jsDebugFailureEvents();
+        if (failures.length !== 1) return {failures, barrier: jsDebugCurrentObservationReceiptBarrier()};
+        const failure = failures[0];
+        const retiredKeys = new Set(
+          [...jsDebugCurrentObservationState.receipts.values()]
+            .filter(receipt => receipt.eventId === failure.id)
+            .map(receipt => receipt.key),
+        );
+        for (let index = jsDebugEvents.length - 1; index >= 0; index -= 1) {
+          if (jsDebugEvents[index]?.id === failure.id) jsDebugEvents.splice(index, 1);
+        }
+        jsDebugCurrentObservationState.queue = jsDebugCurrentObservationState.queue.filter(entry => {
+          if (!retiredKeys.has(entry.key)) return true;
+          jsDebugCurrentObservationState.keys.delete(entry.key);
+          return false;
+        });
+        for (const key of retiredKeys) jsDebugCurrentObservationState.receipts.delete(key);
+        persistJsDebugCurrentObservationReceipts();
+        return {failure: {...failure}, barrier: jsDebugCurrentObservationReceiptBarrier()};
+        """
+    )
+    assert retired["failure"]["type"] == "api", retired
+    assert retired["failure"]["endpoint"] == "/api/stats-snapshot", retired
+    assert retired["failure"]["status"] == 401, retired
+    assert retired["barrier"]["quiescent"] is True, retired
+
+
 def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 8).until(

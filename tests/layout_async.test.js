@@ -124,6 +124,115 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     assert.deepStrictEqual(canonical(api.locationAssignmentsForTest()), ['/login?next=%2F'], 'an interactive 401 still starts the login redirect');
   });
 
+  await testAsync('one terminal authentication owner retires long-lived transports after the first 401', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [1500]});
+    let requests = 0;
+    api.setFetchForTest(() => {
+      requests += 1;
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: null,
+        clone() { return {json: async () => ({code: 'authentication_required', login_url: '/login?next=%2F'})}; },
+      });
+    });
+    api.resetRuntimeIntervalForTest('latency', () => null, 3000);
+    api.resetRuntimeIntervalForTest('debug-stats', () => null, 500);
+    api.installClientEventStreamForTest();
+    api.startTranscriptStreamForTest('1');
+    const transcriptSource = api.transcriptStreamForTest('1');
+    assert.ok(api.clientEventTransportStateForTest().source, 'the client-events stream is live before authentication expires');
+    assert.ok(transcriptSource, 'the transcript stream is live before authentication expires');
+
+    let firstError;
+    let secondError;
+    try { await api.apiFetchJsonQuietForTest('/api/ping'); } catch (error) { firstError = error; }
+    try { await api.apiFetchJsonQuietForTest('/api/ping'); } catch (error) { secondError = error; }
+
+    assert.equal(requests, 1, 'the terminal latch blocks every request after the first 401');
+    assert.equal(firstError?.status, 401);
+    assert.equal(firstError?.terminalAuthentication, true);
+    assert.equal(secondError?.status, 401, 'blocked siblings receive the same typed terminal outcome');
+    assert.equal(api.runtimeIntervalActiveForTest('latency'), false, 'the /api/ping interval is retired');
+    assert.equal(api.runtimeIntervalActiveForTest('debug-stats'), false, 'the snapshot interval is retired');
+    assert.equal(api.clientEventTransportStateForTest().source, null, 'the shared client-events EventSource is closed');
+    assert.equal(api.clientEventTransportStateForTest().enabled, false, 'client-events cannot immediately recreate its retired stream');
+    assert.equal(api.transcriptStreamForTest('1'), null, 'the shared terminal owner closes direct transcript EventSources');
+    transcriptSource.onerror?.();
+    await flushAsyncWork();
+    assert.equal(api.transcriptStreamForTest('1'), null, 'a retired transcript callback cannot schedule a replacement EventSource');
+    assert.equal(api.testElementForId('body').dataset.authenticationState, 'signed-out');
+    assert.equal(api.testElementForId('status').textContent, 'Authentication required.');
+  });
+
+  await testAsync('client-events resolves its hidden HTTP failure through one bounded auth probe', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [15000]});
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: null,
+        clone() {
+          return {
+            json: async () => ({code: 'authentication_required'}),
+            arrayBuffer: async () => new ArrayBuffer(0),
+          };
+        },
+      });
+    });
+    api.installClientEventStreamForTest();
+    const source = api.clientEventTransportStateForTest().source;
+    source.onerror();
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.deepStrictEqual(requests, ['/api/ping?client_event_auth_probe=1'], 'one disconnect episode owns one status probe');
+    assert.equal(api.clientEventTransportStateForTest().source, null, `the terminal auth owner clears the rejected EventSource (requests=${requests.length})`);
+    assert.equal(source.closeCount, 1, `the terminal auth owner closes the rejected EventSource (closeCount=${String(source.closeCount)})`);
+    assert.equal(api.clientEventTransportStateForTest().enabled, false);
+  });
+
+  await testAsync('a rejected client-events candidate reaches the same bounded auth probe', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin');
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: null,
+        clone() {
+          return {
+            json: async () => ({code: 'authentication_required'}),
+            arrayBuffer: async () => new ArrayBuffer(0),
+          };
+        },
+      });
+    });
+    api.installClientEventStreamForTest();
+    const active = api.clientEventTransportStateForTest().source;
+    api.setEventLogTabActiveForTest('1', true);
+    api.syncClientEventDemandForTest({immediate: true});
+    const candidate = api.clientEventTransportStateForTest().replacementSource;
+    assert.ok(candidate && candidate !== active);
+
+    candidate.onerror();
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.deepStrictEqual(requests, ['/api/ping?client_event_auth_probe=1']);
+    assert.equal(active.closeCount, 1, 'terminal authentication closes the formerly active source');
+    assert.equal(candidate.closeCount, 1, 'terminal authentication closes the rejected candidate');
+    assert.equal(api.clientEventTransportStateForTest().source, null);
+    assert.equal(api.clientEventTransportStateForTest().replacementSource, null);
+    assert.equal(api.clientEventTransportStateForTest().enabled, false);
+  });
+
   await testAsync('the shared startup and refresh request owner admits at most eight API fetches', async () => {
     const api = loadYolomux();
     const pending = [];

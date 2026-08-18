@@ -4039,6 +4039,7 @@ function ensureJsDebugCurrentStatsClient() {
   const selection = jsDebugCurrentStatsSelection();
   const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
     fetch: apiFetch,
+    onTerminalAuthentication: claimTerminalAuthentication,
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,

@@ -26,32 +26,15 @@ from yolomux_lib import http_routes
 from yolomux_lib import server
 
 
-class _StubReservation:
-    """Stand-in reservation handle with the exactly-once release contract."""
-
-    def __init__(self) -> None:
-        self._released = False
-
-    def release(self) -> None:
-        self._released = True
-
-    @property
-    def released(self) -> bool:
-        return self._released
-
-
-class _StoppedCompletionService:
+class _StoppedCompletionService(app_module.JobdOperationService):
     """Accept the reservation and retain the submitted worker without running it."""
 
     def __init__(self) -> None:
-        self.stop_event = threading.Event()
+        super().__init__()
         self.submissions: list[tuple] = []
 
-    def reserve(self, lane: str = "bulk"):
-        return _StubReservation()
-
     def submit_reserved(self, reservation, function, *args) -> bool:
-        assert isinstance(reservation, _StubReservation)
+        assert isinstance(reservation, app_module.JobdOperationReservation)
         self.submissions.append((function, args))
         return True
 
@@ -90,7 +73,7 @@ def test_watch_diff_route_accepts_every_root_count_the_client_index_admits(monke
     assert payload["operation"]["progress"]["batches_total"] == expected_batches
     function, args = webapp.jobd_operation_service.submissions[0]
     assert function == webapp.complete_filesystem_watch_diff_operation
-    assert args[3] == roots
+    assert args[2] == roots
 
 
 def test_watch_diff_route_reports_no_roots_as_a_ready_empty_plan(monkeypatch, tmp_path):
@@ -506,8 +489,8 @@ def test_accepted_watch_diff_threads_one_absolute_deadline_through_every_child(m
 
     assert status == HTTPStatus.ACCEPTED, receipt
     _function, args = webapp.jobd_operation_service.submissions[0]
-    # args == (receipt_fence, request_id, base_payload, roots, deadline_at, identity_seed)
-    deadline_at = args[4]
+    # args == (flight, base_payload, roots, identity_seed)
+    deadline_at = args[0].deadline_at
     # One absolute deadline, set at acceptance -- not a per-child relative timeout.
     assert accepted_at + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS <= deadline_at <= time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS
 
@@ -539,8 +522,12 @@ def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_chi
     limit = app_module.filesystem.MAX_BATCH_REQUESTS
     roots = [f"/repo-{index:03d}" for index in range(limit + 1)]
     webapp = _watch_diff_app(monkeypatch, tmp_path, roots)
-    fence = app_module.FilesystemWatchReceiptFence()
-    fence.cancel()  # a superseding/failed acceptance cancelled this parent before it resolved
+    flight = app_module.JobdOperationFlight(
+        lane="bulk",
+        key="fs-watch-request:cancelled",
+        deadline_at=time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS,
+    )
+    flight.cancel_owner()  # a failed acceptance cancelled this parent before it resolved
 
     cold_batches = tuple(
         app_module.FilesystemWatchBatchProduct(
@@ -558,11 +545,9 @@ def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_chi
     monkeypatch.setattr(webapp, "terminalize_operation", lambda *a, **k: terminalized.append((a, k)))
     try:
         webapp.complete_filesystem_watch_diff_operation(
-            fence,
-            "r-cancelled",
+            flight,
             {"mode": "full", "reason": "forced", "token": "", "removed_roots": []},
             roots,
-            time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS,
             "seed",
         )
     finally:

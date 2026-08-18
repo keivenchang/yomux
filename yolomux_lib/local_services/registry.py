@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import ctypes
 import ctypes.util
+import fcntl
 import os
 import platform
 import re
@@ -906,6 +907,7 @@ class LocalServiceRegistry:
         self._last_resource_group_sample: tuple[tuple[int, ...], float, float] | None = None
         self._upgrade_required: dict[str, Any] | None = None
         self._process_diagnostic: dict[str, Any] = {}
+        self._runtime_locks_pruned = False
 
     @property
     def failures(self) -> int:
@@ -1019,6 +1021,75 @@ class LocalServiceRegistry:
         # the configured state directory so service startup never chmods /tmp.
         return self.service_dir / f"{self.spec.name}.service.lock"
 
+    def _prune_stale_runtime_locks(self) -> list[Path]:
+        """Remove only unlocked runtime generations no current record can name."""
+
+        active = {self.lock_path, self.socket_path.with_suffix(".lock")}
+        try:
+            record_paths = tuple(self.service_dir.glob("*.service.json"))
+        except OSError:
+            return []
+        for record_path in record_paths:
+            record = read_json_file(record_path, None)
+            if not isinstance(record, dict):
+                continue
+            diagnostic = process_record_diagnostic(record, host_identity=self.host_identity)
+            if not diagnostic.current and diagnostic.may_remove_stale_record:
+                continue
+            recorded_socket = str(record.get("socket") or "")
+            if recorded_socket:
+                active.add(Path(recorded_socket).with_suffix(".lock"))
+        try:
+            candidates = sorted(self.service_dir.glob(f"{self.spec.name}.*.lock"))
+        except OSError:
+            return []
+        removed: list[Path] = []
+        open_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        for candidate in candidates:
+            if candidate in active:
+                continue
+            try:
+                fd = os.open(candidate, open_flags)
+            except OSError:
+                continue
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    continue
+                opened = os.fstat(fd)
+                try:
+                    current = candidate.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    continue
+                try:
+                    candidate.unlink()
+                except OSError:
+                    continue
+                removed.append(candidate)
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                os.close(fd)
+        return removed
+
+    def prune_stale_runtime_locks_once(self) -> list[Path]:
+        """Run startup maintenance even when this generation adopts a healthy daemon."""
+
+        if self._runtime_locks_pruned:
+            return []
+        with self.lock:
+            if self._runtime_locks_pruned:
+                return []
+            with file_lock(self.lock_path, dir_mode=0o700):
+                removed = self._prune_stale_runtime_locks()
+            self._runtime_locks_pruned = True
+            return removed
+
     @property
     def stderr_path(self) -> Path:
         return self.socket_path.with_suffix(".stderr.log")
@@ -1095,14 +1166,14 @@ class LocalServiceRegistry:
             return True
         return True
 
-    def _can_reclaim_newer_service(self, service_pid: int) -> bool:
-        """Whether a newer daemon is provably left behind by a dead web owner.
+    def _can_reclaim_dead_launcher_service(self, service_pid: int) -> bool:
+        """Whether a daemon is provably left behind by a dead web owner.
 
-        A version fence normally means another live web server may still own the
-        shared daemon, so it remains terminal.  A guarded web restart is the
-        narrow exception: the persisted record still identifies this exact
-        socket/process group, while its launcher has exited.  Only that ledger
-        proof permits retiring the daemon and starting the current one.
+        Another live web server may still own a compatible or newer shared daemon,
+        so neither version nor a dead PID alone grants signal authority. A guarded
+        web restart is the narrow exception: the persisted record still identifies
+        this exact socket/process group, while its launcher has exited. Only that
+        ledger proof permits retiring the daemon and starting the current one.
         """
         if service_pid <= 0:
             return False
@@ -1126,10 +1197,8 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
-        newer_reclaimable = (
-            service_version > self.spec.protocol_version
-            and self._can_reclaim_newer_service(service_pid)
-        )
+        dead_launcher_reclaimable = self._can_reclaim_dead_launcher_service(service_pid)
+        newer_reclaimable = service_version > self.spec.protocol_version and dead_launcher_reclaimable
         if service_version > self.spec.protocol_version and not newer_reclaimable:
             self._upgrade_required = {
                 "required_protocol_version": service_version,
@@ -1180,7 +1249,11 @@ class LocalServiceRegistry:
                 return False
             service_pid = record_pid
             shutdown_protocol_version = recorded_protocol_version
-        if (not response.get("ok") and not older_upgrade and not newer_reclaimable) or not service_pid or compatible:
+        if (
+            (not response.get("ok") and not older_upgrade and not newer_reclaimable)
+            or not service_pid
+            or (compatible and not dead_launcher_reclaimable)
+        ):
             return True
         if record_pid != service_pid or not diagnostic.current:
             return False
@@ -1233,7 +1306,7 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
         if service_version > self.spec.protocol_version:
-            if self._can_reclaim_newer_service(int(response.get("pid") or 0)):
+            if self._can_reclaim_dead_launcher_service(int(response.get("pid") or 0)):
                 # _CurrentRegistry observes the wire fence before this health
                 # check.  Clear that provisional fence so ensure_started can
                 # execute the ledger-proven stale-owner recovery below.
@@ -1261,6 +1334,9 @@ class LocalServiceRegistry:
                 service_build > self.spec.build_revision
                 or str(response.get("code_revision") or "") == self.spec.code_revision
             )
+        if healthy and self._can_reclaim_dead_launcher_service(int(response.get("pid") or 0)):
+            self.invalidate_rpc_health()
+            return False
         if healthy:
             self._upgrade_required = None
             self.note_rpc_success()
@@ -1787,6 +1863,7 @@ class LocalServiceRegistry:
         if self.process is not None and self.process.poll() is not None:
             self.process = None
         self._reap_recorded_child_if_exited()
+        self.prune_stale_runtime_locks_once()
         if self._upgrade_required is not None:
             return False
         if self.recently_healthy():
