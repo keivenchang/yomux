@@ -35,8 +35,8 @@
   inset-block-end: max(var(--space-8), env(safe-area-inset-bottom));
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--touch-target-min-size);
+  height: var(--touch-target-min-size);
   padding: 0;
   border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
@@ -58,8 +58,8 @@
   inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
   grid-template-rows: 21px minmax(0, 1fr);
-  width: min(calc(226px + 2em), calc(100% - var(--space-4)));
-  height: min(171px, calc(100% - var(--space-4)));
+  width: min(306px, calc(100% - var(--space-4)));
+  height: min(211px, calc(100% - var(--space-4)));
   max-height: calc(100% - var(--space-4));
   padding: 0;
   overflow: hidden;
@@ -149,11 +149,12 @@
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 48px 48px 35px;
+  grid-template-columns: 48px minmax(0, 1fr) 48px 48px var(--touch-row-height);
   gap: var(--space-1);
   overflow: visible;
 }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--tmux-prefix { grid-column: 1; }
+.mobile-terminal-keyrow--primary .mobile-terminal-key--upload { grid-column: 2; }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--backspace { grid-column: 3; }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--more { grid-column: 4; }
 .mobile-terminal-keyrow-shell {
@@ -189,7 +190,7 @@
   display: none;
 }
 .mobile-terminal-key-content--more {
-  grid-template-columns: repeat(3, minmax(0, 1fr)) 48px 35px;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 48px var(--touch-row-height);
   grid-template-rows: repeat(3, minmax(var(--touch-row-height), 1fr));
   gap: var(--space-1);
 }
@@ -1004,6 +1005,15 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .panel-toast-stack .toast {
   width: 100%;
+  pointer-events: auto;
+}
+body.app-topbar-touch-compact .attention-alerts {
+  top: calc(var(--topbar-height) + 2 * var(--pane-tab-height) + var(--space-4));
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert {
+  pointer-events: none;
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert :is(button, a, input, select, [role="button"], [tabindex]) {
   pointer-events: auto;
 }
 .attention-alerts .startup-helper-toast {

@@ -1695,10 +1695,10 @@ async function runCrossSurfaceStateSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(/scope\.ownEvent\('keydown', container, 'keydown', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('keydown'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
-    assert.ok(/scope\.ownEvent\('paste', container, 'paste', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('paste'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('keydown', container, 'keydown', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('keydown'[\s\S]{0,300}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/scope\.ownEvent\('paste', container, 'paste', (?:\(\)|event) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/scope\.ownEvent\('paste'[\s\S]{0,240}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
-    assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
+    assert.ok(/term\.onData\(data => \{[\s\S]*recordTerminalMobileInputTrace\(session, 'on-data'[\s\S]*handleTerminalData\(session, data\);[\s\S]*\}\);/.test(terminalInputBody), 'startTerminal traces metadata then routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
     assert.ok(/function applyTerminalUnicode11Addon\(term\)[\s\S]*new Unicode11AddonCtor\(\)[\s\S]*term\.loadAddon\(addon\)[\s\S]*term\.unicode\.activeVersion = '11'/.test(appSource), 'xterm terminals register Unicode 11 widths for emoji cell accounting');
     assert.ok(/const term = new TerminalCtor\([\s\S]*?\}\);\s*applyTerminalUnicode11Addon\(term\);\s*term\.open\(container\);/.test(terminalInputBody), 'xterm Unicode widths are selected before the first terminal paint');
@@ -2940,6 +2940,31 @@ async function runCrossSurfaceStateSuite() {
     const mobileLayoutMenu = mobileViewMenu.items.find(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout'));
     assert.ok(mobileLayoutMenu, 'mobile keeps View > Layout visible so the one-column policy is explained rather than silently hiding split controls');
     assert.ok(mobileLayoutMenu.items.every(item => item.disabled === true && item.detail === mobileApi.t('menu.view.layout.narrow.detail')), 'mobile disables every layout command with the shared localized width hint');
+    const mobileRestoredApi = loadYolomux(
+      '?sessions=old,recent,newest&layout=row@50(left,right)&tabs=left:old,recent;right:newest*',
+      ['old', 'recent', 'newest'],
+      'http:',
+      'iPhone',
+      'admin',
+      {coarsePointer: true, viewport: {width: 390, height: 844}},
+    );
+    assert.deepEqual(canonical(mobileRestoredApi.layoutSlotsForTest()), {
+      __tree: {slot: 'left'},
+      left: {active: 'newest', tabs: ['old', 'recent', 'newest']},
+    }, 'a desktop URL collapses through the shared phone owner without losing its restored active tab');
+    const desktopRestoredApi = loadYolomux(
+      '?sessions=old,recent,newest&layout=row@50(left,right)&tabs=left:old,recent;right:newest*',
+      ['old', 'recent', 'newest'],
+      'http:',
+      'Linux x86_64',
+      'admin',
+      {coarsePointer: false, viewport: {width: 1440, height: 900}},
+    );
+    assert.deepEqual(canonical(desktopRestoredApi.layoutSlotsForTest()), {
+      __tree: {split: 'row', pct: 50, children: [{slot: 'left'}, {slot: 'right'}]},
+      left: {active: 'old', tabs: ['old', 'recent']},
+      right: {active: 'newest', tabs: ['newest']},
+    }, 'the responsive owner leaves the same restored URL split intact on a desktop viewport');
     assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
@@ -3250,7 +3275,7 @@ async function runCrossSurfaceStateSuite() {
       assert.ok(/function newTmuxSessionFullAccessFlags\(agent\)[\s\S]*`\+ \$\{flags\}`/.test(newSessionSrc), 'the dangerous-auto-approve action retains the exact command flags for its tooltip and accessible name');
       assert.ok(menuCss.includes('.app-menu-command-pair') && /\.app-menu-command-pair\s*\{[\s\S]*display:\s*flex[\s\S]*flex-wrap:\s*nowrap/.test(menuCss) && menuCss.includes('.app-menu-command-separator') && /function createAppMenuCommandPair\(item\)[\s\S]*separator: true/.test(newSessionSrc), 'paired launch actions stay compact on one line with a visible separator instead of wasting half the menu width');
       assert.ok(menuCss.includes('.app-menu-command-row') && /\.app-menu-command-row\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss), 'Shell command rows stay on one line and scroll only as a final narrow-screen fallback');
-      assert.ok(/app-topbar-touch-compact \.app-menu--nested-root > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'touch Menus uses a viewport-bounded sheet, compact paired full-access actions, and separator-free shell text controls');
+      assert.ok(/app-topbar-touch-compact \.app-menu > \.app-menu-popover\s*\{[\s\S]*position:\s*fixed[\s\S]*overflow:\s*auto/.test(menuCss) && /app-topbar-touch-compact \.app-menu-command-pair\s*\{[\s\S]*flex-wrap:\s*nowrap[\s\S]*overflow-x:\s*auto/.test(menuCss) && /app-menu-command-row--shells \.(?:app-menu-command-row-label|app-menu-command)[\s\S]*border-color:\s*transparent[\s\S]*background:\s*transparent/.test(menuCss), 'every touch top-level menu uses a viewport-bounded sheet with compact paired actions and separator-free shell text controls');
       const infoTreeCss = fs.readFileSync('static/yolomux.css', 'utf8');
       assert.ok(infoTreeCss.includes('--info-pane-bg:') && infoTreeCss.includes('--info-tree-border:') && infoTreeCss.includes('--info-tree-line:') && infoTreeCss.includes('--info-tree-record-border:'), 'YO!info tree owns dedicated pane, border, record-outline, and connector tokens');
       assert.ok(/--info-tree-record-border:\s*var\(--info-tree-line\)/.test(infoTreeCss), 'YO!info leaf record outlines use the same visibility token as the left tree guides');

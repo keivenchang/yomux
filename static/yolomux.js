@@ -269,8 +269,8 @@ function previewRendererStrategy(specification) {
 }
 const PREVIEW_RENDERERS = Object.freeze([
   previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
-  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], render: renderHtmlPreviewStrategy}),
-  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], render: renderImagePreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -282,7 +282,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
   }}),
-  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
+  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
   previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
   previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
   previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
@@ -313,7 +313,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.props': 'ini',
   }}),
   previewRendererStrategy({id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text', surfaceClasses: ['data-preview-body'], parse: parseDelimitedPreviewStrategy, delimiterByExtension: {'.csv': ',', '.tsv': '\t'}, render: renderDelimitedPreviewStrategy}),
-  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp3': 'audio/mpeg',
     '.wav': 'audio/wav',
     '.ogg': 'audio/ogg',
@@ -323,7 +323,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.aac': 'audio/aac',
     '.opus': 'audio/opus',
   }}),
-  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp4': 'video/mp4',
     '.m4v': 'video/mp4',
     '.webm': 'video/webm',
@@ -3988,7 +3988,7 @@ function diagnosticRedactSecretAssignment(...args) {
   return `${groups.prefix}${quote}[redacted-secret]${quote}`;
 }
 
-function recordJsDebugEvent(type, payload = {}) {
+function recordJsDebugEvent(type, payload = {}, options = {}) {
   const timestampMs = Date.now();
   // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
   // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
@@ -4005,11 +4005,11 @@ function recordJsDebugEvent(type, payload = {}) {
     type: String(type || 'event'),
   };
   jsDebugEvents.push(event);
-  if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
+  if (options.graph !== false && typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
   if (jsDebugEvents.length > jsDebugEventLimit) {
     jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
   }
-  scheduleJsDebugPanelRefresh();
+  if (options.refresh !== false) scheduleJsDebugPanelRefresh();
   return event;
 }
 
@@ -6228,7 +6228,17 @@ function focusTerminalDom(session, delay = 0) {
   const run = () => {
     const scrollX = window.scrollX;
     const scrollY = window.scrollY;
-    terminals.get(session)?.term?.focus?.();
+    const item = terminals.get(session);
+    const textarea = item?.container?.querySelector?.('textarea.xterm-helper-textarea');
+    recordTerminalMobileInputTrace(session, 'focus-attempt', {
+      textareaPresent: Boolean(textarea),
+      textareaFocused: document.activeElement === textarea,
+    });
+    item?.term?.focus?.();
+    recordTerminalMobileInputTrace(session, 'touch-focus-result', {
+      textareaPresent: Boolean(textarea),
+      textareaFocused: document.activeElement === textarea,
+    });
     // xterm focuses its hidden textarea without a preventScroll option. In a full-height app with
     // a tall sibling pane, Chrome can scroll the otherwise overflow-hidden document and move the
     // entire top bar above the viewport when switching terminal tabs.
@@ -6487,13 +6497,390 @@ function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   return parts.join('');
 }
 
-function restoreElementScrollPosition(element, scrollTop, scrollLeft) {
+function previewScrollTraceContext(element, details = {}) {
+  const explicitSurface = String(details.previewSurface || '');
+  const contextElement = details.previewOwner || element;
+  const previewPane = contextElement?.matches?.('.file-editor-preview-pane-panel')
+    ? contextElement
+    : contextElement?.closest?.('.file-editor-preview-pane-panel');
+  const zoomViewport = contextElement?.matches?.('.file-editor-preview-zoom-viewport')
+    ? contextElement
+    : contextElement?.closest?.('.file-editor-preview-zoom-viewport');
+  if (!explicitSurface && !previewPane && !zoomViewport) return null;
+  const panel = contextElement?.closest?.('.file-editor-panel, .panel') || null;
+  const surface = explicitSurface
+    || (zoomViewport ? 'zoom' : PREVIEW_SURFACE_CLASSES.find(name => previewPane?.classList?.contains?.(name)) || 'preview');
+  return {
+    surface,
+    item: String(panel?.dataset?.layoutItem || ''),
+    layoutGeneration: Number(runtimeState?.layoutMutationGeneration || 0),
+    layoutCompletedGeneration: Number(runtimeState?.layoutMutationCompletedGeneration || 0),
+    layoutPendingGeneration: Number(runtimeState?.pendingLayoutMutationGeneration || 0),
+    splitGeneration: Number(panel?._splitScrollGeneration || 0),
+    renderGeneration: Number(details.renderGeneration ?? panel?._cmGeneration ?? 0),
+  };
+}
+
+function writeOwnedElementScroll(element, coordinates = {}, owner = 'unknown', details = {}) {
+  if (!element) return false;
+  const beforeTop = Number(element.scrollTop || 0);
+  const beforeLeft = Number(element.scrollLeft || 0);
+  if (Object.prototype.hasOwnProperty.call(coordinates, 'top')) element.scrollTop = Number(coordinates.top || 0);
+  if (Object.prototype.hasOwnProperty.call(coordinates, 'left')) element.scrollLeft = Number(coordinates.left || 0);
+  if (debugModeExplicitUrlEnabled === true) {
+    const context = previewScrollTraceContext(element, details);
+    if (context) {
+      const activeGesture = previewScrollTraceState.active;
+      const endedGesture = previewScrollTraceState.last && Date.now() - Number(previewScrollTraceState.last.endedAt || 0) <= 2000
+        ? previewScrollTraceState.last
+        : null;
+      const gesture = activeGesture || endedGesture;
+      recordJsDebugEvent('preview_scroll_trace', {
+        ...details,
+        ...context,
+        phase: 'owned-write',
+        owner: String(owner || 'unknown'),
+        gesture: Number(gesture?.gesture || 0),
+        gestureEndedMs: activeGesture || !endedGesture ? null : Math.max(0, Date.now() - Number(endedGesture.endedAt || 0)),
+        beforeTop,
+        beforeLeft,
+        top: Number(element.scrollTop || 0),
+        left: Number(element.scrollLeft || 0),
+        scrollHeight: Number(element.scrollHeight || 0),
+        scrollWidth: Number(element.scrollWidth || 0),
+        clientHeight: Number(element.clientHeight || 0),
+        clientWidth: Number(element.clientWidth || 0),
+      }, {graph: false, refresh: false});
+    }
+  }
+  return true;
+}
+
+function ownedElementScrollPosition(element) {
+  return {
+    top: Number(element?.scrollTop || 0),
+    left: Number(element?.scrollLeft || 0),
+  };
+}
+
+function ownedElementScrollPositionMatches(element, expected) {
+  if (!element || !expected) return false;
+  const current = ownedElementScrollPosition(element);
+  return current.top === Number(expected.top || 0) && current.left === Number(expected.left || 0);
+}
+
+const previewScrollUserOwnershipGenerations = new WeakMap();
+
+function previewScrollUserOwnershipGeneration(element) {
+  return Number(previewScrollUserOwnershipGenerations.get(element) || 0);
+}
+
+function claimPreviewScrollUserOwnership(element) {
+  if (!element) return 0;
+  const generation = previewScrollUserOwnershipGeneration(element) + 1;
+  previewScrollUserOwnershipGenerations.set(element, generation);
+  return generation;
+}
+
+function deferredElementScrollExpectation(element) {
+  return {
+    ...ownedElementScrollPosition(element),
+    userGeneration: previewScrollUserOwnershipGeneration(element),
+  };
+}
+
+function deferredElementScrollExpectationMatches(element, expected) {
+  return ownedElementScrollPositionMatches(element, expected)
+    && previewScrollUserOwnershipGeneration(element) === Number(expected?.userGeneration || 0);
+}
+
+function createDeferredElementScrollOwner(...elements) {
+  const state = {expected: new WeakMap(), superseded: new WeakSet()};
+  for (const element of elements) {
+    if (element) state.expected.set(element, deferredElementScrollExpectation(element));
+  }
+  return state;
+}
+
+function previewScrollUserOwnsElementNow(element) {
+  const ownsElement = record => Boolean(
+    record?.claimed
+    && (
+      record.element === element
+      || record.traceElement === element
+      || element?.contains?.(record.element)
+      || element?.contains?.(record.traceElement)
+    )
+  );
+  const active = previewScrollTraceState.active;
+  if (ownsElement(active) && Date.now() - Number(active.startedAt || 0) <= previewScrollGestureMaxActiveMs) return true;
+  const ended = previewScrollTraceState.last;
+  return Boolean(
+    ownsElement(ended)
+    && Date.now() - Math.max(Number(ended.endedAt || 0), Number(ended.lastScrollAt || 0)) <= 2000
+  );
+}
+
+function createPassiveDeferredElementScrollOwner(...elements) {
+  const state = createDeferredElementScrollOwner(...elements);
+  for (const element of elements) {
+    if (element && previewScrollUserOwnsElementNow(element)) state.superseded.add(element);
+  }
+  return state;
+}
+
+function deferredElementScrollOwnerOwnsElement(state, element) {
+  if (!state || !element || state.superseded.has(element)) return false;
+  const expected = state.expected.get(element);
+  if (expected && !deferredElementScrollExpectationMatches(element, expected)) {
+    state.superseded.add(element);
+    return false;
+  }
+  return true;
+}
+
+function writeDeferredElementScrollIfOwned(state, element, coordinates, owner = 'unknown', details = {}) {
+  if (!deferredElementScrollOwnerOwnsElement(state, element)) return false;
+  if (!writeOwnedElementScroll(element, coordinates, owner, details)) return false;
+  state.expected.set(element, deferredElementScrollExpectation(element));
+  return true;
+}
+
+function recordTerminalMobileInputTrace(session, phase, details = {}) {
+  if (debugModeExplicitUrlEnabled !== true) return null;
+  return recordJsDebugEvent('terminal_mobile_input_trace', {
+    ...details,
+    session: String(session || ''),
+    phase: String(phase || 'unknown'),
+    focused: viewportDiagnosticsFocusedElementText(),
+    layoutGeneration: Number(runtimeState?.layoutMutationGeneration || 0),
+  }, {graph: false, refresh: false});
+}
+
+const previewScrollTraceState = {installed: false, gestureSequence: 0, active: null, last: null, flushTimer: 0};
+const previewScrollCaptureDocuments = new WeakSet();
+const previewScrollGestureSlopPx = 4;
+const previewScrollGestureMaxActiveMs = 30000;
+
+function previewScrollTraceElementForTarget(target) {
+  if (!target?.closest) return null;
+  return target.closest('.file-editor-preview-zoom-viewport, .file-editor-preview-pane-panel');
+}
+
+function previewScrollTraceRecordForTarget(target) {
+  const element = previewScrollTraceElementForTarget(target);
+  return element ? {element, traceElement: element, details: {}} : null;
+}
+
+function previewScrollTraceRecordsMatch(left, right) {
+  return Boolean(left && right && left.element === right.element && left.traceElement === right.traceElement);
+}
+
+function claimPreviewScrollRecord(record) {
+  const generation = claimPreviewScrollUserOwnership(record?.element);
+  if (record?.traceElement && record.traceElement !== record.element) claimPreviewScrollUserOwnership(record.traceElement);
+  return generation;
+}
+
+function recordPreviewScrollRecord(record, phase, event = null, details = {}) {
+  if (!record) return null;
+  return recordPreviewScrollInputTrace(record.traceElement || record.element, phase, event, {
+    ...(record.details || {}),
+    previewOwner: record.element,
+    ...details,
+  });
+}
+
+function recordPreviewScrollInputTrace(element, phase, event = null, details = {}) {
+  if (debugModeExplicitUrlEnabled !== true || !element) return null;
+  const context = previewScrollTraceContext(element, details);
+  if (!context) return null;
+  const touch = event?.touches?.[0] || event?.changedTouches?.[0] || null;
+  const visual = window.visualViewport;
+  return recordJsDebugEvent('preview_scroll_trace', {
+    ...details,
+    ...context,
+    phase,
+    gesture: Number(details.gesture || previewScrollTraceState.active?.gesture || previewScrollTraceState.last?.gesture || 0),
+    top: Number(element.scrollTop || 0),
+    left: Number(element.scrollLeft || 0),
+    scrollHeight: Number(element.scrollHeight || 0),
+    scrollWidth: Number(element.scrollWidth || 0),
+    clientHeight: Number(element.clientHeight || 0),
+    clientWidth: Number(element.clientWidth || 0),
+    clientX: Number(touch?.clientX || 0),
+    clientY: Number(touch?.clientY || 0),
+    touches: Number(event?.touches?.length || 0),
+    visualViewport: visual ? {
+      width: Number(visual.width || 0),
+      height: Number(visual.height || 0),
+      offsetTop: Number(visual.offsetTop || 0),
+      offsetLeft: Number(visual.offsetLeft || 0),
+      scale: Number(visual.scale || 0),
+    } : null,
+  }, {graph: false, refresh: false});
+}
+
+function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
+  if (!ownerDocument?.addEventListener || previewScrollCaptureDocuments.has(ownerDocument)) return false;
+  previewScrollCaptureDocuments.add(ownerDocument);
+  ownerDocument.addEventListener('touchstart', event => {
+    const record = recordForTarget(event.target);
+    if (!record) return;
+    const touch = event?.touches?.[0] || null;
+    const gesture = ++previewScrollTraceState.gestureSequence;
+    previewScrollTraceState.active = {
+      ...record,
+      gesture,
+      identifier: touch?.identifier,
+      startX: Number(touch?.clientX || 0),
+      startY: Number(touch?.clientY || 0),
+      startedAt: Date.now(),
+      claimed: false,
+    };
+    previewScrollTraceState.last = previewScrollTraceState.active;
+    recordPreviewScrollRecord(previewScrollTraceState.active, 'touchstart', event, {gesture});
+  }, {capture: true, passive: true});
+  ownerDocument.addEventListener('touchmove', event => {
+    const active = previewScrollTraceState.active;
+    if (!active) return;
+    const touches = Array.from(event?.touches || []);
+    const touch = touches.find(item => active.identifier === undefined || item.identifier === active.identifier) || touches[0] || null;
+    if (touch && !active.claimed) {
+      const deltaX = Number(touch.clientX || 0) - active.startX;
+      const deltaY = Number(touch.clientY || 0) - active.startY;
+      if (Math.abs(deltaY) >= previewScrollGestureSlopPx && Math.abs(deltaY) > Math.abs(deltaX)) {
+        active.claimed = true;
+        active.userGeneration = claimPreviewScrollRecord(active);
+        recordPreviewScrollRecord(active, 'ownership-claimed', event, {
+          gesture: active.gesture,
+          userGeneration: active.userGeneration,
+        });
+      }
+    }
+    recordPreviewScrollRecord(active, 'touchmove', event, {gesture: active.gesture});
+  }, {capture: true, passive: true});
+  const finish = phase => event => {
+    const active = previewScrollTraceState.active;
+    if (!active) return;
+    recordPreviewScrollRecord(active, phase, event, {gesture: active.gesture});
+    previewScrollTraceState.last = {...active, endedAt: Date.now()};
+    previewScrollTraceState.active = null;
+    if (debugModeExplicitUrlEnabled !== true) return;
+    if (previewScrollTraceState.flushTimer) clearTimeout(previewScrollTraceState.flushTimer);
+    previewScrollTraceState.flushTimer = setTimeout(() => {
+      previewScrollTraceState.flushTimer = 0;
+      scheduleJsDebugPanelRefresh();
+    }, 2100);
+  };
+  ownerDocument.addEventListener('touchend', finish('touchend'), {capture: true, passive: true});
+  ownerDocument.addEventListener('touchcancel', finish('touchcancel'), {capture: true, passive: true});
+  ownerDocument.addEventListener('scroll', event => {
+    const resolved = recordForTarget(event.target);
+    if (!resolved) return;
+    const record = previewScrollTraceRecordsMatch(previewScrollTraceState.active, resolved)
+      ? previewScrollTraceState.active
+      : (previewScrollTraceRecordsMatch(previewScrollTraceState.last, resolved) ? previewScrollTraceState.last : resolved);
+    if (record && !record.claimed) {
+      record.claimed = true;
+      record.userGeneration = claimPreviewScrollRecord(record);
+      recordPreviewScrollRecord(record, 'ownership-claimed', event, {
+        gesture: record.gesture,
+        userGeneration: record.userGeneration,
+        claimSource: 'native-scroll',
+      });
+    }
+    if (record?.claimed) record.lastScrollAt = Date.now();
+    if (record?.embeddedContainer) {
+      record.embeddedContainer._previewEmbeddedScrollPosition = ownedElementScrollPosition(record.traceElement);
+    }
+    recordPreviewScrollRecord(record, 'scroll', event);
+  }, {capture: true, passive: true});
+  return true;
+}
+
+function installPreviewScrollOwnershipCapture() {
+  if (previewScrollTraceState.installed) return false;
+  previewScrollTraceState.installed = true;
+  bindPreviewScrollOwnershipCapture(document, previewScrollTraceRecordForTarget);
+  if (debugModeExplicitUrlEnabled === true) {
+    const viewport = window.visualViewport;
+    for (const type of ['resize', 'scroll']) {
+      viewport?.addEventListener?.(type, event => {
+        const record = previewScrollTraceState.active || previewScrollTraceState.last;
+        if (!record || (!previewScrollTraceState.active && Date.now() - Number(record.endedAt || 0) > 2000)) return;
+        recordPreviewScrollInputTrace(record.element, `visual-viewport-${type}`, event, {gesture: record.gesture});
+      }, {passive: true});
+    }
+  }
+  return true;
+}
+
+function previewEmbeddedScrollElement(frame) {
+  try {
+    return frame?.contentDocument?.scrollingElement || frame?.contentDocument?.documentElement || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function previewEmbeddedScrollPosition(container) {
+  const frame = container?.querySelector?.('.file-editor-html-preview');
+  const element = previewEmbeddedScrollElement(frame);
+  return element ? ownedElementScrollPosition(element) : (container?._previewEmbeddedScrollPosition || null);
+}
+
+function installPreviewEmbeddedScrollOwnershipCapture(frame, container) {
+  const ownerDocument = frame?.contentDocument || null;
+  const traceElement = previewEmbeddedScrollElement(frame);
+  if (!ownerDocument || !traceElement || !container) return null;
+  const resolveRecord = () => ({
+    element: container,
+    traceElement,
+    embeddedContainer: container,
+    details: {previewSurface: 'html', embedded: true},
+  });
+  bindPreviewScrollOwnershipCapture(ownerDocument, resolveRecord);
+  return traceElement;
+}
+
+function restorePreviewEmbeddedScrollPosition(container, frame, position) {
+  const element = installPreviewEmbeddedScrollOwnershipCapture(frame, container);
+  if (!element) return false;
+  const coordinates = position || container?._previewEmbeddedScrollPosition;
+  if (!coordinates) return true;
+  container._previewEmbeddedScrollPosition = {
+    top: Number(coordinates.top || 0),
+    left: Number(coordinates.left || 0),
+  };
+  restoreElementScrollPosition(element, container._previewEmbeddedScrollPosition.top, container._previewEmbeddedScrollPosition.left, {
+    owner: 'html-preview-render-restore',
+    previewSurface: 'html',
+    previewOwner: container,
+  });
+  return true;
+}
+
+function restoreElementScrollPosition(element, scrollTop, scrollLeft, details = {}) {
   if (!element) return;
-  element.scrollTop = scrollTop;
-  element.scrollLeft = scrollLeft;
+  const {deferredOwner: specifiedDeferredOwner = null, ...traceDetails} = details;
+  const owner = String(traceDetails.owner || 'restore-element-scroll');
+  const deferredOwner = specifiedDeferredOwner || createPassiveDeferredElementScrollOwner(element);
+  writeDeferredElementScrollIfOwned(
+    deferredOwner,
+    element,
+    {top: scrollTop, left: scrollLeft},
+    owner,
+    {...traceDetails, restorePhase: 'immediate'},
+  );
   requestAnimationFrame(() => {
-    element.scrollTop = scrollTop;
-    element.scrollLeft = scrollLeft;
+    writeDeferredElementScrollIfOwned(
+      deferredOwner,
+      element,
+      {top: scrollTop, left: scrollLeft},
+      owner,
+      {...traceDetails, restorePhase: 'animation-frame'},
+    );
   });
 }
 
@@ -10639,7 +11026,7 @@ function layoutUrlScrollElementForPayload(payload = {}) {
   return null;
 }
 
-function applyLayoutUrlScrollSnapshot(scroll = []) {
+function applyLayoutUrlScrollSnapshot(scroll = [], deferredOwner = null) {
   if (!Array.isArray(scroll)) return;
   for (const payload of scroll.slice(0, 100)) {
     if (!payload || typeof payload !== 'object') continue;
@@ -10654,8 +11041,11 @@ function applyLayoutUrlScrollSnapshot(scroll = []) {
       descriptor.term.scrollToLine(top);
       continue;
     }
-    descriptor.element.scrollTop = top;
-    descriptor.element.scrollLeft = left;
+    if (deferredOwner) {
+      writeDeferredElementScrollIfOwned(deferredOwner, descriptor.element, {top, left}, 'layout-url-scroll-restore');
+    } else {
+      writeOwnedElementScroll(descriptor.element, {top, left}, 'layout-url-scroll-restore');
+    }
     if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
   }
 }
@@ -10772,9 +11162,12 @@ function applyPendingLayoutUrlState() {
   }
   applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
   if (Array.isArray(state.scroll)) {
-    applyLayoutUrlScrollSnapshot(state.scroll);
-    requestAnimationFrame(() => applyLayoutUrlScrollSnapshot(state.scroll));
-    setTimeout(() => applyLayoutUrlScrollSnapshot(state.scroll), 0);
+    const scrollOwner = createPassiveDeferredElementScrollOwner(
+      ...state.scroll.map(payload => layoutUrlScrollElementForPayload(payload)?.element).filter(Boolean),
+    );
+    applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner);
+    requestAnimationFrame(() => applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner));
+    setTimeout(() => applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner), 0);
   }
   layoutUrlState.applied = true;
   return true;
@@ -11558,12 +11951,15 @@ function restorePaneElementScrollState(panel, state) {
   paneScrollContainers(panel).forEach((element, index) => {
     current.set(paneScrollContainerKey(element, index), element);
   });
+  const deferredOwner = createPassiveDeferredElementScrollOwner(...current.values());
   const restore = () => {
     for (const entry of entries) {
       const element = current.get(entry.key);
       if (!paneScrollContainerHasLayout(element)) continue;
-      element.scrollTop = Number(entry.scrollTop || 0);
-      element.scrollLeft = Number(entry.scrollLeft || 0);
+      writeDeferredElementScrollIfOwned(deferredOwner, element, {
+        top: Number(entry.scrollTop || 0),
+        left: Number(entry.scrollLeft || 0),
+      }, 'pane-view-state-restore');
     }
   };
   restore();
@@ -17732,10 +18128,10 @@ function createAppMenu(menu) {
     event.stopPropagation();
     if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
-      // The phone's single Menus root is a disclosure: its next tap must collapse the currently
-      // open menu immediately. Full desktop roots keep the short grace period that prevents one
-      // physical pointer interaction from being interpreted as open then close.
-      if (wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
+      // Every coarse-pointer top-level menu is a disclosure: its next tap must collapse the
+      // currently open sheet immediately. Cursor-driven roots keep the short grace period that
+      // prevents one physical pointer interaction from being interpreted as open then close.
+      if (browserUsesCoarsePointer() || wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
       return;
     }
@@ -19470,6 +19866,13 @@ function rawFileUrl(path, params = {}) {
   return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
+function rawFileMediaVersion(state) {
+  const identity = physicalFileIdentityFromPayload(state);
+  const mtime = String(state?.mtime_ns ?? state?.mtime ?? 0);
+  const size = state?.size == null ? null : Number(state.size);
+  return JSON.stringify([identity, mtime, size]);
+}
+
 function rawFileFailureFallback(status, path) {
   if (status === 401) return {key: 'auth.error.authenticationRequired', params: {}, fallback: 'Authentication required.'};
   if (status === 404) return {key: 'common.pathNotFound', params: {path}, fallback: `path not found: ${path}`};
@@ -19530,7 +19933,7 @@ function rawFileImageFailureResult(path, installed) {
 
 function rawFileImageReadiness(media, path, installed, options = {}) {
   let settle = null;
-  const promise = new Promise(resolve => {
+  const promise = new Promise((resolve, reject) => {
     let promiseSettled = false;
     let failureReported = false;
     const cleanup = () => {
@@ -19548,9 +19951,11 @@ function rawFileImageReadiness(media, path, installed, options = {}) {
       failureReported = true;
       cleanup();
       const failure = rawFileImageFailureResult(path, installed);
-      resolveOnce(failure);
       releaseRawFileMediaSource(media);
-      options.onDecodeFailure?.(failure.error, failure);
+      Promise.resolve(options.onDecodeFailure?.(failure.error, failure)).then(
+        () => resolveOnce(failure),
+        reject,
+      );
     };
     const handleLoad = () => {
       if (Number(media.naturalWidth || 0) <= 0 || Number(media.naturalHeight || 0) <= 0) {
@@ -19581,7 +19986,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
   if (media._rawFileAbortController !== controller || options.isCurrent?.() === false) return result;
   media._rawFileAbortController = null;
   if (!result.ok) {
-    if (!result.aborted) options.onFailure?.(result.error, result);
+    if (!result.aborted) await options.onFailure?.(result.error, result);
     return result;
   }
   const objectUrl = URL.createObjectURL(result.blob);
@@ -19598,10 +20003,12 @@ async function installRawFileMediaSource(media, path, options = {}) {
     return readiness.promise;
   }
   if (typeof options.onDecodeFailure === 'function') {
+    let decodeFailurePromise = null;
     const handleDecodeFailure = () => {
-      if (media._rawFileErrorHandler !== handleDecodeFailure) return;
+      if (media._rawFileErrorHandler !== handleDecodeFailure) return decodeFailurePromise;
       releaseRawFileMediaSource(media);
-      options.onDecodeFailure();
+      decodeFailurePromise = Promise.resolve(options.onDecodeFailure());
+      return decodeFailurePromise;
     };
     media._rawFileErrorHandler = handleDecodeFailure;
     media.addEventListener?.('error', handleDecodeFailure, {once: true});
@@ -19611,7 +20018,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
     try {
       await media.decode();
     } catch (_) {
-      media._rawFileErrorHandler?.();
+      await media._rawFileErrorHandler?.();
     }
   }
   return installed;
@@ -20682,6 +21089,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
+    detached: repo.detached === true,
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -20697,7 +21105,18 @@ function hydrateFileExplorerRepoInfoCache() {
   for (const item of repos) {
     const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
     const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
-    if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
+    if (!path || !repo) continue;
+    // Drop a persisted cache_path that points INSIDE its own repo root. Records written before the
+    // alias fix stamped the queried descendant, which made every child of a repo satisfy the
+    // root-identity guard and inherit that repo's branch label.
+    const root = normalizeDirectoryPath(repo.root);
+    const stale = root && repo.cache_path && normalizeDirectoryPath(repo.cache_path).startsWith(`${root}/`);
+    setLimitedMapEntry(
+      fileExplorerRepoInfoCache,
+      path,
+      stale ? {...repo, cache_path: root} : repo,
+      fileExplorerMemoryCacheLimit,
+    );
   }
 }
 
@@ -20720,7 +21139,16 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const repoRoot = normalizeDirectoryPath(info.root);
   // Finder preserves the path the user opened while macOS APIs can return its physical alias
   // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  // A cache_path is an ALIAS OF the repo root, never a path inside it: stamping it on a descendant
+  // made every child of a repo satisfy the root-identity guard in fileTreeRepoBranch(), so every
+  // entry under an ancestor repo inherited that repo's branch label.
+  const aliasesRepoRoot = !repoRoot || repoRoot === normalized || !normalized.startsWith(`${repoRoot}/`);
+  setLimitedMapEntry(
+    fileExplorerRepoInfoCache,
+    normalized,
+    aliasesRepoRoot ? {...info, cache_path: normalized} : info,
+    fileExplorerMemoryCacheLimit,
+  );
   if (repoRoot && repoRoot !== normalized) {
     setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
   }
@@ -21686,23 +22114,27 @@ function restoreCommittedFileExplorerRootDisplay() {
 }
 
 function repoBranchDisplayText(repo) {
-  return repo?.branch || t('git.detached');
+  return repo?.branch || (repo?.detached === true ? t('git.detached') : '');
 }
 
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
-  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${t('git.dirty', {count: Number(repo.dirty_count)})}` : '';
-  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${t('git.ahead', {count: Number(repo.ahead)})}` : '';
-  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${t('git.behind', {count: Number(repo.behind)})}` : '';
-  const branch = repoBranchDisplayText(repo);
-  return `${repo.name || basenameOf(repo.root)} (${branch}${dirty}${ahead}${behind})`;
+  const details = [
+    repoBranchDisplayText(repo),
+    Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? t('git.dirty', {count: Number(repo.dirty_count)}) : '',
+    Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? t('git.ahead', {count: Number(repo.ahead)}) : '',
+    Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? t('git.behind', {count: Number(repo.behind)}) : '',
+  ].filter(Boolean);
+  const name = repo.name || basenameOf(repo.root);
+  return details.length ? `${name} (${details.join(', ')})` : name;
 }
 
 function setFileExplorerRepoSummary(path, repo, error = '') {
   const summary = error ? '' : repoInfoSummary(repo);
+  const branch = repoBranchDisplayText(repo);
   const title = error || (repo?.root ? [
     `${t('popover.repo')}: ${repo.root}`,
-    `${t('common.field.branch')}: ${repoBranchDisplayText(repo)}`,
+    branch ? `${t('common.field.branch')}: ${branch}` : '',
     repo.upstream ? `↗ ${repo.upstream}` : '',
     Number.isFinite(Number(repo.dirty_count)) ? t('git.dirty', {count: repo.dirty_count}) : '',
     Number(repo.ahead) ? t('git.ahead', {count: repo.ahead}) : '',
@@ -21750,7 +22182,8 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
 function repoInfoPopoverHtml(repo) {
   if (!repo?.root) return '';
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
-  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repoBranchDisplayText(repo))}</div>`);
+  const branch = repoBranchDisplayText(repo);
+  if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
@@ -30590,11 +31023,20 @@ function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) 
 // All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
 // selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
 function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
-  if (!pane) return;
+  if (!pane) return false;
+  if (previewScrollUserOwnsElementNow(pane)) {
+    void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
+      renderFileEditorPreviewSurface(host, pane, path, text, options)
+    ));
+    return false;
+  }
+  cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = fileEditorPreviewSelectionOffsets(pane);
-  renderEditorPreviewPane(pane, path, text, options);
+  const rendered = renderEditorPreviewPane(pane, path, text, options);
+  if (rendered === false) return false;
   refreshPreviewFind(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
+  return rendered;
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -36739,6 +37181,10 @@ function enableTerminalScroll(session, term, container) {
   let touchState = null;
   let suppressSyntheticMouseUntil = 0;
 
+  const armSyntheticMouseSuppression = () => {
+    suppressSyntheticMouseUntil = performanceNow() + terminalTouchSyntheticMouseSuppressMs;
+  };
+
   const clearTouchTimer = state => {
     if (!state?.timer) return;
     clearTimeout(state.timer);
@@ -36774,6 +37220,7 @@ function enableTerminalScroll(session, term, container) {
 
   container.addEventListener('touchstart', event => {
     if (event.touches?.length !== 1) {
+      armSyntheticMouseSuppression();
       cancelTouch(touchState);
       touchState = null;
       return;
@@ -36790,6 +37237,9 @@ function enableTerminalScroll(session, term, container) {
       pendingLines: 0,
       timer: 0,
     };
+    recordTerminalMobileInputTrace(session, 'touch-start', {
+      touches: event.touches.length, clientX: touch.clientX, clientY: touch.clientY,
+    });
   }, {passive: true});
 
   container.addEventListener('touchmove', event => {
@@ -36810,8 +37260,12 @@ function enableTerminalScroll(session, term, container) {
     }
     if (!state.claimed) {
       const decision = terminalTouchGestureDecision(touch.clientX - state.startX, touch.clientY - state.startY);
+      recordTerminalMobileInputTrace(session, 'touch-decision', {
+        decision, deltaX: touch.clientX - state.startX, deltaY: touch.clientY - state.startY,
+      });
       if (decision === 'pending') return;
       if (decision === 'horizontal') {
+        armSyntheticMouseSuppression();
         cancelTouch(state);
         touchState = null;
         return;
@@ -36834,8 +37288,10 @@ function enableTerminalScroll(session, term, container) {
     const touch = touchForIdentifier(event, state.identifier);
     if (!touch && event.touches?.length) return;
     touchState = null;
+    if (state.claimed || cancelled) {
+      armSyntheticMouseSuppression();
+    }
     if (state.claimed) {
-      suppressSyntheticMouseUntil = performanceNow() + terminalTouchSyntheticMouseSuppressMs;
       event.preventDefault();
       event.stopPropagation();
     }
@@ -36847,6 +37303,7 @@ function enableTerminalScroll(session, term, container) {
       // Panel pointerdown deliberately defers touch focus until this shared
       // classifier proves the gesture was a tap. Focusing xterm sooner opens
       // the iPad keyboard before a vertical pan can claim terminal scroll.
+      recordTerminalMobileInputTrace(session, 'touch-focus-attempt', {gesture: 'tap'});
       focusTerminalFromUserAction(session);
     }
   };
@@ -36864,7 +37321,8 @@ function enableTerminalScroll(session, term, container) {
   });
 
   // iPadOS may synthesize a complete mouse chain after touchend even when touchmove was prevented.
-  // Swallow only that short post-pan window; an unclaimed tap never arms the latch and still focuses.
+  // Swallow only that short post-pan/cancellation window; an unclaimed tap never arms the latch and
+  // still focuses.
   const suppressSyntheticMouse = event => {
     if (performanceNow() > suppressSyntheticMouseUntil) return;
     event.preventDefault();
@@ -36875,6 +37333,18 @@ function enableTerminalScroll(session, term, container) {
   for (const type of ['mousedown', 'mouseup', 'click']) {
     container.addEventListener(type, suppressSyntheticMouse, {capture: true, passive: false});
   }
+
+  // Some iPad WebKit builds finish a short tap through the synthesized click path without leaving
+  // xterm's textarea focused after touchend. A claimed pan is stopped by the latch above; this
+  // fallback therefore retries only an unclaimed terminal tap and keeps xterm's textarea/transport
+  // as the single native-input owner.
+  container.addEventListener('click', event => {
+    if (event.button !== 0 || !eventTargetIsTerminalFocusSurface(event.target)) return;
+    const textarea = term?.textarea || container.querySelector?.('textarea.xterm-helper-textarea');
+    if (document.activeElement === textarea) return;
+    recordTerminalMobileInputTrace(session, 'click-focus-fallback', {textareaPresent: Boolean(textarea)});
+    focusTerminalFromUserAction(session);
+  });
 
   container.addEventListener('wheel', event => {
     if (dispatchingSyntheticWheel) return;
@@ -50236,6 +50706,7 @@ const debugRuntimeState = {
   graphRangeSeconds: 15 * 60,
   graphResolutionOverrideSeconds: 0,
   graphChartLayout: 0,
+  serviceLoadMode: 'auto',
   graphHiddenCharts: null,
   graphVisibleCharts: null,
   statsUiPreferencesLoaded: false,
@@ -50291,6 +50762,7 @@ function loadJsDebugStatsUiPreferences() {
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   debugRuntimeState.graphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
+  debugRuntimeState.serviceLoadMode = normalizedDebugGraphServiceLoadPreference(saved.serviceLoadMode);
   const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);
@@ -50315,6 +50787,7 @@ function saveJsDebugStatsUiPreferences() {
       rangeSeconds: debugRuntimeState.graphRangeSeconds,
       resolutionOverrideSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
       chartLayout: debugRuntimeState.graphChartLayout,
+      serviceLoadMode: debugRuntimeState.serviceLoadMode,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(debugRuntimeState.graphVisibleCharts instanceof Set ? debugRuntimeState.graphVisibleCharts : [])].sort(),
       logLevels: [...jsDebugLogsState.levels].sort(),
@@ -50760,14 +51233,27 @@ function debugGraphAgentStatusSeriesDef(key) {
     hasData: bucket => Number(bucket?.agentActivitySamples || 0) > 0,
   };
 }
+// One theme-aware series palette for every chart family. The active-pane accent is chrome, not data:
+// a red/orange accent must not turn CPU series and the selection overlay into the same visual state.
+const jsDebugGraphSeriesPalette = Object.freeze({
+  cyan: 'var(--js-debug-agent-token-cyan)',
+  orange: 'var(--js-debug-agent-token-orange)',
+  magenta: 'var(--js-debug-agent-token-magenta)',
+  beige: 'var(--js-debug-agent-token-beige)',
+  turquoise: 'var(--js-debug-agent-token-turquoise)',
+  rose: 'var(--js-debug-agent-token-rose)',
+  violet: 'var(--js-debug-agent-token-violet)',
+  systemCpu: 'var(--js-debug-agent-token-cyan)',
+  currentProcessCpu: 'var(--js-debug-agent-token-violet)',
+});
 const jsDebugGraphAgentTokenColors = Object.freeze([
-  'var(--js-debug-agent-token-cyan)',
-  'var(--js-debug-agent-token-orange)',
-  'var(--js-debug-agent-token-magenta)',
-  'var(--js-debug-agent-token-beige)',
-  'var(--js-debug-agent-token-turquoise)',
-  'var(--js-debug-agent-token-rose)',
-  'var(--js-debug-agent-token-violet)',
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.beige,
+  jsDebugGraphSeriesPalette.turquoise,
+  jsDebugGraphSeriesPalette.rose,
+  jsDebugGraphSeriesPalette.violet,
 ]);
 // Horizontal-only strokes remain legible inside short stacked bars. Color is the primary identity;
 // these distinct horizontal cadences provide a second cue without vertical hatching disappearing
@@ -50783,16 +51269,14 @@ const jsDebugGraphAgentTokenPatternShapes = Object.freeze([
 ]);
 const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes.length;
 const jsDebugGraphProcessCpuColors = Object.freeze({
-  current: 'var(--active-accent-bright)',
-  // Green is reserved for the server that is serving this browser. Peers must remain
-  // distinguishable without being mistaken for the current YOLOmux process.
-  peers: Object.freeze(['var(--bad)', 'var(--accent-gold)', 'var(--link-soft)']),
+  current: jsDebugGraphSeriesPalette.currentProcessCpu,
+  peers: Object.freeze([jsDebugGraphSeriesPalette.turquoise, jsDebugGraphSeriesPalette.magenta, jsDebugGraphSeriesPalette.beige]),
 });
 const jsDebugGraphGpuDeviceColors = Object.freeze([
-  'var(--active-accent-bright)',
-  'var(--bad)',
-  'var(--link-soft)',
-  'var(--accent-gold)',
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.turquoise,
 ]);
 // THE one client display cache: every retained bucket of every tier lives here,
 // keyed `${startMs}:${durationMs}`. Tier membership is the key's durationMs (the
@@ -50807,7 +51291,7 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphSeriesPalette.systemCpu, value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
     key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
     value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
@@ -50824,17 +51308,17 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
 ]);
-// Mirror of yolomux_lib/stats_families.py — the ONE YO!stats family manifest.
+// Mirror of yolomux_lib/stats_current/families.py — the ONE YO!stats family manifest.
 // Per family: the canonical name (identical to the server's
 // stats_coverage_intervals family), the legacy alias names an OLDER server may
 // still write into coverage payloads (canonical is tried first), the true
 // sampler cadence, and the owning chart groups / series. Coverage lookups and
 // chart->family mapping READ this table; inline per-family if/alias chains
-// outside it are contract-banned (tests/yostats_performance.test.js pins both
-// mirrors against each other).
+// outside it are contract-banned. tests/stats_current_panel.test.js pins the
+// client manifest and chart owner; tests/test_stats_current_families.py pins the server cadence.
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
-  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
+  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 1, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
   agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens', 'modelTokens']), series: Object.freeze(['tokensPerAgent'])}),
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), series: Object.freeze([])}),
@@ -51381,7 +51865,9 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  refreshDebugGraphSurfaces();
+  // Reset is a completed activation, so replacing its focused button is safe and
+  // must not leave the visible charts on the retired zoom domain until focusout.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
 }
 
 function debugEventCounts() {
@@ -51392,6 +51878,75 @@ function debugEventCounts() {
   const apiResponseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.responseBytes) ? event.responseBytes : 0), 0);
   const sseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'sse' && Number.isFinite(event.frameBytes) ? event.frameBytes : 0), 0);
   return {apiCalls, sseEvents, errors, apiRequestBytes, apiResponseBytes, sseBytes};
+}
+
+const debugMobileCaptureEventTypes = new Set(['preview_scroll_trace', 'terminal_mobile_input_trace']);
+
+function debugMobileCaptureSnapshot() {
+  const screenState = window.screen && typeof window.screen === 'object' ? window.screen : {};
+  const viewportState = appViewport();
+  const locationState = window.location && typeof window.location === 'object' ? window.location : {};
+  const captureUrl = String(locationState.href || `${locationState.protocol || ''}//${locationState.host || ''}${locationState.pathname || ''}${locationState.search || ''}${locationState.hash || ''}`);
+  const orientationState = screenState.orientation && typeof screenState.orientation === 'object'
+    ? screenState.orientation
+    : {};
+  const activeItems = activePaneItems().map(item => ({item: String(item), slot: String(slotForItem(item) || '')}));
+  const preview = Array.from(document.querySelectorAll('.file-editor-preview-pane-panel')).map(node => {
+    const context = previewScrollTraceContext(node) || {};
+    const content = node.closest?.('.file-editor-content');
+    return {
+      item: String(context.item || ''),
+      surface: String(context.surface || ''),
+      classes: Array.from(node.classList || [], value => String(value)),
+      split: content?.classList?.contains('split-preview') === true,
+      top: Number(node.scrollTop || 0),
+      left: Number(node.scrollLeft || 0),
+      scrollHeight: Number(node.scrollHeight || 0),
+      clientHeight: Number(node.clientHeight || 0),
+    };
+  });
+  return redactDiagnosticValue({
+    capturedAt: new Date().toISOString(),
+    url: captureUrl,
+    debugArmed: debugModeExplicitUrlEnabled === true,
+    codeRevision: jsDebugCodeRevision(),
+    userAgent: String(navigator?.userAgent || ''),
+    platform: String(navigator?.platform || ''),
+    maxTouchPoints: Number(navigator?.maxTouchPoints || 0),
+    standalone: navigator?.standalone === true
+      || (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches === true),
+    orientation: {
+      type: String(orientationState.type || ''),
+      angle: Number.isFinite(Number(orientationState.angle))
+        ? Number(orientationState.angle)
+        : (Number.isFinite(Number(window.orientation)) ? Number(window.orientation) : null),
+      inferred: Number(viewportState.width || 0) > Number(viewportState.height || 0) ? 'landscape' : 'portrait',
+    },
+    screen: {
+      width: Number(screenState.width || 0),
+      height: Number(screenState.height || 0),
+      dpr: Number(window.devicePixelRatio || 0),
+    },
+    viewport: viewportDiagnosticsSnapshot(),
+    layout: {
+      slots: cloneLayoutSlots(layoutSlots),
+      activeItems,
+      focusedItem: String(focusedPanelItem || ''),
+      visualItem: String(visualActivePaneItem() || ''),
+      generation: Number(runtimeState?.layoutMutationGeneration || 0),
+      completedGeneration: Number(runtimeState?.layoutMutationCompletedGeneration || 0),
+      pendingGeneration: Number(runtimeState?.pendingLayoutMutationGeneration || 0),
+    },
+    preview,
+    focused: viewportDiagnosticsFocusedElementText(),
+    events: jsDebugEvents
+      .filter(event => debugMobileCaptureEventTypes.has(String(event?.type || '')))
+      .map(event => ({...event})),
+  });
+}
+
+function debugMobileCaptureTextForClipboard(snapshot = debugMobileCaptureSnapshot()) {
+  return JSON.stringify(snapshot, null, 2);
 }
 
 function debugMetaText() {
@@ -51418,6 +51973,7 @@ function debugSubTabButtonHtml(tab, label) {
 function debugEventsSubviewHtml() {
   const counts = debugEventCounts();
   const apiCopyLabel = debugApiCopyButtonLabel();
+  const mobileCopyLabel = debugMobileCopyButtonLabel();
   return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
       <div class="js-debug-toolbar">
         <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
@@ -51427,6 +51983,7 @@ function debugEventsSubviewHtml() {
           ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
         </div>
         <div class="js-debug-actions">
+          ${debugModeExplicitUrlEnabled ? `<button type="button" class="preferences-inline-action" data-js-debug-mobile-copy data-copy-feedback-key="debug-mobile" data-copy-feedback-label="${esc(`${t('common.copy')} ${t('debug.events')}`)}" aria-label="${esc(mobileCopyLabel)}">${esc(mobileCopyLabel)}</button>` : ''}
           <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
           <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
         </div>
@@ -51655,6 +52212,10 @@ function debugLogsCopyButtonLabel(nowMs = Date.now()) {
 
 function debugApiCopyButtonLabel(nowMs = Date.now()) {
   return copyFeedbackLabel('debug-api', t('common.copy'), nowMs);
+}
+
+function debugMobileCopyButtonLabel(nowMs = Date.now()) {
+  return copyFeedbackLabel('debug-mobile', `${t('common.copy')} ${t('debug.events')}`, nowMs);
 }
 
 function runDebugCopy(text, options = {}) {
@@ -51886,6 +52447,21 @@ function debugGraphNewHostMetrics() {
     gpuMemoryProcesses: new Map(),
     gpuDevices: new Map(),
     serviceLoad: new Map(),
+  };
+}
+
+function debugGraphNewServiceLoadItem(label) {
+  return {
+    label: String(label || ''),
+    cpuTotalPercent: 0,
+    cpuSamples: 0,
+    cpuMinPercent: 0,
+    cpuMaxPercent: 0,
+    cpuRangeAvailable: false,
+    rssTotalBytes: 0,
+    rssSamples: 0,
+    rssMinBytes: 0,
+    rssMaxBytes: 0,
   };
 }
 
@@ -52252,7 +52828,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     }
     if (sourceHost.serviceLoad instanceof Map) {
       for (const [key, sourceItem] of sourceHost.serviceLoad.entries()) {
-        const item = targetHost.serviceLoad.get(key) || {label: sourceItem.label || key, cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+        const item = targetHost.serviceLoad.get(key) || debugGraphNewServiceLoadItem(sourceItem.label || key);
         item.label = sourceItem.label || item.label;
         for (const prefix of ['cpu', 'rss']) {
           const totalKey = `${prefix}Total${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
@@ -52262,6 +52838,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
           const sourceSamples = Number(sourceItem[samplesKey] || 0) * scale;
           if (sourceSamples <= 0) continue;
           const previousSamples = Number(item[samplesKey] || 0);
+          if (prefix === 'cpu') {
+            item.cpuRangeAvailable = (previousSamples <= 0 || item.cpuRangeAvailable === true)
+              && sourceItem.cpuRangeAvailable === true;
+          }
           item[totalKey] += Number(sourceItem[totalKey] || 0) * scale;
           item[samplesKey] += sourceSamples;
           item[minKey] = previousSamples > 0 ? Math.min(item[minKey], Number(sourceItem[minKey] || 0)) : Number(sourceItem[minKey] || 0);
@@ -53440,7 +54020,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
   if (source.service_load && typeof source.service_load === 'object' && !Array.isArray(source.service_load)) {
     for (const [key, record] of Object.entries(source.service_load)) {
       if (!record || typeof record !== 'object') continue;
-      const item = target.serviceLoad.get(key) || {label: String(record.label || key), cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+      const item = target.serviceLoad.get(key) || debugGraphNewServiceLoadItem(record.label || key);
       item.label = String(record.label || item.label || key);
       for (const prefix of ['cpu', 'rss']) {
         const unit = prefix === 'cpu' ? 'Percent' : 'Bytes';
@@ -53452,6 +54032,11 @@ function debugGraphApplyHostMetrics(bucket, source) {
         item[samplesKey] = sourceSamples;
         item[`${prefix}Min${unit}`] = Math.max(0, Number(record[`${prefix}_min_${sourceUnit}`] || 0));
         item[`${prefix}Max${unit}`] = Math.max(0, Number(record[`${prefix}_max_${sourceUnit}`] || 0));
+        if (prefix === 'cpu') {
+          item.cpuRangeAvailable = record.cpu_min_percent !== null && record.cpu_min_percent !== undefined
+            && record.cpu_max_percent !== null && record.cpu_max_percent !== undefined
+            && Number.isFinite(Number(record.cpu_min_percent)) && Number.isFinite(Number(record.cpu_max_percent));
+        }
       }
       target.serviceLoad.set(key, item);
     }
@@ -54573,14 +55158,61 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
-function debugGraphServiceLoadSeriesDefs(buckets) {
-  const services = new Map();
-  for (const bucket of buckets) {
+function normalizedDebugGraphServiceLoadMode(value) {
+  return debugGraphServiceLoadModes.includes(value) ? value : 'avg';
+}
+
+const debugGraphServiceLoadModes = Object.freeze(['avg', 'max', 'min']);
+
+function normalizedDebugGraphServiceLoadPreference(value) {
+  return debugGraphServiceLoadModes.includes(value) ? value : 'auto';
+}
+
+function debugGraphDefaultServiceLoadMode(buckets) {
+  return (buckets || []).some(bucket => Number(bucket?.durationMs || 0) >= 60000) ? 'max' : 'avg';
+}
+
+function debugGraphVisibleServiceLoadItems(buckets) {
+  const items = [];
+  for (const bucket of buckets || []) {
     for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
       // Old retained buckets contain the synthetic web row. Its PID is already shown by CPU.
-      if (key === 'web') continue;
-      if (Number(item?.cpuSamples || 0) > 0) services.set(key, String(item.label || key));
+      if (key === 'web' || Number(item?.cpuSamples || 0) <= 0) continue;
+      items.push([key, item]);
     }
+  }
+  return items;
+}
+
+function debugGraphServiceLoadRangeAvailable(buckets) {
+  let sampled = 0;
+  for (const [, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+    sampled += 1;
+    if (item.cpuRangeAvailable !== true) return false;
+  }
+  return sampled > 0;
+}
+
+function debugGraphServiceLoadEffectiveMode(buckets, mode = debugRuntimeState.serviceLoadMode) {
+  const preferred = normalizedDebugGraphServiceLoadPreference(mode);
+  const normalized = preferred === 'auto' ? debugGraphDefaultServiceLoadMode(buckets) : preferred;
+  return normalized === 'avg' || debugGraphServiceLoadRangeAvailable(buckets) ? normalized : 'avg';
+}
+
+function debugGraphServiceLoadValue(item, mode = debugRuntimeState.serviceLoadMode) {
+  const samples = Number(item?.cpuSamples || 0);
+  if (samples <= 0) return 0;
+  const normalized = normalizedDebugGraphServiceLoadMode(mode);
+  if (normalized === 'max' && item.cpuRangeAvailable === true) return Math.max(0, Number(item.cpuMaxPercent || 0));
+  if (normalized === 'min' && item.cpuRangeAvailable === true) return Math.max(0, Number(item.cpuMinPercent || 0));
+  return Math.max(0, Number(item.cpuTotalPercent || 0)) / samples;
+}
+
+function debugGraphServiceLoadSeriesDefs(buckets) {
+  const mode = debugGraphServiceLoadEffectiveMode(buckets);
+  const services = new Map();
+  for (const [key, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+    services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
   const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
@@ -54590,11 +55222,11 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
-      return Number(item?.cpuSamples || 0) > 0 ? Number(item.cpuTotalPercent || 0) / Number(item.cpuSamples) : 0;
+      return debugGraphServiceLoadValue(item, mode);
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => [...(bucket?.hostMetrics?.serviceLoad?.values?.() || [])].some(item => Number(item?.cpuSamples || 0) > 0),
+    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }
@@ -54749,6 +55381,21 @@ function debugGraphLayoutControlsHtml() {
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-range-resolution-controls">${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}</div>`;
+}
+
+function debugGraphServiceLoadModeLabel(mode) {
+  return t(`debug.graph.serviceLoad.mode.${normalizedDebugGraphServiceLoadMode(mode)}`);
+}
+
+function debugGraphServiceLoadModeControlsHtml(buckets = []) {
+  const rangeAvailable = debugGraphServiceLoadRangeAvailable(buckets);
+  const selected = debugGraphServiceLoadEffectiveMode(buckets);
+  const label = t('debug.graph.chart.serversLoad');
+  return `<fieldset class="js-debug-service-load-mode-control" role="radiogroup" aria-label="${esc(label)}">${debugGraphServiceLoadModes.map(mode => {
+    const checked = mode === selected;
+    const disabled = mode !== 'avg' && !rangeAvailable;
+    return `<label class="preferences-radio"><input type="radio" name="js-debug-service-load-mode" value="${esc(mode)}" data-js-debug-service-load-mode="${esc(mode)}"${checked ? ' checked' : ''}${disabled ? ' disabled' : ''} aria-checked="${checked ? 'true' : 'false'}" aria-disabled="${disabled ? 'true' : 'false'}"><span>${esc(debugGraphServiceLoadModeLabel(mode))}</span></label>`;
+  }).join('')}</fieldset>`;
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
@@ -55201,10 +55848,13 @@ function debugGraphAgentTokenPatternIndex(series) {
 function debugGraphAgentTokenPatternId(series, suffix = '') {
   const patternIndex = debugGraphAgentTokenPatternIndex(series);
   if (patternIndex < 0) return '';
+  const scope = String(series?.agentTokenPatternScope || '')
+    .replace(/[^A-Za-z0-9_-]/g, '-')
+    .slice(-64);
   const key = String(series?.agentTokenKey || series?.key || 'series')
     .replace(/[^A-Za-z0-9_-]/g, '-')
     .slice(-64);
-  return `js-debug-agent-token-pattern-${patternIndex}-${key || 'series'}${suffix}`;
+  return `js-debug-agent-token-pattern-${scope ? `${scope}-` : ''}${patternIndex}-${key || 'series'}${suffix}`;
 }
 
 function debugGraphAgentTokenPatternShapeHtml(patternIndex) {
@@ -55731,10 +56381,12 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
       const samples = Number(item?.cpuSamples || 0);
       if (samples <= 0) return [];
       const avg = Number(item.cpuTotalPercent || 0) / samples;
-      return [`${series.label}: ${debugGraphValueText(avg, 'percent')} (${t('debug.graph.serviceLoad.range', {
-        minimum: debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent'),
+      const mode = debugGraphServiceLoadEffectiveMode(data.buckets);
+      const rangeAvailable = item.cpuRangeAvailable === true;
+      return [`${series.label}: ${debugGraphValueText(debugGraphServiceLoadValue(item, mode), 'percent')} (${t('debug.graph.serviceLoad.range', {
+        minimum: rangeAvailable ? debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent') : t('common.notAvailable'),
         average: debugGraphValueText(avg, 'percent'),
-        maximum: debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent'),
+        maximum: rangeAvailable ? debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent') : t('common.notAvailable'),
       })})`];
     });
     return details.join(' · ') || debugGraphValueText(0, data.group.unit);
@@ -55901,6 +56553,13 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  // Both subviews stay mounted so switching modes preserves their DOM. Namespace the
+  // SVG paint-server IDs by surface; otherwise Cost bars resolve Graphs' now-hidden
+  // <pattern> definitions and become invisible even though both views share the data.
+  const patternScope = String(options.patternScope || `graphs-${group.key}`).replace(/[^A-Za-z0-9_-]/g, '-');
+  const scopedPatternSeries = series => ({...series, agentTokenPatternScope: patternScope});
+  const renderedLegendSeries = legendSeries.map(scopedPatternSeries);
+  const renderedPlotSeries = plotSeries.map(scopedPatternSeries);
   const spikeAxis = (group.key === 'agentTokens' || group.key === 'modelTokens')
     ? options.spikeAxis
     : (group.key === 'serversLoad' ? debugGraphSpikeCompressedAxisDescriptor(group, plotSeries.flatMap(debugGraphSeriesPlotValues)) : null);
@@ -55935,20 +56594,20 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
-        ${displayedSummaryHtml}
+        ${group.key === 'serversLoad' ? debugGraphServiceLoadModeControlsHtml(buckets) : displayedSummaryHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries)}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
-          ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
+          ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(renderedPlotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
+          ${group.kind === 'bar' ? renderedPlotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
           ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
@@ -57008,7 +57667,7 @@ async function refreshDebugCostPricingStatus(scope = debugPricingRefreshLifecycl
   return true;
 }
 
-function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true} = {}) {
+function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true, patternScope = 'graphs'} = {}) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
@@ -57019,7 +57678,7 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
       const items = visibleGroupKeys.has(group.key)
-        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis})]
+        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis, patternScope: `${patternScope}-${group.key}`})]
         : [];
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
       // displayed bucket array from the unified cache, but adds no axes, bars, or
@@ -57552,6 +58211,31 @@ function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
   return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
 }
 
+function jsDebugCurrentCpuProjectionValue(series, averageName, maximumName, duration) {
+  const average = jsDebugCurrentSeriesValue(series, averageName);
+  if (average === null) return null;
+  const maximum = jsDebugCurrentSeriesValue(series, maximumName);
+  return duration >= 60 && maximum !== null ? maximum : average;
+}
+
+function jsDebugCurrentServiceLoadItem(record, source) {
+  const serviceLoad = record.host_metrics.service_load;
+  if (!serviceLoad[source]) {
+    serviceLoad[source] = {
+      label: source,
+      cpu_total_percent: 0,
+      cpu_samples: 0,
+      cpu_min_percent: null,
+      cpu_max_percent: null,
+      rss_total_bytes: 0,
+      rss_samples: 0,
+      rss_min_bytes: 0,
+      rss_max_bytes: 0,
+    };
+  }
+  return serviceLoad[source];
+}
+
 function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost = null) {
   const series = bucket?.series || {};
   const duration = Math.max(1, Number(bucket?.duration) || 1);
@@ -57573,11 +58257,12 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     const value = jsDebugCurrentSeriesValue(series, name);
     if (value === null) continue;
     if (name === 'system_cpu_percent') {
-      record.system_cpu_total_percent = value;
+      record.system_cpu_total_percent = jsDebugCurrentCpuProjectionValue(series, name, 'system_cpu_max_percent', duration);
       record.system_cpu_count = 1;
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
-      record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `cpu_max_percent:${source}`, duration);
+      record.servers[source] = {label: source, cpu_total_percent: projected, cpu_count: 1};
       // No serving-port preference: the exact serving port owns the solid CPU series in
       // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
       if (!record.cpu_count) {
@@ -57624,12 +58309,21 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
       record.host_metrics.gpu_devices[source] = device;
     } else if (name.startsWith('service_cpu_percent:')) {
       const source = name.slice('service_cpu_percent:'.length);
-      record.host_metrics.service_load[source] = {label: source, cpu_total_percent: value, cpu_samples: 1, cpu_min_percent: value, cpu_max_percent: value, rss_total_bytes: 0, rss_samples: 0, rss_min_bytes: 0, rss_max_bytes: 0};
+      const sourceCount = Math.max(1, Number(series[name]?.source_count) || 1);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      Object.assign(service, {cpu_total_percent: value * sourceCount, cpu_samples: sourceCount});
+    } else if (name.startsWith('service_cpu_min_percent:')) {
+      const source = name.slice('service_cpu_min_percent:'.length);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      service.cpu_min_percent = value;
+    } else if (name.startsWith('service_cpu_max_percent:')) {
+      const source = name.slice('service_cpu_max_percent:'.length);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      service.cpu_max_percent = value;
     } else if (name.startsWith('service_rss_bytes:')) {
       const source = name.slice('service_rss_bytes:'.length);
-      const service = record.host_metrics.service_load[source] || {label: source, cpu_total_percent: 0, cpu_samples: 0, cpu_min_percent: 0, cpu_max_percent: 0};
+      const service = jsDebugCurrentServiceLoadItem(record, source);
       Object.assign(service, {rss_total_bytes: value, rss_samples: 1, rss_min_bytes: value, rss_max_bytes: value});
-      record.host_metrics.service_load[source] = service;
     } else if (name === 'cost_micro_usd') bucketMarginalMicroUsd = value;
     else if (name === 'api_list_cost_micro_usd') bucketApiListMicroUsd = value;
     else if (name === 'usage_tokens') bucketUsageTokens = value;
@@ -57960,6 +58654,17 @@ function jsDebugTextForClipboard() {
     ...(clientPerfRows.length ? ['Client work counters:', ...clientPerfRows, ''] : []),
     ...rows,
   ].join('\n');
+}
+
+const jsDebugCopyTextProviders = Object.freeze({
+  'debug-api': () => jsDebugTextForClipboard(),
+  'debug-logs': () => debugLogsTextForClipboard(),
+  'debug-mobile': () => debugMobileCaptureTextForClipboard(),
+});
+
+function jsDebugCopyTextForFeedbackKey(key) {
+  const provider = jsDebugCopyTextProviders[String(key || '')];
+  return typeof provider === 'function' ? provider() : null;
 }
 
 function debugSystemNumber(value, digits = 0) {
@@ -59765,7 +60470,7 @@ function yoCostPanelHtml() {
   const buckets = debugGraphDisplayBuckets(nowMs);
   const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
   const charts = buckets.length
-    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false})
+    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false, patternScope: 'cost'})
     : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
   const costBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
   const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
@@ -60463,6 +61168,16 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
   } catch (_) {}
 }
 
+function setDebugGraphServiceLoadMode(value) {
+  loadJsDebugStatsUiPreferences();
+  const normalized = normalizedDebugGraphServiceLoadMode(value);
+  if (normalized === debugRuntimeState.serviceLoadMode) return false;
+  debugRuntimeState.serviceLoadMode = normalized;
+  saveJsDebugStatsUiPreferences();
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  return true;
+}
+
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
@@ -60931,6 +61646,11 @@ function handleDebugGraphControlEvent(event, panel) {
     void refreshDebugCostPricing();
     return true;
   }
+  const serviceLoadMode = event.target.closest('[data-js-debug-service-load-mode]');
+  if (event.type === 'change' && serviceLoadMode && panel.contains(serviceLoadMode)) {
+    setDebugGraphServiceLoadMode(serviceLoadMode.dataset.jsDebugServiceLoadMode);
+    return true;
+  }
   const chartClose = event.target.closest('[data-js-debug-chart-close]');
   // A chart close reflows the grid. Handling it on pointerdown replaces the target before the
   // corresponding pointerup, so that follow-up event can land on another chart's X. Click is the
@@ -61085,12 +61805,6 @@ function bindDebugPanel(panel) {
       refreshDebugLogsViews();
       return;
     }
-    const logsCopy = event.target.closest('[data-js-debug-logs-copy]');
-    if (logsCopy && panel.contains(logsCopy)) {
-      event.preventDefault();
-      void runDebugCopy(debugLogsTextForClipboard(), {button: logsCopy, feedbackKey: 'debug-logs'});
-      return;
-    }
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
@@ -61099,10 +61813,13 @@ function bindDebugPanel(panel) {
       statusEl.textContent = t('debug.logs.cleared');
       return;
     }
-    const copy = event.target.closest('[data-js-debug-copy]');
+    const copy = event.target.closest('[data-copy-feedback-key]');
     if (copy && panel.contains(copy)) {
+      const feedbackKey = String(copy.dataset.copyFeedbackKey || '');
+      const text = jsDebugCopyTextForFeedbackKey(feedbackKey);
+      if (text === null) return;
       event.preventDefault();
-      void runDebugCopy(jsDebugTextForClipboard(), {button: copy, feedbackKey: 'debug-api'});
+      void runDebugCopy(text, {button: copy, feedbackKey});
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');
@@ -64376,6 +65093,14 @@ function fileEditorToolbarHtml(item) {
               hidden: true,
             },
             {
+              className: 'file-editor-upload-panel',
+              action: 'editor-upload',
+              label: '↑',
+              title: t('pref.section.uploads'),
+              ariaLabel: t('pref.section.uploads'),
+              hidden: true,
+            },
+            {
               kind: 'separator',
               className: 'file-editor-toolbar-separator',
               dataset: {editorToolbarSeparator: 'theme'},
@@ -64421,6 +65146,7 @@ function relocalizeFileEditorPanel(panel, item) {
   setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'common.reload', {text: true, title: false, aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-upload-panel', 'pref.section.uploads');
   setFileEditorLocalizedLabel(panel, '.file-editor-diff-expand-panel', 'editor.diffExpand');
   setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'common.save', {aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.saveFile', {text: false, title: false});
@@ -64487,6 +65213,7 @@ function createFileEditorPanel(item) {
   bindActionDispatcher(panel, {
     'editor-save': () => saveFileEditor(path, panel),
     'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-upload': () => openFileUploadChooserForEditor(panel, path),
     'editor-mode': (_event, target) => {
       const mode = target?.dataset?.editorMode;
       if (!editorViewModes.has(mode)) return;
@@ -64664,13 +65391,9 @@ function disconnectFileEditorImageObserver(imagePane) {
   if (typeof disconnectPreviewZoomSurface === 'function') disconnectPreviewZoomSurface(imagePane, {resetClasses: true});
 }
 
-function fileEditorImageVersion(state) {
-  return String(state?.mtime_ns || state?.mtime || state?.size || 0);
-}
-
 function renderFileEditorImagePane(imagePane, path, state, status) {
   if (!imagePane) return;
-  const version = fileEditorImageVersion(state);
+  const version = rawFileMediaVersion(state);
   const sameImage = imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version;
   const zoomOptions = previewZoomOptionsForKind('imagePane', {path});
   let img = sameImage ? imagePane.querySelector('img.file-editor-image') : null;
@@ -64683,32 +65406,32 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     img.loading = 'eager';
     img.decoding = 'async';
     img.onload = () => {
-      applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
+    const showFailureAfterUserScroll = async (key, detail, statusMessage) => {
+      const applied = await scheduleRawMediaFallbackAfterUserScroll(imagePane, img, key, () => (
+        fileEditorEmptyState(t('preview.image.loadFailed'), detail)
+      ));
+      if (applied) status(statusMessage, 'error');
+      return applied;
+    };
     imagePane._previewAsync = installRawFileMediaSource(img, path, {
       params: {v: version},
       isCurrent: () => imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version && imagePane.contains(img),
-      onFailure: error => {
-        disconnectFileEditorImageObserver(imagePane);
-        imagePane.replaceChildren(fileEditorEmptyState(
-          t('preview.image.loadFailed'),
+      onFailure: error => showFailureAfterUserScroll(
+        'image-pane-failure',
           userMessageText(error, t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)})),
-        ));
-        status(userMessageText(error, t('preview.image.loadFailedStatus')), 'error');
-      },
-      onDecodeFailure: () => {
-        disconnectFileEditorImageObserver(imagePane);
-        imagePane.replaceChildren(fileEditorEmptyState(
-          t('preview.image.loadFailed'),
-          t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
-        ));
-        status(t('preview.image.loadFailedStatus'), 'error');
-      },
+        userMessageText(error, t('preview.image.loadFailedStatus')),
+      ),
+      onDecodeFailure: () => showFailureAfterUserScroll(
+        'image-pane-decode-failure',
+        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+        t('preview.image.loadFailedStatus'),
+      ),
     });
   }
   if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);
@@ -64939,6 +65662,99 @@ function updateEditorNavButtons() {
 
 function markdownTextWithSourceAnchors(text) {
   return String(text || '');
+}
+
+const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
+const MARKDOWN_INLINE_NUMBERED_TASK_RE = /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+(\d+)([.)])\s+\S/;
+const MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS = 'markdown-rendered-task-checkbox';
+
+function markdownTaskLineEntries(text) {
+  return String(text || '').split('\n')
+    .map((line, index) => {
+      const task = line.match(MARKDOWN_TASK_LINE_RE);
+      if (!task) return null;
+      const numbered = line.match(MARKDOWN_INLINE_NUMBERED_TASK_RE);
+      return {
+        line: index + 1,
+        checked: task[2].toLowerCase() === 'x',
+        inlineNumber: numbered ? Number(numbered[1]) : null,
+        inlineNumberText: numbered?.[1] || '',
+        inlineDelimiter: numbered?.[2] || '',
+      };
+    })
+    .filter(Boolean);
+}
+
+function markdownMarkedTaskRenderer(marked) {
+  if (typeof marked?.Renderer !== 'function') return null;
+  const renderer = new marked.Renderer();
+  const renderListItem = renderer.listitem;
+  renderer.listitem = function renderMarkedTaskListItem(text, task, checked) {
+    const renderedText = task
+      ? String(text).replace(/^<input\b/, `<input class="${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS}"`)
+      : text;
+    return renderListItem.call(this, renderedText, task, checked);
+  };
+  return renderer;
+}
+
+function markdownRenderedTaskCheckboxes(root) {
+  return Array.from(root?.querySelectorAll?.('input[type="checkbox"]') || []).filter(input => {
+    const item = input.parentElement;
+    const list = item?.parentElement;
+    return String(item?.tagName || '').toUpperCase() === 'LI'
+      && ['UL', 'OL'].includes(String(list?.tagName || '').toUpperCase())
+      && (input.classList?.contains(MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS)
+        || input.classList?.contains('markdown-task-checkbox'));
+  });
+}
+
+function markdownInlineOrderedTask(item, input, task) {
+  if (!task || task.inlineNumber === null) return null;
+  const siblings = Array.from(item?.children || []).filter(node => node !== input);
+  if (siblings.length !== 1) return null;
+  const ordered = siblings[0];
+  if (ordered.parentElement !== item || String(ordered.tagName || '').toUpperCase() !== 'OL') return null;
+  if (ordered.children?.length !== 1 || String(ordered.firstElementChild?.tagName || '').toUpperCase() !== 'LI') return null;
+  const nestedItem = ordered.firstElementChild;
+  if (nestedItem.querySelector?.('ul,ol')) return null;
+  const outsideText = Array.from(item.childNodes || []).some(node => (
+    node !== input && node !== ordered && String(node.textContent || '').trim()
+  ));
+  if (outsideText) return null;
+  const parsedStart = Number(ordered.getAttribute?.('start') || 1);
+  return parsedStart === task.inlineNumber ? {nestedItem, ordered} : null;
+}
+
+function applyMarkdownTaskListClasses(root, sourceText = '') {
+  const tasks = markdownTaskLineEntries(sourceText);
+  for (const [index, input] of markdownRenderedTaskCheckboxes(root).entries()) {
+    const item = input.parentElement;
+    const list = item?.parentElement;
+    if (!item || !['UL', 'OL'].includes(String(list?.tagName || '').toUpperCase())) continue;
+    item.classList.add('task-list-item');
+    list.classList.add('contains-task-list');
+    if (input.parentElement !== item || item.querySelector?.(':scope > .markdown-task-label')) continue;
+    // A grid treats each text node and inline element as a separate anonymous item. Keep the task
+    // prose under one grid owner so inline code cannot take a full row and strand later text in the
+    // checkbox column.
+    const label = (item.ownerDocument || document).createElement('span');
+    label.className = 'markdown-task-label';
+    const inlineOrdered = markdownInlineOrderedTask(item, input, tasks[index]);
+    if (inlineOrdered) {
+      const number = (item.ownerDocument || document).createElement('span');
+      number.className = 'markdown-task-number';
+      number.textContent = `${tasks[index].inlineNumberText}${tasks[index].inlineDelimiter} `;
+      label.appendChild(number);
+      for (const node of Array.from(inlineOrdered.nestedItem.childNodes || inlineOrdered.nestedItem.children || [])) {
+        label.appendChild(node);
+      }
+      item.replaceChildren(input, label);
+      continue;
+    }
+    while (input.nextSibling) label.appendChild(input.nextSibling);
+    item.appendChild(label);
+  }
 }
 
 function applyMarkdownSourceLines(container, source) {
@@ -65401,6 +66217,16 @@ function markdownImageFallbackNode(path, label = '') {
   return node;
 }
 
+function scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, createFallback) {
+  const completion = schedulePreviewDeferredWorkAfterUserScroll(img, 'markdown-image-failure', () => {
+    if (previewContainer?._markdownPreviewGeneration && !previewContainer.contains(img)) return false;
+    img.replaceWith(createFallback());
+    return true;
+  });
+  trackPreviewAsyncCompletion(previewContainer, completion);
+  return completion;
+}
+
 function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
   if (!root || !markdownPath) return [];
   const pending = [];
@@ -65415,7 +66241,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     if (target.external) {
       img.setAttribute('src', target.src);
       img.addEventListener('error', () => {
-        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+        void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+        ));
       }, {once: true});
       continue;
     }
@@ -65425,26 +66253,19 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       onFailure: error => {
         if (options.isCurrent?.() === false) return;
         const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
-        img.replaceWith(markdownImageFallbackNode(target.path, label));
+        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, label)
+        ));
       },
       onDecodeFailure: () => {
         if (options.isCurrent?.() === false) return;
-        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+        ));
       },
     }));
   }
   return pending;
-}
-
-const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
-
-function markdownTaskLineEntries(text) {
-  return String(text || '').split('\n')
-    .map((line, index) => {
-      const match = line.match(MARKDOWN_TASK_LINE_RE);
-      return match ? {line: index + 1, checked: match[2].toLowerCase() === 'x'} : null;
-    })
-    .filter(Boolean);
 }
 
 function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
@@ -65472,7 +66293,7 @@ function updateMarkdownTaskFromPreview(container, input) {
 
 function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
   const tasks = markdownTaskLineEntries(text);
-  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  const checkboxes = markdownRenderedTaskCheckboxes(container);
   checkboxes.forEach((input, index) => {
     const task = tasks[index];
     if (!task) return;
@@ -65733,7 +66554,7 @@ function fallbackMarkdownToHtml(text) {
         const item = lines[index].trim().match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
         if (!item) break;
         const checked = item[1].toLowerCase() === 'x' ? ' checked' : '';
-        items.push(`<li class="task-list-item"><input type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
+        items.push(`<li class="task-list-item"><input class="${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS}" type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
         index += 1;
       }
       out.push(`<ul>${items.join('')}</ul>`);
@@ -65762,7 +66583,11 @@ function fallbackMarkdownToHtml(text) {
 
 function markdownPreviewHtml(text) {
   if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
-    return window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+    return window.marked.parse(markdownTextWithSourceAnchors(text), {
+      gfm: true,
+      breaks: true,
+      renderer: markdownMarkedTaskRenderer(window.marked),
+    });
   }
   return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
 }
@@ -65791,12 +66616,14 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  applyMarkdownTaskListClasses(frag, text);
   trimMarkdownCodeBlockEdgeNewlines(frag);
   applyMarkdownHtmlBackgroundClasses(frag);
   applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
   const localImages = rewriteMarkdownPreviewImages(frag, markdownPath, {
     isCurrent: () => container._markdownPreviewGeneration === generation,
+    previewContainer: container,
   });
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
@@ -66303,7 +67130,10 @@ function resetPreviewZoomSurfaceClasses(shell) {
 
 function disconnectPreviewZoomSurface(shell, options = {}) {
   shell?._previewZoomLifecycleScope?.dispose('preview-zoom-disconnect');
-  if (shell) shell._previewZoomLifecycleScope = null;
+  if (shell) {
+    shell._previewZoomApplyGeneration = Number(shell._previewZoomApplyGeneration || 0) + 1;
+    shell._previewZoomLifecycleScope = null;
+  }
   shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
   if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
 }
@@ -66401,7 +67231,18 @@ function previewZoomWriteState(shell, options = {}, zoomState) {
 function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}) {
   const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
   const value = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar .file-editor-preview-zoom-value');
-  if (!viewport || !content) return;
+  if (!viewport || !content) return false;
+  const zoomGeneration = Number(shell._previewZoomApplyGeneration || 0) + 1;
+  shell._previewZoomApplyGeneration = zoomGeneration;
+  const deferredOwner = applyOptions.deferredScrollOwner || (
+    applyOptions.userInitiated === true
+      ? createDeferredElementScrollOwner(viewport)
+      : createPassiveDeferredElementScrollOwner(viewport)
+  );
+  // Fit changes scroll geometry before its positioning frame. A claimed native gesture owns both:
+  // letting a passive refit shrink scrollHeight here would make WebKit clamp scrollTop even though
+  // the later guarded write correctly yielded.
+  if (!deferredElementScrollOwnerOwnsElement(deferredOwner, viewport)) return false;
   const previousScale = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
   const viewportRect = viewport.getBoundingClientRect?.();
   const focusOffsetX = Number.isFinite(applyOptions.focusClientX) && viewportRect
@@ -66436,20 +67277,32 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
     if (action?.pressed) button.setAttribute('aria-pressed', action.pressed(state, scale) ? 'true' : 'false');
     else button.removeAttribute('aria-pressed');
   });
+  const writeIfOwned = (coordinates, details) => writeDeferredElementScrollIfOwned(
+    deferredOwner,
+    viewport,
+    coordinates,
+    'preview-zoom-apply',
+    {previewSurface: options.zoomKey || 'zoom', zoomGeneration, ...details},
+  );
   schedulePreviewZoomFrame(shell, () => {
+    if (shell._previewZoomApplyGeneration !== zoomGeneration) return;
     if (state.mode === 'fit') {
-      viewport.scrollLeft = 0;
-      viewport.scrollTop = 0;
+      writeIfOwned({left: 0, top: 0}, {zoomMode: state.mode});
       return;
     }
     if (applyOptions.centerIfUnfocused === true && !hasFocusPoint) {
-      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
-      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+      writeIfOwned({
+        left: Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2),
+        top: Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2),
+      }, {zoomMode: 'center'});
       return;
     }
-    viewport.scrollLeft = Math.max(0, (focusX * scale) - focusOffsetX);
-    viewport.scrollTop = Math.max(0, (focusY * scale) - focusOffsetY);
+    writeIfOwned({
+      left: Math.max(0, (focusX * scale) - focusOffsetX),
+      top: Math.max(0, (focusY * scale) - focusOffsetY),
+    }, {zoomMode: state.mode});
   });
+  return true;
 }
 
 function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}, applyOptions = {}) {
@@ -66457,7 +67310,7 @@ function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}
   applyPreviewZoomSurface(shell, content, options, applyOptions);
 }
 
-function bindPreviewZoomDragPan(shell, viewport, bind) {
+function bindPreviewZoomDragPan(shell, viewport, bind, options) {
   let drag = null;
   const finish = event => {
     if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
@@ -66483,8 +67336,10 @@ function bindPreviewZoomDragPan(shell, viewport, bind) {
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     if (Math.abs(dx) > previewZoomPolicy.panThresholdPx || Math.abs(dy) > previewZoomPolicy.panThresholdPx) event.preventDefault();
-    viewport.scrollLeft = Math.max(0, drag.scrollLeft - dx);
-    viewport.scrollTop = Math.max(0, drag.scrollTop - dy);
+    writeOwnedElementScroll(viewport, {
+      left: Math.max(0, drag.scrollLeft - dx),
+      top: Math.max(0, drag.scrollTop - dy),
+    }, 'preview-zoom-drag-pan', {previewSurface: options.zoomKey || 'zoom'});
   }, {passive: false});
   bind(viewport, 'pointerup', finish);
   bind(viewport, 'pointercancel', finish);
@@ -66517,9 +67372,12 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     if (!button || !toolbar.contains(button) || button.disabled) return;
     const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
     const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
-    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
+      centerIfUnfocused: true,
+      userInitiated: true,
+    });
   });
-  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
+  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind, resolvedOptions);
   const ownerWindow = previewZoomOwnerWindow(shell);
   // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
   // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
@@ -66538,9 +67396,13 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     }, 150);
     lifecycleScope.ownTimer('reveal-timer', timer, value => ownerWindow?.clearTimeout?.(value));
   };
-  const applyAndScheduleReveal = applyOptions => {
-    applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
-    scheduleReveal();
+  const applyAndScheduleReveal = (applyOptions, deferredScrollOwner) => {
+    const applied = applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, {
+      ...(applyOptions || {}),
+      deferredScrollOwner: deferredScrollOwner || createPassiveDeferredElementScrollOwner(viewport),
+    });
+    if (applied) scheduleReveal();
+    return applied;
   };
   const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
   if (ResizeObserverCtor) {
@@ -66550,23 +67412,28 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
       // so applying synchronously here would re-trigger this observer and emit the noisy
       // "ResizeObserver loop completed with undelivered notifications" warning.
       const ownerWin = previewZoomOwnerWindow(shell);
+      const deferredScrollOwner = createPassiveDeferredElementScrollOwner(viewport);
       lifecycleScope.release('resize-frame');
       let frame = 0;
       frame = schedulePreviewZoomFrame(shell, () => {
         lifecycleScope.release('resize-frame', frame);
         if (!lifecycleScope.current()) return;
-        applyAndScheduleReveal();
+        applyAndScheduleReveal({}, deferredScrollOwner);
       });
       lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
     });
     lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
   }
-  bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
+  bind(resolvedContent, 'load', () => applyAndScheduleReveal(
+    {centerIfUnfocused: true},
+    createPassiveDeferredElementScrollOwner(viewport),
+  ), {once: true});
+  const initialScrollOwner = createPassiveDeferredElementScrollOwner(viewport);
   let initialFrame = 0;
   initialFrame = schedulePreviewZoomFrame(shell, () => {
     lifecycleScope.release('initial-frame', initialFrame);
-    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true});
+    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true}, initialScrollOwner);
   });
   lifecycleScope.ownTimer('initial-frame', initialFrame, value => ownerWindow?.cancelAnimationFrame?.(value));
   return true;
@@ -66665,23 +67532,29 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
-    const img = document.createElement('img');
-    img.className = 'mermaid-preview-image';
-    img.alt = t('preview.mermaid.alt');
-    img.src = svgImageUrl(svg);
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
       : container.classList.contains('file-editor-preview-pane-panel');
-    installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-      ...options,
-      path: options.path || '',
-      full: fullPreview,
-    }));
-    return true;
+    return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
+      if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
+      const img = document.createElement('img');
+      img.className = 'mermaid-preview-image';
+      img.alt = t('preview.mermaid.alt');
+      img.src = svgImageUrl(svg);
+      installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+        ...options,
+        path: options.path || '',
+        full: fullPreview,
+      }));
+      return true;
+    });
   } catch (error) {
-    disconnectPreviewZoomSurface(container, {resetClasses: true});
-    if (isCurrent() && container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
-    return false;
+    return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
+      if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
+      disconnectPreviewZoomSurface(container, {resetClasses: true});
+      container.replaceChildren(mermaidErrorNode(text, error));
+      return false;
+    });
   }
 }
 
@@ -67137,7 +68010,7 @@ function htmlPreviewUrl(path) {
 }
 
 function renderRawImagePreviewInto(container, path, state = null, options = {}) {
-  const version = String(state?.mtime || state?.size || 0);
+  const version = rawFileMediaVersion(state);
   const img = document.createElement('img');
   img.className = 'file-editor-preview-image';
   img.alt = basenameOf(path);
@@ -67150,20 +68023,20 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   container._previewAsync = installRawFileMediaSource(img, path, {
     params: version ? {v: version} : {},
     isCurrent: () => container.contains(img),
-    onFailure: error => {
-      container.replaceChildren(previewActionFallbackNode(
+    onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, img, 'raw-image-failure', () => (
+      previewActionFallbackNode(
         t('preview.image.loadFailed'),
         userMessageText(error, t('common.requestFailed')),
         path,
-      ));
-    },
-    onDecodeFailure: () => {
-      container.replaceChildren(previewActionFallbackNode(
+      )
+    )),
+    onDecodeFailure: () => scheduleRawMediaFallbackAfterUserScroll(container, img, 'raw-image-failure', () => (
+      previewActionFallbackNode(
         t('preview.image.loadFailed'),
         `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
         path,
-      ));
-    },
+      )
+    )),
   });
 }
 
@@ -67225,6 +68098,17 @@ function previewActionFallbackNode(titleText, detailText, path) {
   return fallback;
 }
 
+function scheduleRawMediaFallbackAfterUserScroll(container, media, key, createFallback) {
+  const completion = schedulePreviewDeferredWorkAfterUserScroll(container, key, () => {
+    if (!container.contains(media)) return false;
+    releasePreviewSurfaceResources(container);
+    container.replaceChildren(createFallback());
+    return true;
+  });
+  trackPreviewAsyncCompletion(container, completion);
+  return completion;
+}
+
 function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
   const media = document.createElement(kind === 'video' ? 'video' : 'audio');
   media.className = `file-editor-native-media file-editor-native-${kind}`;
@@ -67232,22 +68116,22 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.preload = 'metadata';
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   container._previewAsync = installRawFileMediaSource(media, path, {
-    params: state?.mtime ? {v: state.mtime} : {},
+    params: {v: rawFileMediaVersion(state)},
     isCurrent: () => container.contains(media),
-    onFailure: error => {
-      container.replaceChildren(previewActionFallbackNode(
+    onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, media, 'raw-media-failure', () => (
+      previewActionFallbackNode(
         t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
         userMessageText(error, t('common.requestFailed')),
         path,
-      ));
-    },
-    onDecodeFailure: () => {
-      container.replaceChildren(previewActionFallbackNode(
+      )
+    )),
+    onDecodeFailure: () => scheduleRawMediaFallbackAfterUserScroll(container, media, 'raw-media-failure', () => (
+      previewActionFallbackNode(
         t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
         `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
         path,
-      ));
-    },
+      )
+    )),
   });
 }
 
@@ -67279,6 +68163,7 @@ async function openHtmlPreviewWithAuth(path) {
 }
 
 function renderHtmlPreviewInto(container, path, text) {
+  const embeddedScrollPosition = previewEmbeddedScrollPosition(container);
   const children = [];
   if (htmlPreviewHasDisabledJavaScript(text)) {
     const notice = document.createElement('div');
@@ -67300,8 +68185,14 @@ function renderHtmlPreviewInto(container, path, text) {
   }
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
-  frame.setAttribute('sandbox', '');
+  // Scripts remain disabled. Same-origin access is needed only so the shared Preview owner can
+  // observe the iframe document's native touch/scroll state instead of treating it as a second,
+  // invisible scroll surface.
+  frame.setAttribute('sandbox', 'allow-same-origin');
   frame.setAttribute('title', t('preview.htmlTitle'));
+  frame.addEventListener('load', () => {
+    restorePreviewEmbeddedScrollPosition(container, frame, embeddedScrollPosition);
+  });
   frame.srcdoc = String(text ?? '');
   children.push(frame);
   container.replaceChildren(...children);
@@ -67325,6 +68216,29 @@ function cleanupMarkdownPreviewStrategy(container) {
   container._mermaidSig = null;
 }
 
+// Retained Preview strategies decide whether resources are stale after comparing the new signature.
+// Cleaning them before that comparison would destroy the exact iframe, zoom viewport, or media node
+// whose native scroll/playback state an unchanged passive refresh must retain.
+function cleanupRetainedPreviewStrategy() {}
+
+function disconnectPreviewZoomSurfaces(root) {
+  const surfaces = Array.from(root?.querySelectorAll?.('.file-editor-preview-zoom-shell') || []);
+  if (root?.classList?.contains?.('file-editor-preview-zoom-shell')) surfaces.unshift(root);
+  for (const surface of surfaces) disconnectPreviewZoomSurface(surface, {resetClasses: true});
+}
+
+function releasePreviewSurfaceResources(container) {
+  releaseRawFileMediaSources(container);
+  disconnectPreviewZoomSurfaces(container);
+}
+
+function prepareRetainedPreviewStrategy(container, signature, selector) {
+  if (container._retainedPreviewSignature === signature && container.querySelector(selector)) return false;
+  releasePreviewSurfaceResources(container);
+  container._retainedPreviewSignature = signature;
+  return true;
+}
+
 function cleanupMermaidPreviewStrategy(container) {
   container._previewPath = null;
   container._previewText = null;
@@ -67334,6 +68248,14 @@ function cleanupMermaidPreviewStrategy(container) {
 
 function markdownPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, fileEditorPreviewDisplayMode, context]);
+}
+
+function htmlPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, context]);
+}
+
+function rawMediaPreviewStrategySignature({path, state, context}) {
+  return JSON.stringify([path, rawFileMediaVersion(state), context]);
 }
 
 function mermaidPreviewStrategySignature({path, text, context}) {
@@ -67358,28 +68280,143 @@ function renderMermaidPreviewStrategy({container, path, text, context, signature
   return true;
 }
 
-function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
-function renderImagePreviewStrategy({container, path, state, context}) { renderRawImagePreviewInto(container, path, state, {context}); }
-function renderPdfPreviewStrategy({container, path}) { renderPdfPreviewInto(container, path); }
+function renderHtmlPreviewStrategy({container, path, text, context, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-html-preview')) return false;
+  renderHtmlPreviewInto(container, path, text);
+  return true;
+}
+function renderImagePreviewStrategy({container, path, state, context, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-preview-image')) return false;
+  renderRawImagePreviewInto(container, path, state, {context});
+  return true;
+}
+function renderPdfPreviewStrategy({container, path, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-pdf-preview')) return false;
+  renderPdfPreviewInto(container, path);
+  return true;
+}
 function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
 function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
 function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
-function renderNativeMediaPreviewStrategy({container, path, state, renderer}) { renderNativeMediaPreviewInto(container, path, state, renderer.kind); }
+function renderNativeMediaPreviewStrategy({container, path, state, renderer, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, `.file-editor-native-${renderer.kind}`)) return false;
+  renderNativeMediaPreviewInto(container, path, state, renderer.kind);
+  return true;
+}
 function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }
 function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
 
 function renderPreviewDescriptor(renderer, context) {
+  if (context.container._previewRendererId && context.container._previewRendererId !== renderer.id) {
+    releasePreviewSurfaceResources(context.container);
+  }
+  context.container._previewRendererId = renderer.id;
   renderer.cleanup(context.container, context);
   const signature = typeof renderer.signature === 'function' ? renderer.signature(context) : null;
   return renderer.render({...context, renderer, signature});
 }
 
+const previewDeferredWorkUserOwnershipRetryMs = 100;
+
+function trackPreviewAsyncCompletion(container, completion) {
+  if (!container || !completion || typeof completion.then !== 'function') return completion;
+  const previous = container._previewAsync;
+  container._previewAsync = previous && typeof previous.then === 'function' && previous !== completion
+    ? Promise.all([previous, completion]).then(([, value]) => value)
+    : completion;
+  return completion;
+}
+
+function previewDeferredWorkScrollOwner(container) {
+  return container?.closest?.('.file-editor-preview-pane-panel') || container;
+}
+
+function schedulePreviewDeferredWorkAfterUserScroll(container, key, work) {
+  if (!container || typeof work !== 'function') return Promise.resolve(false);
+  const ownerWindow = container.ownerDocument?.defaultView || window;
+  const owner = previewDeferredWorkScrollOwner(container);
+  let pendingByKey = container._previewDeferredWorkByKey;
+  if (!(pendingByKey instanceof Map)) {
+    pendingByKey = new Map();
+    container._previewDeferredWorkByKey = pendingByKey;
+  }
+  const normalizedKey = String(key || 'default');
+  let pending = pendingByKey.get(normalizedKey);
+  if (pending) {
+    pending.work = work;
+    return pending.promise;
+  }
+  if (!previewScrollUserOwnsElementNow(owner)) {
+    try {
+      return Promise.resolve(work());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  pending = {timer: 0, work, promise: null, resolve: null, reject: null};
+  pending.promise = new Promise((resolve, reject) => {
+    pending.resolve = resolve;
+    pending.reject = reject;
+  });
+  pendingByKey.set(normalizedKey, pending);
+  const retry = () => {
+    pending.timer = 0;
+    if (pendingByKey.get(normalizedKey) !== pending) return;
+    if (container.isConnected === false) {
+      pendingByKey.delete(normalizedKey);
+      pending.resolve(false);
+      return;
+    }
+    if (previewScrollUserOwnsElementNow(owner)) {
+      pending.timer = ownerWindow.setTimeout(retry, previewDeferredWorkUserOwnershipRetryMs);
+      return;
+    }
+    pendingByKey.delete(normalizedKey);
+    Promise.resolve().then(() => pending.work()).then(pending.resolve, pending.reject);
+  };
+  pending.timer = ownerWindow.setTimeout(retry, previewDeferredWorkUserOwnershipRetryMs);
+  return pending.promise;
+}
+
+function cancelPreviewDeferredWorkAfterUserScroll(container, key) {
+  const pendingByKey = container?._previewDeferredWorkByKey;
+  const normalizedKey = String(key || 'default');
+  const pending = pendingByKey instanceof Map ? pendingByKey.get(normalizedKey) : null;
+  if (!pending) return false;
+  const ownerWindow = container.ownerDocument?.defaultView || window;
+  if (pending.timer) ownerWindow.clearTimeout?.(pending.timer);
+  pendingByKey.delete(normalizedKey);
+  pending.resolve(false);
+  return true;
+}
+
+function scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options = {}) {
+  void schedulePreviewDeferredWorkAfterUserScroll(container, 'editor-render', () => (
+    renderEditorPreviewPane(container, path, text, options)
+  ));
+  return true;
+}
+
+function cancelEditorPreviewRenderAfterUserScroll(container) {
+  return cancelPreviewDeferredWorkAfterUserScroll(container, 'editor-render');
+}
+
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  if (previewScrollUserOwnsElementNow(container)) {
+    scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options);
+    return false;
+  }
+  cancelEditorPreviewRenderAfterUserScroll(container);
+  const renderGeneration = debugModeExplicitUrlEnabled === true
+    ? Number(container._previewTraceRenderGeneration || 0) + 1
+    : 0;
+  if (renderGeneration) container._previewTraceRenderGeneration = renderGeneration;
   const previousAsync = container._previewAsync;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
+  const scrollOwner = createPassiveDeferredElementScrollOwner(container);
   const state = fileState.get(path) || null;
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
@@ -67387,7 +68424,11 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   if (rendered === false) container._previewAsync = previousAsync;
-  restoreElementScrollPosition(container, scrollTop, scrollLeft);
+  restoreElementScrollPosition(container, scrollTop, scrollLeft, {
+    owner: 'preview-render-restore', previewSurface: renderer.id, renderContext: previewContext, renderGeneration,
+    deferredOwner: scrollOwner,
+  });
+  return rendered;
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -67491,12 +68532,14 @@ function writePanePopoutDocument(popoutWindow, options = {}) {
   const bodyStyle = options.bodyStyle || panePopoutVariableStyle();
   const style = options.style || '';
   const bodyHtml = options.bodyHtml || '<main class="pane-popout-shell"><section data-pane-popout-root></section></main>';
+  const viewportContent = document.querySelector('meta[name="viewport"]')?.getAttribute('content')
+    || 'width=device-width, initial-scale=1, viewport-fit=cover';
   doc.open();
   doc.write(`<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="${esc(viewportContent)}">
   <title>${esc(title)}</title>
   <link rel="stylesheet" href="${esc(cssHref)}">
   ${style ? `<style>${style}</style>` : ''}
@@ -67772,6 +68815,7 @@ function filePreviewPopoutsForPath(path) {
 
 function closeFilePreviewPopout(path) {
   const record = filePreviewPopouts.get(path);
+  retireFilePreviewPopoutSnapshotApply(record);
   retireFilePreviewPopoutNavigationWrite(record);
   filePreviewPopouts.delete(path);
   const previewWindow = record?.window;
@@ -67783,6 +68827,7 @@ function closeFilePreviewPopout(path) {
 function bumpFilePreviewPopoutGeneration(path) {
   const record = filePreviewPopouts.get(path);
   if (!record) return 0;
+  retireFilePreviewPopoutSnapshotApply(record);
   retireFilePreviewPopoutNavigationWrite(record);
   record.previewGeneration = Number(record.previewGeneration || 0) + 1;
   return record.previewGeneration;
@@ -67831,11 +68876,15 @@ function scrollSyncTargetPosition(from, to, axis = 'top') {
   return Math.min(maxTo, Math.max(0, target));
 }
 
-function syncScrollPositionByRatio(from, to) {
+function syncScrollPositionByRatio(from, to, owner = 'preview-scroll-ratio', details = {}, deferredOwner = null) {
   if (!from || !to) return false;
-  to.scrollTop = scrollSyncTargetPosition(from, to, 'top');
-  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
-  return true;
+  const coordinates = {
+    top: scrollSyncTargetPosition(from, to, 'top'),
+    left: scrollSyncTargetPosition(from, to, 'left'),
+  };
+  return deferredOwner
+    ? writeDeferredElementScrollIfOwned(deferredOwner, to, coordinates, owner, details)
+    : writeOwnedElementScroll(to, coordinates, owner, details);
 }
 
 function filePreviewPopoutScrollEdge(element) {
@@ -67904,17 +68953,119 @@ function filePreviewPopoutScrollSyncReady(record) {
     && !record?.scrollConvergenceFrame
     && !record?.scrollConvergence
     && !record?.previewAsync
+    && !record?.snapshotApply
     && !record?.navigationWrite;
 }
 
+const filePreviewPopoutInputGraceMs = 500;
+const filePreviewPopoutActiveInputMaxMs = 30_000;
+
 function markFilePreviewPopoutScrollInput(record) {
   if (!record) return false;
-  record.popupScrollInputUntil = nowMs() + 500;
+  const current = nowMs();
+  record.popupScrollInputUntil = current + filePreviewPopoutInputGraceMs;
+  if (record.popupScrollActiveInputs?.size) {
+    record.popupScrollActiveUntil = current + filePreviewPopoutActiveInputMaxMs;
+  }
+  return true;
+}
+
+function beginFilePreviewPopoutScrollInput(record, kind) {
+  if (!record) return false;
+  if (!(record.popupScrollActiveInputs instanceof Set)) record.popupScrollActiveInputs = new Set();
+  record.popupScrollActiveInputs.add(String(kind || 'unknown'));
+  markFilePreviewPopoutScrollInput(record);
+  return true;
+}
+
+function endFilePreviewPopoutScrollInput(record, kind) {
+  if (!record) return false;
+  record.popupScrollActiveInputs?.delete?.(String(kind || 'unknown'));
+  if (!record.popupScrollActiveInputs?.size) record.popupScrollActiveUntil = 0;
+  markFilePreviewPopoutScrollInput(record);
+  return true;
+}
+
+function claimFilePreviewPopoutUserScroll(record, previewWindow) {
+  const scroller = filePreviewPopoutScrollElement(previewWindow);
+  if (!record || !scroller) return false;
+  claimPreviewScrollUserOwnership(scroller);
+  beginFilePreviewPopoutScrollOwner(record, {
+    kind: 'popout',
+    ...filePreviewPopoutScrollCoordinates(scroller),
+  });
   return true;
 }
 
 function filePreviewPopoutScrollInputActive(record) {
-  return Number(record?.popupScrollInputUntil || 0) >= nowMs();
+  const current = nowMs();
+  const active = Boolean(record?.popupScrollActiveInputs?.size)
+    && Number(record?.popupScrollActiveUntil || 0) >= current;
+  if (!active && record?.popupScrollActiveInputs?.size) record.popupScrollActiveInputs.clear();
+  return active || Number(record?.popupScrollInputUntil || 0) >= current;
+}
+
+const filePreviewPopoutSnapshotRetryMs = 100;
+
+function settleFilePreviewPopoutSnapshotApply(record, job, applied) {
+  if (!job || job.settled) return false;
+  job.settled = true;
+  if (job.timer) job.clearTimeout?.(job.timer);
+  job.timer = 0;
+  if (record?.snapshotApply === job) record.snapshotApply = null;
+  job.resolve(Boolean(applied));
+  return true;
+}
+
+function retireFilePreviewPopoutSnapshotApply(record) {
+  const job = record?.snapshotApply;
+  return job ? settleFilePreviewPopoutSnapshotApply(record, job, false) : false;
+}
+
+function scheduleFilePreviewPopoutApplyWhenIdle(record, apply) {
+  if (!record || typeof apply !== 'function') return Promise.resolve(false);
+  retireFilePreviewPopoutSnapshotApply(record);
+  const previewWindow = record.window;
+  const schedule = typeof previewWindow?.setTimeout === 'function'
+    ? previewWindow.setTimeout.bind(previewWindow)
+    : window.setTimeout.bind(window);
+  const clear = typeof previewWindow?.clearTimeout === 'function'
+    ? previewWindow.clearTimeout.bind(previewWindow)
+    : window.clearTimeout.bind(window);
+  let resolveCompletion;
+  const completion = new Promise(resolve => { resolveCompletion = resolve; });
+  const job = {
+    timer: 0,
+    clearTimeout: clear,
+    resolve: resolveCompletion,
+    settled: false,
+  };
+  const run = () => {
+    job.timer = 0;
+    if (job.settled || record.snapshotApply !== job) return;
+    if (filePreviewPopoutScrollInputActive(record)) {
+      job.timer = schedule(run, filePreviewPopoutSnapshotRetryMs);
+      return;
+    }
+    let applied = false;
+    try {
+      applied = apply();
+    } catch (error) {
+      console.warn('preview popout snapshot apply failed', error);
+      settleFilePreviewPopoutSnapshotApply(record, job, false);
+      return;
+    }
+    Promise.resolve(applied).then(
+      value => settleFilePreviewPopoutSnapshotApply(record, job, value),
+      error => {
+        console.warn('preview popout snapshot apply failed', error);
+        settleFilePreviewPopoutSnapshotApply(record, job, false);
+      },
+    );
+  };
+  record.snapshotApply = job;
+  run();
+  return completion;
 }
 
 function requestFilePreviewPopoutFrame(previewWindow, callback) {
@@ -67945,7 +69096,7 @@ function scheduleFilePreviewPopoutEdgeConvergence(path, record) {
       return;
     }
     const maxTop = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
-    scroller.scrollTop = owner.edge === 'bottom' ? maxTop : 0;
+    writeOwnedElementScroll(scroller, {top: owner.edge === 'bottom' ? maxTop : 0}, 'preview-popout-edge-convergence', {previewSurface: 'popout'});
     const top = Number(scroller.scrollTop || 0);
     const measuredMax = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
     rememberFilePreviewPopoutReflectedScroll(record, scroller, state.generation);
@@ -67978,7 +69129,7 @@ function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
   const edge = filePreviewPopoutScrollEdge(from);
   const generation = beginFilePreviewPopoutScrollOwner(record, {kind: 'panel', panel, source, edge});
   setFileEditorScrollSyncGuard(record);
-  const synced = syncScrollPositionByRatio(from, scroller);
+  const synced = syncScrollPositionByRatio(from, scroller, 'preview-popout-panel-reflection', {previewSurface: 'popout'});
   if (!synced) return false;
   rememberFilePreviewPopoutReflectedScroll(record, scroller, generation);
   if (edge) scheduleFilePreviewPopoutEdgeConvergence(path, record);
@@ -68013,12 +69164,12 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
     const previewPane = fileEditorPanelPreviewPane(panel);
     const editorScroller = fileEditorPanelScroller(panel);
     const panelGeneration = Number(panel._splitScrollGeneration || 0);
-    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller) && syncScrollPositionByRatio(scroller, editorScroller)) {
+    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller) && syncScrollPositionByRatio(scroller, editorScroller, 'preview-popout-editor-reflection')) {
       rememberFileEditorReflectedScroll(panel, 'editor', 'popout', panelGeneration);
       rememberFilePreviewPopoutPanelReflection(record, panel, 'editor', editorScroller);
       synced = true;
     }
-    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane) && syncScrollPositionByRatio(scroller, previewPane)) {
+    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane) && syncScrollPositionByRatio(scroller, previewPane, 'preview-popout-preview-reflection')) {
       rememberFileEditorReflectedScroll(panel, 'preview', 'popout', panelGeneration);
       rememberFilePreviewPopoutPanelReflection(record, panel, 'preview', previewPane);
       synced = true;
@@ -68621,7 +69772,7 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   const dispose = bindScopedOnce(doc, 'file-preview-popout-controls', scope => {
   const bind = (target, type, handler) => {
     if (!target?.addEventListener) return;
-    const listenerOptions = ['scroll', 'wheel', 'touchstart'].includes(type) ? {passive: true} : undefined;
+    const listenerOptions = type === 'scroll' || type === 'wheel' || type.startsWith('touch') ? {passive: true} : undefined;
     scope.ownEvent(`${type}-${String(scope.value('event-index') || 0)}`, target, type, handler, listenerOptions);
     scope.replace('event-index', Number(scope.value('event-index') || 0) + 1);
   };
@@ -68643,18 +69794,42 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   };
   const scheduleUserScrollSync = () => {
     markFilePreviewPopoutScrollInput(record);
+    claimFilePreviewPopoutUserScroll(record, previewWindow);
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent: true});
+  };
+  const beginUserScroll = kind => () => {
+    beginFilePreviewPopoutScrollInput(record, kind);
+    claimFilePreviewPopoutUserScroll(record, previewWindow);
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent: true});
+  };
+  const endUserScroll = kind => () => {
+    endFilePreviewPopoutScrollInput(record, kind);
     scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent: true});
   };
   const scroller = filePreviewPopoutScrollElement(previewWindow);
   bind(previewWindow, 'scroll', syncScroll);
   bind(previewWindow, 'wheel', scheduleUserScrollSync);
-  bind(previewWindow, 'pointerdown', scheduleUserScrollSync);
-  bind(previewWindow, 'touchstart', scheduleUserScrollSync);
+  bind(previewWindow, 'pointerdown', beginUserScroll('pointer'));
+  bind(previewWindow, 'pointerup', endUserScroll('pointer'));
+  bind(previewWindow, 'pointercancel', endUserScroll('pointer'));
+  bind(previewWindow, 'touchstart', beginUserScroll('touch'));
+  bind(previewWindow, 'touchmove', scheduleUserScrollSync);
+  bind(previewWindow, 'touchend', endUserScroll('touch'));
+  bind(previewWindow, 'touchcancel', endUserScroll('touch'));
+  bind(previewWindow, 'blur', () => {
+    endFilePreviewPopoutScrollInput(record, 'pointer');
+    endFilePreviewPopoutScrollInput(record, 'touch');
+  });
   bind(previewWindow, 'keydown', scheduleUserScrollSync);
   bind(doc, 'scroll', syncScroll);
   bind(doc, 'wheel', scheduleUserScrollSync);
-  bind(doc, 'pointerdown', scheduleUserScrollSync);
-  bind(doc, 'touchstart', scheduleUserScrollSync);
+  bind(doc, 'pointerdown', beginUserScroll('pointer'));
+  bind(doc, 'pointerup', endUserScroll('pointer'));
+  bind(doc, 'pointercancel', endUserScroll('pointer'));
+  bind(doc, 'touchstart', beginUserScroll('touch'));
+  bind(doc, 'touchmove', scheduleUserScrollSync);
+  bind(doc, 'touchend', endUserScroll('touch'));
+  bind(doc, 'touchcancel', endUserScroll('touch'));
   bind(doc, 'keydown', scheduleUserScrollSync);
   bind(scroller, 'scroll', syncScroll);
   bind(scroller, 'wheel', scheduleUserScrollSync);
@@ -68662,6 +69837,31 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
   });
   previewWindow._yolomuxPreviewControlsCleanup = dispose;
   return dispose;
+}
+
+function applyFilePreviewPopoutSnapshot(path, previewWindow, generation, snapshot) {
+  const record = filePreviewPopouts.get(path);
+  if (!record || !filePreviewPopoutGenerationMatches(path, previewWindow, generation)) return Promise.resolve(false);
+  return scheduleFilePreviewPopoutApplyWhenIdle(record, () => {
+    if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return false;
+    const doc = filePreviewPopoutDocument(previewWindow);
+    const root = doc?.querySelector?.('[data-preview-root]');
+    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    const scroller = filePreviewPopoutScrollElement(previewWindow);
+    const coordinates = filePreviewPopoutScrollCoordinates(scroller);
+    const scrollOwner = createPassiveDeferredElementScrollOwner(scroller);
+    applyPreviewSnapshotRoot(root, snapshot);
+    doc.body.className = previewPopoutBodyClassName();
+    updateFilePreviewPopoutControls(path, previewWindow);
+    doc.title = t('preview.popout.title', {name: basenameOf(path)});
+    restoreElementScrollPosition(scroller, coordinates.top, coordinates.left, {
+      owner: 'preview-popout-snapshot-restore',
+      previewSurface: 'popout',
+      deferredOwner: scrollOwner,
+    });
+    scheduleFilePreviewPopoutEdgeConvergence(path, record);
+    return true;
+  });
 }
 
 function updateFilePreviewPopout(path, text) {
@@ -68675,24 +69875,9 @@ function updateFilePreviewPopout(path, text) {
   }
   const snapshot = renderedPreviewSnapshot(path, text);
   try {
-    const doc = previewWindow.document;
-    const scroller = filePreviewPopoutScrollElement(previewWindow);
-    const scrollTop = scroller?.scrollTop || 0;
-    const scrollLeft = scroller?.scrollLeft || 0;
-    const root = doc?.querySelector?.('[data-preview-root]');
-    if (!root) return writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
-    applyPreviewSnapshotRoot(root, snapshot);
-    doc.body.className = previewPopoutBodyClassName();
-    updateFilePreviewPopoutControls(path, previewWindow);
-    doc.title = t('preview.popout.title', {name: basenameOf(path)});
-    restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
-    scheduleFilePreviewPopoutEdgeConvergence(path, record);
+    applyFilePreviewPopoutSnapshot(path, previewWindow, generation, snapshot);
     applyFilePreviewPopoutAsync(path, previewWindow, generation, renderedPreviewSnapshotAsync(path, text), asyncSnapshot => {
-      const currentRoot = previewWindow.document?.querySelector?.('[data-preview-root]');
-      if (!currentRoot) return;
-      applyPreviewSnapshotRoot(currentRoot, asyncSnapshot);
-      updateFilePreviewPopoutControls(path, previewWindow);
-      scheduleFilePreviewPopoutEdgeConvergence(path, record);
+      return applyFilePreviewPopoutSnapshot(path, previewWindow, generation, asyncSnapshot);
     });
     return true;
   } catch (_) {
@@ -68712,6 +69897,8 @@ function refreshFilePreviewPopouts() {
 function settleFilePreviewPopoutNavigationWrite(record, job, written) {
   if (!job || job.settled) return false;
   job.settled = true;
+  if (job.timer) job.clearTimeout?.(job.timer);
+  job.timer = 0;
   if (record?.navigationWrite === job) record.navigationWrite = null;
   job.resolve(Boolean(written));
   return true;
@@ -68733,12 +69920,28 @@ function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, pr
     previewGeneration,
     resolve: resolveCompletion,
     settled: false,
+    timer: 0,
+    clearTimeout: typeof previewWindow.clearTimeout === 'function'
+      ? previewWindow.clearTimeout.bind(previewWindow)
+      : window.clearTimeout.bind(window),
   };
   record.navigationWrite = job;
   const write = () => {
     if (job.settled) return;
     if (record.navigationWrite !== job || !filePreviewPopoutGenerationMatches(path, previewWindow, previewGeneration) || previewWindow.closed) {
       settleFilePreviewPopoutNavigationWrite(record, job, false);
+      return;
+    }
+    if (filePreviewPopoutScrollInputActive(record)) {
+      const schedule = typeof previewWindow.setTimeout === 'function'
+        ? previewWindow.setTimeout.bind(previewWindow)
+        : window.setTimeout.bind(window);
+      if (!job.timer) {
+        job.timer = schedule(() => {
+          job.timer = 0;
+          write();
+        }, filePreviewPopoutSnapshotRetryMs);
+      }
       return;
     }
     const written = writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
@@ -69943,6 +71146,7 @@ function editorPanelParts(panel) {
     diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
     popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
     reloadButton: panel.querySelector('.file-editor-reload-panel'),
+    uploadButton: panel.querySelector('.file-editor-upload-panel'),
     themeButton: panel.querySelector('.file-editor-theme-panel'),
     blameButton: panel.querySelector('.file-editor-blame-panel'),
     saveButton: panel.querySelector('.file-editor-save-panel'),
@@ -69960,6 +71164,7 @@ function editorPanelParts(panel) {
     parts.diffRefPanel,
     parts.popoutPreviewButton,
     parts.reloadButton,
+    parts.uploadButton,
   ];
   return parts;
 }
@@ -70298,6 +71503,11 @@ function updateFileEditorPanelChrome(panel, path) {
   if (reloadButton) {
     reloadButton.hidden = previewOnly || state?.kind !== 'text';
   }
+  const uploadButton = panel.querySelector('.file-editor-upload-panel');
+  if (uploadButton) {
+    const viewMode = editorViewModeFor(path, item);
+    uploadButton.hidden = readOnlyMode || state?.kind !== 'text' || previewRendererForPath(path)?.id !== 'markdown' || !['edit', 'split'].includes(viewMode);
+  }
   updateFileEditorToolbarSeparators(panel);
 }
 
@@ -70324,6 +71534,7 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-diff-panel',
     '.file-editor-diff-expand-panel',
     '.file-editor-diff-ref-panel',
+    '.file-editor-upload-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
   const reload = fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
@@ -70608,7 +71819,7 @@ function previewAnchorForSourceLine(previewPane, sourceLine) {
 function scrollPreviewToSourceLine(previewPane, sourceLine) {
   const anchor = previewAnchorForSourceLine(previewPane, sourceLine);
   if (!anchor) return false;
-  previewPane.scrollTop = Math.max(0, anchor.element.offsetTop - 4);
+  writeOwnedElementScroll(previewPane, {top: Math.max(0, anchor.element.offsetTop - 4)}, 'preview-find-reveal');
   return true;
 }
 
@@ -70639,7 +71850,7 @@ function previewSourceLineForScroller(previewRoot, scroller) {
 function scrollPreviewScrollerToSourceLine(previewRoot, scroller, sourceLine) {
   const anchor = previewAnchorForSourceLine(previewRoot, sourceLine);
   if (!anchor || !scroller) return false;
-  scroller.scrollTop = Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4);
+  writeOwnedElementScroll(scroller, {top: Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4)}, 'preview-source-line-reveal', {previewSurface: 'preview'});
   return true;
 }
 
@@ -70757,29 +71968,33 @@ function previewPaneNeedsSourceAnchorScroll(previewPane) {
   return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
 }
 
-function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane) {
+function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) {
+  return deferredOwner
+    ? writeDeferredElementScrollIfOwned(deferredOwner, element, coordinates, 'preview-split-reflection')
+    : writeOwnedElementScroll(element, coordinates, 'preview-split-reflection');
+}
+
+function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner = null) {
   if (!previewPaneNeedsSourceAnchorScroll(previewPane)) return false;
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
-  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
+  if (!writeFileEditorSplitScrollIfOwned(deferredOwner, to, {left: scrollSyncTargetPosition(from, to, 'left')})) return false;
   const edgeTarget = editorScrollEdgeTarget(source === 'preview' ? previewPane : editorScroller, source === 'preview' ? editorScroller : previewPane);
   if (edgeTarget !== null) {
-    if (source === 'preview') editorScroller.scrollTop = edgeTarget;
-    else previewPane.scrollTop = edgeTarget;
-    return true;
+    return source === 'preview'
+      ? writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: edgeTarget})
+      : writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: edgeTarget});
   }
   const position = source === 'preview' ? sourcePositionForPreviewScroll(previewPane) : sourcePositionForEditorScroll(host?._cmView);
   if (!position) return false;
   if (source === 'preview') {
     const target = editorScrollTopForSourcePosition(host?._cmView, position);
     if (target === null) return false;
-    editorScroller.scrollTop = target;
-    return true;
+    return writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: target});
   }
   const target = previewScrollTopForSourcePosition(previewPane, position);
   if (target === null) return false;
-  previewPane.scrollTop = target;
-  return true;
+  return writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: target});
 }
 
 function nowMs() {
@@ -70854,7 +72069,7 @@ function scheduleFileEditorCodeMirrorBottomConvergence(panel, ownerSource, gener
     write(measure, view) {
       if (panel._splitScrollBottomConvergence !== state || Number(panel._splitScrollGeneration || 0) !== generation) return;
       const scroller = view.scrollDOM;
-      scroller.scrollTop = measure.max;
+      writeOwnedElementScroll(scroller, {top: measure.max}, 'preview-split-bottom-convergence');
       const top = Number(scroller.scrollTop || 0);
       const max = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
       rememberFileEditorReflectedScroll(panel, 'editor', ownerSource, generation);
@@ -70985,7 +72200,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
-function syncFileEditorInPaneSplitScroll(host, source, generation) {
+function syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner = null) {
   const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return false;
   const cmView = host._cmView || null;
@@ -70997,19 +72212,19 @@ function syncFileEditorInPaneSplitScroll(host, source, generation) {
   const to = source === 'preview' ? editorScroller : previewPane;
   const previewDrivesBottom = source === 'preview' && fileEditorScrollAtBottom(previewPane);
   setFileEditorScrollSyncGuardForSource(source, host);
-  const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane)
-    || syncScrollPositionByRatio(from, to);
+  const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner)
+    || syncScrollPositionByRatio(from, to, 'preview-split-reflection', {}, deferredOwner);
   if (!synced) return false;
   rememberFileEditorReflectedScroll(host, source === 'preview' ? 'editor' : 'preview', source, generation);
   if (previewDrivesBottom) scheduleFileEditorCodeMirrorBottomConvergence(host, source, generation);
   return true;
 }
 
-function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0)) {
+function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0), deferredOwner = null) {
   if (!host || fileEditorScrollSyncBlocked(host, source)) return;
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
-  syncFileEditorInPaneSplitScroll(host, source, generation);
+  syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner);
   syncFilePreviewPopoutsFromPanel(host, source);
 }
 
@@ -71022,15 +72237,21 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
   promoteFileEditorReflectedScrollOwner(host, source, generation);
   host._splitScrollPendingGeneration = generation;
   host._splitScrollPendingSource = source;
+  host._splitScrollDeferredOwner = createPassiveDeferredElementScrollOwner(
+    fileEditorPanelScroller(host),
+    fileEditorPanelPreviewPane(host),
+  );
   if (host._splitScrollFrame) return true;
   const run = () => {
     host._splitScrollFrame = 0;
     const pendingSource = host._splitScrollPendingSource || source;
     const pendingGeneration = Number(host._splitScrollPendingGeneration || generation);
+    const deferredOwner = host._splitScrollDeferredOwner;
     host._splitScrollPendingSource = '';
     host._splitScrollPendingGeneration = 0;
+    host._splitScrollDeferredOwner = null;
     if (pendingGeneration !== Number(host._splitScrollGeneration || 0)) return;
-    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration);
+    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration, deferredOwner);
   };
   if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
   else host._splitScrollFrame = setTimeout(run, 0);
@@ -71040,6 +72261,11 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
 const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
+  const previewPane = fileEditorPanelPreviewPane(panel);
+  // A native vertical gesture is stronger evidence than the short-lived layout refit window. Once
+  // this Preview element has been claimed, its scroll events must never be relabeled as editor
+  // reflections; doing so writes the older editor position straight back into the user's gesture.
+  if (previewScrollUserOwnershipGeneration(previewPane) > 0) return 'preview';
   const layoutSyncActive = Number(panel?._previewLayoutScrollUntil || 0) > nowMs();
   return layoutSyncActive && fileEditorPanelMode(panel) === 'split' && fileEditorSourceCanDrive(panel, 'editor')
     ? 'editor'
@@ -71178,7 +72404,7 @@ function terminalRuntimeFacade(name) {
 }
 
 const terminalMobileAccessoryActionFamilies = Object.freeze({
-  primary: Object.freeze(['tmux-prefix', 'backspace', 'more']),
+  primary: Object.freeze(['tmux-prefix', 'upload', 'backspace', 'more']),
   side: Object.freeze(['tab', 'shift', 'ctrl']),
   dpad: Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']),
 });
@@ -71392,6 +72618,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'command-v', macLabel: '⌘V', pcLabel: 'Ctrl+V', macAriaLabel: 'Command-V', pcAriaLabel: 'Ctrl-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
+  {action: 'upload', label: '↑', ariaLabelKey: 'pref.section.uploads'},
   {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
   {action: 'arrow-left', label: '←', ariaLabel: 'Left arrow'},
   {action: 'arrow-down', label: '↓', ariaLabel: 'Down arrow'},
@@ -72185,6 +73412,7 @@ function sendTerminalMobileAccessoryInput(session, action) {
     void pasteTerminalMobileAccessoryClipboard(session);
     return true;
   }
+  if (action === 'upload') return openFileUploadChooserForSession(session);
   if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
     const item = terminals.get(session);
     const term = item?.term;
@@ -75098,6 +76326,58 @@ function imageSuffix(mimeType) {
   return '.png';
 }
 
+let fileUploadChooserElement = null;
+let fileUploadChooserTarget = null;
+
+function ensureFileUploadChooser() {
+  if (fileUploadChooserElement && fileUploadChooserElement.isConnected !== false) return fileUploadChooserElement;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.hidden = true;
+  input.className = 'file-upload-chooser';
+  input.setAttribute('aria-label', t('pref.section.uploads'));
+  input.addEventListener('change', async () => {
+    const target = fileUploadChooserTarget;
+    fileUploadChooserTarget = null;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!target || !files.length) return;
+    if (target.kind === 'editor') {
+      await uploadEditorFiles(target.editorTarget, files);
+      return;
+    }
+    await uploadFiles(target.session, files, {source: 'chooser'});
+  });
+  document.body.appendChild(input);
+  fileUploadChooserElement = input;
+  return input;
+}
+
+function openFileUploadChooser(target) {
+  if (readOnlyMode || !target) return false;
+  const input = ensureFileUploadChooser();
+  if (!input || typeof input.click !== 'function') return false;
+  fileUploadChooserTarget = target;
+  input.value = '';
+  if (target.kind === 'editor') input.setAttribute('accept', 'image/*');
+  else input.removeAttribute('accept');
+  input.click();
+  return true;
+}
+
+function openFileUploadChooserForSession(session) {
+  const key = String(session || '');
+  if (!isTmuxSession(key)) return false;
+  return openFileUploadChooser({kind: 'terminal', session: key});
+}
+
+function openFileUploadChooserForEditor(panel, path) {
+  const view = panel?._cmView || null;
+  if (!view || previewRendererForPath(path)?.id !== 'markdown') return false;
+  return openFileUploadChooser({kind: 'editor', editorTarget: {panel, view, path}});
+}
+
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyUploadFiles'));
@@ -76353,23 +77633,35 @@ function bindTerminalContainerForSession(session, term, container) {
   installTerminalFileDrop(session, container);
   enableTerminalScroll(session, term, container);
   observeTerminalResize(session, container);
-  scope.ownEvent('focusin', container, 'focusin', () => {
+  scope.ownEvent('focusin', container, 'focusin', event => {
+    recordTerminalMobileInputTrace(session, 'focusin', {target: viewportDiagnosticsFocusedElementText(event.target)});
     setFocusedTerminal(session);
   });
-  scope.ownEvent('focusout', container, 'focusout', () => {
+  scope.ownEvent('focusout', container, 'focusout', event => {
+    recordTerminalMobileInputTrace(session, 'focusout', {target: viewportDiagnosticsFocusedElementText(event.target)});
     clearFocusedTerminal(session);
   });
   scope.ownEvent('copy', container, 'copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  scope.ownEvent('keydown', container, 'keydown', () => {
+  scope.ownEvent('keydown', container, 'keydown', event => {
+    const keyKind = ['Backspace', 'Enter'].includes(event.key) ? event.key.toLowerCase() : (event.key?.length === 1 ? 'printable' : 'control');
+    recordTerminalMobileInputTrace(session, 'keydown', {keyKind, composing: event.isComposing === true});
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  scope.ownEvent('paste', container, 'paste', () => {
+  scope.ownEvent('paste', container, 'paste', event => {
+    recordTerminalMobileInputTrace(session, 'paste', {types: Array.from(event.clipboardData?.types || [])});
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  scope.ownEvent('beforeinput', container, 'beforeinput', () => {
+  scope.ownEvent('beforeinput', container, 'beforeinput', event => {
+    recordTerminalMobileInputTrace(session, 'beforeinput', {inputType: String(event.inputType || ''), composing: event.isComposing === true});
     noteTerminalExplicitInput(session);
+  }, {capture: true});
+  scope.ownEvent('compositionstart', container, 'compositionstart', () => {
+    recordTerminalMobileInputTrace(session, 'compositionstart');
+  }, {capture: true});
+  scope.ownEvent('compositionend', container, 'compositionend', () => {
+    recordTerminalMobileInputTrace(session, 'compositionend');
   }, {capture: true});
   });
 }
@@ -76472,7 +77764,10 @@ function startTerminal(session) {
   });
   // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
   // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
-  term.onData(data => handleTerminalData(session, data));
+  term.onData(data => {
+    recordTerminalMobileInputTrace(session, 'on-data', {bytes: utf8ByteLength(data)});
+    handleTerminalData(session, data);
+  });
   if (focusedTerminal === session && terminalPaneIsActive(session)) focusTerminalDom(session);
   connectTerminalSocket(session, item);
 }
@@ -78147,6 +79442,7 @@ function paintInitialAppShell() {
 
 async function boot() {
   installNativeAppViewportOwner();
+  installPreviewScrollOwnershipCapture();
   installTouchContextMenuOwner();
   syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});

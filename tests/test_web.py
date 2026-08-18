@@ -210,3 +210,15 @@ def test_every_page_head_declares_the_one_inline_favicon():
         assert len(favicons) == 1, (name, favicons)
         assert favicons[0] == web.INLINE_FAVICON_LINK, name
         assert page.index(favicons[0]) < page.index("</head>"), name
+
+
+def test_every_page_head_uses_the_shared_safe_area_viewport_owner():
+    pages = {
+        "html_page": web.html_page([]),
+        "login_html": web.login_html(),
+        "setup_auth_html": web.setup_auth_html(),
+    }
+    assert web.MOBILE_VIEWPORT_CONTENT == "width=device-width, initial-scale=1, viewport-fit=cover"
+    for name, page in pages.items():
+        viewport_meta = re.findall(r'<meta name="viewport"[^>]*>', page)
+        assert viewport_meta == [web.MOBILE_VIEWPORT_META], name

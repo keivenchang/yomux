@@ -268,8 +268,8 @@ function previewRendererStrategy(specification) {
 }
 const PREVIEW_RENDERERS = Object.freeze([
   previewRendererStrategy({id: 'markdown', kind: 'markdown', extensions: ['.md', '.markdown'], textBacked: true, defaultMode: 'edit', language: 'markdown', surfaceClasses: ['markdown-body'], cleanup: cleanupMarkdownPreviewStrategy, signature: markdownPreviewStrategySignature, render: renderMarkdownPreviewStrategy}),
-  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], render: renderHtmlPreviewStrategy}),
-  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], render: renderImagePreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'html', kind: 'html', extensions: ['.html', '.htm'], textBacked: true, defaultMode: 'edit', language: 'xml', sandbox: true, surfaceClasses: ['html-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: htmlPreviewStrategySignature, render: renderHtmlPreviewStrategy}),
+  previewRendererStrategy({id: 'image', kind: 'image', mediaKind: 'image', extensions: ['.png', '.apng', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp', '.avif'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['image-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderImagePreviewStrategy, mimeByExtension: {
     '.png': 'image/png',
     '.apng': 'image/apng',
     '.jpg': 'image/jpeg',
@@ -281,7 +281,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.bmp': 'image/bmp',
     '.avif': 'image/avif',
   }}),
-  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
+  previewRendererStrategy({id: 'pdf', kind: 'pdf', mediaKind: 'pdf', extensions: ['.pdf'], textBacked: false, defaultMode: 'preview', raw: true, sandbox: true, surfaceClasses: ['pdf-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderPdfPreviewStrategy, mimeByExtension: {'.pdf': 'application/pdf'}}),
   previewRendererStrategy({id: 'mermaid', kind: 'mermaid', mediaKind: 'mermaid', extensions: ['.mmd', '.mermaid'], textBacked: true, defaultMode: 'preview', language: 'mermaid', surfaceClasses: ['code-preview-body'], cleanup: cleanupMermaidPreviewStrategy, signature: mermaidPreviewStrategySignature, render: renderMermaidPreviewStrategy}),
   previewRendererStrategy({id: 'json-lines-table', kind: 'table', extensions: ['.jsonl', '.ndjson'], textBacked: true, defaultMode: 'preview', language: 'json', surfaceClasses: ['data-preview-body'], render: renderJsonLinesPreviewStrategy}),
   previewRendererStrategy({id: 'structured', kind: 'structured', extensions: ['.json', '.geojson', '.ipynb', '.yaml', '.yml', '.toml', '.xml', '.drawio', '.dio', '.excalidraw', '.ini', '.cfg', '.conf', '.env', '.properties', '.props'], textBacked: true, defaultMode: 'edit', surfaceClasses: ['data-preview-body'], parse: parseStructuredPreviewStrategy, parseByExtension: {
@@ -312,7 +312,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.props': 'ini',
   }}),
   previewRendererStrategy({id: 'table', kind: 'table', extensions: ['.csv', '.tsv'], textBacked: true, defaultMode: 'edit', language: 'text', surfaceClasses: ['data-preview-body'], parse: parseDelimitedPreviewStrategy, delimiterByExtension: {'.csv': ',', '.tsv': '\t'}, render: renderDelimitedPreviewStrategy}),
-  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'audio', kind: 'audio', mediaKind: 'audio', extensions: ['.mp3', '.wav', '.ogg', '.oga', '.flac', '.m4a', '.aac', '.opus'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp3': 'audio/mpeg',
     '.wav': 'audio/wav',
     '.ogg': 'audio/ogg',
@@ -322,7 +322,7 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.aac': 'audio/aac',
     '.opus': 'audio/opus',
   }}),
-  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], render: renderNativeMediaPreviewStrategy, mimeByExtension: {
+  previewRendererStrategy({id: 'video', kind: 'video', mediaKind: 'video', extensions: ['.mp4', '.m4v', '.webm', '.mov', '.mkv', '.ogv', '.3gp'], textBacked: false, defaultMode: 'preview', raw: true, surfaceClasses: ['media-preview-body'], cleanup: cleanupRetainedPreviewStrategy, signature: rawMediaPreviewStrategySignature, render: renderNativeMediaPreviewStrategy, mimeByExtension: {
     '.mp4': 'video/mp4',
     '.m4v': 'video/mp4',
     '.webm': 'video/webm',

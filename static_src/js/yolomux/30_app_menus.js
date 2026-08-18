@@ -1510,10 +1510,10 @@ function createAppMenu(menu) {
     event.stopPropagation();
     if (wrapper.classList.contains(CLS.open)) {
       const openMs = Date.now() - openAppMenuOpenedAt;
-      // The phone's single Menus root is a disclosure: its next tap must collapse the currently
-      // open menu immediately. Full desktop roots keep the short grace period that prevents one
-      // physical pointer interaction from being interpreted as open then close.
-      if (wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
+      // Every coarse-pointer top-level menu is a disclosure: its next tap must collapse the
+      // currently open sheet immediately. Cursor-driven roots keep the short grace period that
+      // prevents one physical pointer interaction from being interpreted as open then close.
+      if (browserUsesCoarsePointer() || wrapper.classList.contains('app-menu--nested-root') || (openAppMenuPinned && openMs >= menuClickCloseGraceMs)) closeAppMenus();
       else openAppMenu(wrapper, {focusFirst: false, pinned: true});
       return;
     }

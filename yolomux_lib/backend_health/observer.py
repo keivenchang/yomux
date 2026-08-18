@@ -5,11 +5,10 @@
 WHY THIS IS NOT A SECOND SAMPLING LOOP -- THE RECORDED DECISION
 --------------------------------------------------------------
 A periodic sampler already exists. ``TmuxWebtermApp.collect_current_stats_service_load``
-(``app.py:2766``) is driven by the ``service_load`` stats family on a 10s visible / 60s hidden
-cadence (``stats_current/families.py:153-159``) and persists exactly three numbers per service:
-``running``, ``cpu_percent``, ``rss_bytes``. The DOIT is explicit that two sampling loops over
-one projection is the divergent-copy defect this codebase fails on most, so the choice has to
-be recorded rather than assumed.
+(``app.py:2766``) is driven by the ``service_load`` stats family on a continuous 1 Hz cadence
+and persists the service's running state, CPU range, and RSS range. The DOIT is explicit that
+two sampling loops over one projection is the divergent-copy defect this codebase fails on
+most, so the choice has to be recorded rather than assumed.
 
 **Decision: the observer runs BESIDE the ``service_load`` collector and does not extend it.**
 
@@ -20,9 +19,9 @@ Three reasons it cannot be folded into that owner:
    the port lease is what makes it single-writer. An observer that inherited the stats-collector
    role would stop observing whenever that role moved to another process, which is the exact
    "health is only computed when something else happens to be running" defect.
-2. ``service_load``'s cadence is browser-visibility driven. Health needs a fixed 2.0s interval;
-   folding it in would make hard-failure detection take 60 seconds whenever nobody is looking,
-   which is the originating incident restated.
+2. Health has independent failure timing and per-service timeout semantics. Folding those into
+   the stats family would couple health transitions to metrics collection even though their
+   scheduling and failure policies are different.
 3. The two have different retention owners and different bounds: ``service_load`` writes numeric
    series into the stats database, health writes typed states and bounded transition rows into
    :mod:`yolomux_lib.backend_health.store`.

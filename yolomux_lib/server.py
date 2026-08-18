@@ -89,6 +89,7 @@ from .locales import resolve_locale_preference
 from .locales import user_message_payload
 from .web import html_page
 from .web import html_lang_dir_attrs
+from .web import MOBILE_VIEWPORT_META
 from .web import server_string
 from .web import static_asset_path
 from .web import static_content_type
@@ -1923,7 +1924,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 <html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {MOBILE_VIEWPORT_META}
   <title>{title}</title>
 </head>
 <body></body>
@@ -1939,7 +1940,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 <html {html_lang_dir_attrs(locale)}>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {MOBILE_VIEWPORT_META}
   <title>{title}</title>
 </head>
 <body></body>

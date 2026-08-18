@@ -115,7 +115,10 @@ function resetPreviewZoomSurfaceClasses(shell) {
 
 function disconnectPreviewZoomSurface(shell, options = {}) {
   shell?._previewZoomLifecycleScope?.dispose('preview-zoom-disconnect');
-  if (shell) shell._previewZoomLifecycleScope = null;
+  if (shell) {
+    shell._previewZoomApplyGeneration = Number(shell._previewZoomApplyGeneration || 0) + 1;
+    shell._previewZoomLifecycleScope = null;
+  }
   shell?.classList?.remove?.('file-editor-preview-zoom-measuring');
   if (options.resetClasses === true) resetPreviewZoomSurfaceClasses(shell);
 }
@@ -213,7 +216,18 @@ function previewZoomWriteState(shell, options = {}, zoomState) {
 function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}) {
   const viewport = shell.querySelector(':scope > .file-editor-preview-zoom-viewport');
   const value = shell.querySelector(':scope > .file-editor-preview-zoom-toolbar .file-editor-preview-zoom-value');
-  if (!viewport || !content) return;
+  if (!viewport || !content) return false;
+  const zoomGeneration = Number(shell._previewZoomApplyGeneration || 0) + 1;
+  shell._previewZoomApplyGeneration = zoomGeneration;
+  const deferredOwner = applyOptions.deferredScrollOwner || (
+    applyOptions.userInitiated === true
+      ? createDeferredElementScrollOwner(viewport)
+      : createPassiveDeferredElementScrollOwner(viewport)
+  );
+  // Fit changes scroll geometry before its positioning frame. A claimed native gesture owns both:
+  // letting a passive refit shrink scrollHeight here would make WebKit clamp scrollTop even though
+  // the later guarded write correctly yielded.
+  if (!deferredElementScrollOwnerOwnsElement(deferredOwner, viewport)) return false;
   const previousScale = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
   const viewportRect = viewport.getBoundingClientRect?.();
   const focusOffsetX = Number.isFinite(applyOptions.focusClientX) && viewportRect
@@ -248,20 +262,32 @@ function applyPreviewZoomSurface(shell, content, options = {}, applyOptions = {}
     if (action?.pressed) button.setAttribute('aria-pressed', action.pressed(state, scale) ? 'true' : 'false');
     else button.removeAttribute('aria-pressed');
   });
+  const writeIfOwned = (coordinates, details) => writeDeferredElementScrollIfOwned(
+    deferredOwner,
+    viewport,
+    coordinates,
+    'preview-zoom-apply',
+    {previewSurface: options.zoomKey || 'zoom', zoomGeneration, ...details},
+  );
   schedulePreviewZoomFrame(shell, () => {
+    if (shell._previewZoomApplyGeneration !== zoomGeneration) return;
     if (state.mode === 'fit') {
-      viewport.scrollLeft = 0;
-      viewport.scrollTop = 0;
+      writeIfOwned({left: 0, top: 0}, {zoomMode: state.mode});
       return;
     }
     if (applyOptions.centerIfUnfocused === true && !hasFocusPoint) {
-      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
-      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+      writeIfOwned({
+        left: Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2),
+        top: Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2),
+      }, {zoomMode: 'center'});
       return;
     }
-    viewport.scrollLeft = Math.max(0, (focusX * scale) - focusOffsetX);
-    viewport.scrollTop = Math.max(0, (focusY * scale) - focusOffsetY);
+    writeIfOwned({
+      left: Math.max(0, (focusX * scale) - focusOffsetX),
+      top: Math.max(0, (focusY * scale) - focusOffsetY),
+    }, {zoomMode: state.mode});
   });
+  return true;
 }
 
 function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}, applyOptions = {}) {
@@ -269,7 +295,7 @@ function setPreviewZoomSurfaceState(shell, content, options = {}, zoomState = {}
   applyPreviewZoomSurface(shell, content, options, applyOptions);
 }
 
-function bindPreviewZoomDragPan(shell, viewport, bind) {
+function bindPreviewZoomDragPan(shell, viewport, bind, options) {
   let drag = null;
   const finish = event => {
     if (!drag || (event.pointerId !== undefined && event.pointerId !== drag.pointerId)) return;
@@ -295,8 +321,10 @@ function bindPreviewZoomDragPan(shell, viewport, bind) {
     const dx = event.clientX - drag.x;
     const dy = event.clientY - drag.y;
     if (Math.abs(dx) > previewZoomPolicy.panThresholdPx || Math.abs(dy) > previewZoomPolicy.panThresholdPx) event.preventDefault();
-    viewport.scrollLeft = Math.max(0, drag.scrollLeft - dx);
-    viewport.scrollTop = Math.max(0, drag.scrollTop - dy);
+    writeOwnedElementScroll(viewport, {
+      left: Math.max(0, drag.scrollLeft - dx),
+      top: Math.max(0, drag.scrollTop - dy),
+    }, 'preview-zoom-drag-pan', {previewSurface: options.zoomKey || 'zoom'});
   }, {passive: false});
   bind(viewport, 'pointerup', finish);
   bind(viewport, 'pointercancel', finish);
@@ -329,9 +357,12 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     if (!button || !toolbar.contains(button) || button.disabled) return;
     const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
     const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
-    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
+    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
+      centerIfUnfocused: true,
+      userInitiated: true,
+    });
   });
-  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
+  if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind, resolvedOptions);
   const ownerWindow = previewZoomOwnerWindow(shell);
   // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a
   // transient height and Dockview re-lays-it-out ~150ms later (and a hover that triggers a relayout
@@ -350,9 +381,13 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     }, 150);
     lifecycleScope.ownTimer('reveal-timer', timer, value => ownerWindow?.clearTimeout?.(value));
   };
-  const applyAndScheduleReveal = applyOptions => {
-    applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, applyOptions);
-    scheduleReveal();
+  const applyAndScheduleReveal = (applyOptions, deferredScrollOwner) => {
+    const applied = applyPreviewZoomSurface(shell, resolvedContent, resolvedOptions, {
+      ...(applyOptions || {}),
+      deferredScrollOwner: deferredScrollOwner || createPassiveDeferredElementScrollOwner(viewport),
+    });
+    if (applied) scheduleReveal();
+    return applied;
   };
   const ResizeObserverCtor = ownerWindow?.ResizeObserver || (typeof ResizeObserver === 'function' ? ResizeObserver : null);
   if (ResizeObserverCtor) {
@@ -362,23 +397,28 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
       // so applying synchronously here would re-trigger this observer and emit the noisy
       // "ResizeObserver loop completed with undelivered notifications" warning.
       const ownerWin = previewZoomOwnerWindow(shell);
+      const deferredScrollOwner = createPassiveDeferredElementScrollOwner(viewport);
       lifecycleScope.release('resize-frame');
       let frame = 0;
       frame = schedulePreviewZoomFrame(shell, () => {
         lifecycleScope.release('resize-frame', frame);
         if (!lifecycleScope.current()) return;
-        applyAndScheduleReveal();
+        applyAndScheduleReveal({}, deferredScrollOwner);
       });
       lifecycleScope.ownTimer('resize-frame', frame, value => ownerWin?.cancelAnimationFrame?.(value));
     });
     lifecycleScope.ownObserver('resize-observer', resizeObserver);
     resizeObserver.observe(viewport);
   }
-  bind(resolvedContent, 'load', () => applyAndScheduleReveal({centerIfUnfocused: true}), {once: true});
+  bind(resolvedContent, 'load', () => applyAndScheduleReveal(
+    {centerIfUnfocused: true},
+    createPassiveDeferredElementScrollOwner(viewport),
+  ), {once: true});
+  const initialScrollOwner = createPassiveDeferredElementScrollOwner(viewport);
   let initialFrame = 0;
   initialFrame = schedulePreviewZoomFrame(shell, () => {
     lifecycleScope.release('initial-frame', initialFrame);
-    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true});
+    if (lifecycleScope.current()) applyAndScheduleReveal({centerIfUnfocused: true}, initialScrollOwner);
   });
   lifecycleScope.ownTimer('initial-frame', initialFrame, value => ownerWindow?.cancelAnimationFrame?.(value));
   return true;
@@ -477,23 +517,29 @@ async function renderMermaidSourceInto(container, source, options = {}) {
     const rawSvg = typeof result === 'string' ? result : result?.svg;
     const svg = sanitizeStandaloneSvg(rawSvg);
     if (!svg) throw new Error(t('preview.mermaid.noSvg'));
-    const img = document.createElement('img');
-    img.className = 'mermaid-preview-image';
-    img.alt = t('preview.mermaid.alt');
-    img.src = svgImageUrl(svg);
     const fullPreview = Object.prototype.hasOwnProperty.call(options, 'full')
       ? options.full !== false
       : container.classList.contains('file-editor-preview-pane-panel');
-    installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
-      ...options,
-      path: options.path || '',
-      full: fullPreview,
-    }));
-    return true;
+    return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
+      if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
+      const img = document.createElement('img');
+      img.className = 'mermaid-preview-image';
+      img.alt = t('preview.mermaid.alt');
+      img.src = svgImageUrl(svg);
+      installPreviewZoomSurface(container, img, previewZoomOptionsForKind(fullPreview ? 'mermaidFull' : 'mermaidInline', {
+        ...options,
+        path: options.path || '',
+        full: fullPreview,
+      }));
+      return true;
+    });
   } catch (error) {
-    disconnectPreviewZoomSurface(container, {resetClasses: true});
-    if (isCurrent() && container.dataset.mermaidRenderSeq === String(seq)) container.replaceChildren(mermaidErrorNode(text, error));
-    return false;
+    return await schedulePreviewDeferredWorkAfterUserScroll(container, 'mermaid-completion', () => {
+      if (!isCurrent() || container.dataset.mermaidRenderSeq !== String(seq)) return false;
+      disconnectPreviewZoomSurface(container, {resetClasses: true});
+      container.replaceChildren(mermaidErrorNode(text, error));
+      return false;
+    });
   }
 }
 
@@ -949,7 +995,7 @@ function htmlPreviewUrl(path) {
 }
 
 function renderRawImagePreviewInto(container, path, state = null, options = {}) {
-  const version = String(state?.mtime || state?.size || 0);
+  const version = rawFileMediaVersion(state);
   const img = document.createElement('img');
   img.className = 'file-editor-preview-image';
   img.alt = basenameOf(path);
@@ -962,20 +1008,20 @@ function renderRawImagePreviewInto(container, path, state = null, options = {}) 
   container._previewAsync = installRawFileMediaSource(img, path, {
     params: version ? {v: version} : {},
     isCurrent: () => container.contains(img),
-    onFailure: error => {
-      container.replaceChildren(previewActionFallbackNode(
+    onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, img, 'raw-image-failure', () => (
+      previewActionFallbackNode(
         t('preview.image.loadFailed'),
         userMessageText(error, t('common.requestFailed')),
         path,
-      ));
-    },
-    onDecodeFailure: () => {
-      container.replaceChildren(previewActionFallbackNode(
+      )
+    )),
+    onDecodeFailure: () => scheduleRawMediaFallbackAfterUserScroll(container, img, 'raw-image-failure', () => (
+      previewActionFallbackNode(
         t('preview.image.loadFailed'),
         `${previewMimeForPath(path) || 'image'}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
         path,
-      ));
-    },
+      )
+    )),
   });
 }
 
@@ -1037,6 +1083,17 @@ function previewActionFallbackNode(titleText, detailText, path) {
   return fallback;
 }
 
+function scheduleRawMediaFallbackAfterUserScroll(container, media, key, createFallback) {
+  const completion = schedulePreviewDeferredWorkAfterUserScroll(container, key, () => {
+    if (!container.contains(media)) return false;
+    releasePreviewSurfaceResources(container);
+    container.replaceChildren(createFallback());
+    return true;
+  });
+  trackPreviewAsyncCompletion(container, completion);
+  return completion;
+}
+
 function renderNativeMediaPreviewInto(container, path, state = null, kind = 'audio') {
   const media = document.createElement(kind === 'video' ? 'video' : 'audio');
   media.className = `file-editor-native-media file-editor-native-${kind}`;
@@ -1044,22 +1101,22 @@ function renderNativeMediaPreviewInto(container, path, state = null, kind = 'aud
   media.preload = 'metadata';
   container.replaceChildren(media, previewActionFallbackNode(t(kind === 'video' ? 'preview.video.title' : 'preview.audio.title'), `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`, path));
   container._previewAsync = installRawFileMediaSource(media, path, {
-    params: state?.mtime ? {v: state.mtime} : {},
+    params: {v: rawFileMediaVersion(state)},
     isCurrent: () => container.contains(media),
-    onFailure: error => {
-      container.replaceChildren(previewActionFallbackNode(
+    onFailure: error => scheduleRawMediaFallbackAfterUserScroll(container, media, 'raw-media-failure', () => (
+      previewActionFallbackNode(
         t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
         userMessageText(error, t('common.requestFailed')),
         path,
-      ));
-    },
-    onDecodeFailure: () => {
-      container.replaceChildren(previewActionFallbackNode(
+      )
+    )),
+    onDecodeFailure: () => scheduleRawMediaFallbackAfterUserScroll(container, media, 'raw-media-failure', () => (
+      previewActionFallbackNode(
         t(kind === 'video' ? 'preview.video.loadFailed' : 'preview.audio.loadFailed'),
         `${previewMimeForPath(path) || kind}${state?.size ? ` · ${formatFileSize(state.size)}` : ''}`,
         path,
-      ));
-    },
+      )
+    )),
   });
 }
 
@@ -1091,6 +1148,7 @@ async function openHtmlPreviewWithAuth(path) {
 }
 
 function renderHtmlPreviewInto(container, path, text) {
+  const embeddedScrollPosition = previewEmbeddedScrollPosition(container);
   const children = [];
   if (htmlPreviewHasDisabledJavaScript(text)) {
     const notice = document.createElement('div');
@@ -1112,8 +1170,14 @@ function renderHtmlPreviewInto(container, path, text) {
   }
   const frame = document.createElement('iframe');
   frame.className = 'file-editor-html-preview';
-  frame.setAttribute('sandbox', '');
+  // Scripts remain disabled. Same-origin access is needed only so the shared Preview owner can
+  // observe the iframe document's native touch/scroll state instead of treating it as a second,
+  // invisible scroll surface.
+  frame.setAttribute('sandbox', 'allow-same-origin');
   frame.setAttribute('title', t('preview.htmlTitle'));
+  frame.addEventListener('load', () => {
+    restorePreviewEmbeddedScrollPosition(container, frame, embeddedScrollPosition);
+  });
   frame.srcdoc = String(text ?? '');
   children.push(frame);
   container.replaceChildren(...children);
@@ -1137,6 +1201,29 @@ function cleanupMarkdownPreviewStrategy(container) {
   container._mermaidSig = null;
 }
 
+// Retained Preview strategies decide whether resources are stale after comparing the new signature.
+// Cleaning them before that comparison would destroy the exact iframe, zoom viewport, or media node
+// whose native scroll/playback state an unchanged passive refresh must retain.
+function cleanupRetainedPreviewStrategy() {}
+
+function disconnectPreviewZoomSurfaces(root) {
+  const surfaces = Array.from(root?.querySelectorAll?.('.file-editor-preview-zoom-shell') || []);
+  if (root?.classList?.contains?.('file-editor-preview-zoom-shell')) surfaces.unshift(root);
+  for (const surface of surfaces) disconnectPreviewZoomSurface(surface, {resetClasses: true});
+}
+
+function releasePreviewSurfaceResources(container) {
+  releaseRawFileMediaSources(container);
+  disconnectPreviewZoomSurfaces(container);
+}
+
+function prepareRetainedPreviewStrategy(container, signature, selector) {
+  if (container._retainedPreviewSignature === signature && container.querySelector(selector)) return false;
+  releasePreviewSurfaceResources(container);
+  container._retainedPreviewSignature = signature;
+  return true;
+}
+
 function cleanupMermaidPreviewStrategy(container) {
   container._previewPath = null;
   container._previewText = null;
@@ -1146,6 +1233,14 @@ function cleanupMermaidPreviewStrategy(container) {
 
 function markdownPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, fileEditorPreviewDisplayMode, context]);
+}
+
+function htmlPreviewStrategySignature({path, text, context}) {
+  return JSON.stringify([path, text, context]);
+}
+
+function rawMediaPreviewStrategySignature({path, state, context}) {
+  return JSON.stringify([path, rawFileMediaVersion(state), context]);
 }
 
 function mermaidPreviewStrategySignature({path, text, context}) {
@@ -1170,28 +1265,143 @@ function renderMermaidPreviewStrategy({container, path, text, context, signature
   return true;
 }
 
-function renderHtmlPreviewStrategy({container, path, text}) { renderHtmlPreviewInto(container, path, text); }
-function renderImagePreviewStrategy({container, path, state, context}) { renderRawImagePreviewInto(container, path, state, {context}); }
-function renderPdfPreviewStrategy({container, path}) { renderPdfPreviewInto(container, path); }
+function renderHtmlPreviewStrategy({container, path, text, context, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-html-preview')) return false;
+  renderHtmlPreviewInto(container, path, text);
+  return true;
+}
+function renderImagePreviewStrategy({container, path, state, context, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-preview-image')) return false;
+  renderRawImagePreviewInto(container, path, state, {context});
+  return true;
+}
+function renderPdfPreviewStrategy({container, path, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, '.file-editor-pdf-preview')) return false;
+  renderPdfPreviewInto(container, path);
+  return true;
+}
 function renderStructuredPreviewStrategy({container, path, text, renderer}) { renderStructuredPreviewInto(container, path, text, renderer); }
 function renderJsonLinesPreviewStrategy({container, path, text}) { renderJsonLinesTablePreviewInto(container, path, text); }
 function renderDelimitedPreviewStrategy({container, path, text, renderer}) { renderDelimitedPreviewInto(container, path, text, renderer); }
-function renderNativeMediaPreviewStrategy({container, path, state, renderer}) { renderNativeMediaPreviewInto(container, path, state, renderer.kind); }
+function renderNativeMediaPreviewStrategy({container, path, state, renderer, signature}) {
+  if (!prepareRetainedPreviewStrategy(container, signature, `.file-editor-native-${renderer.kind}`)) return false;
+  renderNativeMediaPreviewInto(container, path, state, renderer.kind);
+  return true;
+}
 function renderUnsupportedPreviewStrategy({container, path, state}) { renderUnsupportedPreviewInto(container, path, state); }
 function renderCodePreviewStrategy({container, path, text}) { renderEditorCodePreviewInto(container, path, text); }
 
 function renderPreviewDescriptor(renderer, context) {
+  if (context.container._previewRendererId && context.container._previewRendererId !== renderer.id) {
+    releasePreviewSurfaceResources(context.container);
+  }
+  context.container._previewRendererId = renderer.id;
   renderer.cleanup(context.container, context);
   const signature = typeof renderer.signature === 'function' ? renderer.signature(context) : null;
   return renderer.render({...context, renderer, signature});
 }
 
+const previewDeferredWorkUserOwnershipRetryMs = 100;
+
+function trackPreviewAsyncCompletion(container, completion) {
+  if (!container || !completion || typeof completion.then !== 'function') return completion;
+  const previous = container._previewAsync;
+  container._previewAsync = previous && typeof previous.then === 'function' && previous !== completion
+    ? Promise.all([previous, completion]).then(([, value]) => value)
+    : completion;
+  return completion;
+}
+
+function previewDeferredWorkScrollOwner(container) {
+  return container?.closest?.('.file-editor-preview-pane-panel') || container;
+}
+
+function schedulePreviewDeferredWorkAfterUserScroll(container, key, work) {
+  if (!container || typeof work !== 'function') return Promise.resolve(false);
+  const ownerWindow = container.ownerDocument?.defaultView || window;
+  const owner = previewDeferredWorkScrollOwner(container);
+  let pendingByKey = container._previewDeferredWorkByKey;
+  if (!(pendingByKey instanceof Map)) {
+    pendingByKey = new Map();
+    container._previewDeferredWorkByKey = pendingByKey;
+  }
+  const normalizedKey = String(key || 'default');
+  let pending = pendingByKey.get(normalizedKey);
+  if (pending) {
+    pending.work = work;
+    return pending.promise;
+  }
+  if (!previewScrollUserOwnsElementNow(owner)) {
+    try {
+      return Promise.resolve(work());
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  pending = {timer: 0, work, promise: null, resolve: null, reject: null};
+  pending.promise = new Promise((resolve, reject) => {
+    pending.resolve = resolve;
+    pending.reject = reject;
+  });
+  pendingByKey.set(normalizedKey, pending);
+  const retry = () => {
+    pending.timer = 0;
+    if (pendingByKey.get(normalizedKey) !== pending) return;
+    if (container.isConnected === false) {
+      pendingByKey.delete(normalizedKey);
+      pending.resolve(false);
+      return;
+    }
+    if (previewScrollUserOwnsElementNow(owner)) {
+      pending.timer = ownerWindow.setTimeout(retry, previewDeferredWorkUserOwnershipRetryMs);
+      return;
+    }
+    pendingByKey.delete(normalizedKey);
+    Promise.resolve().then(() => pending.work()).then(pending.resolve, pending.reject);
+  };
+  pending.timer = ownerWindow.setTimeout(retry, previewDeferredWorkUserOwnershipRetryMs);
+  return pending.promise;
+}
+
+function cancelPreviewDeferredWorkAfterUserScroll(container, key) {
+  const pendingByKey = container?._previewDeferredWorkByKey;
+  const normalizedKey = String(key || 'default');
+  const pending = pendingByKey instanceof Map ? pendingByKey.get(normalizedKey) : null;
+  if (!pending) return false;
+  const ownerWindow = container.ownerDocument?.defaultView || window;
+  if (pending.timer) ownerWindow.clearTimeout?.(pending.timer);
+  pendingByKey.delete(normalizedKey);
+  pending.resolve(false);
+  return true;
+}
+
+function scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options = {}) {
+  void schedulePreviewDeferredWorkAfterUserScroll(container, 'editor-render', () => (
+    renderEditorPreviewPane(container, path, text, options)
+  ));
+  return true;
+}
+
+function cancelEditorPreviewRenderAfterUserScroll(container) {
+  return cancelPreviewDeferredWorkAfterUserScroll(container, 'editor-render');
+}
+
 function renderEditorPreviewPane(container, path, text, options = {}) {
   if (!container) return;
+  if (previewScrollUserOwnsElementNow(container)) {
+    scheduleEditorPreviewRenderAfterUserScroll(container, path, text, options);
+    return false;
+  }
+  cancelEditorPreviewRenderAfterUserScroll(container);
+  const renderGeneration = debugModeExplicitUrlEnabled === true
+    ? Number(container._previewTraceRenderGeneration || 0) + 1
+    : 0;
+  if (renderGeneration) container._previewTraceRenderGeneration = renderGeneration;
   const previousAsync = container._previewAsync;
   container._previewAsync = null;
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
+  const scrollOwner = createPassiveDeferredElementScrollOwner(container);
   const state = fileState.get(path) || null;
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
@@ -1199,5 +1409,9 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   container.classList.toggle('vanilla-preview-body', fileEditorPreviewDisplayMode === 'vanilla');
   const rendered = renderPreviewDescriptor(renderer, {container, path, text, state, context: previewContext});
   if (rendered === false) container._previewAsync = previousAsync;
-  restoreElementScrollPosition(container, scrollTop, scrollLeft);
+  restoreElementScrollPosition(container, scrollTop, scrollLeft, {
+    owner: 'preview-render-restore', previewSurface: renderer.id, renderContext: previewContext, renderGeneration,
+    deferredOwner: scrollOwner,
+  });
+  return rendered;
 }

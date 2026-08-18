@@ -6,6 +6,99 @@ function markdownTextWithSourceAnchors(text) {
   return String(text || '');
 }
 
+const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
+const MARKDOWN_INLINE_NUMBERED_TASK_RE = /^\s*(?:[-+*]|\d+[.)])\s+\[[ xX]\]\s+(\d+)([.)])\s+\S/;
+const MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS = 'markdown-rendered-task-checkbox';
+
+function markdownTaskLineEntries(text) {
+  return String(text || '').split('\n')
+    .map((line, index) => {
+      const task = line.match(MARKDOWN_TASK_LINE_RE);
+      if (!task) return null;
+      const numbered = line.match(MARKDOWN_INLINE_NUMBERED_TASK_RE);
+      return {
+        line: index + 1,
+        checked: task[2].toLowerCase() === 'x',
+        inlineNumber: numbered ? Number(numbered[1]) : null,
+        inlineNumberText: numbered?.[1] || '',
+        inlineDelimiter: numbered?.[2] || '',
+      };
+    })
+    .filter(Boolean);
+}
+
+function markdownMarkedTaskRenderer(marked) {
+  if (typeof marked?.Renderer !== 'function') return null;
+  const renderer = new marked.Renderer();
+  const renderListItem = renderer.listitem;
+  renderer.listitem = function renderMarkedTaskListItem(text, task, checked) {
+    const renderedText = task
+      ? String(text).replace(/^<input\b/, `<input class="${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS}"`)
+      : text;
+    return renderListItem.call(this, renderedText, task, checked);
+  };
+  return renderer;
+}
+
+function markdownRenderedTaskCheckboxes(root) {
+  return Array.from(root?.querySelectorAll?.('input[type="checkbox"]') || []).filter(input => {
+    const item = input.parentElement;
+    const list = item?.parentElement;
+    return String(item?.tagName || '').toUpperCase() === 'LI'
+      && ['UL', 'OL'].includes(String(list?.tagName || '').toUpperCase())
+      && (input.classList?.contains(MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS)
+        || input.classList?.contains('markdown-task-checkbox'));
+  });
+}
+
+function markdownInlineOrderedTask(item, input, task) {
+  if (!task || task.inlineNumber === null) return null;
+  const siblings = Array.from(item?.children || []).filter(node => node !== input);
+  if (siblings.length !== 1) return null;
+  const ordered = siblings[0];
+  if (ordered.parentElement !== item || String(ordered.tagName || '').toUpperCase() !== 'OL') return null;
+  if (ordered.children?.length !== 1 || String(ordered.firstElementChild?.tagName || '').toUpperCase() !== 'LI') return null;
+  const nestedItem = ordered.firstElementChild;
+  if (nestedItem.querySelector?.('ul,ol')) return null;
+  const outsideText = Array.from(item.childNodes || []).some(node => (
+    node !== input && node !== ordered && String(node.textContent || '').trim()
+  ));
+  if (outsideText) return null;
+  const parsedStart = Number(ordered.getAttribute?.('start') || 1);
+  return parsedStart === task.inlineNumber ? {nestedItem, ordered} : null;
+}
+
+function applyMarkdownTaskListClasses(root, sourceText = '') {
+  const tasks = markdownTaskLineEntries(sourceText);
+  for (const [index, input] of markdownRenderedTaskCheckboxes(root).entries()) {
+    const item = input.parentElement;
+    const list = item?.parentElement;
+    if (!item || !['UL', 'OL'].includes(String(list?.tagName || '').toUpperCase())) continue;
+    item.classList.add('task-list-item');
+    list.classList.add('contains-task-list');
+    if (input.parentElement !== item || item.querySelector?.(':scope > .markdown-task-label')) continue;
+    // A grid treats each text node and inline element as a separate anonymous item. Keep the task
+    // prose under one grid owner so inline code cannot take a full row and strand later text in the
+    // checkbox column.
+    const label = (item.ownerDocument || document).createElement('span');
+    label.className = 'markdown-task-label';
+    const inlineOrdered = markdownInlineOrderedTask(item, input, tasks[index]);
+    if (inlineOrdered) {
+      const number = (item.ownerDocument || document).createElement('span');
+      number.className = 'markdown-task-number';
+      number.textContent = `${tasks[index].inlineNumberText}${tasks[index].inlineDelimiter} `;
+      label.appendChild(number);
+      for (const node of Array.from(inlineOrdered.nestedItem.childNodes || inlineOrdered.nestedItem.children || [])) {
+        label.appendChild(node);
+      }
+      item.replaceChildren(input, label);
+      continue;
+    }
+    while (input.nextSibling) label.appendChild(input.nextSibling);
+    item.appendChild(label);
+  }
+}
+
 function applyMarkdownSourceLines(container, source) {
   const lines = String(source || '').split('\n');
   let searchFrom = 0;
@@ -466,6 +559,16 @@ function markdownImageFallbackNode(path, label = '') {
   return node;
 }
 
+function scheduleMarkdownImageFallbackAfterUserScroll(previewContainer, img, createFallback) {
+  const completion = schedulePreviewDeferredWorkAfterUserScroll(img, 'markdown-image-failure', () => {
+    if (previewContainer?._markdownPreviewGeneration && !previewContainer.contains(img)) return false;
+    img.replaceWith(createFallback());
+    return true;
+  });
+  trackPreviewAsyncCompletion(previewContainer, completion);
+  return completion;
+}
+
 function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
   if (!root || !markdownPath) return [];
   const pending = [];
@@ -480,7 +583,9 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
     if (target.external) {
       img.setAttribute('src', target.src);
       img.addEventListener('error', () => {
-        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+        void scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+        ));
       }, {once: true});
       continue;
     }
@@ -490,26 +595,19 @@ function rewriteMarkdownPreviewImages(root, markdownPath, options = {}) {
       onFailure: error => {
         if (options.isCurrent?.() === false) return;
         const label = userMessageText(error, t('preview.markdown.imageUnavailable', {path: target.path || original}));
-        img.replaceWith(markdownImageFallbackNode(target.path, label));
+        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, label)
+        ));
       },
       onDecodeFailure: () => {
         if (options.isCurrent?.() === false) return;
-        img.replaceWith(markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original})));
+        return scheduleMarkdownImageFallbackAfterUserScroll(options.previewContainer, img, () => (
+          markdownImageFallbackNode(target.path, t('preview.markdown.imageUnavailable', {path: target.path || original}))
+        ));
       },
     }));
   }
   return pending;
-}
-
-const MARKDOWN_TASK_LINE_RE = /^(\s*(?:[-+*]|\d+[.)])\s+\[)([ xX])(\]\s*)/;
-
-function markdownTaskLineEntries(text) {
-  return String(text || '').split('\n')
-    .map((line, index) => {
-      const match = line.match(MARKDOWN_TASK_LINE_RE);
-      return match ? {line: index + 1, checked: match[2].toLowerCase() === 'x'} : null;
-    })
-    .filter(Boolean);
 }
 
 function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
@@ -537,7 +635,7 @@ function updateMarkdownTaskFromPreview(container, input) {
 
 function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
   const tasks = markdownTaskLineEntries(text);
-  const checkboxes = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  const checkboxes = markdownRenderedTaskCheckboxes(container);
   checkboxes.forEach((input, index) => {
     const task = tasks[index];
     if (!task) return;
@@ -798,7 +896,7 @@ function fallbackMarkdownToHtml(text) {
         const item = lines[index].trim().match(/^[-+*]\s+\[([ xX])\]\s+(.+)$/);
         if (!item) break;
         const checked = item[1].toLowerCase() === 'x' ? ' checked' : '';
-        items.push(`<li class="task-list-item"><input type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
+        items.push(`<li class="task-list-item"><input class="${MARKDOWN_RENDERED_TASK_CHECKBOX_CLASS}" type="checkbox"${checked} disabled> ${markdownInlineHtml(item[2])}</li>`);
         index += 1;
       }
       out.push(`<ul>${items.join('')}</ul>`);
@@ -827,7 +925,11 @@ function fallbackMarkdownToHtml(text) {
 
 function markdownPreviewHtml(text) {
   if (typeof window.marked !== 'undefined' && typeof window.marked.parse === 'function') {
-    return window.marked.parse(markdownTextWithSourceAnchors(text), {gfm: true, breaks: true});
+    return window.marked.parse(markdownTextWithSourceAnchors(text), {
+      gfm: true,
+      breaks: true,
+      renderer: markdownMarkedTaskRenderer(window.marked),
+    });
   }
   return fallbackMarkdownToHtml(markdownTextWithSourceAnchors(text));
 }
@@ -856,12 +958,14 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
   container._previewAsync = null;
   const html = markdownPreviewHtml(text);
   const frag = sanitizeMarkdownPreviewHtml(html);
+  applyMarkdownTaskListClasses(frag, text);
   trimMarkdownCodeBlockEdgeNewlines(frag);
   applyMarkdownHtmlBackgroundClasses(frag);
   applyMarkdownAlertClasses(frag);
   linkifyBareUrls(frag);
   const localImages = rewriteMarkdownPreviewImages(frag, markdownPath, {
     isCurrent: () => container._markdownPreviewGeneration === generation,
+    previewContainer: container,
   });
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);

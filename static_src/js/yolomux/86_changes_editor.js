@@ -3253,6 +3253,14 @@ function fileEditorToolbarHtml(item) {
               hidden: true,
             },
             {
+              className: 'file-editor-upload-panel',
+              action: 'editor-upload',
+              label: '↑',
+              title: t('pref.section.uploads'),
+              ariaLabel: t('pref.section.uploads'),
+              hidden: true,
+            },
+            {
               kind: 'separator',
               className: 'file-editor-toolbar-separator',
               dataset: {editorToolbarSeparator: 'theme'},
@@ -3298,6 +3306,7 @@ function relocalizeFileEditorPanel(panel, item) {
   setFileEditorLocalizedLabel(panel, '.file-editor-popout-preview-panel', 'editor.popoutPreview');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'editor.reloadFromDisk');
   setFileEditorLocalizedLabel(panel, '.file-editor-reload-panel', 'common.reload', {text: true, title: false, aria: false});
+  setFileEditorLocalizedLabel(panel, '.file-editor-upload-panel', 'pref.section.uploads');
   setFileEditorLocalizedLabel(panel, '.file-editor-diff-expand-panel', 'editor.diffExpand');
   setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'common.save', {aria: false});
   setFileEditorLocalizedLabel(panel, '.file-editor-save-panel', 'editor.saveFile', {text: false, title: false});
@@ -3364,6 +3373,7 @@ function createFileEditorPanel(item) {
   bindActionDispatcher(panel, {
     'editor-save': () => saveFileEditor(path, panel),
     'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-upload': () => openFileUploadChooserForEditor(panel, path),
     'editor-mode': (_event, target) => {
       const mode = target?.dataset?.editorMode;
       if (!editorViewModes.has(mode)) return;
@@ -3541,13 +3551,9 @@ function disconnectFileEditorImageObserver(imagePane) {
   if (typeof disconnectPreviewZoomSurface === 'function') disconnectPreviewZoomSurface(imagePane, {resetClasses: true});
 }
 
-function fileEditorImageVersion(state) {
-  return String(state?.mtime_ns || state?.mtime || state?.size || 0);
-}
-
 function renderFileEditorImagePane(imagePane, path, state, status) {
   if (!imagePane) return;
-  const version = fileEditorImageVersion(state);
+  const version = rawFileMediaVersion(state);
   const sameImage = imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version;
   const zoomOptions = previewZoomOptionsForKind('imagePane', {path});
   let img = sameImage ? imagePane.querySelector('img.file-editor-image') : null;
@@ -3560,32 +3566,32 @@ function renderFileEditorImagePane(imagePane, path, state, status) {
     img.loading = 'eager';
     img.decoding = 'async';
     img.onload = () => {
-      applyPreviewZoomSurface(imagePane, img, zoomOptions);
       status(`${img.naturalWidth}x${img.naturalHeight}`, '');
     };
     imagePane.dataset.imagePath = path;
     imagePane.dataset.imageVersion = version;
     installPreviewZoomSurface(imagePane, img, zoomOptions);
     status(t('common.loading'), '');
+    const showFailureAfterUserScroll = async (key, detail, statusMessage) => {
+      const applied = await scheduleRawMediaFallbackAfterUserScroll(imagePane, img, key, () => (
+        fileEditorEmptyState(t('preview.image.loadFailed'), detail)
+      ));
+      if (applied) status(statusMessage, 'error');
+      return applied;
+    };
     imagePane._previewAsync = installRawFileMediaSource(img, path, {
       params: {v: version},
       isCurrent: () => imagePane.dataset.imagePath === path && imagePane.dataset.imageVersion === version && imagePane.contains(img),
-      onFailure: error => {
-        disconnectFileEditorImageObserver(imagePane);
-        imagePane.replaceChildren(fileEditorEmptyState(
-          t('preview.image.loadFailed'),
+      onFailure: error => showFailureAfterUserScroll(
+        'image-pane-failure',
           userMessageText(error, t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)})),
-        ));
-        status(userMessageText(error, t('preview.image.loadFailedStatus')), 'error');
-      },
-      onDecodeFailure: () => {
-        disconnectFileEditorImageObserver(imagePane);
-        imagePane.replaceChildren(fileEditorEmptyState(
-          t('preview.image.loadFailed'),
-          t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
-        ));
-        status(t('preview.image.loadFailedStatus'), 'error');
-      },
+        userMessageText(error, t('preview.image.loadFailedStatus')),
+      ),
+      onDecodeFailure: () => showFailureAfterUserScroll(
+        'image-pane-decode-failure',
+        t('preview.image.loadFailedDetail', {size: formatFileSize(MAX_FILE_PREVIEW_BYTES)}),
+        t('preview.image.loadFailedStatus'),
+      ),
     });
   }
   if (!imagePane.querySelector(':scope > .file-editor-preview-zoom-viewport')) installPreviewZoomSurface(imagePane, img, zoomOptions);

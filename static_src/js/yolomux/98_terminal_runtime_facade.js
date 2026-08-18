@@ -16,7 +16,7 @@ function terminalRuntimeFacade(name) {
 }
 
 const terminalMobileAccessoryActionFamilies = Object.freeze({
-  primary: Object.freeze(['tmux-prefix', 'backspace', 'more']),
+  primary: Object.freeze(['tmux-prefix', 'upload', 'backspace', 'more']),
   side: Object.freeze(['tab', 'shift', 'ctrl']),
   dpad: Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']),
 });

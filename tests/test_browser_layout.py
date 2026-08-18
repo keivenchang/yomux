@@ -1225,6 +1225,212 @@ def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(brows
     assert result["visible"] is True and re.search(r"low daemon: 5(?:\.0+)?%", result["tooltip"]), result
 
 
+def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_persist(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+
+    def activate_debug_panel():
+        activation = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            (async () => {
+              await selectSession('__debug__');
+              requestAnimationFrame(() => done(true));
+            })().catch(error => done({error: String(error)}));
+            """
+        )
+        assert activation is True, activation
+
+    activate_debug_panel()
+
+    def seed_retained_service_load(reset_preference):
+        return WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                """
+                const resetPreference = arguments[0];
+                const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+                if (!graph || typeof debugGraphApplyServerHistory !== 'function' || typeof refreshDebugGraphElement !== 'function') return false;
+                const now = Date.now();
+                const durationMs = 60000;
+                const averages = [20, 35, 25, 40];
+                const minimums = [2, 12, 5, 8];
+                const maximums = [95, 50, 110, 70];
+                clearJsDebugGraphData();
+                debugGraphApplyServerHistory({
+                  latest_sequence: 4,
+                  records: averages.map((average, index) => ({
+                    start: Math.floor((now - (averages.length - index) * durationMs) / 1000),
+                    duration: durationMs / 1000,
+                    host_metrics: {service_load: {statsd: {
+                      label: 'statsd',
+                      cpu_samples: 6,
+                      cpu_total_percent: average * 6,
+                      cpu_min_percent: minimums[index],
+                      cpu_max_percent: maximums[index],
+                    }}},
+                  })),
+                });
+                debugRuntimeState.graphRangeSeconds = 30 * 60;
+                debugRuntimeState.graphResolutionOverrideSeconds = 60;
+                debugRuntimeState.graphChartLayout = 3;
+                setDebugSubTab('graph');
+                setDebugGraphChartVisible('serversLoad', true);
+                if (resetPreference) {
+                  debugRuntimeState.serviceLoadMode = 'auto';
+                  saveJsDebugStatsUiPreferences();
+                }
+                jsDebugHistoryReadiness.phase = 'ready';
+                jsDebugHistoryReadiness.reason = '';
+                jsDebugHistoryReadiness.overlayVisible = false;
+                graph.dataset.daemonLoadModeFixtureIdentity = 'retained-graph';
+                refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+                const chart = graph.querySelector('[data-js-debug-chart="serversLoad"]');
+                const controls = chart?.querySelectorAll('[data-js-debug-service-load-mode]') || [];
+                const line = chart?.querySelector('[data-js-debug-series="serviceLoad:statsd"]');
+                if (!chart || !line || controls.length !== 3) {
+                  throw new Error(`retained Daemons graph failed to render: chart=${Boolean(chart)} line=${Boolean(line)} controls=${controls.length}`);
+                }
+                const firstModeLabel = controls[0]?.nextElementSibling;
+                const firstModeRect = firstModeLabel?.getBoundingClientRect?.();
+                if (!firstModeRect?.width || !firstModeRect?.height) {
+                  throw new Error(`retained Daemons controls are hidden: panels=${document.querySelectorAll('.js-debug-panel').length} panelRects=${graph.closest('.js-debug-panel')?.getClientRects().length || 0} subviewHidden=${graph.closest('[data-js-debug-subview]')?.hidden === true}`);
+                }
+                return true;
+                """,
+                reset_preference,
+            )
+        )
+
+    def hover_retained_bucket():
+        point = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+                const chart = graph?.querySelector('[data-js-debug-chart="serversLoad"]');
+                const svg = chart?.querySelector('.js-debug-line-chart');
+                const grid = graph?.querySelector('[data-js-debug-chart-grid]');
+                const data = jsDebugGraphHoverChartData.get('serversLoad');
+                const bucket = data?.buckets?.at(-2);
+                if (!svg || !grid || !bucket) return null;
+                const domainStart = Number(grid.dataset.jsDebugDomainStart);
+                const domainEnd = Number(grid.dataset.jsDebugDomainEnd);
+                const timestamp = Number(bucket.startMs) + Number(bucket.durationMs) / 2;
+                const ratio = (timestamp - domainStart) / (domainEnd - domainStart);
+                svg.scrollIntoView({block: 'center', inline: 'center'});
+                const rect = svg.getBoundingClientRect();
+                return {
+                  x: rect.left + rect.width * ratio,
+                  y: rect.top + rect.height / 2,
+                };
+                """
+            )
+        )
+        browser.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": 0, "y": 0, "button": "none"},
+        )
+        browser.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+        )
+
+    def click_service_load_mode(mode):
+        point = browser.execute_script(
+            """
+            const graph = document.querySelector('[data-daemon-load-mode-fixture-identity="retained-graph"]');
+            const input = graph?.querySelector(`[data-js-debug-service-load-mode="${arguments[0]}"]`);
+            const label = input?.nextElementSibling;
+            if (!label) return null;
+            label.scrollIntoView({block: 'center', inline: 'center'});
+            const rect = label.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            """,
+            mode,
+        )
+        assert point is not None, mode
+        browser.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseMoved", "x": point["x"], "y": point["y"], "button": "none"},
+        )
+        browser.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": point["x"], "y": point["y"], "button": "left", "buttons": 1, "clickCount": 1},
+        )
+        browser.execute_cdp_cmd(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": point["x"], "y": point["y"], "button": "left", "buttons": 0, "clickCount": 1},
+        )
+
+    def mode_snapshot():
+        return browser.execute_script(
+            """
+            const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+            const chart = graph?.querySelector('[data-js-debug-chart="serversLoad"]');
+            const line = chart?.querySelector('[data-js-debug-series="serviceLoad:statsd"]');
+            const grid = graph?.querySelector('[data-js-debug-chart-grid]');
+            if (!graph || !chart || !line || !grid) return null;
+            const tooltip = chart.querySelector('[data-js-debug-hover-tooltip]');
+            const selected = chart.querySelector('[data-js-debug-service-load-mode]:checked');
+            const stored = JSON.parse(localStorage.getItem('yolomux.stats.ui_preferences.v1') || '{}');
+            return {
+              selected: selected?.dataset.jsDebugServiceLoadMode || '',
+              points: line.getAttribute('points') || '',
+              tooltip: tooltip?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+              tooltipVisible: tooltip?.hidden === false,
+              storedMode: stored.serviceLoadMode || '',
+              graphIdentity: graph.dataset.daemonLoadModeFixtureIdentity || '',
+              rangeSeconds: debugRuntimeState.graphRangeSeconds,
+              resolutionSeconds: debugRuntimeState.graphResolutionOverrideSeconds,
+              chartLayout: debugRuntimeState.graphChartLayout,
+              renderedLayout: grid.dataset.jsDebugChartLayout,
+            };
+            """
+        )
+
+    seed_retained_service_load(True)
+    observed = {}
+    expected_values = {"avg": 25, "max": 110, "min": 5}
+    for mode in ("avg", "max", "min"):
+        click_service_load_mode(mode)
+        hover_retained_bucket()
+        observed[mode] = WebDriverWait(browser, 5).until(
+            lambda _driver: (
+                snapshot
+                if (snapshot := mode_snapshot())
+                and snapshot["selected"] == mode
+                and snapshot["storedMode"] == mode
+                else False
+            )
+        )
+        snapshot = observed[mode]
+        assert snapshot["tooltipVisible"] is True, snapshot
+        assert re.search(rf"statsd: {expected_values[mode]}(?:\.0+)?%", snapshot["tooltip"]), snapshot
+        assert (snapshot["rangeSeconds"], snapshot["resolutionSeconds"], snapshot["chartLayout"], snapshot["renderedLayout"]) == (1800, 60, 3, "3"), snapshot
+        assert snapshot["graphIdentity"] == "retained-graph", snapshot
+
+    assert len({observed[mode]["points"] for mode in observed}) == 3, observed
+
+    browser.refresh()
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            "return typeof refreshDebugGraphElement === 'function' && document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"
+        )
+    )
+    activate_debug_panel()
+    seed_retained_service_load(False)
+    hover_retained_bucket()
+    restored = WebDriverWait(browser, 5).until(
+        lambda _driver: (
+            snapshot
+            if (snapshot := mode_snapshot())
+            and snapshot["selected"] == "min"
+            and snapshot["storedMode"] == "min"
+            else False
+        )
+    )
+    assert re.search(r"statsd: 5(?:\.0+)?%", restored["tooltip"]), restored
+    assert restored["graphIdentity"] == "retained-graph", restored
+
+
 def test_current_stats_graph_toolbar_uses_one_wide_row_and_two_narrow_rows(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
 
@@ -5893,7 +6099,13 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
         elsewhere.id = 'terminal-touch-focus-elsewhere';
         elsewhere.textContent = 'focused elsewhere';
         document.body.append(elsewhere);
-        screen.addEventListener('click', () => textarea.focus());
+        window.__terminalTouchScreenFocus = () => textarea.focus();
+        screen.addEventListener('click', window.__terminalTouchScreenFocus);
+        const fixtureTerm = terminals.get('1')?.term;
+        fixtureTerm.focus = () => {
+          textarea.focus();
+          fixtureTerm._onFocus?.();
+        };
         textarea.value = 'unchanged';
         elsewhere.focus();
         window.__terminalTouchSocket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
@@ -5991,6 +6203,25 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
     dispatch_gesture(60, 2)
     after_horizontal = browser.execute_script("return window.__terminalTouchRelevantCount()")
     assert after_horizontal == before_horizontal, (before_horizontal, after_horizontal)
+    horizontal_mouse = browser.execute_script(
+        """
+        const screen = document.querySelector('#term-1 .xterm');
+        const textarea = document.querySelector('#term-1 textarea.xterm-helper-textarea');
+        const events = [];
+        for (const type of ['mousedown', 'mouseup', 'click']) {
+          const event = new MouseEvent(type, {
+            bubbles: true, cancelable: true, button: 0,
+            clientX: arguments[0], clientY: arguments[1],
+          });
+          events.push({type, accepted: screen.dispatchEvent(event), defaultPrevented: event.defaultPrevented});
+        }
+        return {events, focused: document.activeElement === textarea};
+        """,
+        geometry["x"] + 60,
+        geometry["y"] + 2,
+    )
+    assert horizontal_mouse["focused"] is False, horizontal_mouse
+    assert all(event["defaultPrevented"] and not event["accepted"] for event in horizontal_mouse["events"]), horizontal_mouse
     browser.execute_script(
         """
         window.__terminalTouchEndProbe = {at: performance.now(), count: window.__terminalTouchRelevantCount()};
@@ -6017,6 +6248,25 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             "return document.activeElement === document.querySelector('#term-1 textarea')"
         )
     )
+    click_fallback = browser.execute_script(
+        """
+        const elsewhere = document.getElementById('terminal-touch-focus-elsewhere');
+        const screen = document.querySelector('#term-1 .xterm');
+        const textarea = document.querySelector('#term-1 textarea.xterm-helper-textarea');
+        screen.removeEventListener('click', window.__terminalTouchScreenFocus);
+        elsewhere.focus();
+        window.__terminalTouchSocket.sent.length = 0;
+        const rect = screen.getBoundingClientRect();
+        const click = new MouseEvent('click', {
+          bubbles: true, cancelable: true, button: 0,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+        });
+        const accepted = screen.dispatchEvent(click);
+        return {accepted, defaultPrevented: click.defaultPrevented, focused: document.activeElement === textarea};
+        """
+    )
+    assert click_fallback == {"accepted": True, "defaultPrevented": False, "focused": True}, click_fallback
     browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
 
 
@@ -6837,7 +7087,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     opened = metrics["opened"]
     assert opened["barHidden"] is False and opened["launcherHidden"] is True and opened["placement"] == "above", metrics
     assert opened["first"] and opened["second"] and opened["third"], metrics
-    expected_actions = sorted(["escape", "ctrl", "shift", "alt", "tab", "tmux-prefix", "backspace", "more", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "cmd", "arrow-down", "tmux-scroll-down", "interrupt"])
+    expected_actions = sorted(["escape", "ctrl", "shift", "alt", "tab", "tmux-prefix", "upload", "backspace", "more", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "cmd", "arrow-down", "tmux-scroll-down", "interrupt"])
     assert opened["actions"] == expected_actions, metrics
     assert abs(opened["grabber"]["left"] - opened["bar"]["left"]) <= 1 and abs(opened["grabber"]["right"] - opened["bar"]["right"]) <= 1, metrics
     assert opened["close"]["right"] <= opened["bar"]["right"] and opened["close"]["top"] >= opened["grabber"]["bottom"], metrics
@@ -6873,7 +7123,7 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const visibleActions=()=>[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort();
           const surfaceState=()=>({launchers:[...pane.querySelectorAll('[data-terminal-mobile-toggle="1"]')].map(node=>node.hidden),bars:[...pane.querySelectorAll('[data-terminal-mobile-keybar="1"]')].map(node=>node.hidden)});
-          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),arrowJoinBorders={up:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')).borderBottomColor,down:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')).borderTopColor,left:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')).borderRightColor,right:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')).borderLeftColor},primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,arrowJoinBorders,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),escape:box(primaryPage.querySelector('[data-terminal-mobile-key="escape"]')),tab:box(primaryPage.querySelector('[data-terminal-mobile-key="tab"]')),shift:box(primaryPage.querySelector('[data-terminal-mobile-key="shift"]')),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),prefix:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-prefix"]')),backspace:box(primaryPage.querySelector('[data-terminal-mobile-key="backspace"]')),more:box(primaryPage.querySelector('[data-terminal-mobile-key="more"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),up:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),down:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),left:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),more:box(morePage.querySelector('[data-terminal-mobile-key="more"]')),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:jsDebugFailureEvents('error')});})().catch(error=>done({error:String(error?.stack||error)}));
+          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),arrowJoinBorders={up:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')).borderBottomColor,down:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')).borderTopColor,left:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')).borderRightColor,right:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')).borderLeftColor},primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,arrowJoinBorders,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),escape:box(primaryPage.querySelector('[data-terminal-mobile-key="escape"]')),tab:box(primaryPage.querySelector('[data-terminal-mobile-key="tab"]')),shift:box(primaryPage.querySelector('[data-terminal-mobile-key="shift"]')),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),prefix:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-prefix"]')),upload:box(primaryPage.querySelector('[data-terminal-mobile-key="upload"]')),backspace:box(primaryPage.querySelector('[data-terminal-mobile-key="backspace"]')),more:box(primaryPage.querySelector('[data-terminal-mobile-key="more"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),up:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),down:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),left:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),more:box(morePage.querySelector('[data-terminal-mobile-key="more"]')),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:jsDebugFailureEvents('error')});})().catch(error=>done({error:String(error?.stack||error)}));
         """)
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
@@ -6885,10 +7135,12 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
     assert primary["surfaces"] == {"launchers": [True, True], "bars": [False, False]}, metrics
     assert primary["bar"]["left"] >= primary["pane"]["left"] - 0.5 and primary["bar"]["right"] <= primary["pane"]["right"] + 0.5, metrics
     assert primary["bar"]["top"] >= primary["pane"]["top"] - 0.5 and primary["bar"]["bottom"] <= primary["pane"]["bottom"] + 0.5, metrics
-    assert abs(primary["bar"]["width"] - 252) <= 1 and abs(primary["bar"]["height"] - 171) <= 1, metrics
+    assert abs(primary["bar"]["width"] - 306) <= 1 and abs(primary["bar"]["height"] - 211) <= 1, metrics
     assert abs(primary["grabber"]["left"] - primary["bar"]["left"]) <= 1 and abs(primary["grabber"]["right"] - primary["bar"]["right"]) <= 1, metrics
     assert primary["grabber"]["height"] > 0 and primary["grabberBorder"] != "0px" and primary["grabberBackground"] != "rgba(0, 0, 0, 0)", metrics
-    assert primary["actions"] == sorted(["escape", "ctrl", "shift", "tab", "tmux-prefix", "backspace", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "arrow-down", "tmux-scroll-down", "alt", "cmd", "interrupt", "more"]), metrics
+    assert primary["actions"] == sorted(["escape", "ctrl", "shift", "tab", "tmux-prefix", "upload", "backspace", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "arrow-down", "tmux-scroll-down", "alt", "cmd", "interrupt", "more"]), metrics
+    assert primary["upload"]["width"] >= 48 and primary["prefix"]["right"] <= primary["upload"]["left"] + 1, metrics
+    assert primary["upload"]["right"] <= primary["backspace"]["left"] + 1, metrics
     assert abs(primary["copy"]["left"] - primary["paste"]["left"]) <= 1 and abs(primary["copy"]["right"] - primary["paste"]["right"]) <= 1, metrics
     assert 0 <= primary["paste"]["top"] - primary["copy"]["bottom"] <= 8, metrics
     assert abs(primary["escape"]["left"] - primary["tab"]["left"]) <= 1 and 0 <= primary["tab"]["top"] - primary["escape"]["bottom"] <= 8, metrics
@@ -6906,14 +7158,15 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
     assert abs(primary["enter"]["width"] - primary["interrupt"]["width"]) <= 1 and abs(primary["enter"]["left"] - primary["interrupt"]["left"]) <= 1, metrics
     assert 0 <= primary["interrupt"]["top"] - primary["enter"]["bottom"] <= 8, metrics
     assert metrics["overflow"]["interrupt"]["right"] >= metrics["overflow"]["page"]["right"] - 5 and metrics["overflow"]["interrupt"]["bottom"] >= metrics["overflow"]["page"]["bottom"] - 5, metrics
-    assert primary["pgUp"]["width"] > primary["up"]["width"] and primary["pgDown"]["width"] > primary["down"]["width"], metrics
+    assert primary["pgUp"]["width"] >= primary["up"]["width"] >= 44, metrics
+    assert primary["pgDown"]["width"] >= primary["down"]["width"] >= 44, metrics
     assert set(primary["arrowJoinBorders"].values()) == {"rgba(0, 0, 0, 0)"}, metrics
     for page in (metrics["overflow"], metrics["primaryAgain"]):
         assert abs(page["bar"]["width"] - primary["bar"]["width"]) <= 0.5 and abs(page["bar"]["height"] - primary["bar"]["height"]) <= 0.5, metrics
     assert metrics["primaryAgain"]["actions"] == primary["actions"], metrics
     assert primary["close"]["right"] <= primary["bar"]["right"] and primary["close"]["top"] >= primary["grabber"]["bottom"], metrics
     assert 0 <= primary["bar"]["right"] - max(primary["close"]["right"], primary["enter"]["right"], primary["interrupt"]["right"]) <= 2, metrics
-    assert 0 <= primary["bar"]["bottom"] - max(primary["ctrl"]["bottom"], primary["pgDown"]["bottom"], primary["interrupt"]["bottom"]) <= 2, metrics
+    assert 0 <= primary["bar"]["bottom"] - max(primary["ctrl"]["bottom"], primary["pgDown"]["bottom"], primary["interrupt"]["bottom"]) <= 12, metrics
     assert abs(primary["close"]["top"] - primary["more"]["top"]) <= 1 and 0 <= primary["close"]["left"] - primary["more"]["right"] <= 8, metrics
     assert abs(primary["close"]["top"] - metrics["overflow"]["more"]["top"]) <= 1 and 0 <= primary["close"]["left"] - metrics["overflow"]["more"]["right"] <= 8, metrics
     assert metrics["closed"] == {"barHidden": True, "launcherHidden": False, "open": False, "surfaces": {"launchers": [False, False], "bars": [True, True]}}, metrics
@@ -7221,6 +7474,174 @@ def test_touch_pane_tab_close_uses_a_large_hit_target(browser, tmp_path):
     assert metrics["width"] >= 36 and metrics["height"] >= 36, metrics
     assert metrics["touchAction"] == "manipulation", metrics
     assert metrics["clicks"] == 1, metrics
+
+
+def test_touch_editor_preview_and_diff_controls_keep_desktop_button_geometry(browser, tmp_path):
+    page = tmp_path / "touch-editor-controls.html"
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 577, "height": 815, "deviceScaleFactor": 2, "mobile": True},
+    )
+    try:
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html("""
+          <div class="file-editor-toolbar">
+            <span class="file-editor-toolbar-zone file-editor-toolbar-left">
+              <button id="wrap" class="file-editor-wrap-panel">W</button>
+              <button id="diff" class="file-editor-diff-panel">Differ</button>
+              <span class="file-editor-path">~/dev/yolomux/queues/backlog/DOIT.p1.e4.responsive-mobile-layout.md</span>
+            </span>
+            <span id="font-zone" class="file-editor-toolbar-zone file-editor-toolbar-center">
+              <span class="file-editor-preview-font-panel"><button id="font">A-</button><span class="file-editor-preview-font-value">16</span><button>A+</button></span>
+            </span>
+            <span id="action-zone" class="file-editor-toolbar-zone file-editor-toolbar-right">
+              <button id="theme" class="file-editor-theme-panel theme-with-label">Dark</button>
+              <span class="file-editor-mode-control"><button id="mode">E</button><button id="preview">P</button><button id="popout" class="file-editor-popout-preview-panel">O</button></span>
+              <button id="upload" class="file-editor-upload-panel">↑</button>
+              <span class="file-editor-preview-find-panel"><input id="find"><button id="next">N</button></span>
+              <span class="file-editor-diff-ref-panel"><span class="diff-ref-controls compact"><label class="diff-ref-control"><input id="ref" class="diff-ref-input"></label><button id="reset" class="diff-ref-reset">Reset</button></span></span>
+            </span>
+          </div>
+          <div class="file-editor-preview-zoom-toolbar"><button id="zoom">+</button></div>
+        """, extra_css="body { margin: 0; padding: 12px; display: block; height: auto; min-height: 0; }"),
+        )
+        metrics = browser.execute_script(
+            """
+            const ids = ['mode', 'preview', 'popout', 'theme', 'wrap', 'diff', 'font', 'upload', 'find', 'next', 'ref', 'reset', 'zoom'];
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height};
+            };
+            const desktopBoxes = Object.fromEntries(ids.map(id => [id, box(document.getElementById(id))]));
+            const desktopToolbar = box(document.querySelector('.file-editor-toolbar'));
+            document.body.classList.add('app-topbar-coarse-pointer');
+            const boxes = Object.fromEntries(ids.map(id => [id, box(document.getElementById(id))]));
+            const toolbar = box(document.querySelector('.file-editor-toolbar'));
+            document.getElementById('upload').hidden = true;
+            const previewToolbar = box(document.querySelector('.file-editor-toolbar'));
+            return {desktopBoxes, desktopToolbar, boxes, toolbar, previewToolbar, fontZone: box(document.getElementById('font-zone')), actionZone: box(document.getElementById('action-zone')), viewportWidth: innerWidth};
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    assert all(
+        abs(metrics["boxes"][name][dimension] - metrics["desktopBoxes"][name][dimension]) <= 1
+        for name in metrics["boxes"]
+        for dimension in ("width", "height")
+    ), metrics
+    assert abs(metrics["toolbar"]["height"] - metrics["desktopToolbar"]["height"]) <= 1, metrics
+    assert abs(metrics["toolbar"]["height"] - metrics["previewToolbar"]["height"]) <= 1, metrics
+    assert abs(metrics["boxes"]["upload"]["height"] - metrics["boxes"]["mode"]["height"]) <= 1, metrics
+    assert metrics["toolbar"]["width"] <= metrics["viewportWidth"], metrics
+    assert metrics["fontZone"]["right"] <= metrics["actionZone"]["left"] + 1, metrics
+
+
+def test_touch_terminal_overlays_respect_nonzero_safe_area_insets(browser, tmp_path):
+    page = tmp_path / "touch-terminal-safe-area.html"
+    try:
+        browser.execute_cdp_cmd(
+            "Emulation.setSafeAreaInsetsOverride",
+            {"insets": {"top": 0, "right": 31, "bottom": 24, "left": 0}},
+        )
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html("""
+          <div id="terminal" class="terminal">
+            <button id="launcher" class="mobile-terminal-key-launcher">Keys</button>
+            <div id="keybar" class="mobile-terminal-keybar"></div>
+          </div>
+        """, extra_css="""
+          body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+          #terminal { width: 320px; height: 500px; }
+        """),
+        )
+        metrics = browser.execute_script(
+            """
+            const terminal = document.getElementById('terminal').getBoundingClientRect();
+            const launcher = document.getElementById('launcher').getBoundingClientRect();
+            const keybar = document.getElementById('keybar').getBoundingClientRect();
+            return {
+              launcherRight: terminal.right - launcher.right,
+              launcherBottom: terminal.bottom - launcher.bottom,
+              keybarRight: terminal.right - keybar.right,
+              keybarBottom: terminal.bottom - keybar.bottom,
+            };
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd(
+            "Emulation.setSafeAreaInsetsOverride",
+            {"insets": {"top": 0, "right": 0, "bottom": 0, "left": 0}},
+        )
+    assert metrics == {
+        "launcherRight": 31,
+        "launcherBottom": 24,
+        "keybarRight": 31,
+        "keybarBottom": 68,
+    }, metrics
+
+
+def test_full_mobile_app_and_compact_menu_respect_nonzero_safe_area_insets(browser, tmp_path):
+    page = tmp_path / "full-mobile-safe-area.html"
+    insets = {"top": 17, "right": 31, "bottom": 24, "left": 11}
+    try:
+        browser.execute_cdp_cmd("Emulation.setSafeAreaInsetsOverride", {"insets": insets})
+        load_static_html_fixture(
+            browser,
+            page.parent,
+            page.name,
+            page_html("""
+          <div id="appRoot" class="app-root">
+            <header id="safe-topbar" class="topbar"><span>YOLOmux</span></header>
+            <main id="safe-grid"></main>
+          </div>
+          <div class="app-menu app-menu--nested-root open">
+            <button class="app-menu-button">Menus</button>
+            <div id="safe-menu" class="app-menu-popover"><button class="app-menu-command">File</button></div>
+          </div>
+        """, extra_css="""
+          body { margin: 0; padding: 0; display: block; height: auto; min-height: 0; }
+          #safe-topbar { min-height: 40px; }
+          #safe-grid { min-height: 0; }
+        """),
+        )
+        metrics = browser.execute_script(
+            """
+            document.body.classList.add('app-topbar-touch-compact');
+            const rect = node => {
+              const value = node.getBoundingClientRect();
+              return {left: value.left, top: value.top, right: value.right, bottom: value.bottom};
+            };
+            return {
+              viewport: {width: innerWidth, height: innerHeight},
+              root: rect(document.getElementById('appRoot')),
+              topbar: rect(document.getElementById('safe-topbar')),
+              grid: rect(document.getElementById('safe-grid')),
+              menu: rect(document.getElementById('safe-menu')),
+            };
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd(
+            "Emulation.setSafeAreaInsetsOverride",
+            {"insets": {"top": 0, "right": 0, "bottom": 0, "left": 0}},
+        )
+    assert metrics["root"] == {
+        "left": 0,
+        "top": 0,
+        "right": metrics["viewport"]["width"],
+        "bottom": metrics["viewport"]["height"],
+    }, metrics
+    for surface in ("topbar", "grid", "menu"):
+        assert metrics[surface]["left"] >= insets["left"], metrics
+        assert metrics[surface]["right"] <= metrics["viewport"]["width"] - insets["right"], metrics
+        assert metrics[surface]["top"] >= insets["top"], metrics
+        assert metrics[surface]["bottom"] <= metrics["viewport"]["height"] - insets["bottom"], metrics
 
 
 def test_narrow_server_update_banner_stacks_message_and_actions(browser, tmp_path):

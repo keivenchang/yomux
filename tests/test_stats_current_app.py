@@ -168,7 +168,7 @@ def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
     )
     webapp.local_services_snapshot = collector.collect
 
-    facts = webapp.collect_current_stats_service_load(attempt("service_load", 10))
+    facts = webapp.collect_current_stats_service_load(attempt("service_load", 1))
     statsd = next(observation for observation in facts.observations if observation.source_id == "statsd")
 
     assert [observation.source_id for observation in facts.observations] == list(

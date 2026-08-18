@@ -393,14 +393,27 @@ function debugGraphAgentStatusSeriesDef(key) {
     hasData: bucket => Number(bucket?.agentActivitySamples || 0) > 0,
   };
 }
+// One theme-aware series palette for every chart family. The active-pane accent is chrome, not data:
+// a red/orange accent must not turn CPU series and the selection overlay into the same visual state.
+const jsDebugGraphSeriesPalette = Object.freeze({
+  cyan: 'var(--js-debug-agent-token-cyan)',
+  orange: 'var(--js-debug-agent-token-orange)',
+  magenta: 'var(--js-debug-agent-token-magenta)',
+  beige: 'var(--js-debug-agent-token-beige)',
+  turquoise: 'var(--js-debug-agent-token-turquoise)',
+  rose: 'var(--js-debug-agent-token-rose)',
+  violet: 'var(--js-debug-agent-token-violet)',
+  systemCpu: 'var(--js-debug-agent-token-cyan)',
+  currentProcessCpu: 'var(--js-debug-agent-token-violet)',
+});
 const jsDebugGraphAgentTokenColors = Object.freeze([
-  'var(--js-debug-agent-token-cyan)',
-  'var(--js-debug-agent-token-orange)',
-  'var(--js-debug-agent-token-magenta)',
-  'var(--js-debug-agent-token-beige)',
-  'var(--js-debug-agent-token-turquoise)',
-  'var(--js-debug-agent-token-rose)',
-  'var(--js-debug-agent-token-violet)',
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.beige,
+  jsDebugGraphSeriesPalette.turquoise,
+  jsDebugGraphSeriesPalette.rose,
+  jsDebugGraphSeriesPalette.violet,
 ]);
 // Horizontal-only strokes remain legible inside short stacked bars. Color is the primary identity;
 // these distinct horizontal cadences provide a second cue without vertical hatching disappearing
@@ -416,16 +429,14 @@ const jsDebugGraphAgentTokenPatternShapes = Object.freeze([
 ]);
 const jsDebugGraphAgentTokenPatternCount = jsDebugGraphAgentTokenPatternShapes.length;
 const jsDebugGraphProcessCpuColors = Object.freeze({
-  current: 'var(--active-accent-bright)',
-  // Green is reserved for the server that is serving this browser. Peers must remain
-  // distinguishable without being mistaken for the current YOLOmux process.
-  peers: Object.freeze(['var(--bad)', 'var(--accent-gold)', 'var(--link-soft)']),
+  current: jsDebugGraphSeriesPalette.currentProcessCpu,
+  peers: Object.freeze([jsDebugGraphSeriesPalette.turquoise, jsDebugGraphSeriesPalette.magenta, jsDebugGraphSeriesPalette.beige]),
 });
 const jsDebugGraphGpuDeviceColors = Object.freeze([
-  'var(--active-accent-bright)',
-  'var(--bad)',
-  'var(--link-soft)',
-  'var(--accent-gold)',
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.turquoise,
 ]);
 // THE one client display cache: every retained bucket of every tier lives here,
 // keyed `${startMs}:${durationMs}`. Tier membership is the key's durationMs (the
@@ -440,7 +451,7 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphSeriesPalette.systemCpu, value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
     key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
     value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
@@ -457,17 +468,17 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
 ]);
-// Mirror of yolomux_lib/stats_families.py — the ONE YO!stats family manifest.
+// Mirror of yolomux_lib/stats_current/families.py — the ONE YO!stats family manifest.
 // Per family: the canonical name (identical to the server's
 // stats_coverage_intervals family), the legacy alias names an OLDER server may
 // still write into coverage payloads (canonical is tried first), the true
 // sampler cadence, and the owning chart groups / series. Coverage lookups and
 // chart->family mapping READ this table; inline per-family if/alias chains
-// outside it are contract-banned (tests/yostats_performance.test.js pins both
-// mirrors against each other).
+// outside it are contract-banned. tests/stats_current_panel.test.js pins the
+// client manifest and chart owner; tests/test_stats_current_families.py pins the server cadence.
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
-  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
+  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 1, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
   agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens', 'modelTokens']), series: Object.freeze(['tokensPerAgent'])}),
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), series: Object.freeze([])}),
@@ -1014,7 +1025,9 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  refreshDebugGraphSurfaces();
+  // Reset is a completed activation, so replacing its focused button is safe and
+  // must not leave the visible charts on the retired zoom domain until focusout.
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
 }
 
 function debugEventCounts() {
@@ -1025,6 +1038,75 @@ function debugEventCounts() {
   const apiResponseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'api' && Number.isFinite(event.responseBytes) ? event.responseBytes : 0), 0);
   const sseBytes = jsDebugEvents.reduce((total, event) => total + (event.type === 'sse' && Number.isFinite(event.frameBytes) ? event.frameBytes : 0), 0);
   return {apiCalls, sseEvents, errors, apiRequestBytes, apiResponseBytes, sseBytes};
+}
+
+const debugMobileCaptureEventTypes = new Set(['preview_scroll_trace', 'terminal_mobile_input_trace']);
+
+function debugMobileCaptureSnapshot() {
+  const screenState = window.screen && typeof window.screen === 'object' ? window.screen : {};
+  const viewportState = appViewport();
+  const locationState = window.location && typeof window.location === 'object' ? window.location : {};
+  const captureUrl = String(locationState.href || `${locationState.protocol || ''}//${locationState.host || ''}${locationState.pathname || ''}${locationState.search || ''}${locationState.hash || ''}`);
+  const orientationState = screenState.orientation && typeof screenState.orientation === 'object'
+    ? screenState.orientation
+    : {};
+  const activeItems = activePaneItems().map(item => ({item: String(item), slot: String(slotForItem(item) || '')}));
+  const preview = Array.from(document.querySelectorAll('.file-editor-preview-pane-panel')).map(node => {
+    const context = previewScrollTraceContext(node) || {};
+    const content = node.closest?.('.file-editor-content');
+    return {
+      item: String(context.item || ''),
+      surface: String(context.surface || ''),
+      classes: Array.from(node.classList || [], value => String(value)),
+      split: content?.classList?.contains('split-preview') === true,
+      top: Number(node.scrollTop || 0),
+      left: Number(node.scrollLeft || 0),
+      scrollHeight: Number(node.scrollHeight || 0),
+      clientHeight: Number(node.clientHeight || 0),
+    };
+  });
+  return redactDiagnosticValue({
+    capturedAt: new Date().toISOString(),
+    url: captureUrl,
+    debugArmed: debugModeExplicitUrlEnabled === true,
+    codeRevision: jsDebugCodeRevision(),
+    userAgent: String(navigator?.userAgent || ''),
+    platform: String(navigator?.platform || ''),
+    maxTouchPoints: Number(navigator?.maxTouchPoints || 0),
+    standalone: navigator?.standalone === true
+      || (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches === true),
+    orientation: {
+      type: String(orientationState.type || ''),
+      angle: Number.isFinite(Number(orientationState.angle))
+        ? Number(orientationState.angle)
+        : (Number.isFinite(Number(window.orientation)) ? Number(window.orientation) : null),
+      inferred: Number(viewportState.width || 0) > Number(viewportState.height || 0) ? 'landscape' : 'portrait',
+    },
+    screen: {
+      width: Number(screenState.width || 0),
+      height: Number(screenState.height || 0),
+      dpr: Number(window.devicePixelRatio || 0),
+    },
+    viewport: viewportDiagnosticsSnapshot(),
+    layout: {
+      slots: cloneLayoutSlots(layoutSlots),
+      activeItems,
+      focusedItem: String(focusedPanelItem || ''),
+      visualItem: String(visualActivePaneItem() || ''),
+      generation: Number(runtimeState?.layoutMutationGeneration || 0),
+      completedGeneration: Number(runtimeState?.layoutMutationCompletedGeneration || 0),
+      pendingGeneration: Number(runtimeState?.pendingLayoutMutationGeneration || 0),
+    },
+    preview,
+    focused: viewportDiagnosticsFocusedElementText(),
+    events: jsDebugEvents
+      .filter(event => debugMobileCaptureEventTypes.has(String(event?.type || '')))
+      .map(event => ({...event})),
+  });
+}
+
+function debugMobileCaptureTextForClipboard(snapshot = debugMobileCaptureSnapshot()) {
+  return JSON.stringify(snapshot, null, 2);
 }
 
 function debugMetaText() {
@@ -1051,6 +1133,7 @@ function debugSubTabButtonHtml(tab, label) {
 function debugEventsSubviewHtml() {
   const counts = debugEventCounts();
   const apiCopyLabel = debugApiCopyButtonLabel();
+  const mobileCopyLabel = debugMobileCopyButtonLabel();
   return `<div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
       <div class="js-debug-toolbar">
         <div class="js-debug-summary" aria-label="${esc(t('debug.summary'))}">
@@ -1060,6 +1143,7 @@ function debugEventsSubviewHtml() {
           ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
         </div>
         <div class="js-debug-actions">
+          ${debugModeExplicitUrlEnabled ? `<button type="button" class="preferences-inline-action" data-js-debug-mobile-copy data-copy-feedback-key="debug-mobile" data-copy-feedback-label="${esc(`${t('common.copy')} ${t('debug.events')}`)}" aria-label="${esc(mobileCopyLabel)}">${esc(mobileCopyLabel)}</button>` : ''}
           <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
           <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
         </div>
@@ -1288,6 +1372,10 @@ function debugLogsCopyButtonLabel(nowMs = Date.now()) {
 
 function debugApiCopyButtonLabel(nowMs = Date.now()) {
   return copyFeedbackLabel('debug-api', t('common.copy'), nowMs);
+}
+
+function debugMobileCopyButtonLabel(nowMs = Date.now()) {
+  return copyFeedbackLabel('debug-mobile', `${t('common.copy')} ${t('debug.events')}`, nowMs);
 }
 
 function runDebugCopy(text, options = {}) {
@@ -1519,6 +1607,21 @@ function debugGraphNewHostMetrics() {
     gpuMemoryProcesses: new Map(),
     gpuDevices: new Map(),
     serviceLoad: new Map(),
+  };
+}
+
+function debugGraphNewServiceLoadItem(label) {
+  return {
+    label: String(label || ''),
+    cpuTotalPercent: 0,
+    cpuSamples: 0,
+    cpuMinPercent: 0,
+    cpuMaxPercent: 0,
+    cpuRangeAvailable: false,
+    rssTotalBytes: 0,
+    rssSamples: 0,
+    rssMinBytes: 0,
+    rssMaxBytes: 0,
   };
 }
 
@@ -1885,7 +1988,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     }
     if (sourceHost.serviceLoad instanceof Map) {
       for (const [key, sourceItem] of sourceHost.serviceLoad.entries()) {
-        const item = targetHost.serviceLoad.get(key) || {label: sourceItem.label || key, cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+        const item = targetHost.serviceLoad.get(key) || debugGraphNewServiceLoadItem(sourceItem.label || key);
         item.label = sourceItem.label || item.label;
         for (const prefix of ['cpu', 'rss']) {
           const totalKey = `${prefix}Total${prefix === 'cpu' ? 'Percent' : 'Bytes'}`;
@@ -1895,6 +1998,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
           const sourceSamples = Number(sourceItem[samplesKey] || 0) * scale;
           if (sourceSamples <= 0) continue;
           const previousSamples = Number(item[samplesKey] || 0);
+          if (prefix === 'cpu') {
+            item.cpuRangeAvailable = (previousSamples <= 0 || item.cpuRangeAvailable === true)
+              && sourceItem.cpuRangeAvailable === true;
+          }
           item[totalKey] += Number(sourceItem[totalKey] || 0) * scale;
           item[samplesKey] += sourceSamples;
           item[minKey] = previousSamples > 0 ? Math.min(item[minKey], Number(sourceItem[minKey] || 0)) : Number(sourceItem[minKey] || 0);

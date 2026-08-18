@@ -63,6 +63,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'command-v', macLabel: '⌘V', pcLabel: 'Ctrl+V', macAriaLabel: 'Command-V', pcAriaLabel: 'Ctrl-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
+  {action: 'upload', label: '↑', ariaLabelKey: 'pref.section.uploads'},
   {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
   {action: 'arrow-left', label: '←', ariaLabel: 'Left arrow'},
   {action: 'arrow-down', label: '↓', ariaLabel: 'Down arrow'},
@@ -856,6 +857,7 @@ function sendTerminalMobileAccessoryInput(session, action) {
     void pasteTerminalMobileAccessoryClipboard(session);
     return true;
   }
+  if (action === 'upload') return openFileUploadChooserForSession(session);
   if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
     const item = terminals.get(session);
     const term = item?.term;
@@ -3769,6 +3771,58 @@ function imageSuffix(mimeType) {
   return '.png';
 }
 
+let fileUploadChooserElement = null;
+let fileUploadChooserTarget = null;
+
+function ensureFileUploadChooser() {
+  if (fileUploadChooserElement && fileUploadChooserElement.isConnected !== false) return fileUploadChooserElement;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.hidden = true;
+  input.className = 'file-upload-chooser';
+  input.setAttribute('aria-label', t('pref.section.uploads'));
+  input.addEventListener('change', async () => {
+    const target = fileUploadChooserTarget;
+    fileUploadChooserTarget = null;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!target || !files.length) return;
+    if (target.kind === 'editor') {
+      await uploadEditorFiles(target.editorTarget, files);
+      return;
+    }
+    await uploadFiles(target.session, files, {source: 'chooser'});
+  });
+  document.body.appendChild(input);
+  fileUploadChooserElement = input;
+  return input;
+}
+
+function openFileUploadChooser(target) {
+  if (readOnlyMode || !target) return false;
+  const input = ensureFileUploadChooser();
+  if (!input || typeof input.click !== 'function') return false;
+  fileUploadChooserTarget = target;
+  input.value = '';
+  if (target.kind === 'editor') input.setAttribute('accept', 'image/*');
+  else input.removeAttribute('accept');
+  input.click();
+  return true;
+}
+
+function openFileUploadChooserForSession(session) {
+  const key = String(session || '');
+  if (!isTmuxSession(key)) return false;
+  return openFileUploadChooser({kind: 'terminal', session: key});
+}
+
+function openFileUploadChooserForEditor(panel, path) {
+  const view = panel?._cmView || null;
+  if (!view || previewRendererForPath(path)?.id !== 'markdown') return false;
+  return openFileUploadChooser({kind: 'editor', editorTarget: {panel, view, path}});
+}
+
 async function uploadFiles(session, fileList, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyUploadFiles'));
@@ -5024,23 +5078,35 @@ function bindTerminalContainerForSession(session, term, container) {
   installTerminalFileDrop(session, container);
   enableTerminalScroll(session, term, container);
   observeTerminalResize(session, container);
-  scope.ownEvent('focusin', container, 'focusin', () => {
+  scope.ownEvent('focusin', container, 'focusin', event => {
+    recordTerminalMobileInputTrace(session, 'focusin', {target: viewportDiagnosticsFocusedElementText(event.target)});
     setFocusedTerminal(session);
   });
-  scope.ownEvent('focusout', container, 'focusout', () => {
+  scope.ownEvent('focusout', container, 'focusout', event => {
+    recordTerminalMobileInputTrace(session, 'focusout', {target: viewportDiagnosticsFocusedElementText(event.target)});
     clearFocusedTerminal(session);
   });
   scope.ownEvent('copy', container, 'copy', event => {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
-  scope.ownEvent('keydown', container, 'keydown', () => {
+  scope.ownEvent('keydown', container, 'keydown', event => {
+    const keyKind = ['Backspace', 'Enter'].includes(event.key) ? event.key.toLowerCase() : (event.key?.length === 1 ? 'printable' : 'control');
+    recordTerminalMobileInputTrace(session, 'keydown', {keyKind, composing: event.isComposing === true});
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  scope.ownEvent('paste', container, 'paste', () => {
+  scope.ownEvent('paste', container, 'paste', event => {
+    recordTerminalMobileInputTrace(session, 'paste', {types: Array.from(event.clipboardData?.types || [])});
     noteTerminalExplicitInput(session);
   }, {capture: true});
-  scope.ownEvent('beforeinput', container, 'beforeinput', () => {
+  scope.ownEvent('beforeinput', container, 'beforeinput', event => {
+    recordTerminalMobileInputTrace(session, 'beforeinput', {inputType: String(event.inputType || ''), composing: event.isComposing === true});
     noteTerminalExplicitInput(session);
+  }, {capture: true});
+  scope.ownEvent('compositionstart', container, 'compositionstart', () => {
+    recordTerminalMobileInputTrace(session, 'compositionstart');
+  }, {capture: true});
+  scope.ownEvent('compositionend', container, 'compositionend', () => {
+    recordTerminalMobileInputTrace(session, 'compositionend');
   }, {capture: true});
   });
 }
@@ -5143,7 +5209,10 @@ function startTerminal(session) {
   });
   // xterm can emit focus and mouse-tracking bytes from hover. Keep Differ commits on DOM
   // keydown/paste/beforeinput and pane pointerdown, not on the terminal transport stream.
-  term.onData(data => handleTerminalData(session, data));
+  term.onData(data => {
+    recordTerminalMobileInputTrace(session, 'on-data', {bytes: utf8ByteLength(data)});
+    handleTerminalData(session, data);
+  });
   if (focusedTerminal === session && terminalPaneIsActive(session)) focusTerminalDom(session);
   connectTerminalSocket(session, item);
 }
@@ -6818,6 +6887,7 @@ function paintInitialAppShell() {
 
 async function boot() {
   installNativeAppViewportOwner();
+  installPreviewScrollOwnershipCapture();
   installTouchContextMenuOwner();
   syncNativeAppViewport({force: true});
   applySettingsPayload(clientSettingsPayload, {initial: true, force: true});

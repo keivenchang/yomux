@@ -20,7 +20,7 @@ import pytest
 from yolomux_lib.host_identity import current_host_identity
 from yolomux_lib.stats_current import client as client_module
 from yolomux_lib.stats_current import http as http_module
-from yolomux_lib.stats_current import host_collectors, materializer, migration, pricing, protocol, prune_schedule, revision, storage
+from yolomux_lib.stats_current import collectors, host_collectors, materializer, migration, pricing, protocol, prune_schedule, revision, storage
 from yolomux_lib.stats_current import resolution as stats_resolution
 from yolomux_lib.stats_current import service as service_module
 
@@ -141,6 +141,7 @@ class FakeStore:
         self.appends = 0
         self.closed = 0
         self.last_append = {}
+        self.last_retention_now = None
         self.prunes = 0
         self.pruned_at = []
         self.dirty_reads = []
@@ -149,6 +150,7 @@ class FakeStore:
 
     def append_batch(self, **values):
         self.appends += 1
+        self.last_retention_now = values.pop("retention_now", None)
         self.last_append = values
         count = sum(len(items) for items in values.values())
         self.source_generation += int(count > 0)
@@ -455,10 +457,128 @@ def test_append_normalizes_families_usage_private_ids_and_commits_one_batch(tmp_
     assert store.appends == 1
 
 
+@pytest.mark.parametrize("owner", ("rpc", "host"))
+def test_append_owners_enforce_retention_and_dirty_the_cutoff(tmp_path, owner):
+    now = 200_000.0
+    cutoff = now - storage.RETENTION_SECONDS
+
+    class RetentionOnlyStore(FakeStore):
+        def append_batch(self, **values):
+            result = super().append_batch(**values)
+            return replace(
+                result,
+                observations_accepted=0,
+                observations_duplicate=len(values.get("observations", ())),
+                coverage_changed=0,
+                coverage_unchanged=len(values.get("coverage_epochs", ())),
+                accepted_observation_ids=(),
+                accepted_original_timestamps=(),
+                retention_cutoff=cutoff,
+                retention_prune=storage.PruneResult(1, 0, 0, 0, result.source_generation),
+            )
+
+    store = RetentionOnlyStore()
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: now,
+    )
+    service.writer = store
+    service._build_once(store, True, frozenset())
+    assert service._cache is not None
+    service._pending_full = False
+    service._pending_dirty.clear()
+    service.work_event.clear()
+
+    if owner == "rpc":
+        response, _binary = service.handle_with_binary(
+            append_request(observations=[cpu_record()])
+        )
+        assert response["accepted"] == 0
+    else:
+        service._append_host_facts(
+            store,
+            collectors.CollectorFacts(observations=(
+                storage.Observation(
+                    "host-1", "cpu", "host", now, "host-epoch", 1,
+                    {"process_percent": 1.0, "system_percent": 2.0},
+                ),
+            )),
+        )
+
+    assert store.last_retention_now == now
+    assert service._pending_dirty == service._dirty_cells_at((cutoff,))
+    assert service.work_event.is_set()
+
+
+def test_append_retention_invalidates_warm_coverage_cache(tmp_path):
+    now = 200_000.0
+    cutoff = now - storage.RETENTION_SECONDS
+    retained = storage.CoverageEpoch(
+        "cpu", "host", "retained", cutoff, None, 1.0, 1,
+    )
+    expired = storage.CoverageEpoch(
+        "cpu", "host", "expired", cutoff - 10.0, cutoff - 1.0, 1.0, 1,
+    )
+    unavailable = storage.UnavailableSpan(
+        "cpu", "host", "expired", cutoff - 10.0, cutoff - 1.0, 1.0, "test", 1,
+    )
+
+    class RetentionCoverageStore(FakeStore):
+        def append_batch(self, **values):
+            result = super().append_batch(**values)
+            return replace(
+                result,
+                observations_accepted=0,
+                observations_duplicate=len(values.get("observations", ())),
+                accepted_observation_ids=(),
+                accepted_original_timestamps=(),
+                retention_cutoff=cutoff,
+                retention_prune=storage.PruneResult(
+                    0, 1, 1, 0, result.source_generation, 1, 1,
+                ),
+            )
+
+    store = RetentionCoverageStore()
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: now,
+    )
+    service.writer = store
+    service._coverage_cache_ready = True
+    service._cached_coverage_epochs = (expired, retained)
+    service._cached_unavailable_spans = (unavailable,)
+    previous_version = service._coverage_version
+    service._pending_full = False
+
+    response, _binary = service.handle_with_binary(
+        append_request(observations=[cpu_record()])
+    )
+
+    assert response["accepted"] == 0
+    assert service._coverage_version == previous_version + 1
+    assert service._coverage_cache_ready is False
+    assert service._cached_coverage_epochs == ()
+    assert service._cached_unavailable_spans == ()
+    assert service._pending_coverage_refresh is True
+
+    work = service._take_work()
+    assert work is not None
+    store.last_append = {"coverage_epochs": (retained,)}
+    service._build_once(store, *work)
+
+    assert store.coverage_reads[-1] is True
+    assert service._coverage_cache_ready is True
+    assert service._cached_coverage_epochs == (retained,)
+    assert service._cached_unavailable_spans == ()
+
+
 def test_append_reports_agent_attribution_changes_without_double_counting(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
         service.writer = store
@@ -572,6 +692,7 @@ def test_fork_history_tombstone_deletes_exact_atom_and_dirties_its_old_cells(tmp
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     legacy = usage_record()
     legacy["event_id"] = "codex:child-thread:3"
@@ -1586,6 +1707,47 @@ def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cell
         for resolution in stats_resolution.RESOLUTION_CHOICES
     )
     assert service._take_work() == (False, expected, False)
+
+
+def test_prune_invalidates_warm_coverage_cache(tmp_path):
+    monotonic_now = [10.0]
+    wall_now = [1_700_000_000.0]
+
+    class CoveragePruneStore(FakeStore):
+        def prune(self, *, now):
+            self.prunes += 1
+            self.pruned_at.append(now)
+            self.source_generation += 1
+            return storage.PruneResult(0, 1, 1, 0, self.source_generation, 1, 1)
+
+    store = CoveragePruneStore()
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        prune_time_reader=lambda: "02:30",
+    )
+    service.writer = store
+    service._pending_full = False
+    service._coverage_cache_ready = True
+    service._cached_coverage_epochs = (
+        storage.CoverageEpoch("cpu", "host", "old", 1.0, 2.0, 1.0, 1),
+    )
+    service._cached_unavailable_spans = (
+        storage.UnavailableSpan("cpu", "host", "old", 1.0, 2.0, 1.0, "test", 1),
+    )
+    previous_version = service._coverage_version
+
+    assert service._prune_if_due() is True
+    work = service._take_work()
+
+    assert work is not None
+    assert work[2] is True
+    assert service._coverage_version == previous_version + 1
+    assert service._coverage_cache_ready is False
+    assert service._cached_coverage_epochs == ()
+    assert service._cached_unavailable_spans == ()
 
 
 def test_vacuum_runs_only_from_worker_after_quiet_and_persists_its_schedule(tmp_path):
@@ -2964,23 +3126,31 @@ def test_ring_change_detection_materializes_zero_unchanged_no_data_cells_at_live
     monkeypatch,
 ):
     gap_count = 4_909
-    buckets = tuple(
-        materializer.Bucket(start, 1, (), 0, None, None, True)
-        for start in range(stats_resolution.RING_CAPACITIES[1])
-    )
-    gap_values = tuple(
-        materializer.NoData(
-            "cpu",
-            f"source:{index}",
-            f"epoch:{index}",
-            (index % len(buckets)) + 0.1,
-            (index % len(buckets)) + 0.9,
-            1,
+    previous_layers = []
+    for resolution, capacity in stats_resolution.RING_CAPACITIES.items():
+        buckets = tuple(
+            materializer.Bucket(
+                index * resolution, resolution, (), 0, None, None, True,
+            )
+            for index in range(capacity)
         )
-        for index in range(gap_count)
+        gap_values = tuple(
+            materializer.NoData(
+                "cpu",
+                f"source:{index}",
+                f"epoch:{index}",
+                (index % capacity) * resolution + 0.1,
+                ((index % capacity) + 1) * resolution - 0.1,
+                resolution,
+            )
+            for index in range(gap_count)
+        )
+        previous_layers.append(materializer.Layer(
+            resolution, 0, capacity * resolution, buckets, gap_values,
+        ))
+    previous = materializer.Generation(
+        1, 10, 100.0, 100.0, tuple(previous_layers),
     )
-    previous_layer = materializer.Layer(1, 0, len(buckets), buckets, gap_values)
-    previous = materializer.Generation(1, 10, 100.0, 100.0, (previous_layer,))
     materialized = 0
     original_replace = service_module.replace
 
@@ -2996,12 +3166,19 @@ def test_ring_change_detection_materializes_zero_unchanged_no_data_cells_at_live
         tmp_path / storage.DATABASE_FILENAME,
     )
     for revision in range(10):
-        candidate_layer = materializer.Layer(
-            1, 0, len(buckets), buckets, tuple(list(gap_values)),
+        candidate_layers = tuple(
+            materializer.Layer(
+                layer.resolution,
+                layer.start,
+                layer.end,
+                layer.buckets,
+                tuple(list(layer.no_data)),
+            )
+            for layer in previous.layers
         )
         candidate = materializer.Generation(
             1, 20 + revision, 101.0 + revision, 101.0 + revision,
-            (candidate_layer,),
+            candidate_layers,
         )
         changed = service._changed_ring_cells(previous, candidate)
         service._ring_writes(candidate, changed)
@@ -3825,6 +4002,7 @@ def test_appends_are_accepted_while_startup_build_is_still_pending(tmp_path):
 def test_browser_profiles_are_queried_from_durable_observations_in_statsd(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
     service.writer = writer

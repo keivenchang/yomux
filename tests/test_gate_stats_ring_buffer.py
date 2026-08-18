@@ -247,6 +247,105 @@ def _assert_rings_match_generation(
         }
 
 
+@pytest.mark.parametrize(
+    ("resolution_seconds", "bucket_start", "observations_at"),
+    (
+        (10, 86_390, (86_391, 86_394, 86_398)),
+        (60, 86_340, (86_341, 86_351, 86_361)),
+        (300, 86_100, (86_111, 86_171, 86_231)),
+    ),
+)
+def test_persisted_coarse_service_cpu_bucket_keeps_minimum_average_and_maximum(
+    tmp_path: Path,
+    resolution_seconds: int,
+    bucket_start: int,
+    observations_at: tuple[int, int, int],
+) -> None:
+    observations = tuple(
+        storage.Observation(
+            f"service-statsd-{observed_at}",
+            "service_load",
+            "statsd",
+            observed_at,
+            "service:epoch",
+            owner_generation,
+            {"running": True, "cpu_percent": value, "rss_bytes": 400},
+        )
+        for owner_generation, (observed_at, value) in enumerate(
+            zip(observations_at, (2, 54, 7), strict=True),
+            start=1,
+        )
+    ) + tuple(
+        storage.Observation(
+            f"cpu-host-{observed_at}",
+            "cpu",
+            "host",
+            observed_at,
+            "cpu:epoch",
+            owner_generation,
+            {"process_percent": value, "system_percent": value * 2},
+        )
+        for owner_generation, (observed_at, value) in enumerate(
+            zip(observations_at, (2, 54, 7), strict=True),
+            start=1,
+        )
+    )
+    snapshot = storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 1, 1), observations, (), (), (), (),
+    )
+    generation = materializer.build_generation(
+        snapshot,
+        source_generation=1,
+        cache_generation=1,
+        generated_at=86_400,
+        observed_until=86_400,
+    )
+    writes = service_module.StatsCurrentService._ring_writes(
+        generation,
+        frozenset({materializer.DirtyCell(resolution_seconds, bucket_start)}),
+    )
+
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        publication = store.publish_ring_buckets(
+            buckets=writes,
+            source_generation=1,
+            published_at=86_400,
+        )
+        window = store.read_ring_window(
+            range_seconds=materializer.LAYER_SECONDS[resolution_seconds],
+            resolution_seconds=resolution_seconds,
+            window_end=generation.layer(resolution_seconds).end,
+        )
+
+    assert publication.buckets_updated == 1
+    row = next(item for item in window.rows if item.bucket_start == bucket_start)
+    persisted = json.loads(row.bucket_json)["bucket"]["series"]
+    assert persisted["service_cpu_min_percent:statsd"]["value"] == 2
+    assert persisted["service_cpu_percent:statsd"]["value"] == 21
+    assert persisted["service_cpu_max_percent:statsd"]["value"] == 54
+    assert persisted["cpu_min_percent:host"]["value"] == 2
+    assert persisted["cpu_percent:host"]["value"] == 21
+    assert persisted["cpu_max_percent:host"]["value"] == 54
+    assert persisted["system_cpu_min_percent"]["value"] == 4
+    assert persisted["system_cpu_percent"]["value"] == 42
+    assert persisted["system_cpu_max_percent"]["value"] == 108
+
+    restored = service_module._materialized_ring_bucket(
+        service_module._decode_ring_bucket(row)
+    )
+    restored_series = {item.name: item.value for item in restored.series}
+    assert restored_series["service_cpu_min_percent:statsd"] == 2
+    assert restored_series["service_cpu_percent:statsd"] == 21
+    assert restored_series["service_cpu_max_percent:statsd"] == 54
+    assert restored_series["cpu_min_percent:host"] == 2
+    assert restored_series["cpu_percent:host"] == 21
+    assert restored_series["cpu_max_percent:host"] == 54
+    assert restored_series["system_cpu_min_percent"] == 4
+    assert restored_series["system_cpu_percent"] == 42
+    assert restored_series["system_cpu_max_percent"] == 108
+
+
 def test_real_ingest_ring_and_published_cache_series_agree_for_every_valid_pair(
     tmp_path: Path,
 ) -> None:

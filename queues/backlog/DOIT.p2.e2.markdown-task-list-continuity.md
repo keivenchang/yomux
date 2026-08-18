@@ -50,19 +50,27 @@ That is the exact `- [x] 1. …` pattern. Changing it there would fix this one f
 
 ## Plan
 
-- [ ] Reproduce in the product, not only in the parser. Open a Markdown file containing `- [x] 1. text` in the YOLOmux preview and confirm the two-line rendering, so the fix is verified against what users see.
-- [ ] Keep the checkbox and its text on one line by presentation only. A single-item ordered list nested directly inside a task-list item should render inline and preserve its number. Do not rewrite the source text, do not pre-process the Markdown into a different structure, and do not swap the parser.
-- [ ] Preserve the number. `1.`, `2.`, `3.` are meaningful here — `marked` already emits `<ol start="2">` for the second item, so the rendered output must keep showing the original numbering rather than collapsing to unnumbered text.
-- [ ] Confirm ordinary nested lists still indent. A genuine multi-item nested list inside a task item must keep its block layout; only the single-item inline case changes.
-- [ ] Confirm the checkbox stays interactive. `88_markdown_preview.js` binds task checkboxes back to source lines through `markdownTaskLineEntries` and `data-source-line`; toggling a checkbox in a numbered item must still edit the right line.
+- [x] Reproduce in the product, not only in the parser. Open a Markdown file containing `- [x] 1. text` in the YOLOmux preview and confirm the two-line rendering, so the fix is verified against what users see.
+- [x] Keep the checkbox and its text on one line by presentation only. A single-item ordered list nested directly inside a task-list item should render inline and preserve its number. Do not rewrite the source text, do not pre-process the Markdown into a different structure, and do not swap the parser.
+- [x] Preserve the number. `1.`, `2.`, `3.` are meaningful here — `marked` already emits `<ol start="2">` for the second item, so the rendered output must keep showing the original numbering rather than collapsing to unnumbered text.
+- [x] Confirm ordinary nested lists still indent. A genuine multi-item nested list inside a task item must keep its block layout; only the single-item inline case changes.
+- [x] Confirm the checkbox stays interactive. `88_markdown_preview.js` binds task checkboxes back to source lines through `markdownTaskLineEntries` and `data-source-line`; toggling a checkbox in a numbered item must still edit the right line.
 
 ## Done Criteria
 
-- [ ] `- [x] 1. text` renders as one continuous line with the number intact, confirmed in a real browser.
-- [ ] Toggling that checkbox still writes to the correct source line, covered by a test.
-- [ ] A multi-item nested list inside a task item still renders as an indented block.
-- [ ] No change to `static/vendor/marked.min.js` and no source-text rewriting in the preview path.
+- [x] `- [x] 1. text` renders as one continuous line with the number intact, confirmed in a real browser.
+- [x] Toggling that checkbox still writes to the correct source line, covered by a test.
+- [x] A multi-item nested list inside a task item still renders as an indented block.
+- [x] No change to `static/vendor/marked.min.js` and no source-text rewriting in the preview path.
 - [ ] Canonical gate green, no new Warnings or Errors.
+
+## Evidence
+
+- Red: `node tests/editor_preview_core.test.js` reported 61 passed and one failure because the preview path still preprocessed source text before parsing. Green: the same exact suite passed 62/62 after unchanged Markdown was sent to Marked and the qualified single-item transform moved after parse/sanitize.
+- Exact browser regressions passed for numbered task labels and real multi-item nesting, then for split Preview checkbox writes back to the correct source line. Coverage includes `1.`, `2.`, `3)`, inline code, malformed `2.not-a-list`, and genuine two-item nesting.
+- `python3 tools/static_build.py --check`, `git diff --check`, and the 26-test architecture suite pass. The last integrated full gate passed Node, syntax, compile, whitespace, E2E, and serial lanes but preceded the final ratchet/detector corrections; the final landing gate remains open.
+- The pre-landing source audit found a second source-line bug: sanitized raw HTML checkboxes could consume the ordinal intended for a real task. The exact raw top-level and direct-list regressions failed first; Marked and the fallback parser now mark their own task inputs, one shared selector owns presentation and binding, raw inputs remain excluded, and the focused suite passes 62/62 including rebind and source writes.
+- The covering lane first exposed one stale expected task-entry shape in `layout_restore.test.js`; that exact shard passes 112/112 after pinning the numbered metadata, and the final `node-layout` lane exits 0. Generated assets and the reviewed architecture ratchet are current; the final exact-SHA gate remains open.
 
 ## Completion
 

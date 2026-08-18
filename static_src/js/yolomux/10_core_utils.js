@@ -1586,7 +1586,7 @@ function diagnosticRedactSecretAssignment(...args) {
   return `${groups.prefix}${quote}[redacted-secret]${quote}`;
 }
 
-function recordJsDebugEvent(type, payload = {}) {
+function recordJsDebugEvent(type, payload = {}, options = {}) {
   const timestampMs = Date.now();
   // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
   // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
@@ -1603,11 +1603,11 @@ function recordJsDebugEvent(type, payload = {}) {
     type: String(type || 'event'),
   };
   jsDebugEvents.push(event);
-  if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
+  if (options.graph !== false && typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
   if (jsDebugEvents.length > jsDebugEventLimit) {
     jsDebugEvents.splice(0, jsDebugEvents.length - jsDebugEventLimit);
   }
-  scheduleJsDebugPanelRefresh();
+  if (options.refresh !== false) scheduleJsDebugPanelRefresh();
   return event;
 }
 
@@ -3826,7 +3826,17 @@ function focusTerminalDom(session, delay = 0) {
   const run = () => {
     const scrollX = window.scrollX;
     const scrollY = window.scrollY;
-    terminals.get(session)?.term?.focus?.();
+    const item = terminals.get(session);
+    const textarea = item?.container?.querySelector?.('textarea.xterm-helper-textarea');
+    recordTerminalMobileInputTrace(session, 'focus-attempt', {
+      textareaPresent: Boolean(textarea),
+      textareaFocused: document.activeElement === textarea,
+    });
+    item?.term?.focus?.();
+    recordTerminalMobileInputTrace(session, 'touch-focus-result', {
+      textareaPresent: Boolean(textarea),
+      textareaFocused: document.activeElement === textarea,
+    });
     // xterm focuses its hidden textarea without a preventScroll option. In a full-height app with
     // a tall sibling pane, Chrome can scroll the otherwise overflow-hidden document and move the
     // entire top bar above the viewport when switching terminal tabs.
@@ -4085,13 +4095,390 @@ function fuzzyHighlightHtml(query, text, {markClass = 'fuzzy-match'} = {}) {
   return parts.join('');
 }
 
-function restoreElementScrollPosition(element, scrollTop, scrollLeft) {
+function previewScrollTraceContext(element, details = {}) {
+  const explicitSurface = String(details.previewSurface || '');
+  const contextElement = details.previewOwner || element;
+  const previewPane = contextElement?.matches?.('.file-editor-preview-pane-panel')
+    ? contextElement
+    : contextElement?.closest?.('.file-editor-preview-pane-panel');
+  const zoomViewport = contextElement?.matches?.('.file-editor-preview-zoom-viewport')
+    ? contextElement
+    : contextElement?.closest?.('.file-editor-preview-zoom-viewport');
+  if (!explicitSurface && !previewPane && !zoomViewport) return null;
+  const panel = contextElement?.closest?.('.file-editor-panel, .panel') || null;
+  const surface = explicitSurface
+    || (zoomViewport ? 'zoom' : PREVIEW_SURFACE_CLASSES.find(name => previewPane?.classList?.contains?.(name)) || 'preview');
+  return {
+    surface,
+    item: String(panel?.dataset?.layoutItem || ''),
+    layoutGeneration: Number(runtimeState?.layoutMutationGeneration || 0),
+    layoutCompletedGeneration: Number(runtimeState?.layoutMutationCompletedGeneration || 0),
+    layoutPendingGeneration: Number(runtimeState?.pendingLayoutMutationGeneration || 0),
+    splitGeneration: Number(panel?._splitScrollGeneration || 0),
+    renderGeneration: Number(details.renderGeneration ?? panel?._cmGeneration ?? 0),
+  };
+}
+
+function writeOwnedElementScroll(element, coordinates = {}, owner = 'unknown', details = {}) {
+  if (!element) return false;
+  const beforeTop = Number(element.scrollTop || 0);
+  const beforeLeft = Number(element.scrollLeft || 0);
+  if (Object.prototype.hasOwnProperty.call(coordinates, 'top')) element.scrollTop = Number(coordinates.top || 0);
+  if (Object.prototype.hasOwnProperty.call(coordinates, 'left')) element.scrollLeft = Number(coordinates.left || 0);
+  if (debugModeExplicitUrlEnabled === true) {
+    const context = previewScrollTraceContext(element, details);
+    if (context) {
+      const activeGesture = previewScrollTraceState.active;
+      const endedGesture = previewScrollTraceState.last && Date.now() - Number(previewScrollTraceState.last.endedAt || 0) <= 2000
+        ? previewScrollTraceState.last
+        : null;
+      const gesture = activeGesture || endedGesture;
+      recordJsDebugEvent('preview_scroll_trace', {
+        ...details,
+        ...context,
+        phase: 'owned-write',
+        owner: String(owner || 'unknown'),
+        gesture: Number(gesture?.gesture || 0),
+        gestureEndedMs: activeGesture || !endedGesture ? null : Math.max(0, Date.now() - Number(endedGesture.endedAt || 0)),
+        beforeTop,
+        beforeLeft,
+        top: Number(element.scrollTop || 0),
+        left: Number(element.scrollLeft || 0),
+        scrollHeight: Number(element.scrollHeight || 0),
+        scrollWidth: Number(element.scrollWidth || 0),
+        clientHeight: Number(element.clientHeight || 0),
+        clientWidth: Number(element.clientWidth || 0),
+      }, {graph: false, refresh: false});
+    }
+  }
+  return true;
+}
+
+function ownedElementScrollPosition(element) {
+  return {
+    top: Number(element?.scrollTop || 0),
+    left: Number(element?.scrollLeft || 0),
+  };
+}
+
+function ownedElementScrollPositionMatches(element, expected) {
+  if (!element || !expected) return false;
+  const current = ownedElementScrollPosition(element);
+  return current.top === Number(expected.top || 0) && current.left === Number(expected.left || 0);
+}
+
+const previewScrollUserOwnershipGenerations = new WeakMap();
+
+function previewScrollUserOwnershipGeneration(element) {
+  return Number(previewScrollUserOwnershipGenerations.get(element) || 0);
+}
+
+function claimPreviewScrollUserOwnership(element) {
+  if (!element) return 0;
+  const generation = previewScrollUserOwnershipGeneration(element) + 1;
+  previewScrollUserOwnershipGenerations.set(element, generation);
+  return generation;
+}
+
+function deferredElementScrollExpectation(element) {
+  return {
+    ...ownedElementScrollPosition(element),
+    userGeneration: previewScrollUserOwnershipGeneration(element),
+  };
+}
+
+function deferredElementScrollExpectationMatches(element, expected) {
+  return ownedElementScrollPositionMatches(element, expected)
+    && previewScrollUserOwnershipGeneration(element) === Number(expected?.userGeneration || 0);
+}
+
+function createDeferredElementScrollOwner(...elements) {
+  const state = {expected: new WeakMap(), superseded: new WeakSet()};
+  for (const element of elements) {
+    if (element) state.expected.set(element, deferredElementScrollExpectation(element));
+  }
+  return state;
+}
+
+function previewScrollUserOwnsElementNow(element) {
+  const ownsElement = record => Boolean(
+    record?.claimed
+    && (
+      record.element === element
+      || record.traceElement === element
+      || element?.contains?.(record.element)
+      || element?.contains?.(record.traceElement)
+    )
+  );
+  const active = previewScrollTraceState.active;
+  if (ownsElement(active) && Date.now() - Number(active.startedAt || 0) <= previewScrollGestureMaxActiveMs) return true;
+  const ended = previewScrollTraceState.last;
+  return Boolean(
+    ownsElement(ended)
+    && Date.now() - Math.max(Number(ended.endedAt || 0), Number(ended.lastScrollAt || 0)) <= 2000
+  );
+}
+
+function createPassiveDeferredElementScrollOwner(...elements) {
+  const state = createDeferredElementScrollOwner(...elements);
+  for (const element of elements) {
+    if (element && previewScrollUserOwnsElementNow(element)) state.superseded.add(element);
+  }
+  return state;
+}
+
+function deferredElementScrollOwnerOwnsElement(state, element) {
+  if (!state || !element || state.superseded.has(element)) return false;
+  const expected = state.expected.get(element);
+  if (expected && !deferredElementScrollExpectationMatches(element, expected)) {
+    state.superseded.add(element);
+    return false;
+  }
+  return true;
+}
+
+function writeDeferredElementScrollIfOwned(state, element, coordinates, owner = 'unknown', details = {}) {
+  if (!deferredElementScrollOwnerOwnsElement(state, element)) return false;
+  if (!writeOwnedElementScroll(element, coordinates, owner, details)) return false;
+  state.expected.set(element, deferredElementScrollExpectation(element));
+  return true;
+}
+
+function recordTerminalMobileInputTrace(session, phase, details = {}) {
+  if (debugModeExplicitUrlEnabled !== true) return null;
+  return recordJsDebugEvent('terminal_mobile_input_trace', {
+    ...details,
+    session: String(session || ''),
+    phase: String(phase || 'unknown'),
+    focused: viewportDiagnosticsFocusedElementText(),
+    layoutGeneration: Number(runtimeState?.layoutMutationGeneration || 0),
+  }, {graph: false, refresh: false});
+}
+
+const previewScrollTraceState = {installed: false, gestureSequence: 0, active: null, last: null, flushTimer: 0};
+const previewScrollCaptureDocuments = new WeakSet();
+const previewScrollGestureSlopPx = 4;
+const previewScrollGestureMaxActiveMs = 30000;
+
+function previewScrollTraceElementForTarget(target) {
+  if (!target?.closest) return null;
+  return target.closest('.file-editor-preview-zoom-viewport, .file-editor-preview-pane-panel');
+}
+
+function previewScrollTraceRecordForTarget(target) {
+  const element = previewScrollTraceElementForTarget(target);
+  return element ? {element, traceElement: element, details: {}} : null;
+}
+
+function previewScrollTraceRecordsMatch(left, right) {
+  return Boolean(left && right && left.element === right.element && left.traceElement === right.traceElement);
+}
+
+function claimPreviewScrollRecord(record) {
+  const generation = claimPreviewScrollUserOwnership(record?.element);
+  if (record?.traceElement && record.traceElement !== record.element) claimPreviewScrollUserOwnership(record.traceElement);
+  return generation;
+}
+
+function recordPreviewScrollRecord(record, phase, event = null, details = {}) {
+  if (!record) return null;
+  return recordPreviewScrollInputTrace(record.traceElement || record.element, phase, event, {
+    ...(record.details || {}),
+    previewOwner: record.element,
+    ...details,
+  });
+}
+
+function recordPreviewScrollInputTrace(element, phase, event = null, details = {}) {
+  if (debugModeExplicitUrlEnabled !== true || !element) return null;
+  const context = previewScrollTraceContext(element, details);
+  if (!context) return null;
+  const touch = event?.touches?.[0] || event?.changedTouches?.[0] || null;
+  const visual = window.visualViewport;
+  return recordJsDebugEvent('preview_scroll_trace', {
+    ...details,
+    ...context,
+    phase,
+    gesture: Number(details.gesture || previewScrollTraceState.active?.gesture || previewScrollTraceState.last?.gesture || 0),
+    top: Number(element.scrollTop || 0),
+    left: Number(element.scrollLeft || 0),
+    scrollHeight: Number(element.scrollHeight || 0),
+    scrollWidth: Number(element.scrollWidth || 0),
+    clientHeight: Number(element.clientHeight || 0),
+    clientWidth: Number(element.clientWidth || 0),
+    clientX: Number(touch?.clientX || 0),
+    clientY: Number(touch?.clientY || 0),
+    touches: Number(event?.touches?.length || 0),
+    visualViewport: visual ? {
+      width: Number(visual.width || 0),
+      height: Number(visual.height || 0),
+      offsetTop: Number(visual.offsetTop || 0),
+      offsetLeft: Number(visual.offsetLeft || 0),
+      scale: Number(visual.scale || 0),
+    } : null,
+  }, {graph: false, refresh: false});
+}
+
+function bindPreviewScrollOwnershipCapture(ownerDocument, recordForTarget) {
+  if (!ownerDocument?.addEventListener || previewScrollCaptureDocuments.has(ownerDocument)) return false;
+  previewScrollCaptureDocuments.add(ownerDocument);
+  ownerDocument.addEventListener('touchstart', event => {
+    const record = recordForTarget(event.target);
+    if (!record) return;
+    const touch = event?.touches?.[0] || null;
+    const gesture = ++previewScrollTraceState.gestureSequence;
+    previewScrollTraceState.active = {
+      ...record,
+      gesture,
+      identifier: touch?.identifier,
+      startX: Number(touch?.clientX || 0),
+      startY: Number(touch?.clientY || 0),
+      startedAt: Date.now(),
+      claimed: false,
+    };
+    previewScrollTraceState.last = previewScrollTraceState.active;
+    recordPreviewScrollRecord(previewScrollTraceState.active, 'touchstart', event, {gesture});
+  }, {capture: true, passive: true});
+  ownerDocument.addEventListener('touchmove', event => {
+    const active = previewScrollTraceState.active;
+    if (!active) return;
+    const touches = Array.from(event?.touches || []);
+    const touch = touches.find(item => active.identifier === undefined || item.identifier === active.identifier) || touches[0] || null;
+    if (touch && !active.claimed) {
+      const deltaX = Number(touch.clientX || 0) - active.startX;
+      const deltaY = Number(touch.clientY || 0) - active.startY;
+      if (Math.abs(deltaY) >= previewScrollGestureSlopPx && Math.abs(deltaY) > Math.abs(deltaX)) {
+        active.claimed = true;
+        active.userGeneration = claimPreviewScrollRecord(active);
+        recordPreviewScrollRecord(active, 'ownership-claimed', event, {
+          gesture: active.gesture,
+          userGeneration: active.userGeneration,
+        });
+      }
+    }
+    recordPreviewScrollRecord(active, 'touchmove', event, {gesture: active.gesture});
+  }, {capture: true, passive: true});
+  const finish = phase => event => {
+    const active = previewScrollTraceState.active;
+    if (!active) return;
+    recordPreviewScrollRecord(active, phase, event, {gesture: active.gesture});
+    previewScrollTraceState.last = {...active, endedAt: Date.now()};
+    previewScrollTraceState.active = null;
+    if (debugModeExplicitUrlEnabled !== true) return;
+    if (previewScrollTraceState.flushTimer) clearTimeout(previewScrollTraceState.flushTimer);
+    previewScrollTraceState.flushTimer = setTimeout(() => {
+      previewScrollTraceState.flushTimer = 0;
+      scheduleJsDebugPanelRefresh();
+    }, 2100);
+  };
+  ownerDocument.addEventListener('touchend', finish('touchend'), {capture: true, passive: true});
+  ownerDocument.addEventListener('touchcancel', finish('touchcancel'), {capture: true, passive: true});
+  ownerDocument.addEventListener('scroll', event => {
+    const resolved = recordForTarget(event.target);
+    if (!resolved) return;
+    const record = previewScrollTraceRecordsMatch(previewScrollTraceState.active, resolved)
+      ? previewScrollTraceState.active
+      : (previewScrollTraceRecordsMatch(previewScrollTraceState.last, resolved) ? previewScrollTraceState.last : resolved);
+    if (record && !record.claimed) {
+      record.claimed = true;
+      record.userGeneration = claimPreviewScrollRecord(record);
+      recordPreviewScrollRecord(record, 'ownership-claimed', event, {
+        gesture: record.gesture,
+        userGeneration: record.userGeneration,
+        claimSource: 'native-scroll',
+      });
+    }
+    if (record?.claimed) record.lastScrollAt = Date.now();
+    if (record?.embeddedContainer) {
+      record.embeddedContainer._previewEmbeddedScrollPosition = ownedElementScrollPosition(record.traceElement);
+    }
+    recordPreviewScrollRecord(record, 'scroll', event);
+  }, {capture: true, passive: true});
+  return true;
+}
+
+function installPreviewScrollOwnershipCapture() {
+  if (previewScrollTraceState.installed) return false;
+  previewScrollTraceState.installed = true;
+  bindPreviewScrollOwnershipCapture(document, previewScrollTraceRecordForTarget);
+  if (debugModeExplicitUrlEnabled === true) {
+    const viewport = window.visualViewport;
+    for (const type of ['resize', 'scroll']) {
+      viewport?.addEventListener?.(type, event => {
+        const record = previewScrollTraceState.active || previewScrollTraceState.last;
+        if (!record || (!previewScrollTraceState.active && Date.now() - Number(record.endedAt || 0) > 2000)) return;
+        recordPreviewScrollInputTrace(record.element, `visual-viewport-${type}`, event, {gesture: record.gesture});
+      }, {passive: true});
+    }
+  }
+  return true;
+}
+
+function previewEmbeddedScrollElement(frame) {
+  try {
+    return frame?.contentDocument?.scrollingElement || frame?.contentDocument?.documentElement || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function previewEmbeddedScrollPosition(container) {
+  const frame = container?.querySelector?.('.file-editor-html-preview');
+  const element = previewEmbeddedScrollElement(frame);
+  return element ? ownedElementScrollPosition(element) : (container?._previewEmbeddedScrollPosition || null);
+}
+
+function installPreviewEmbeddedScrollOwnershipCapture(frame, container) {
+  const ownerDocument = frame?.contentDocument || null;
+  const traceElement = previewEmbeddedScrollElement(frame);
+  if (!ownerDocument || !traceElement || !container) return null;
+  const resolveRecord = () => ({
+    element: container,
+    traceElement,
+    embeddedContainer: container,
+    details: {previewSurface: 'html', embedded: true},
+  });
+  bindPreviewScrollOwnershipCapture(ownerDocument, resolveRecord);
+  return traceElement;
+}
+
+function restorePreviewEmbeddedScrollPosition(container, frame, position) {
+  const element = installPreviewEmbeddedScrollOwnershipCapture(frame, container);
+  if (!element) return false;
+  const coordinates = position || container?._previewEmbeddedScrollPosition;
+  if (!coordinates) return true;
+  container._previewEmbeddedScrollPosition = {
+    top: Number(coordinates.top || 0),
+    left: Number(coordinates.left || 0),
+  };
+  restoreElementScrollPosition(element, container._previewEmbeddedScrollPosition.top, container._previewEmbeddedScrollPosition.left, {
+    owner: 'html-preview-render-restore',
+    previewSurface: 'html',
+    previewOwner: container,
+  });
+  return true;
+}
+
+function restoreElementScrollPosition(element, scrollTop, scrollLeft, details = {}) {
   if (!element) return;
-  element.scrollTop = scrollTop;
-  element.scrollLeft = scrollLeft;
+  const {deferredOwner: specifiedDeferredOwner = null, ...traceDetails} = details;
+  const owner = String(traceDetails.owner || 'restore-element-scroll');
+  const deferredOwner = specifiedDeferredOwner || createPassiveDeferredElementScrollOwner(element);
+  writeDeferredElementScrollIfOwned(
+    deferredOwner,
+    element,
+    {top: scrollTop, left: scrollLeft},
+    owner,
+    {...traceDetails, restorePhase: 'immediate'},
+  );
   requestAnimationFrame(() => {
-    element.scrollTop = scrollTop;
-    element.scrollLeft = scrollLeft;
+    writeDeferredElementScrollIfOwned(
+      deferredOwner,
+      element,
+      {top: scrollTop, left: scrollLeft},
+      owner,
+      {...traceDetails, restorePhase: 'animation-frame'},
+    );
   });
 }
 

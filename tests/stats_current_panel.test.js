@@ -15,6 +15,8 @@ const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js
 const debugRuntimeSource = fs.readFileSync('static_src/js/yolomux/84_debug_runtime_facade.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const editorSettingsSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+const tokenCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
 const lifecycleScopeSource = coreSource.slice(
   coreSource.indexOf('function createLifecycleScope('),
   coreSource.indexOf('\nfunction createLatestResource(', coreSource.indexOf('function createLifecycleScope(')),
@@ -287,9 +289,12 @@ test('CPU charts preserve multi-core peaks and expand their axis beyond 100%', (
 
 test('Services omits the duplicated web process while CPU names it clearly', () => {
   const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const visibleServiceSource = sourceFunction('debugGraphVisibleServiceLoadItems', 'debugGraphServiceLoadRangeAvailable');
   const serviceSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
   assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
-  assert.match(serviceSource, /if \(key === 'web'\) continue;/);
+  assert.match(visibleServiceSource, /if \(key === 'web'/);
+  assert.match(serviceSource, /debugGraphVisibleServiceLoadItems\(buckets\)/);
+  assert.match(serviceSource, /familyHasData: bucket => debugGraphVisibleServiceLoadItems\(\[bucket\]\)\.length > 0/);
 });
 
 test('CPU keeps the exact serving port as the only solid series and shows a gap, never promoting a peer', () => {
@@ -339,6 +344,72 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result[0].key, 'cpu:port:80');
   assert.equal(context.result[0].linePattern, 'solid');
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
+});
+
+test('CPU series keep a theme-independent semantic palette under the red accent', () => {
+  const paletteSource = slice(
+    source,
+    'const jsDebugGraphSeriesPalette = Object.freeze({',
+    'const jsDebugGraphGpuDeviceColors = Object.freeze(',
+  );
+  const renderSource = source.slice(
+    source.indexOf('function debugGraphSeriesPlotValues('),
+    source.indexOf('\nfunction debugGraphAreaPathHtml('),
+  );
+  const context = {
+    result: null,
+    Number,
+    String,
+    Array,
+    esc: value => String(value),
+    debugGraphPolylinePointSegments: () => [['0,0', '1,1']],
+    debugGraphCommunicationGapThresholdMs: () => 1,
+    debugGraphAgentTokenPatternIndex: () => -1,
+  };
+  vm.runInNewContext(`
+    ${paletteSource}
+    ${renderSource}
+    ${sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues')}
+    const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'solid', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
+    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
+    result = {
+      colors: [debugGraphSeriesDisplayColor(system), debugGraphSeriesDisplayColor(current)],
+      lines: [debugGraphPolylineHtml(system, 100, {}, false), debugGraphPolylineHtml(current, 100, {}, false)],
+      legends: [debugGraphLegendSwatchHtml(system), debugGraphLegendSwatchHtml(current)],
+    };
+  `, context);
+  assert.deepEqual([...context.result.colors], ['var(--js-debug-agent-token-cyan)', 'var(--js-debug-agent-token-violet)']);
+  assert.match(context.result.lines[0], /--js-debug-series-color: var\(--js-debug-agent-token-cyan\)/);
+  assert.match(context.result.lines[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+  assert.match(context.result.lines[0], /<title>system avg CPU %<\/title>/);
+  assert.match(context.result.lines[1], /<title>yolomux\.py \(web\) CPU %<\/title>/);
+  assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-cyan\)/);
+  assert.match(context.result.legends[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+
+  const presetSource = slice(editorSettingsSource, 'const UI_COLOR_CHOICES =', '\nfunction normalizeEditorCursorColor(');
+  const presetContext = {result: null, Object};
+  vm.runInNewContext(`${presetSource}\nresult = UI_COLOR_PRESETS.orange.active;`, presetContext);
+  const componentTokenValue = semanticName => {
+    const match = new RegExp(`--${semanticName}:\\s*var\\((--[^)]+)\\)`).exec(css);
+    assert.ok(match, `${semanticName} aliases a shared theme palette token`);
+    return match[1];
+  };
+  const themeTokenValues = semanticName => {
+    const rawName = componentTokenValue(semanticName);
+    const matches = [...tokenCss.matchAll(new RegExp(`${rawName.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}:\\s*(#[0-9a-fA-F]{6})`, 'g'))];
+    assert.equal(matches.length, 2, `${semanticName} has dark and light values`);
+    return {dark: matches[0][1], light: matches[1][1]};
+  };
+  const rgb = value => [1, 3, 5].map(index => parseInt(value.slice(index, index + 2), 16));
+  const distance = (left, right) => Math.hypot(...rgb(left).map((value, index) => value - rgb(right)[index]));
+  const systemColors = themeTokenValues('js-debug-agent-token-cyan');
+  const currentColors = themeTokenValues('js-debug-agent-token-violet');
+  for (const theme of ['dark', 'light']) {
+    const redAccent = presetContext.result[theme].bright;
+    assert.ok(distance(systemColors[theme], currentColors[theme]) >= 120, `${theme}: simultaneous CPU series stay separated`);
+    assert.ok(distance(systemColors[theme], redAccent) >= 120, `${theme}: system CPU stays separated from red selection chrome`);
+    assert.ok(distance(currentColors[theme], redAccent) >= 120, `${theme}: current web CPU stays separated from red selection chrome`);
+  }
 });
 
 test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall time, and survives an epoch reset', () => {
@@ -2305,6 +2376,126 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
   assert.ok(context.result.captures >= 2);
 });
 
+test('focused Reset Zoom immediately repaints the shared full-range domain and stays live', () => {
+  const resetSource = [
+    sourceFunction('debugGraphZoomDomainValid', 'clearDebugGraphZoom'),
+    sourceFunction('clearDebugGraphZoom', 'debugEventCounts'),
+    sourceFunction('debugGraphDomain', 'debugGraphBucketRate'),
+    sourceFunction('refreshDebugGraphSurfaces', 'createDebugPanel'),
+    sourceFunction('debugGraphFocusedControl', 'syncDebugGraphControls'),
+    sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons'),
+    sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
+  ].join('\n');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const nowMs = 3600000;
+    const Date = {now: () => nowMs};
+    const debugRuntimeState = {graphRangeSeconds: 900, graphResolutionOverrideSeconds: 60};
+    const jsDebugGraphRetentionMs = 86400000;
+    let jsDebugGraphZoomDomain = {startMs: 390000, endMs: 3417000};
+    let jsDebugGraphSelectionState = {pointerType: 'touch'};
+    let jsDebugGraphRangeSliderDragging = false;
+    let resetVisible = true;
+    let paintedDomain = {startMs: 390000, endMs: 3417000, rangeSeconds: 3017, zoomed: true};
+    let controlsState = {resetVisible: true, sliderDisabled: true, label: '05:39-06:30 · 3017s'};
+    let bodyPaints = 0;
+    let prevented = 0;
+    const panel = {contains: () => true};
+    const scrollOwner = {scrollTop: 0, scrollLeft: 0};
+    const controls = {};
+    const reset = {
+      closest(selector) {
+        if (selector === '[data-js-debug-zoom-reset]') return this;
+        if (selector === '.js-debug-graph-controls') return controls;
+        return null;
+      },
+    };
+    const body = {replaceChildren() { bodyPaints += 1; paintedDomain = debugGraphDomain(nowMs); }};
+    const graph = {
+      className: '',
+      dataset: {jsDebugGraphRenderedAt: '1'},
+      contains(node) { return resetVisible && node === reset; },
+      closest(selector) {
+        if (selector === '.js-debug-panel') return panel;
+        if (selector === '.js-debug-graph-view') return scrollOwner;
+        return null;
+      },
+      querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+      setAttribute() {},
+    };
+    const document = {
+      activeElement: reset,
+      querySelectorAll(selector) { return selector === '[data-js-debug-graph]' ? [graph] : []; },
+      createElement() { return {childNodes: [], set innerHTML(_value) {}}; },
+    };
+    function normalizedJsDebugGraphRange(value) { return Number(value); }
+    function syncDebugGraphResolutionOverride() {}
+    function syncJsDebugStatsDeliveryMode() {}
+    function requestJsDebugHistoryForCurrentDomain() { return false; }
+    function renderYoCostPanels() { return false; }
+    function debugGraphInteractionBelongsToPanel() { return false; }
+    function debugGraphClassName() { return 'js-debug-graph'; }
+    function debugGraphBodyHtml() { return ''; }
+    function preserveDebugGraphBodyControls() {}
+    function syncDebugGraphControls() {
+      const domain = debugGraphDomain(nowMs);
+      resetVisible = domain.zoomed;
+      controlsState = {
+        resetVisible,
+        sliderDisabled: domain.zoomed,
+        label: domain.zoomed ? 'zoomed' : '15m',
+      };
+    }
+    function restoreElementScrollPosition() {}
+    function bindDebugCostSummaryTabButtons() {}
+    function clientPerfStart() { return null; }
+    function clientPerfEnd() {}
+    function jsDebugHistoryReadinessStateName() { return 'ready'; }
+    function jsDebugHistoryReadinessBusy() { return false; }
+    const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
+    const jsDebugHistoryReadiness = {phase: 'ready'};
+    function commitJsDebugCurrentStatsPaint() {}
+    function resolveDebugGraphResolutionChange() {}
+    function syncDebugGraphLiveTicker() {}
+    ${resetSource}
+    const handled = handleDebugGraphControlEvent({
+      type: 'click',
+      target: reset,
+      preventDefault() { prevented += 1; },
+    }, panel);
+    const afterReset = {
+      handled,
+      prevented,
+      zoomed: jsDebugGraphZoomDomain !== null,
+      selection: jsDebugGraphSelectionState,
+      range: debugRuntimeState.graphRangeSeconds,
+      resolution: debugRuntimeState.graphResolutionOverrideSeconds,
+      bodyPaints,
+      paintedDomain,
+      controlsState,
+      pending: graph.dataset.jsDebugGraphRefreshPending || '',
+    };
+    refreshDebugGraphElement(graph, {force: true});
+    result = {afterReset, afterTick: {bodyPaints, paintedDomain, controlsState}};
+  `, context);
+  const result = JSON.parse(JSON.stringify(context.result));
+  assert.deepEqual(result.afterReset, {
+    handled: true,
+    prevented: 1,
+    zoomed: false,
+    selection: null,
+    range: 900,
+    resolution: 60,
+    bodyPaints: 1,
+    paintedDomain: {startMs: 2700000, endMs: 3600000, rangeSeconds: 900, zoomed: false},
+    controlsState: {resetVisible: false, sliderDisabled: false, label: '15m'},
+    pending: '',
+  });
+  assert.equal(result.afterTick.bodyPaints, 2, 'the next live repaint stays on the selected full range');
+  assert.deepEqual(result.afterTick.paintedDomain, {startMs: 2700000, endMs: 3600000, rangeSeconds: 900, zoomed: false});
+  assert.deepEqual(result.afterTick.controlsState, {resetVisible: false, sliderDisabled: false, label: '15m'});
+});
+
 test('accepted snapshots bypass the event debounce and render immediately', () => {
   assert.match(source, /scheduleJsDebugPanelRefresh\(\{force: forceGraphRefresh, immediate: true\}\)/);
   const functionText = coreSource.slice(
@@ -3112,6 +3303,56 @@ test('YO!stats owns Cost between Graphs and API/SSE with persistence, activation
   }
 });
 
+test('Graphs and Cost give the same retained token range separate SVG pattern identities', () => {
+  const patternSource = source.slice(
+    source.indexOf('function debugGraphAgentTokenPatternIndex('),
+    source.indexOf('\nfunction debugGraphMacMemoryPressureColor('),
+  );
+  const context = {
+    result: null,
+    Number,
+    Math,
+    jsDebugGraphAgentTokenPatternCount: 6,
+    jsDebugGraphAgentTokenPatternShapes: [''],
+    esc: value => String(value),
+    debugGraphSeriesStyleAttr: series => ` style="--js-debug-series-color: ${series.color};"`,
+  };
+  vm.runInNewContext(`
+    ${patternSource}
+    const retainedRange = Object.freeze({rangeSeconds: 3600, resolutionSeconds: 60});
+    const retainedSeries = Object.freeze({
+      key: 'agentToken:yo7771-b',
+      agentTokenKey: 'yo7771-b',
+      tokenPatternSeries: true,
+      agentTokenPatternIndex: 0,
+      color: '#38bdf8',
+      values: [1200, 2400, 1800],
+      times: [1000, 61000, 121000],
+      durations: [60000, 60000, 60000],
+    });
+    const surface = patternScope => {
+      const series = {...retainedSeries, agentTokenPatternScope: patternScope};
+      const id = debugGraphAgentTokenPatternId(series);
+      return {
+        id,
+        definition: debugGraphAgentTokenPatternDefinitionHtml(series),
+        reference: 'url(#' + id + ')',
+      };
+    };
+    result = {retainedRange, graphs: surface('graphs-agentTokens'), cost: surface('cost-agentTokens')};
+  `, context);
+  assert.deepEqual({...context.result.retainedRange}, {rangeSeconds: 3600, resolutionSeconds: 60});
+  assert.notEqual(context.result.graphs.id, context.result.cost.id, 'hidden Graphs defs cannot own Cost bar fills');
+  assert.match(context.result.graphs.definition, new RegExp(`id="${context.result.graphs.id}"`));
+  assert.match(context.result.cost.definition, new RegExp(`id="${context.result.cost.id}"`));
+
+  const costPanel = sourceFunction('yoCostPanelHtml', 'openYoCostTranscriptPreview');
+  assert.match(costPanel, /debugGraphSvgHtml\(buckets, debugGraphSeriesData\(buckets\), tokenGroups, nowMs, \{includeCostSummary: false, patternScope: 'cost'\}\)/);
+  const graphRenderer = sourceFunction('debugGraphSvgHtml', 'debugGraphClassName');
+  assert.match(graphRenderer, /patternScope = 'graphs'/);
+  assert.match(graphRenderer, /patternScope: `\$\{patternScope\}-\$\{group\.key\}`/);
+});
+
 test('the YO!stats Daemons subtab keeps the system key and every locale carries a non-empty label', () => {
   const path = require('node:path');
   // The subtab wiring keeps the internal `system` key; only the human label changed.
@@ -3276,6 +3517,113 @@ test('YO!cost usage metrics and compact pricing links stay on one line', () => {
   assert.match(css, /\.js-debug-cost-table-metric--inline \.js-debug-cost-price-pair\s*\{[\s\S]*?display: inline-flex;/);
   assert.match(css, /\.js-debug-cost-model-copy\s*\{[\s\S]*?display: flex;[\s\S]*?white-space: nowrap;/);
   assert.match(css, /\.js-debug-cost-pricing-links--compact::before,[\s\S]*?\.js-debug-cost-pricing-links--compact::after\s*\{[\s\S]*?content: none;/);
+});
+
+test('Daemons chart mirrors the server continuous one-second service-load cadence', () => {
+  const manifestSource = slice(source, 'const jsDebugStatsFamilyManifest', 'const jsDebugGraphChartControlItems');
+  assert.match(manifestSource, /service_load: Object\.freeze\(\{[^}]*cadenceSeconds: 1,/, 'the client mirrors the server continuous 1 Hz service-load cadence');
+  assert.match(manifestSource, /serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest\.service_load\.cadenceSeconds/, 'the Daemons chart buckets from the mirrored family cadence');
+});
+
+test('retained service-load apply and merge share one bucket-item initializer', () => {
+  const serviceLoadBucketItemSource = sourceFunction('debugGraphNewServiceLoadItem', 'debugGraphNewClientBucket');
+  assert.match(serviceLoadBucketItemSource, /cpuTotalPercent: 0,[\s\S]*cpuRangeAvailable: false,[\s\S]*rssMaxBytes: 0/);
+  const mergeSource = sourceFunction('debugGraphMergeBucket', 'compactJsDebugGraphBuckets');
+  const applyHostSource = sourceFunction('debugGraphApplyHostMetrics', 'debugGraphAgentStatusSnapshot');
+  assert.equal((mergeSource.match(/debugGraphNewServiceLoadItem\(/g) || []).length, 1, 'retained bucket merge uses the shared service-load initializer');
+  assert.equal((applyHostSource.match(/debugGraphNewServiceLoadItem\(/g) || []).length, 1, 'retained server apply uses the shared service-load initializer');
+  assert.doesNotMatch(mergeSource, /targetHost\.serviceLoad\.get\(key\) \|\| \{/, 'retained merge has no divergent inline service-load shape');
+  assert.doesNotMatch(applyHostSource, /target\.serviceLoad\.get\(key\) \|\| \{/, 'retained apply has no divergent inline service-load shape');
+});
+
+test('Daemon load defaults coarse CPU to Max and one shared selector repaints Avg and Min values', () => {
+  const valueSource = sourceFunction('normalizedDebugGraphServiceLoadMode', 'debugGraphServiceLoadSeriesDefs');
+  const seriesSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
+  const context = {
+    Number,
+    String,
+    Map,
+    result: null,
+    debugRuntimeState: {serviceLoadMode: 'avg'},
+    debugGraphDisplayedTokenVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+  };
+  context.bucket = {
+    startMs: 0,
+    durationMs: 10000,
+    hostMetrics: {serviceLoad: new Map([['statusd', {
+      label: 'statusd', cpuTotalPercent: 11.7, cpuSamples: 10, cpuMinPercent: 0, cpuMaxPercent: 54, cpuRangeAvailable: true,
+    }]])},
+  };
+  vm.runInNewContext(`${valueSource}\n${seriesSource}\nlet series = debugGraphServiceLoadSeriesDefs([bucket])[0];\nresult = {avg: series.value(bucket)};\ndebugRuntimeState.serviceLoadMode = 'max';\nseries = debugGraphServiceLoadSeriesDefs([bucket])[0];\nresult.max = series.value(bucket);\ndebugRuntimeState.serviceLoadMode = 'min';\nseries = debugGraphServiceLoadSeriesDefs([bucket])[0];\nresult.min = series.value(bucket);`, context);
+  assert.deepEqual({...context.result}, {avg: 1.17, max: 54, min: 0});
+  assert.match(valueSource, /function debugGraphServiceLoadValue\(item, mode = debugRuntimeState\.serviceLoadMode\)/, 'one value owner selects all three existing retained fields');
+  assert.doesNotMatch(seriesSource, /cpuMinPercent[\s\S]*cpuMaxPercent[\s\S]*cpuTotalPercent/, 'the series does not duplicate three render paths');
+
+  const controlsSource = sourceFunction('debugGraphServiceLoadModeControlsHtml', 'debugGraphControlsHtml');
+  const controlsContext = {
+    result: null,
+    debugRuntimeState: {serviceLoadMode: 'avg'},
+    normalizedDebugGraphServiceLoadMode: value => ['avg', 'max', 'min'].includes(value) ? value : 'avg',
+    debugGraphServiceLoadModeLabel: mode => ({avg: 'Avg', max: 'Max', min: 'Min'}[mode]),
+    t: key => key === 'debug.graph.chart.serversLoad' ? 'Daemons load' : key,
+    esc: value => String(value),
+  };
+  controlsContext.availableBuckets = [{hostMetrics: {serviceLoad: new Map([
+    ['web', {cpuSamples: 6, cpuRangeAvailable: false}],
+    ['statusd', {cpuSamples: 6, cpuRangeAvailable: true}],
+  ])}}];
+  controlsContext.unavailableBuckets = [{hostMetrics: {serviceLoad: new Map([['statusd', {cpuSamples: 30, cpuRangeAvailable: false}]])}}];
+  vm.runInNewContext(`${valueSource}\n${controlsSource}\nresult = {available: debugGraphServiceLoadModeControlsHtml(availableBuckets), unavailable: debugGraphServiceLoadModeControlsHtml(unavailableBuckets)};`, controlsContext);
+  controlsContext.result = JSON.parse(JSON.stringify(controlsContext.result));
+  const availableControls = controlsContext.result.available;
+  const unavailableControls = controlsContext.result.unavailable;
+  assert.match(availableControls, /role="radiogroup"[^>]*aria-label="Daemons load"/);
+  assert.match(availableControls, /data-js-debug-service-load-mode="avg"[^>]*checked[^>]*aria-checked="true"/);
+  assert.doesNotMatch(availableControls, /data-js-debug-service-load-mode="(?:max|min)"[^>]*\sdisabled(?:\s|>)/);
+  assert.match(availableControls, />Avg<[^]*>Max<[^]*>Min</);
+  assert.match(unavailableControls, /data-js-debug-service-load-mode="avg"[^>]*checked[^>]*aria-checked="true"/);
+  assert.match(unavailableControls, /data-js-debug-service-load-mode="max"[^>]*disabled[^>]*aria-disabled="true"/);
+  assert.match(unavailableControls, /data-js-debug-service-load-mode="min"[^>]*disabled[^>]*aria-disabled="true"/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /group\.key === 'serversLoad' \? debugGraphServiceLoadModeControlsHtml\(buckets\) : displayedSummaryHtml/);
+  assert.match(valueSource, /debugGraphVisibleServiceLoadItems\(buckets\)/, 'range availability shares the renderer visible-service classifier');
+  assert.match(seriesSource, /for \(const \[key, item\] of debugGraphVisibleServiceLoadItems\(buckets\)\)/, 'the renderer consumes the shared visible-service classifier');
+
+  const defaultContext = {
+    Number,
+    result: null,
+    debugRuntimeState: {serviceLoadMode: 'auto'},
+  };
+  defaultContext.coarse = [{durationMs: 300000, hostMetrics: {serviceLoad: new Map([['statsd', {cpuSamples: 30, cpuRangeAvailable: true}]])}}];
+  defaultContext.fine = [{durationMs: 10000, hostMetrics: {serviceLoad: new Map([['statsd', {cpuSamples: 1, cpuRangeAvailable: true}]])}}];
+  vm.runInNewContext(`${valueSource}\nresult = {coarse: debugGraphServiceLoadEffectiveMode(coarse), fine: debugGraphServiceLoadEffectiveMode(fine)};`, defaultContext);
+  assert.deepEqual({...defaultContext.result}, {coarse: 'max', fine: 'avg'});
+
+  const exactAdapterSource = sourceFunction('jsDebugCurrentBucketRecord', 'jsDebugCurrentBucketHasFamilyData');
+  const serviceLoadItemSource = sourceFunction('jsDebugCurrentServiceLoadItem', 'jsDebugCurrentBucketRecord');
+  assert.match(serviceLoadItemSource, /cpu_total_percent: 0,[\s\S]*cpu_min_percent: null,[\s\S]*cpu_max_percent: null,[\s\S]*rss_total_bytes: 0,[\s\S]*rss_min_bytes: 0,[\s\S]*rss_max_bytes: 0/);
+  assert.equal((exactAdapterSource.match(/jsDebugCurrentServiceLoadItem\(record, source\)/g) || []).length, 4, 'all retained service-load dimensions share one record initializer');
+  assert.doesNotMatch(exactAdapterSource, /cpu_min_percent: null|rss_min_bytes: 0/, 'the exact adapter has no divergent inline record shapes');
+  assert.match(exactAdapterSource, /name\.startsWith\('service_cpu_min_percent:'\)/);
+  assert.match(exactAdapterSource, /name\.startsWith\('service_cpu_max_percent:'\)/);
+  assert.doesNotMatch(exactAdapterSource, /cpu_min_percent: value, cpu_max_percent: value/, 'the exact adapter never fabricates extrema from an average');
+  assert.match(exactAdapterSource, /cpu_samples: sourceCount/);
+  const cpuProjectionSource = sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentBucketRecord');
+  assert.match(cpuProjectionSource, /duration >= 60 && maximum !== null \? maximum : average/);
+  assert.match(exactAdapterSource, /jsDebugCurrentCpuProjectionValue\(series, name, 'system_cpu_max_percent', duration\)/);
+  assert.match(exactAdapterSource, /jsDebugCurrentCpuProjectionValue\(series, name, `cpu_max_percent:\$\{source\}`, duration\)/);
+
+  const setterSource = sourceFunction('setDebugGraphServiceLoadMode', 'setDebugGraphChartLayout');
+  const handlerSource = sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel');
+  assert.match(setterSource, /debugRuntimeState\.serviceLoadMode = normalized/);
+  assert.match(setterSource, /refreshDebugGraphSurfaces\(\{deferFocusedControl: false\}\)/, 'mode changes repaint immediately instead of waiting for focusout');
+  assert.match(handlerSource, /event\.type === 'change' && serviceLoadMode[\s\S]*setDebugGraphServiceLoadMode/);
+  assert.equal(debugRuntimeSource.includes("serviceLoadMode: 'auto'"), true, 'fresh state chooses Avg for fine buckets and Max for coarse CPU buckets');
+  assert.match(debugRuntimeSource, /debugRuntimeState\.serviceLoadMode = normalizedDebugGraphServiceLoadPreference\(saved\.serviceLoadMode\)/);
+  assert.match(debugRuntimeSource, /serviceLoadMode: debugRuntimeState\.serviceLoadMode/);
+  for (const key of ['debug.graph.serviceLoad.mode.avg', 'debug.graph.serviceLoad.mode.max', 'debug.graph.serviceLoad.mode.min']) {
+    assert.equal(typeof localeEn[key], 'string', `${key} is localized`);
+  }
 });
 
 Promise.all(pending).then(() => {

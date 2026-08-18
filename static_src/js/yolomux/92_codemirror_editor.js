@@ -1144,6 +1144,7 @@ function editorPanelParts(panel) {
     diffExpandButton: panel.querySelector('.file-editor-diff-expand-panel'),
     popoutPreviewButton: panel.querySelector('.file-editor-popout-preview-panel'),
     reloadButton: panel.querySelector('.file-editor-reload-panel'),
+    uploadButton: panel.querySelector('.file-editor-upload-panel'),
     themeButton: panel.querySelector('.file-editor-theme-panel'),
     blameButton: panel.querySelector('.file-editor-blame-panel'),
     saveButton: panel.querySelector('.file-editor-save-panel'),
@@ -1161,6 +1162,7 @@ function editorPanelParts(panel) {
     parts.diffRefPanel,
     parts.popoutPreviewButton,
     parts.reloadButton,
+    parts.uploadButton,
   ];
   return parts;
 }
@@ -1499,6 +1501,11 @@ function updateFileEditorPanelChrome(panel, path) {
   if (reloadButton) {
     reloadButton.hidden = previewOnly || state?.kind !== 'text';
   }
+  const uploadButton = panel.querySelector('.file-editor-upload-panel');
+  if (uploadButton) {
+    const viewMode = editorViewModeFor(path, item);
+    uploadButton.hidden = readOnlyMode || state?.kind !== 'text' || previewRendererForPath(path)?.id !== 'markdown' || !['edit', 'split'].includes(viewMode);
+  }
   updateFileEditorToolbarSeparators(panel);
 }
 
@@ -1525,6 +1532,7 @@ function updateFileEditorToolbarSeparators(panel) {
     '.file-editor-diff-panel',
     '.file-editor-diff-expand-panel',
     '.file-editor-diff-ref-panel',
+    '.file-editor-upload-panel',
   ].some(selector => fileEditorToolbarControlVisible(panel, selector));
   const reload = fileEditorToolbarControlVisible(panel, '.file-editor-reload-panel');
   const save = fileEditorToolbarControlVisible(panel, '.file-editor-save-panel');
@@ -1809,7 +1817,7 @@ function previewAnchorForSourceLine(previewPane, sourceLine) {
 function scrollPreviewToSourceLine(previewPane, sourceLine) {
   const anchor = previewAnchorForSourceLine(previewPane, sourceLine);
   if (!anchor) return false;
-  previewPane.scrollTop = Math.max(0, anchor.element.offsetTop - 4);
+  writeOwnedElementScroll(previewPane, {top: Math.max(0, anchor.element.offsetTop - 4)}, 'preview-find-reveal');
   return true;
 }
 
@@ -1840,7 +1848,7 @@ function previewSourceLineForScroller(previewRoot, scroller) {
 function scrollPreviewScrollerToSourceLine(previewRoot, scroller, sourceLine) {
   const anchor = previewAnchorForSourceLine(previewRoot, sourceLine);
   if (!anchor || !scroller) return false;
-  scroller.scrollTop = Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4);
+  writeOwnedElementScroll(scroller, {top: Math.max(0, scrollTopForPreviewElement(scroller, anchor.element) - 4)}, 'preview-source-line-reveal', {previewSurface: 'preview'});
   return true;
 }
 
@@ -1958,29 +1966,33 @@ function previewPaneNeedsSourceAnchorScroll(previewPane) {
   return Boolean(previewPane?.querySelector?.('details, img.markdown-preview-image, .mermaid-preview-host, .file-editor-preview-zoom-shell'));
 }
 
-function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane) {
+function writeFileEditorSplitScrollIfOwned(deferredOwner, element, coordinates) {
+  return deferredOwner
+    ? writeDeferredElementScrollIfOwned(deferredOwner, element, coordinates, 'preview-split-reflection')
+    : writeOwnedElementScroll(element, coordinates, 'preview-split-reflection');
+}
+
+function syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner = null) {
   if (!previewPaneNeedsSourceAnchorScroll(previewPane)) return false;
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
-  to.scrollLeft = scrollSyncTargetPosition(from, to, 'left');
+  if (!writeFileEditorSplitScrollIfOwned(deferredOwner, to, {left: scrollSyncTargetPosition(from, to, 'left')})) return false;
   const edgeTarget = editorScrollEdgeTarget(source === 'preview' ? previewPane : editorScroller, source === 'preview' ? editorScroller : previewPane);
   if (edgeTarget !== null) {
-    if (source === 'preview') editorScroller.scrollTop = edgeTarget;
-    else previewPane.scrollTop = edgeTarget;
-    return true;
+    return source === 'preview'
+      ? writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: edgeTarget})
+      : writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: edgeTarget});
   }
   const position = source === 'preview' ? sourcePositionForPreviewScroll(previewPane) : sourcePositionForEditorScroll(host?._cmView);
   if (!position) return false;
   if (source === 'preview') {
     const target = editorScrollTopForSourcePosition(host?._cmView, position);
     if (target === null) return false;
-    editorScroller.scrollTop = target;
-    return true;
+    return writeFileEditorSplitScrollIfOwned(deferredOwner, editorScroller, {top: target});
   }
   const target = previewScrollTopForSourcePosition(previewPane, position);
   if (target === null) return false;
-  previewPane.scrollTop = target;
-  return true;
+  return writeFileEditorSplitScrollIfOwned(deferredOwner, previewPane, {top: target});
 }
 
 function nowMs() {
@@ -2055,7 +2067,7 @@ function scheduleFileEditorCodeMirrorBottomConvergence(panel, ownerSource, gener
     write(measure, view) {
       if (panel._splitScrollBottomConvergence !== state || Number(panel._splitScrollGeneration || 0) !== generation) return;
       const scroller = view.scrollDOM;
-      scroller.scrollTop = measure.max;
+      writeOwnedElementScroll(scroller, {top: measure.max}, 'preview-split-bottom-convergence');
       const top = Number(scroller.scrollTop || 0);
       const max = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
       rememberFileEditorReflectedScroll(panel, 'editor', ownerSource, generation);
@@ -2186,7 +2198,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
-function syncFileEditorInPaneSplitScroll(host, source, generation) {
+function syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner = null) {
   const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return false;
   const cmView = host._cmView || null;
@@ -2198,19 +2210,19 @@ function syncFileEditorInPaneSplitScroll(host, source, generation) {
   const to = source === 'preview' ? editorScroller : previewPane;
   const previewDrivesBottom = source === 'preview' && fileEditorScrollAtBottom(previewPane);
   setFileEditorScrollSyncGuardForSource(source, host);
-  const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane)
-    || syncScrollPositionByRatio(from, to);
+  const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane, deferredOwner)
+    || syncScrollPositionByRatio(from, to, 'preview-split-reflection', {}, deferredOwner);
   if (!synced) return false;
   rememberFileEditorReflectedScroll(host, source === 'preview' ? 'editor' : 'preview', source, generation);
   if (previewDrivesBottom) scheduleFileEditorCodeMirrorBottomConvergence(host, source, generation);
   return true;
 }
 
-function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0)) {
+function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0), deferredOwner = null) {
   if (!host || fileEditorScrollSyncBlocked(host, source)) return;
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
-  syncFileEditorInPaneSplitScroll(host, source, generation);
+  syncFileEditorInPaneSplitScroll(host, source, generation, deferredOwner);
   syncFilePreviewPopoutsFromPanel(host, source);
 }
 
@@ -2223,15 +2235,21 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
   promoteFileEditorReflectedScrollOwner(host, source, generation);
   host._splitScrollPendingGeneration = generation;
   host._splitScrollPendingSource = source;
+  host._splitScrollDeferredOwner = createPassiveDeferredElementScrollOwner(
+    fileEditorPanelScroller(host),
+    fileEditorPanelPreviewPane(host),
+  );
   if (host._splitScrollFrame) return true;
   const run = () => {
     host._splitScrollFrame = 0;
     const pendingSource = host._splitScrollPendingSource || source;
     const pendingGeneration = Number(host._splitScrollPendingGeneration || generation);
+    const deferredOwner = host._splitScrollDeferredOwner;
     host._splitScrollPendingSource = '';
     host._splitScrollPendingGeneration = 0;
+    host._splitScrollDeferredOwner = null;
     if (pendingGeneration !== Number(host._splitScrollGeneration || 0)) return;
-    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration);
+    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration, deferredOwner);
   };
   if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
   else host._splitScrollFrame = setTimeout(run, 0);
@@ -2241,6 +2259,11 @@ function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
 const fileEditorPreviewLayoutScrollSyncMs = 400;
 
 function fileEditorPreviewScrollSyncSource(panel) {
+  const previewPane = fileEditorPanelPreviewPane(panel);
+  // A native vertical gesture is stronger evidence than the short-lived layout refit window. Once
+  // this Preview element has been claimed, its scroll events must never be relabeled as editor
+  // reflections; doing so writes the older editor position straight back into the user's gesture.
+  if (previewScrollUserOwnershipGeneration(previewPane) > 0) return 'preview';
   const layoutSyncActive = Number(panel?._previewLayoutScrollUntil || 0) > nowMs();
   return layoutSyncActive && fileEditorPanelMode(panel) === 'split' && fileEditorSourceCanDrive(panel, 'editor')
     ? 'editor'

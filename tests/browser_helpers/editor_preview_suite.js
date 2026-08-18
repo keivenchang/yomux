@@ -475,9 +475,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.match(popoutSource, /function scheduleFilePreviewPopoutEdgeConvergence[\s\S]*scrollSyncOwner\?\.generation !== state\.generation[\s\S]*stableSnapshots >= 2[\s\S]*if \(record\.previewAsync\) return;[\s\S]*scrollConvergence = null/, 'popout edge convergence is generation-bound and retires only after async work plus stable measured bottoms');
     assert.match(popoutSource, /function filePreviewPopoutScrollSyncReady[\s\S]*scrollSyncFrame[\s\S]*scrollConvergenceFrame[\s\S]*scrollConvergence[\s\S]*previewAsync[\s\S]*navigationWrite/, 'popout readiness includes queued frames, convergence, asynchronous rendering, and deferred navigation writes');
     assert.match(popoutSource, /function syncFilePreviewPopoutScroll[\s\S]*filePreviewPopoutReflectedScrollMatches[\s\S]*beginFilePreviewPopoutScrollOwner\(record, \{kind: 'popout'/, 'reflected writes cannot steal ownership while a genuine popup scroll can');
+    assert.match(popoutSource, /function claimFilePreviewPopoutUserScroll[\s\S]*claimPreviewScrollUserOwnership[\s\S]*beginFilePreviewPopoutScrollOwner[\s\S]*function bindFilePreviewPopoutControls[\s\S]*beginUserScroll[\s\S]*claimFilePreviewPopoutUserScroll\(record, previewWindow\)/, 'touchstart and other direct popout intent synchronously cancel stale restores and edge convergence before their next frame');
+    assert.match(popoutSource, /function scheduleFilePreviewPopoutApplyWhenIdle[\s\S]*filePreviewPopoutScrollInputActive[\s\S]*filePreviewPopoutSnapshotRetryMs[\s\S]*function applyFilePreviewPopoutSnapshot[\s\S]*scheduleFilePreviewPopoutApplyWhenIdle/, 'popout snapshot replacement coalesces behind the same active input owner');
     assert.match(popoutSource, /function writeFilePreviewPopoutAfterNavigation\(path, previewWindow, snapshot, previewGeneration\)[\s\S]*record\.navigationWrite !== job[\s\S]*filePreviewPopoutGenerationMatches\(path, previewWindow, previewGeneration\)[\s\S]*settleFilePreviewPopoutNavigationWrite/, 'deferred navigation writes validate the current record, window, and generation at the actual write boundary');
     assert.match(popoutSource, /function applyFilePreviewPopoutAsync[\s\S]*return apply\(snapshot\)[\s\S]*completion\.then\(finish, finish\)/, 'async readiness follows the apply result through a deferred navigation write instead of retiring when it is merely scheduled');
-    assert.match(popoutSource, /const listenerOptions = \['scroll', 'wheel', 'touchstart'\]\.includes\(type\) \? \{passive: true\} : undefined;[\s\S]*scope\.ownEvent\([^\n]+listenerOptions\)/, 'only scroll, wheel, and touch listeners are passive; click, pointer, and keyboard controls can prevent defaults');
+    assert.match(popoutSource, /const listenerOptions = type === 'scroll' \|\| type === 'wheel' \|\| type\.startsWith\('touch'\) \? \{passive: true\} : undefined;[\s\S]*scope\.ownEvent\([^\n]+listenerOptions\)/, 'scroll, wheel, and touch lifecycle listeners remain passive; click, pointer, and keyboard controls can prevent defaults');
     const frames = [];
     const measures = [];
     let now = 0;
@@ -547,6 +549,60 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(panel._splitScrollBottomConvergence, null, 'bottom convergence retires only after stable measured snapshots');
     api.scheduleFileEditorPreviewLayoutSyncForTest(panel);
     assert.equal(panel._splitScrollPendingSource, 'editor', 'an explicit preview-layout refresh can still elect the editor source');
+
+    api.installPreviewScrollOwnershipCaptureForTest();
+    const touchstart = api.documentListenersForTest('touchstart')[0];
+    const touchmove = api.documentListenersForTest('touchmove')[0];
+    touchstart({target: preview, touches: [{identifier: 4, clientX: 20, clientY: 30}]});
+    touchmove({target: preview, touches: [{identifier: 4, clientX: 20, clientY: 42}]});
+    assert.equal(api.fileEditorPreviewScrollSyncSourceForTest(panel), 'preview', 'a claimed native Preview gesture outranks the temporary editor-owned layout window');
+    api.scheduleFileEditorSplitScrollSyncForTest(panel, api.fileEditorPreviewScrollSyncSourceForTest(panel));
+    assert.equal(panel._splitScrollPendingSource, 'preview', 'the short gesture cannot queue an editor reflection that snaps Preview backward');
+  });
+
+  test('a claimed Preview gesture cancels an already queued editor reflection before geometry moves', () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const path = '/repo/queued-split-reflection.md';
+    const item = api.fileEditorItemFor(path);
+    api.setFileEditorViewMode(path, 'split', item);
+
+    const panel = new TestElement('queued-split-panel');
+    panel.dataset.filePath = path;
+    panel.dataset.layoutItem = item;
+    const content = new TestElement('queued-split-content');
+    content.classList.add('file-editor-content', 'split-preview');
+    const preview = new TestElement('queued-split-preview');
+    preview.classList.add('file-editor-preview-pane-panel');
+    preview.clientHeight = 100;
+    preview.scrollHeight = 1000;
+    preview.scrollTop = 400;
+    const editor = new TestElement('queued-split-editor');
+    editor.clientHeight = 100;
+    editor.scrollHeight = 900;
+    editor.scrollTop = 0;
+    panel.append(content, preview);
+    panel._cmView = {scrollDOM: editor};
+
+    api.scheduleFileEditorPreviewLayoutSyncForTest(panel);
+    assert.equal(panel._splitScrollPendingSource, 'editor', 'layout hydration queues the stale editor source first');
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 8, clientX: 20, clientY: 30}],
+    });
+    api.documentListenersForTest('touchmove')[0]({
+      target: preview,
+      touches: [{identifier: 8, clientX: 20, clientY: 42}],
+    });
+    assert.equal(frames.length, 1, 'the stale editor reflection is still waiting for its frame');
+    frames.shift()();
+    assert.equal(preview.scrollTop, 400, 'touch ownership cancels the stale editor write before WebKit changes scrollTop');
   });
 
   test('integer preview source positions land inside the target CodeMirror block', () => {
@@ -882,7 +938,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
-    assert.ok(/terminalMobileAccessoryActionFamilies = Object\.freeze\(\{[\s\S]*primary: Object\.freeze\(\['tmux-prefix', 'backspace', 'more'\]\)[\s\S]*side: Object\.freeze\(\['tab', 'shift', 'ctrl'\]\)[\s\S]*dpad: Object\.freeze\([^\n]*'copy', 'command-v'[^\n]*'alt'/.test(facadeSource) && /terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.primary[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.side[\s\S]*terminalMobileAccessoryDpadActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.dpad/.test(source), 'the primary page keeps Esc above Tab, stacks Paste directly below Copy, and keeps Ctrl, Alt, then the platform Meta key across the bottom-left row');
+    assert.ok(/terminalMobileAccessoryActionFamilies = Object\.freeze\(\{[\s\S]*primary: Object\.freeze\(\['tmux-prefix', 'upload', 'backspace', 'more'\]\)[\s\S]*side: Object\.freeze\(\['tab', 'shift', 'ctrl'\]\)[\s\S]*dpad: Object\.freeze\([^\n]*'copy', 'command-v'[^\n]*'alt'/.test(facadeSource) && /terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.primary[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.side[\s\S]*terminalMobileAccessoryDpadActions = terminalRuntimeFacade\('mobile-accessory-actions'\)\.dpad/.test(source), 'the primary page keeps Upload between tmux prefix and Backspace, stacks Paste directly below Copy, and keeps Ctrl, Alt, then the platform Meta key across the bottom-left row');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && /const terminalMobileAccessoryMoreActions = Object\.freeze\(\['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'\]\);/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'the More page reuses shared command/navigation definitions while the primary D-pad retains Paste');
     assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
     assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*routeTerminalScrollLines\(session, term, container, signedLines, \{source: 'page-key'\}\)[\s\S]*action === 'tmux-scroll-up' \? '\\x1b\[5~' : '\\x1b\[6~'[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true, bypassMobileAccessoryModifiers: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; palette PgUp/PgDn use the shared page-key router and send native bytes only when a non-mouse alternate app owns paging');
@@ -891,6 +947,23 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/delegate\(panel, 'click', '\[data-terminal-mobile-close\]'[\s\S]*sendTerminalMobileAccessoryInput\(button\.dataset\.terminalMobileClose \|\| session, 'close'\)/.test(source) && /function sendTerminalMobileAccessoryInput[\s\S]*action === 'close'[\s\S]*dismissTerminalMobileAccessory\(session\)[\s\S]*action === 'more' \|\| action === 'open'[\s\S]*toggleTerminalMobileAccessoryState\(session, action\)/.test(source), 'the dedicated X is the only close action while both More buttons reuse the shared palette state owner');
     assert.ok(/mobile-terminal-key--close" data-terminal-mobile-close="\$\{esc\(session\)\}"/.test(source) && !/mobile-terminal-key--close"[^>]*data-terminal-mobile-toggle/.test(source) && !source.includes('data-terminal-mobile-drag') && !source.includes('beginTerminalMobileAccessoryDrag'), 'the palette X is a close-only control and no alternate drag behavior exists');
     assert.ok(/async function pasteTerminalMobileAccessoryClipboard[\s\S]*clipboard\.read[\s\S]*uploadFiles\(session, imageFiles, \{source: 'paste'\}\)[\s\S]*handleTerminalData\(session, text/.test(source), 'mobile Cmd-V reads clipboard text or images and routes both through the existing paste/terminal parents');
+    assert.ok(/action: 'upload'[\s\S]*function ensureFileUploadChooser[\s\S]*uploadFiles\(target\.session, files[\s\S]*function openFileUploadChooserForSession/.test(source), 'the touch upload key opens one native Files/Photos chooser and reuses the existing terminal upload transport');
+    const uploadChooser = api.ensureFileUploadChooserForTest();
+    let chooserOpenCount = 0;
+    uploadChooser.click = () => { chooserOpenCount += 1; };
+    assert.equal(api.openFileUploadChooserForSessionForTest('1'), true);
+    assert.deepStrictEqual(canonical({
+      type: uploadChooser.type,
+      multiple: uploadChooser.multiple,
+      hidden: uploadChooser.hidden,
+      accept: uploadChooser.getAttribute('accept') || '',
+      opens: chooserOpenCount,
+    }), {type: 'file', multiple: true, hidden: true, accept: '', opens: 1}, 'terminal Upload opens the reusable unrestricted native chooser');
+    const markdownPanel = new TestElement('markdown-upload-panel');
+    markdownPanel._cmView = {};
+    assert.equal(api.openFileUploadChooserForEditorForTest(markdownPanel, '/repo/README.md'), true);
+    assert.equal(uploadChooser.getAttribute('accept'), 'image/*', 'Markdown Upload asks iPadOS for Files/Photos through the same chooser');
+    assert.equal(chooserOpenCount, 2);
     const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
     assert.ok(/function terminalClipboardPasteAvailable\(\)[\s\S]*function primeTerminalClipboardAvailability\(\)[\s\S]*clipboard\.read/.test(source) && /function showTerminalContextMenu[\s\S]*terminalClipboardPasteAvailable\(\)[\s\S]*pasteTerminalMobileAccessoryClipboard\(session\)[\s\S]*function installTerminalContextMenu[\s\S]*container\.addEventListener\('pointerdown',[\s\S]*event\.pointerType === 'touch'[\s\S]*primeTerminalClipboardAvailability\(\)/.test(coreSource), 'a touch begins one clipboard availability probe before the shared long-press context menu conditionally adds Paste through the existing terminal paste path');
     assert.ok(/function terminalMobileAccessoryLauncherPosition[\s\S]*insetBlockEnd: y === null \? '' : 'auto'[\s\S]*function terminalMobileAccessoryPositionStyle[\s\S]*terminalMobileAccessoryLauncherPosition\(state\)[\s\S]*function syncTerminalMobileAccessoryState[\s\S]*terminalMobileAccessoryLauncherPosition\(state\)[\s\S]*launcher\.style\.insetBlockEnd = position\.insetBlockEnd/.test(source), 'initial HTML and sync share the launcher inset helper so a dragged launcher releases its bottom anchor without stretching');
@@ -944,7 +1017,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const stableAbovePlacements = Array.from({length: 6}, () => api.terminalMobileAccessoryPalettePlacementForTest(stableAboveState, stableAbovePane, stableAboveLauncher, {width: 288, height: 196}));
     assert.equal(stableAbovePlacements.every(placement => placement.side === 'above'), true, 'the default launcher stays above across repeated more toggles');
     assert.equal(stableAbovePlacements.every(placement => placement.x === stableAbovePlacements[0].x && placement.y === stableAbovePlacements[0].y), true, 'one fixed primary/overflow viewport box keeps default-above placement stable');
-    assert.ok(/\.mobile-terminal-keybar\s*\{[\s\S]*width:\s*min\(calc\(226px \+ 2em\),[\s\S]*height:\s*min\(171px,[\s\S]*\.mobile-terminal-key-content\s*\{[\s\S]*overflow:\s*hidden[\s\S]*\.mobile-terminal-key-content--more\s*\{/.test(css), 'primary and More pages share one content-fitted non-scrolling palette footprint');
+    assert.ok(/\.mobile-terminal-keybar\s*\{[\s\S]*width:\s*min\(306px,[\s\S]*height:\s*min\(211px,[\s\S]*\.mobile-terminal-key-content\s*\{[\s\S]*overflow:\s*hidden[\s\S]*\.mobile-terminal-key-content--more\s*\{/.test(css), 'primary and More pages share one content-fitted non-scrolling palette footprint');
     const clampedPlacementState = {x: null, y: null, palettePlacement: null};
     const clampedLauncher = {left: 272, top: 192, width: 40, height: 40};
     const clampedPrimary = api.terminalMobileAccessoryPalettePlacementForTest(clampedPlacementState, anchoredPane, clampedLauncher, {width: 288, height: 100});
@@ -1021,7 +1094,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest('1').includes('data-terminal-mobile-toggle="1"'), 'mobile=1 forces the shared coarse-pointer keyboard path on desktop browsers');
     assert.equal(desktopMobileOverrideApi.mobileSinglePaneModeForTest(), false, 'mobile=1 alone does not fake a narrow phone viewport or collapse desktop panes');
     assert.ok(/function browserUsesCoarsePointer\(\)[\s\S]*urlFlagEnabled\('mobile'\)[\s\S]*matchMedia\('\(pointer: coarse\)'/.test(bootstrapSource), 'mobile=1 is owned by the shared coarse-pointer predicate before media-query detection');
-    assert.ok(facadeSource.includes("primary: Object.freeze(['tmux-prefix', 'backspace', 'more'])") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && facadeSource.includes("side: Object.freeze(['tab', 'shift', 'ctrl'])") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while Tab stays directly below Esc');
+    assert.ok(facadeSource.includes("primary: Object.freeze(['tmux-prefix', 'upload', 'backspace', 'more'])") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && facadeSource.includes("side: Object.freeze(['tab', 'shift', 'ctrl'])") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while Upload occupies the free primary-row slot');
     const macKeyboardHtml = loadYolomux('?mobile=1&platform=mac', ['1'], 'http:', 'Linux x86_64').terminalMobileAccessoryHtmlForTest('1');
     const pcKeyboardHtml = loadYolomux('?mobile=1&platform=pc', ['1'], 'http:', 'MacIntel').terminalMobileAccessoryHtmlForTest('1');
     assert.ok(macKeyboardHtml.includes('>⌥</button>') && macKeyboardHtml.includes('>⌘</button>') && macKeyboardHtml.includes('>⌘C</button>') && macKeyboardHtml.includes('>⌘V</button>') && macKeyboardHtml.includes('>⌘P</button>'), 'platform=mac renders Option and Command symbols for modifiers and app actions');
@@ -1033,10 +1106,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       /\.mobile-terminal-key-side\s*\{[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*2 \/ 5[\s\S]*grid-template-rows:\s*repeat\(3, var\(--touch-row-height\)\)/,
       /\.mobile-terminal-key-side \.mobile-terminal-key--tab\s*\{\s*grid-row:\s*1[\s\S]*\.mobile-terminal-key-side \.mobile-terminal-key--shift\s*\{\s*grid-row:\s*2[\s\S]*\.mobile-terminal-key-side \.mobile-terminal-key--ctrl\s*\{\s*grid-row:\s*3/,
       /\.mobile-terminal-keybar\s*>\s*\.mobile-terminal-key--close\s*\{[\s\S]*position:\s*absolute[\s\S]*inset-inline-end:\s*1px[\s\S]*inset-block-start:\s*21px/,
-      /\.mobile-terminal-key-content--more\s*\{[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\) 48px 35px[\s\S]*grid-template-rows:\s*repeat\(3, minmax\(var\(--touch-row-height\), 1fr\)\)/,
+      /\.mobile-terminal-key-content--more\s*\{[\s\S]*grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\) 48px var\(--touch-row-height\)[\s\S]*grid-template-rows:\s*repeat\(3, minmax\(var\(--touch-row-height\), 1fr\)\)/,
       /\.mobile-terminal-key-content--more \.mobile-terminal-key--command-p\s*\{\s*grid-column:\s*1;\s*grid-row:\s*1[\s\S]*\.mobile-terminal-key-content--more \.mobile-terminal-key--home\s*\{\s*grid-column:\s*2;\s*grid-row:\s*1/,
       /\.mobile-terminal-key-content--more \.mobile-terminal-key--ctrl-r\s*\{\s*grid-column:\s*3;\s*grid-row:\s*3[\s\S]*\.mobile-terminal-key-content--more \.mobile-terminal-key--more\s*\{[\s\S]*grid-column:\s*4[\s\S]*grid-row:\s*1[\s\S]*\.mobile-terminal-key-content--more \.mobile-terminal-key--interrupt\s*\{[\s\S]*grid-column:\s*4 \/ 6[\s\S]*grid-row:\s*3/,
-      /\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*48px minmax\(0, 1fr\) 48px 48px 35px[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--tmux-prefix\s*\{\s*grid-column:\s*1[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--backspace\s*\{\s*grid-column:\s*3[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--more\s*\{\s*grid-column:\s*4/,
+      /\.mobile-terminal-keyrow--primary\s*\{[\s\S]*grid-template-columns:\s*48px minmax\(0, 1fr\) 48px 48px var\(--touch-row-height\)[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--tmux-prefix\s*\{\s*grid-column:\s*1[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--upload\s*\{\s*grid-column:\s*2[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--backspace\s*\{\s*grid-column:\s*3[\s\S]*\.mobile-terminal-keyrow--primary \.mobile-terminal-key--more\s*\{\s*grid-column:\s*4/,
       /\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-column:\s*2[\s\S]*grid-template-columns:\s*var\(--touch-row-height\) 1em 32px var\(--touch-row-height\) 40px 1em minmax\(var\(--touch-row-height\), 1fr\)/,
       /\.mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-up\s*\{\s*grid-column:\s*5;\s*grid-row:\s*1[\s\S]*\.mobile-terminal-key-dpad \.mobile-terminal-key--tmux-scroll-down\s*\{\s*grid-column:\s*5;\s*grid-row:\s*3/,
       /\.mobile-terminal-key-dpad \.mobile-terminal-key--interrupt\s*\{\s*grid-column:\s*7;\s*grid-row:\s*3;\s*justify-self:\s*start/,
@@ -1488,6 +1561,51 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       assert.equal(stale.aborted, true, 'the retired raw-media result stays typed as an abort');
       assert.equal(staleMedia.src, undefined, 'an aborted/stale owner cannot install late bytes');
       assert.equal(created.length, 3, 'an aborted/stale owner creates no object URL');
+
+      const retainedPath = '/repo/retained.png';
+      const retainedPreview = new TestElement('retained-image-preview');
+      api.setOpenFileStateForTest(retainedPath, {
+        kind: 'image', mtime_ns: 7, size: 1234, fileIdentity: 'id:1:2',
+      });
+      api.setFetchForTest(async () => response({}, 200, blob));
+      api.renderEditorPreviewPane(retainedPreview, retainedPath, '');
+      await flushAsyncWork();
+      const retainedShell = retainedPreview.children[0];
+      const retainedViewport = retainedShell.querySelector('.file-editor-preview-zoom-viewport');
+      const retainedImage = retainedShell.querySelector('.file-editor-preview-image');
+      retainedImage.naturalWidth = 640;
+      retainedImage.naturalHeight = 480;
+      for (const listener of [...(retainedImage.listeners.get('load') || [])]) listener();
+      const settledReadiness = retainedPreview._previewAsync;
+      await settledReadiness;
+      api.renderEditorPreviewPane(retainedPreview, retainedPath, '');
+      assert.equal(retainedPreview.children[0], retainedShell, 'an eventually ready unchanged image preserves its zoom shell');
+      assert.equal(retainedPreview.children[0].querySelector('.file-editor-preview-zoom-viewport'), retainedViewport, 'an eventually ready unchanged image preserves its nested native scroll owner');
+      assert.equal(retainedPreview.children[0].querySelector('.file-editor-preview-image'), retainedImage, 'an eventually ready unchanged image preserves its settled media owner');
+      assert.equal(retainedPreview._previewAsync, settledReadiness, 'an unchanged retained image preserves its settled readiness owner');
+      api.setOpenFileStateForTest(retainedPath, {
+        kind: 'image', mtime_ns: 7, size: 1234, fileIdentity: 'id:1:3',
+      });
+      api.renderEditorPreviewPane(retainedPreview, retainedPath, '');
+      assert.notEqual(retainedPreview.children[0], retainedShell, 'an atomic image replacement retires the retained zoom surface');
+      api.releaseRawFileMediaSourcesForTest(retainedPreview);
+
+      const brokenPreviewPath = '/repo/retained-broken.png';
+      const brokenPreview = new TestElement('retained-broken-preview');
+      api.setOpenFileStateForTest(brokenPreviewPath, {
+        kind: 'image', mtime_ns: 9, size: 4321, fileIdentity: 'id:1:4',
+      });
+      api.renderEditorPreviewPane(brokenPreview, brokenPreviewPath, '');
+      await flushAsyncWork();
+      const brokenShell = brokenPreview.children[0];
+      const brokenImage = brokenShell.querySelector('.file-editor-preview-image');
+      const brokenReadiness = brokenPreview._previewAsync;
+      const brokenError = (brokenImage.listeners.get('error') || [])[0];
+      assert.equal(typeof brokenError, 'function', 'eventual image failure owns one decode handler');
+      brokenError();
+      await brokenReadiness;
+      assert.equal(brokenShell._previewZoomLifecycleScope, null, 'image failure disposes the detached zoom lifecycle before rendering fallback');
+      assert.equal(brokenPreview.querySelector('.file-editor-preview-zoom-shell'), null, 'image failure leaves no detached retained zoom surface');
     } finally {
       URL.createObjectURL = originalCreateObjectURL;
       URL.revokeObjectURL = originalRevokeObjectURL;
@@ -2055,8 +2173,19 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.editorWrapValue(false), 'off');
     assert.equal(api.editorWrapValue(true), 'soft');
     assert.equal(api.rawFileUrl('/repo/app/a b.txt', {v: 7}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&v=7');
-    assert.equal(api.rawFileUrl('/repo/app/image.png', {v: api.fileEditorImageVersionForTest({mtime: 7, mtime_ns: 7000000001, size: 1234})}), '/api/fs/raw?path=%2Frepo%2Fapp%2Fimage.png&v=7000000001');
-    assert.equal(api.fileEditorImageVersionForTest({mtime: 7, size: 1234}), '7');
+    const mediaVersion = api.rawFileMediaVersion({mtime: 7, mtime_ns: 7000000001, size: 1234, fileIdentity: 'id:1:2'});
+    assert.equal(api.rawFileUrl('/repo/app/image.png', {v: mediaVersion}), `/api/fs/raw?path=%2Frepo%2Fapp%2Fimage.png&v=${encodeURIComponent(mediaVersion)}`);
+    assert.equal(api.fileEditorImageVersionForTest({mtime: 7, size: 1234}), '["","7",1234]');
+    assert.notEqual(
+      api.rawFileMediaVersion({mtime_ns: 7, size: 1234, fileIdentity: 'id:1:2'}),
+      api.rawFileMediaVersion({mtime_ns: 7, size: 1234, fileIdentity: 'id:1:3'}),
+      'atomic inode replacement changes the retained raw-media identity even inside one timestamp tick',
+    );
+    assert.notEqual(
+      api.rawFileMediaVersion({mtime_ns: 7, size: 1234, fileIdentity: 'id:1:2'}),
+      api.rawFileMediaVersion({mtime_ns: 7, size: 1235, fileIdentity: 'id:1:2'}),
+      'same-tick size changes invalidate retained raw media',
+    );
     assert.equal(api.rawFileDownloadUrl('/repo/app/a b.txt'), '/api/fs/raw?path=%2Frepo%2Fapp%2Fa%20b.txt&download=1');
     assert.equal(api.zipFileDownloadUrl('/repo/app/a b'), '/api/fs/zip?path=%2Frepo%2Fapp%2Fa%20b');
     assert.equal(api.downloadFilenameFromContentDisposition('attachment; filename="calvin.20261225-120001.zip"', 'fallback.zip'), 'calvin.20261225-120001.zip');
@@ -2105,7 +2234,8 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalTouchSignedRows(-6, 12), 0.5, 'fractional rows survive for accumulation');
     assert.equal(api.terminalTouchSignedRows(20, 0), 0, 'missing terminal geometry cannot invent scroll rows');
     const source = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
-    assert.ok(/terminalTouchSyntheticMouseSuppressMs = 350[\s\S]*suppressSyntheticMouseUntil = performanceNow\(\) \+ terminalTouchSyntheticMouseSuppressMs/.test(source) && /const suppressSyntheticMouse = event =>[\s\S]*stopImmediatePropagation[\s\S]*\['mousedown', 'mouseup', 'click'\]/.test(source), 'a claimed pan arms one bounded WebKit synthesized-mouse latch while taps leave it disarmed');
+    assert.ok(/terminalTouchSyntheticMouseSuppressMs = 350[\s\S]*function enableTerminalScroll[\s\S]*const armSyntheticMouseSuppression[\s\S]*decision === 'horizontal'[\s\S]*armSyntheticMouseSuppression\(\)[\s\S]*state\.claimed \|\| cancelled[\s\S]*armSyntheticMouseSuppression\(\)/.test(source) && /const suppressSyntheticMouse = event =>[\s\S]*stopImmediatePropagation[\s\S]*\['mousedown', 'mouseup', 'click'\]/.test(source), 'claimed, horizontal-cancelled, and touch-cancelled gestures share one bounded WebKit synthesized-mouse latch while taps leave it disarmed');
+    assert.ok(/for \(const type of \['mousedown', 'mouseup', 'click'\]\)[\s\S]*container\.addEventListener\('click', event =>[\s\S]*document\.activeElement === textarea[\s\S]*focusTerminalFromUserAction\(session\)/.test(source), 'the post-pan latch precedes one click-only iPad focus fallback through xterm\'s existing textarea owner');
   });
 
   test('alternate-screen touch commands use line-wise arrows for every pan cadence', () => {

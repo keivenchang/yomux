@@ -626,6 +626,10 @@ def _fold_bucket(
             result = max(values, key=lambda value: (value.observed_at, value.source_id)).value
         elif operation == "average":
             result = sum(value.value for value in values) / len(values)
+        elif operation == "minimum":
+            result = min(value.value for value in values)
+        elif operation == "maximum":
+            result = max(value.value for value in values)
         elif operation == "average_sources":
             source_values = _sample_values_by_source(values)
             result = sum(sum(items) / len(items) for items in source_values.values()) / len(source_values)
@@ -681,9 +685,15 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
     at = observation.observed_at
     source = observation.source_id
     if observation.family == "cpu":
+        process_percent = _number(payload, "process_percent")
+        system_percent = _number(payload, "system_percent")
         return (
-            _Sample(f"cpu_percent:{source}", "average", _number(payload, "process_percent"), at, source),
-            _Sample("system_cpu_percent", "average", _number(payload, "system_percent"), at, source),
+            _Sample(f"cpu_percent:{source}", "average", process_percent, at, source),
+            _Sample(f"cpu_min_percent:{source}", "minimum", process_percent, at, source),
+            _Sample(f"cpu_max_percent:{source}", "maximum", process_percent, at, source),
+            _Sample("system_cpu_percent", "average", system_percent, at, source),
+            _Sample("system_cpu_min_percent", "minimum", system_percent, at, source),
+            _Sample("system_cpu_max_percent", "maximum", system_percent, at, source),
         )
     if observation.family == "agent_status":
         states = payload["states"]
@@ -749,14 +759,22 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
                 if field in payload
             )
         return tuple(samples)
+    if observation.family == "service_load":
+        samples = [
+            _Sample(f"service_cpu_percent:{source}", "average", _number(payload, "cpu_percent"), at, source),
+            _Sample(f"service_cpu_min_percent:{source}", "minimum", _number(payload, "cpu_percent"), at, source),
+            _Sample(f"service_cpu_max_percent:{source}", "maximum", _number(payload, "cpu_percent"), at, source),
+        ]
+        if payload.get("rss_bytes") is not None:
+            samples.append(_Sample(
+                f"service_rss_bytes:{source}", "average",
+                _number(payload, "rss_bytes"), at, source,
+            ))
+        return tuple(samples)
     fields: Mapping[str, str] | None = {
         "gpu": {
             f"gpu_util_percent:{source}": "util_percent",
             f"gpu_memory_bytes:{source}": "memory_used_bytes",
-        },
-        "service_load": {
-            f"service_cpu_percent:{source}": "cpu_percent",
-            f"service_rss_bytes:{source}": "rss_bytes",
         },
         "system_memory": {
             "system_memory_used_bytes": "used_bytes",

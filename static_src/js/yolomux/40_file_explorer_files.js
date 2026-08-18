@@ -1060,6 +1060,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     cache_path: cachePath,
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
+    detached: repo.detached === true,
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -1075,7 +1076,18 @@ function hydrateFileExplorerRepoInfoCache() {
   for (const item of repos) {
     const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
     const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
-    if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
+    if (!path || !repo) continue;
+    // Drop a persisted cache_path that points INSIDE its own repo root. Records written before the
+    // alias fix stamped the queried descendant, which made every child of a repo satisfy the
+    // root-identity guard and inherit that repo's branch label.
+    const root = normalizeDirectoryPath(repo.root);
+    const stale = root && repo.cache_path && normalizeDirectoryPath(repo.cache_path).startsWith(`${root}/`);
+    setLimitedMapEntry(
+      fileExplorerRepoInfoCache,
+      path,
+      stale ? {...repo, cache_path: root} : repo,
+      fileExplorerMemoryCacheLimit,
+    );
   }
 }
 
@@ -1098,7 +1110,16 @@ function cacheFileExplorerRepoInfo(path, repo, options = {}) {
   const repoRoot = normalizeDirectoryPath(info.root);
   // Finder preserves the path the user opened while macOS APIs can return its physical alias
   // (/tmp versus /private/tmp). Keep both exact cache identities without rewriting the Git root.
-  setLimitedMapEntry(fileExplorerRepoInfoCache, normalized, {...info, cache_path: normalized}, fileExplorerMemoryCacheLimit);
+  // A cache_path is an ALIAS OF the repo root, never a path inside it: stamping it on a descendant
+  // made every child of a repo satisfy the root-identity guard in fileTreeRepoBranch(), so every
+  // entry under an ancestor repo inherited that repo's branch label.
+  const aliasesRepoRoot = !repoRoot || repoRoot === normalized || !normalized.startsWith(`${repoRoot}/`);
+  setLimitedMapEntry(
+    fileExplorerRepoInfoCache,
+    normalized,
+    aliasesRepoRoot ? {...info, cache_path: normalized} : info,
+    fileExplorerMemoryCacheLimit,
+  );
   if (repoRoot && repoRoot !== normalized) {
     setLimitedMapEntry(fileExplorerRepoInfoCache, repoRoot, {...info, cache_path: repoRoot}, fileExplorerMemoryCacheLimit);
   }
@@ -2064,23 +2085,27 @@ function restoreCommittedFileExplorerRootDisplay() {
 }
 
 function repoBranchDisplayText(repo) {
-  return repo?.branch || t('git.detached');
+  return repo?.branch || (repo?.detached === true ? t('git.detached') : '');
 }
 
 function repoInfoSummary(repo) {
   if (!repo?.root) return '';
-  const dirty = Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? `, ${t('git.dirty', {count: Number(repo.dirty_count)})}` : '';
-  const ahead = Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? `, ${t('git.ahead', {count: Number(repo.ahead)})}` : '';
-  const behind = Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? `, ${t('git.behind', {count: Number(repo.behind)})}` : '';
-  const branch = repoBranchDisplayText(repo);
-  return `${repo.name || basenameOf(repo.root)} (${branch}${dirty}${ahead}${behind})`;
+  const details = [
+    repoBranchDisplayText(repo),
+    Number.isFinite(Number(repo.dirty_count)) && Number(repo.dirty_count) > 0 ? t('git.dirty', {count: Number(repo.dirty_count)}) : '',
+    Number.isFinite(Number(repo.ahead)) && Number(repo.ahead) > 0 ? t('git.ahead', {count: Number(repo.ahead)}) : '',
+    Number.isFinite(Number(repo.behind)) && Number(repo.behind) > 0 ? t('git.behind', {count: Number(repo.behind)}) : '',
+  ].filter(Boolean);
+  const name = repo.name || basenameOf(repo.root);
+  return details.length ? `${name} (${details.join(', ')})` : name;
 }
 
 function setFileExplorerRepoSummary(path, repo, error = '') {
   const summary = error ? '' : repoInfoSummary(repo);
+  const branch = repoBranchDisplayText(repo);
   const title = error || (repo?.root ? [
     `${t('popover.repo')}: ${repo.root}`,
-    `${t('common.field.branch')}: ${repoBranchDisplayText(repo)}`,
+    branch ? `${t('common.field.branch')}: ${branch}` : '',
     repo.upstream ? `↗ ${repo.upstream}` : '',
     Number.isFinite(Number(repo.dirty_count)) ? t('git.dirty', {count: repo.dirty_count}) : '',
     Number(repo.ahead) ? t('git.ahead', {count: repo.ahead}) : '',
@@ -2128,7 +2153,8 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
 function repoInfoPopoverHtml(repo) {
   if (!repo?.root) return '';
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
-  rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(repoBranchDisplayText(repo))}</div>`);
+  const branch = repoBranchDisplayText(repo);
+  if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
