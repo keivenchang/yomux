@@ -5,6 +5,7 @@ from tests.browser_helpers.browser_console import assert_only_expected_browser_w
 from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
 from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
 from selenium.webdriver.common.by import By
+from urllib.parse import parse_qs, urlparse
 
 
 def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
@@ -748,23 +749,27 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert metrics["pngRefresh"]["before"].startswith("blob:"), metrics
     assert metrics["pngRefresh"]["after"].startswith("blob:"), metrics
     assert metrics["pngRefresh"]["before"] != metrics["pngRefresh"]["after"], metrics
-    assert metrics["pngRefresh"]["version"] == "11000000001", metrics
-    requested_paths = {request.partition("?")[2] for request in metrics["rawRequests"]}
+    assert metrics["pngRefresh"]["version"] == '["","11000000001",1234]', metrics
+    requested_media = {
+        (query["path"][0], query["v"][0])
+        for request in metrics["rawRequests"]
+        if (query := parse_qs(urlparse(request).query)).get("path") and query.get("v")
+    }
     for expected in (
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.png&v=11",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.png&v=11000000001",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fanimation.apng&v=111",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.jpg&v=12",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fspinner.gif&v=13",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.webp&v=131",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.bmp&v=132",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Ffavicon.ico&v=133",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fphoto.avif&v=134",
-        "path=%2Fhome%2Ftest%2Frepo%2Fassets%2Fdiagram.svg&v=14",
-        "path=%2Fhome%2Ftest%2Frepo%2Fsound.mp3&v=151",
-        "path=%2Fhome%2Ftest%2Frepo%2Fmovie.mp4&v=152",
+        ("/home/test/repo/assets/photo.png", '["","11",1234]'),
+        ("/home/test/repo/assets/photo.png", '["","11000000001",1234]'),
+        ("/home/test/repo/assets/animation.apng", '["","111",1534]'),
+        ("/home/test/repo/assets/photo.jpg", '["","12",2234]'),
+        ("/home/test/repo/assets/spinner.gif", '["","13",3234]'),
+        ("/home/test/repo/assets/photo.webp", '["","131",3334]'),
+        ("/home/test/repo/assets/photo.bmp", '["","132",3434]'),
+        ("/home/test/repo/assets/favicon.ico", '["","133",3534]'),
+        ("/home/test/repo/assets/photo.avif", '["","134",3634]'),
+        ("/home/test/repo/assets/diagram.svg", '["","14",4234]'),
+        ("/home/test/repo/sound.mp3", '["","151",6234]'),
+        ("/home/test/repo/movie.mp4", '["","152",7234]'),
     ):
-        assert expected in requested_paths, metrics
+        assert expected in requested_media, metrics
     assert metrics["svg"]["hasInlineSvg"] is False, metrics
     assert metrics["pdf"]["previewPaneHidden"] is False, metrics
     assert metrics["pdf"]["iframeSrc"].startswith("/api/fs/raw?path="), metrics
@@ -1614,7 +1619,8 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
     assert metrics["previewHidden"] is False, metrics
     assert metrics["imageSrc"].startswith("blob:"), metrics
     assert metrics["imageNaturalWidth"] > 0 and metrics["imageNaturalHeight"] > 0, metrics
-    assert "/api/fs/raw?path=%2Fhome%2Ftest%2Frepo%2Frenamed.bin&v=33" in metrics["rawRequests"], metrics
+    raw_queries = [parse_qs(urlparse(request).query) for request in metrics["rawRequests"]]
+    assert {"path": ["/home/test/repo/renamed.bin"], "v": ['["id:1:2","33",18]']} in raw_queries, metrics
     assert metrics["mode"] == "preview", metrics
     assert len(metrics["errors"]) == 1, metrics
     assert all(expected_api_error.get(key) == value for key, value in metrics["errors"][0].items()), {
@@ -2129,6 +2135,123 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
+
+
+def test_preview_touch_claim_rejects_a_deferred_stale_scroll_restore_across_frames(browser, tmp_path, request):
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+    request.addfinalizer(
+        lambda: browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"], grid_width=720, grid_height=520)
+    geometry = browser.execute_script(
+        """
+        const preview = document.createElement('article');
+        preview.id = 'mobile-preview-scroll-owner';
+        preview.className = 'file-editor-preview-pane-panel markdown-body';
+        preview.style.cssText = 'display:block;position:fixed;left:80px;top:80px;width:480px;height:320px;overflow:auto;touch-action:pan-y;';
+        preview.innerHTML = Array.from({length: 180}, (_, index) => `<p style="height:24px;margin:0">Preview row ${index + 1}</p>`).join('');
+        const path = '/tmp/mobile-preview-scroll-owner.md';
+        const item = fileEditorItemFor(path);
+        setFileState(path, {kind: 'text', content: '# Mobile', original: '# Mobile', dirty: false, language: 'markdown'});
+        setFileEditorViewMode(path, 'split', item);
+        const panel = document.createElement('section');
+        panel.className = 'file-editor-panel';
+        panel.dataset.layoutItem = item;
+        panel.dataset.filePath = path;
+        const content = document.createElement('div');
+        content.className = 'file-editor-content split-preview';
+        const editor = document.createElement('div');
+        editor.style.cssText = 'position:fixed;left:-2000px;top:0;width:480px;height:320px;overflow:auto;';
+        editor.innerHTML = '<div style="height:4320px"></div>';
+        content.append(editor, preview);
+        panel.append(content);
+        panel._cmView = {scrollDOM: editor};
+        document.body.append(panel);
+        panelNodes.set(item, panel);
+        editor.scrollTop = 80;
+        preview.scrollTop = 100;
+        const held = [];
+        const nativeRaf = window.requestAnimationFrame;
+        window.requestAnimationFrame = callback => {
+          held.push(callback);
+          return held.length;
+        };
+        restoreElementScrollPosition(preview, 100, 0, {owner: 'browser-preview-restore', previewSurface: 'markdown'});
+        window.requestAnimationFrame = nativeRaf;
+        window.__mobilePreviewHeldFrames = held;
+        window.__mobilePreviewNativeRaf = nativeRaf;
+        window.__mobilePreviewSplitPanel = panel;
+        const rect = preview.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          startY: rect.top + 230,
+          endY: rect.top + 150,
+          held: held.length,
+          initialTop: preview.scrollTop,
+          initialGeneration: previewScrollUserOwnershipGeneration(preview),
+        };
+        """
+    )
+    assert geometry["held"] == 1 and geometry["initialTop"] == 100, geometry
+
+    def touch_point(y):
+        return {"x": geometry["x"], "y": y, "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}
+
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [touch_point(geometry["startY"])]},
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchMove", "touchPoints": [touch_point(geometry["endY"])]},
+    )
+    claimed = browser.execute_script(
+        """
+        const preview = document.getElementById('mobile-preview-scroll-owner');
+        preview.scrollTop = 260;
+        preview.dispatchEvent(new Event('scroll', {bubbles: false}));
+        const panel = window.__mobilePreviewSplitPanel;
+        panel._previewLayoutScrollUntil = performance.now() + fileEditorPreviewLayoutScrollSyncMs;
+        const syncSource = fileEditorPreviewScrollSyncSource(panel);
+        scheduleFileEditorSplitScrollSync(panel, syncSource);
+        return {top: preview.scrollTop, generation: previewScrollUserOwnershipGeneration(preview), syncSource};
+        """
+    )
+    assert claimed["top"] == 260 and claimed["syncSource"] == "preview", claimed
+    assert claimed["generation"] > geometry["initialGeneration"], {"initial": geometry, "claimed": claimed}
+    browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    try:
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": 720, "height": 420, "deviceScaleFactor": 1, "mobile": True},
+        )
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script("return visualViewport.height <= 420;")
+        )
+        frames = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            const preview = document.getElementById('mobile-preview-scroll-owner');
+            const held = window.__mobilePreviewHeldFrames.splice(0);
+            const tops = [preview.scrollTop];
+            for (const callback of held) {
+              callback(performance.now());
+              tops.push(preview.scrollTop);
+            }
+            const collect = remaining => {
+              tops.push(preview.scrollTop);
+              if (remaining <= 0) return done(tops);
+              window.__mobilePreviewNativeRaf(() => collect(remaining - 1));
+            };
+            collect(4);
+            """
+        )
+    finally:
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    assert len(frames) == 7, frames
+    assert frames[0] >= 260 and frames[1] >= frames[0], frames
+    assert all(current >= previous for previous, current in zip(frames, frames[1:])), frames
+    assert 100 not in frames, frames
 
 
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
@@ -2795,6 +2918,87 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
     assert metrics["rejections"] == [], metrics
 
 
+def test_markdown_preview_numbered_tasks_preserve_labels_and_real_nested_lists(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const markdown = [
+              '- [ ] 1. Render `serversLoad` as small multiples: one labeled row per daemon, one common time domain across every row, and one independently labeled zero-based y-scale per row. A busy daemon may not set the scale for quieter rows, and independent normalization may not erase the displayed percent values.',
+              '- [x] 2. Keep the second number.',
+              '- [ ] 3) Keep the third delimiter.',
+              '- [x] 2.not-a-list',
+              '- [ ] Parent task',
+              '  1. genuine nested one',
+              '  2. genuine nested two',
+            ].join('\\n');
+            delete window.marked;
+            await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = `/static/vendor/marked.min.js?numbered-task-test=${Date.now()}`;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
+              document.head.append(script);
+            });
+            if (typeof window.marked?.parse !== 'function') throw new Error('vendored marked parser is unavailable');
+            const preview = document.createElement('div');
+            preview.className = 'markdown-body file-editor-preview-pane-panel';
+            preview.style.cssText = 'display:block; width:900px; padding:16px;';
+            document.getElementById('grid').append(preview);
+            renderMarkdownPreviewInto(preview, markdown, '/repo/DOIT.md');
+            await preview._previewAsync;
+            const items = Array.from(preview.querySelectorAll('ul.contains-task-list > li.task-list-item'));
+            const item = items[0];
+            const label = item?.querySelector(':scope > .markdown-task-label');
+            const code = label?.querySelector('code');
+            const labels = items.map(task => task.querySelector(':scope > .markdown-task-label'));
+            const genuineNested = labels[4]?.querySelector('ol');
+            const box = node => {
+              const rect = node?.getBoundingClientRect?.();
+              return rect ? {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height} : null;
+            };
+            done({
+              html: preview.innerHTML,
+              parsed: window.marked.parse(markdown, {gfm: true, breaks: true}),
+              itemCount: items.length,
+              item: box(item),
+              label: box(label),
+              code: box(code),
+              labelText: label?.textContent || '',
+              numberTexts: labels.slice(0, 3).map(node => node?.querySelector('.markdown-task-number')?.textContent || ''),
+              malformedText: labels[3]?.textContent || '',
+              malformedNumberCount: labels[3]?.querySelectorAll('.markdown-task-number').length || 0,
+              genuineNestedCount: genuineNested?.children.length || 0,
+              genuineNestedNumberCount: labels[4]?.querySelectorAll('.markdown-task-number').length || 0,
+              directLabelCount: item?.querySelectorAll(':scope > .markdown-task-label').length || 0,
+              codeDisplay: code ? getComputedStyle(code).display : '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["directLabelCount"] == 1, {"itemCount": metrics["itemCount"], "html": metrics["html"], "parsed": metrics["parsed"]}
+    assert metrics["labelText"].lstrip().startswith("1. Render serversLoad as small multiples:"), metrics
+    assert metrics["numberTexts"] == ["1. ", "2. ", "3) "], metrics
+    assert metrics["malformedText"].lstrip().startswith("2.not-a-list"), metrics
+    assert metrics["malformedNumberCount"] == 0, metrics
+    assert metrics["genuineNestedCount"] == 2, metrics
+    assert metrics["genuineNestedNumberCount"] == 0, metrics
+    assert metrics["codeDisplay"] == "inline", metrics
+    assert metrics["label"]["width"] >= metrics["item"]["width"] * 0.9, metrics
+    assert metrics["code"]["width"] < metrics["label"]["width"] * 0.25, metrics
+    assert metrics["label"]["height"] < 120, metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
 def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     metrics = browser.execute_async_script(
@@ -2803,20 +3007,17 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
         (async () => {
           try {
             const {frame} = window.__yolomuxTestHelpers;
-            const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
-            window.marked = {
-              parse(markdown) {
-                const items = [];
-                for (const line of String(markdown || '').split('\\n')) {
-                  const match = line.match(/^\\s*- \\[([ xX])\\]\\s*(.*)$/);
-                  if (!match) continue;
-                  items.push(`<li class="task-list-item"><input type="checkbox" ${match[1].toLowerCase() === 'x' ? 'checked' : ''} disabled> ${escapeHtml(match[2])}</li>`);
-                }
-                return `<ul>${items.join('')}</ul>`;
-              },
-            };
+            delete window.marked;
+            await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = `/static/vendor/marked.min.js?numbered-task-checkbox-test=${Date.now()}`;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error('vendored marked parser failed to load'));
+              document.head.append(script);
+            });
+            if (typeof window.marked?.parse !== 'function') throw new Error('vendored marked parser is unavailable');
             const path = '/home/test/yolomux.dev/TODO.md';
-            const original = '- [ ] first task\\n- [x] second task\\n';
+            const original = '- [ ] 2. first task\\n- [x] 3) second task\\n';
             const item = fileEditorItemFor(path);
             setFileState(path, {
               kind: 'text',
@@ -2849,7 +3050,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             };
             const first = panel.querySelector('.file-editor-preview-pane-panel input.markdown-task-checkbox');
             first.click();
-            await waitFor(() => (fileState.get(path)?.content || '').startsWith('- [x] first task'));
+            await waitFor(() => (fileState.get(path)?.content || '').startsWith('- [x] 2. first task'));
             await frame();
             await frame();
             const after = {
@@ -2875,7 +3076,7 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
     assert metrics["before"]["ready"] is True, metrics
     assert metrics["before"]["checked"] == [False, True], metrics
     assert metrics["before"]["disabled"] == [False, False], metrics
-    assert metrics["after"]["content"] == "- [x] first task\n- [x] second task\n", metrics
+    assert metrics["after"]["content"] == "- [x] 2. first task\n- [x] 3) second task\n", metrics
     assert metrics["after"]["dirty"] is True, metrics
     assert metrics["after"]["checked"] == [True, True], metrics
     assert metrics["after"]["sourceLines"] == ["1", "2"], metrics
@@ -3180,11 +3381,28 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               try {
                 const {frame} = window.__yolomuxTestHelpers;
                 const waitFor = window.__yolomuxTestWaitFor;
-                const waitForScrollSyncReady = (...records) => waitFor(
-                  () => records.every(record => !fileEditorScrollSyncBlocked(record)
-                    && (!record?.window || filePreviewPopoutScrollSyncReady(record))),
-                  {timeoutMs: 500, description: 'editor scroll-sync readiness'}
-                );
+                let scrollSyncWaitIndex = 0;
+                const waitForScrollSyncReady = (...records) => {
+                  const waitIndex = ++scrollSyncWaitIndex;
+                  return waitFor(
+                    () => records.every(record => !fileEditorScrollSyncBlocked(record)
+                      && (!record?.window || filePreviewPopoutScrollSyncReady(record))),
+                    {timeoutMs: 500, description: `editor scroll-sync readiness ${waitIndex}`}
+                  ).catch(error => {
+                    const diagnostics = records.map(record => ({
+                      blocked: fileEditorScrollSyncBlocked(record),
+                      hasWindow: Boolean(record?.window),
+                      ready: !record?.window || filePreviewPopoutScrollSyncReady(record),
+                      syncFrame: Boolean(record?.scrollSyncFrame),
+                      convergenceFrame: Boolean(record?.scrollConvergenceFrame),
+                      convergence: record?.scrollConvergence || null,
+                      previewAsync: Boolean(record?.previewAsync),
+                      snapshotApply: Boolean(record?.snapshotApply),
+                      navigationWrite: Boolean(record?.navigationWrite),
+                    }));
+                    throw new Error(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`);
+                  });
+                };
                 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
             window.marked = {
               parse(markdown) {
@@ -3462,6 +3680,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             popupThemeButton().click();
             await frame();
             await frame();
+            await waitFor(
+              () => popupDoc.body.classList.contains('editor-theme-dark')
+                && document.body.classList.contains('editor-theme-dark'),
+              {timeoutMs: 1000, description: 'deferred popout dark-theme repaint after scroll input'},
+            );
             const afterPopupThemeDark = {
               bodyClass: document.body.className,
               popupBodyClass: popupDoc.body.className,

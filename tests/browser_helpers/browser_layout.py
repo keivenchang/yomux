@@ -561,6 +561,7 @@ def page_html(body: str, *, extra_css: str = "") -> str:
     <html>
       <head>
         <meta charset="utf-8">
+        {web.MOBILE_VIEWPORT_META}
         {_EMPTY_FAVICON_HTML}
         <style>{app_css()}</style>{extra}
       </head>
@@ -3056,6 +3057,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
     <html>
       <head>
         <meta charset="utf-8">
+        {web.MOBILE_VIEWPORT_META}
         {_EMPTY_FAVICON_HTML}
         <link rel="stylesheet" href="{dockview_css_uri}">
         <style>{css}</style>

@@ -141,6 +141,10 @@ def test_one_fold_handles_average_gauge_rate_status_tokens_and_cost():
     )
     values = _series(bucket)
     assert values["cpu_percent:host"].value == 3
+    assert values["cpu_min_percent:host"].value == 2
+    assert values["cpu_max_percent:host"].value == 4
+    assert values["system_cpu_min_percent"].value == 4
+    assert values["system_cpu_max_percent"].value == 8
     assert values["agent_window_snapshot_revision"].value == 17
     assert values["gpu_util_percent:host"].value == 40
     assert values["browser_api_per_second"].value == 0.1
@@ -774,6 +778,26 @@ def test_dynamic_process_device_and_service_series_keep_source_identity():
         "gpu_util_percent:gpu:0", "gpu_util_percent:gpu:1",
         "service_cpu_percent:web",
     } <= set(_series(bucket))
+
+
+def test_coarse_service_cpu_buckets_publish_average_minimum_and_maximum():
+    observations = tuple(
+        Observation(f"service-statsd-{at}", "service_load", "statsd", at, "epoch", index, {
+            "running": True, "cpu_percent": value, "rss_bytes": 400,
+        })
+        for index, (at, value) in enumerate(((11, 2), (71, 54), (131, 7)), start=1)
+    )
+
+    bucket = next(
+        item for item in _build(_snapshot(observations=observations), until=301).layer(300).buckets
+        if item.start == 0
+    )
+    values = _series(bucket)
+
+    assert values["service_cpu_percent:statsd"].value == 21
+    assert values["service_cpu_min_percent:statsd"].value == 2
+    assert values["service_cpu_max_percent:statsd"].value == 54
+    assert values["service_cpu_percent:statsd"].source_count == 3
 
 
 def test_usage_identity_is_deduplicated_before_token_and_cost_projection():

@@ -566,6 +566,7 @@ _CODEX_MODEL_STATUS_LINE_RE = re.compile(
 _CODEX_PURSUING_GOAL_STATUS_RE = re.compile(r"\bPursuing\s+goal\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CODEX_GOAL_ACHIEVED_STATUS_RE = re.compile(r"\bGoal\s+achieved\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
 _CODEX_GOAL_STATUS_RE = re.compile(r"\b(?:Pursuing\s+goal|Goal\s+achieved)\s*\((?P<duration>[^)]*\d[^)]*)\)", re.IGNORECASE)
+_GOAL_BLOCKED_RE = re.compile(r"\bgoal blocked(?:\s*\([^)]*\))?\b", re.IGNORECASE)
 _CLAUDE_GOAL_ACTIVE_RE = re.compile(
     r"(?:[◉●○◯☉]\s*)?/goal\s+active\s*\((?P<duration>[^)]*\d[^)]*)\)",
     re.IGNORECASE,
@@ -774,17 +775,34 @@ def _matching_evidence_lines(visible_text: str, prompt_type: str | None, questio
     return evidence
 
 
-def _negative_reason(visible_text: str) -> str:
+def _negative_reason(visible_text: str, working_state: dict[str, object] | None = None) -> str:
     visible_text = normalize_capture_text(visible_text)
     if not visible_text.strip():
         return "empty"
     if stale_approval_behind_working(visible_text) or approval_prompt_has_later_activity(visible_text):
         return "stale prompt text has later activity"
-    if visible_agent_working(visible_text):
+    if working_state is None:
+        working_state = visible_agent_working_state(visible_text)
+    if working_state["working"]:
         return "agent is working"
+    if working_state["discarded"]:
+        return f"working row discarded: {working_state['discard_reason']}"
+    if _GOAL_BLOCKED_RE.search(visible_text):
+        return "goal blocked"
     if any(re.match(r"^\s*[❯›>]\s*(?:\S.*)?$", line) for line in visible_text.splitlines()[-8:]):
         return "idle composer"
     return "no current agent prompt"
+
+
+def _nonworking_screen_diagnostics(visible_text: str, working_state: dict[str, object]) -> dict[str, object]:
+    diagnostics: dict[str, object] = {"negative_reason": _negative_reason(visible_text, working_state)}
+    if working_state["discarded"]:
+        diagnostics.update({
+            "working_discard_reason": working_state["discard_reason"],
+            "working_discard_row_from_bottom": working_state["discard_row_from_bottom"],
+            "evidence_lines": [working_state["discard_line"]],
+        })
+    return diagnostics
 
 
 def _hash_prompt_parts(*parts: object) -> str:
@@ -1066,10 +1084,27 @@ def visible_agent_working(visible_text: str) -> bool:
 
     Spec: docs/specs/AGENT_PROMPTS_AND_COMMUNICATION.md#detector-principles
     """
+    return bool(visible_agent_working_state(visible_text)["working"])
+
+
+def visible_agent_working_state(visible_text: str) -> dict[str, object]:
+    """Return the working verdict and any authoritative evidence that discarded it."""
     visible_text = normalize_capture_text(visible_text)
     lines = visible_text.splitlines()[-25:]
     working_index = _last_working_index(lines)
-    return working_index >= 0 and not _working_line_has_later_prompt(lines, working_index)
+    if working_index < 0:
+        return {
+            "working": False,
+            "discarded": False,
+            "discard_reason": "",
+            "discard_line": "",
+            "discard_row_from_bottom": None,
+        }
+    verdict = _working_later_prompt_verdict(lines, working_index)
+    return {
+        "working": not verdict["discarded"],
+        **verdict,
+    }
 
 
 def completed_agent_followup_question(visible_text: str) -> str:
@@ -1097,6 +1132,8 @@ def visible_agent_status_counter(visible_text: str, *, allow_later_prompt: bool 
     counter_index, counter = _last_status_counter(lines)
     if counter_index < 0 or counter is None:
         return None
+    if _is_embedded_working_example(lines, counter_index):
+        return None
     # A live-shell counter requires temporal proof from a changing spinner. Keep it out of the
     # normal one-capture path so stale retained rows do not paint a completed pane green.
     if counter.get("status_live_shell") is True and not allow_later_prompt:
@@ -1116,9 +1153,27 @@ def visible_agent_status_counter(visible_text: str, *, allow_later_prompt: bool 
 
 
 def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool:
+    return bool(_working_later_prompt_verdict(lines, working_index)["discarded"])
+
+
+def _working_later_prompt_verdict(lines: list[str], working_index: int) -> dict[str, object]:
+    """Discard a working row only for recognized, authoritative later activity."""
+    trailing_lines = lines[working_index + 1:]
+    trailing_text = "\n".join(trailing_lines)
+    ask_question = ask_user_question_prompt_text(trailing_text)
+    if ask_question:
+        evidence = ask_question.splitlines()[0]
+        index = _working_evidence_index(lines, working_index + 1, evidence)
+        return _working_discard_verdict(lines, index, "later AskUserQuestion", evidence)
+    choice_question = visible_choice_prompt_text(trailing_text)
+    if choice_question:
+        evidence = choice_question.splitlines()[0]
+        index = _working_evidence_index(lines, working_index + 1, evidence)
+        return _working_discard_verdict(lines, index, "later choice prompt", evidence)
+
     in_codex_queued_followup = False
     in_wrapped_tip = False
-    for line in lines[working_index + 1:]:
+    for index, line in enumerate(lines[working_index + 1:], start=working_index + 1):
         stripped = line.strip()
         # Same bounded-overlay rule as approval_prompt_has_later_activity: a Ctrl-T task list below a
         # working row is chrome, not a later prompt. break so real output above the header still counts.
@@ -1147,9 +1202,41 @@ def _working_line_has_later_prompt(lines: list[str], working_index: int) -> bool
         if re.match(r"^[❯›>]\s+\S", stripped):
             continue
         if _SHELL_PROMPT_RE.search(stripped):
-            return True
-        return True
-    return False
+            return _working_discard_verdict(lines, index, "later shell prompt", stripped)
+        if _is_assistant_output_line(line):
+            return _working_discard_verdict(lines, index, "later assistant output", stripped)
+        # Unknown client chrome is non-authoritative. A future footer shape must not erase a
+        # recognized working signal merely because this detector has not learned that shape yet.
+    return {
+        "discarded": False,
+        "discard_reason": "",
+        "discard_line": "",
+        "discard_row_from_bottom": None,
+    }
+
+
+def _working_discard_verdict(lines: list[str], index: int, reason: str, evidence: str) -> dict[str, object]:
+    return {
+        "discarded": True,
+        "discard_reason": reason,
+        "discard_line": evidence,
+        "discard_row_from_bottom": len(lines) - index - 1,
+    }
+
+
+def _working_evidence_index(lines: list[str], start: int, evidence: str) -> int:
+    return next(
+        (index for index, line in enumerate(lines[start:], start=start) if _clean_prompt_block_line(line) == evidence),
+        start,
+    )
+
+
+def _is_assistant_output_line(line: str) -> bool:
+    stripped = _clean_prompt_block_line(line)
+    return bool(
+        line.strip().startswith(("●", "•"))
+        and not (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped))
+    )
 
 
 def _last_approval_prompt_index(lines: list[str]) -> int:
@@ -1170,9 +1257,26 @@ def _last_approval_prompt_index(lines: list[str]) -> int:
 def _last_working_index(lines: list[str]) -> int:
     last_index = -1
     for index, line in enumerate(lines):
-        if _is_working_line(line):
+        if _is_working_line(line) and not _is_embedded_working_example(lines, index):
             last_index = index
     return last_index
+
+
+def _is_embedded_working_example(lines: list[str], index: int) -> bool:
+    """Recognize an indented status row quoted inside explanatory prose."""
+    status_indent = len(lines[index]) - len(lines[index].lstrip())
+    if status_indent < 2:
+        return False
+    prompt_index = _current_input_prompt_index(lines)
+    if prompt_index <= index:
+        return False
+    previous = next((line for line in reversed(lines[:index]) if line.strip()), "")
+    following = next((line for line in lines[index + 1:prompt_index] if line.strip()), "")
+    if not previous or not following or not previous.rstrip().endswith(":"):
+        return False
+    previous_indent = len(previous) - len(previous.lstrip())
+    following_indent = len(following) - len(following.lstrip())
+    return previous_indent >= status_indent and following_indent >= status_indent
 
 
 def stale_approval_behind_working(visible_text: str) -> bool:
@@ -1299,6 +1403,8 @@ def _is_prompt_trailing_ui_line(line: str) -> bool:
     if _WORK_QUEUE_HINT_RE.search(stripped) or _WORK_QUEUE_ROW_RE.match(stripped):
         return True
     if _CODEX_INPUT_HINT_RE.match(stripped) or _CODEX_MODEL_STATUS_LINE_RE.match(stripped) or _CODEX_GOAL_STATUS_RE.search(stripped):
+        return True
+    if re.match(r"^(?:gpt|o\d|codex)[A-Za-z0-9_.-]*\s+", stripped, re.IGNORECASE) and _GOAL_BLOCKED_RE.search(stripped):
         return True
     if _CLAUDE_AGENT_TOKEN_SUBLINE_RE.search(stripped):
         return True
@@ -1457,7 +1563,7 @@ def visible_choice_prompt_text(visible_text: str) -> str:
         stripped = _clean_prompt_block_line(line)
         if not stripped or _is_footer_hint_line(stripped) or _is_prompt_trailing_ui_line(line) or stripped.startswith(("keivenc@", "$ ")):
             continue
-        if line.strip().startswith(("●", "•")) and not (_QUESTION_RE.match(stripped) or _INLINE_CONFIRMATION_RE.search(stripped)):
+        if _is_assistant_output_line(line):
             break
         if re.match(r"^\s*[❯›>]\s+\S", line):
             break
@@ -1566,9 +1672,8 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
         }
     if counter is not None:
         return _status_counter_screen_state(counter, pane_target=pane_target, now=observation_now)
-    if re.search(r"\bgoal blocked(?:\s*\([^)]*\))?\b", visible_text, flags=re.IGNORECASE):
-        return {"key": "blocked", "text": "goal blocked", "negative_reason": "goal blocked"}
-    if visible_agent_working(visible_text):
+    working_state = visible_agent_working_state(visible_text)
+    if working_state["working"]:
         return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)
     if question:
@@ -1588,7 +1693,9 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
             "evidence_lines": _matching_evidence_lines(visible_text, None, question),
             "prompt_hash": _hash_prompt_parts(question, option_labels),
         }
-    return {"key": "idle", "text": "", "negative_reason": _negative_reason(visible_text)}
+    if _GOAL_BLOCKED_RE.search(visible_text):
+        return {"key": "blocked", "text": "goal blocked", **_nonworking_screen_diagnostics(visible_text, working_state)}
+    return {"key": "idle", "text": "", **_nonworking_screen_diagnostics(visible_text, working_state)}
 
 
 def prompt_hash(pane_text: str) -> str:
@@ -1702,6 +1809,7 @@ __all__ = [
     "selected_prompt_option",
     "stale_approval_behind_working",
     "visible_agent_working",
+    "visible_agent_working_state",
     "visible_agent_status_counter",
     "visible_choice_prompt_text",
     "yes_is_selected",

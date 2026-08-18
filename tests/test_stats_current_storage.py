@@ -28,6 +28,7 @@ from yolomux_lib.stats_current import UnavailableSpan
 from yolomux_lib.stats_current import UsageAtom
 from yolomux_lib.stats_current import UsageAtomTombstone
 from yolomux_lib.stats_current import WRITER_FENCE_FILENAME
+from yolomux_lib.stats_current import resolution as stats_resolution
 from yolomux_lib.stats_current import storage as storage_module
 
 
@@ -1290,6 +1291,73 @@ def test_prune_retains_exactly_24_hours_and_clips_spanning_coverage(tmp_path):
     assert {item.started_at for item in snapshot.coverage_epochs} == {cutoff}
     assert result.source_generation == generation_before + 1
     assert snapshot.schema.source_generation == result.source_generation
+
+
+def test_append_batch_prunes_expired_observations_in_the_same_transaction(tmp_path):
+    now = 200_000.0
+    cutoff = now - RETENTION_SECONDS
+    prune_state = tmp_path / storage_module.PRUNE_STATE_FILENAME
+    prune_state.write_text('{"last_pruned_at":123}\n', encoding="utf-8")
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        store.append_batch(observations=(
+            _observation("cpu", "expired", cutoff - 0.001),
+            _observation("cpu", "boundary", cutoff),
+        ))
+
+        result = store.append_batch(
+            observations=(_observation("cpu", "current", now),),
+            retention_now=now,
+        )
+        snapshot = store.read_snapshot()
+
+    assert [item.source_id for item in snapshot.observations] == ["boundary", "current"]
+    assert result.retention_prune is not None
+    assert result.retention_prune.observations_deleted == 1
+    assert result.source_generation == snapshot.schema.source_generation == 2
+    assert prune_state.read_text(encoding="utf-8") == '{"last_pruned_at":123}\n'
+
+
+def test_append_batch_retention_fails_closed_before_mutation(tmp_path, monkeypatch):
+    path = tmp_path / DATABASE_FILENAME
+    now = 200_000.0
+    with Store.open(path) as store:
+        store.append_batch(observations=(_observation("cpu", "existing", now),))
+        before = store.read_snapshot()
+        monkeypatch.setattr(
+            storage_module,
+            "RETENTION_SECONDS",
+            stats_resolution.MAX_RANGE_SECONDS - 1,
+        )
+
+        with pytest.raises(StatsCurrentError, match="refusing to prune"):
+            store.append_batch(
+                observations=(_observation("cpu", "rejected", now + 1),),
+                retention_now=now + 1,
+            )
+        after = store.read_snapshot()
+
+    assert after == before
+
+
+def test_append_batch_rolls_back_when_retention_prune_fails(tmp_path, monkeypatch):
+    path = tmp_path / DATABASE_FILENAME
+    now = 200_000.0
+    with Store.open(path) as store:
+        before = store.read_snapshot()
+
+        def fail_prune(connection, cutoff):
+            connection.execute("DELETE FROM observations")
+            raise RuntimeError("prune failed")
+
+        monkeypatch.setattr(storage_module, "_prune_retained_facts", fail_prune)
+        with pytest.raises(RuntimeError, match="prune failed"):
+            store.append_batch(
+                observations=(_observation("cpu", "rejected", now),),
+                retention_now=now,
+            )
+        after = store.read_snapshot()
+
+    assert after == before
 
 
 def test_noop_prune_does_not_advance_source_generation(tmp_path):

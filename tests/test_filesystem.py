@@ -1107,6 +1107,34 @@ def test_list_directory_eagerly_returns_git_repo_info_by_default(tmp_path):
     assert entries["repo"]["repo"]["root"] == str(repo)
     assert entries["repo"]["repo"]["name"] == "repo"
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
+    assert entries["repo"]["repo"]["detached"] is False
+
+
+def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    (repo / "tracked.txt").write_text("tracked\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+    git(repo, "checkout", "--detach")
+
+    detached = git_ops.git_repo_info(repo, include_status=False)
+
+    assert detached["branch"] == ""
+    assert detached["detached"] is True
+
+    def failed_git(args, cwd, timeout):
+        return subprocess.CompletedProcess(args, 128, "", "Git metadata unavailable")
+
+    monkeypatch.setattr(git_ops, "git", failed_git)
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+
+    unknown = git_ops.git_repo_info(repo, include_status=False)
+
+    assert unknown["branch"] == ""
+    assert unknown["detached"] is False
 
 
 def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
@@ -1326,6 +1354,7 @@ def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, mon
 
     assert len(calls) == expected_call_count
     assert info["branch"] == ""
+    assert info["detached"] is False
     assert info["upstream"] == ""
     assert info["ahead"] == 0
     assert info["behind"] == 0

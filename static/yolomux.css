@@ -358,7 +358,7 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
-  --touch-row-height: 36px;
+  --touch-row-height: var(--touch-target-min-size);
   --session-label-dir-max-inline-size: clamp(5rem, 12vw, 6.5rem);
   --session-label-detail-max-inline-size: clamp(3.5rem, 8vw, 4rem);
   --tmux-window-tab-max-inline-size: clamp(4.5rem, 12vw, 6rem);
@@ -1813,9 +1813,11 @@ body {
 }
 .app-root {
   position: relative;
+  box-sizing: border-box;
   width: var(--app-root-width, 100vw);
   height: var(--app-root-height, 100vh);
   min-height: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
@@ -2556,12 +2558,15 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }
-/* The phone/iPad Menus root is an accordion, not a desktop-width dropdown. Keep its open sheet inside
-   the visual viewport; command rows may handle their own compact overflow without clipping the page. */
-body.app-topbar-touch-compact .app-menu--nested-root > .app-menu-popover {
+/* Every coarse-pointer top-level menu uses the same bounded sheet. Measured topbar packing may keep
+   the five desktop roots when they fit, so limiting this rule to the compact Menus root left a
+   perfectly valid File menu clipped off the phone viewport. */
+body.app-topbar-touch-compact .app-menu > .app-menu-popover {
   position: fixed;
-  inset-block: calc(var(--topbar-height) + var(--space-4)) var(--space-4);
-  inset-inline: var(--space-4);
+  inset-block-start: calc(max(var(--topbar-height), env(safe-area-inset-top)) + var(--space-4));
+  inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
+  inset-inline-start: max(var(--space-4), env(safe-area-inset-left));
+  inset-inline-end: max(var(--space-4), env(safe-area-inset-right));
   width: auto !important;
   max-width: none;
   max-height: none;
@@ -5403,6 +5408,40 @@ body :is(
   font: 700 var(--js-debug-display-label-font-size)/1.15 var(--ui-font);
   text-align: end;
 }
+.js-debug-service-load-mode-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
+}
+.js-debug-service-load-mode-control label {
+  position: relative;
+  cursor: pointer;
+}
+.js-debug-service-load-mode-control input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+.js-debug-service-load-mode-control span {
+  display: block;
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.js-debug-service-load-mode-control input:checked + span {
+  border-color: var(--active-accent-bright);
+  color: var(--active-accent-bright);
+  background: var(--active-accent-soft);
+}
+.js-debug-service-load-mode-control input:focus-visible + span {
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
 .js-debug-agent-window-detail {
   display: flex;
   flex-wrap: wrap;
@@ -6295,10 +6334,10 @@ body :is(
   fill: var(--accent-sky-strong);
 }
 .js-debug-line--cpu {
-  stroke: var(--js-debug-series-color, var(--active-accent-bright));
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
 }
 .js-debug-line--systemCpu {
-  stroke: var(--bad);
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
 }
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);
@@ -6389,10 +6428,10 @@ body :is(
   overflow: visible;
 }
 .js-debug-legend-swatch--cpu {
-  color: var(--js-debug-series-color, var(--active-accent-bright));
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
 }
 .js-debug-legend-swatch--systemCpu {
-  color: var(--bad);
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
 }
 .js-debug-graph-empty {
   display: grid;
@@ -9885,8 +9924,8 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   inset-block-end: max(var(--space-8), env(safe-area-inset-bottom));
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--touch-target-min-size);
+  height: var(--touch-target-min-size);
   padding: 0;
   border: 1px solid var(--pane-inactive-tab-border);
   border-radius: var(--radius-control);
@@ -9908,8 +9947,8 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
   grid-template-rows: 21px minmax(0, 1fr);
-  width: min(calc(226px + 2em), calc(100% - var(--space-4)));
-  height: min(171px, calc(100% - var(--space-4)));
+  width: min(306px, calc(100% - var(--space-4)));
+  height: min(211px, calc(100% - var(--space-4)));
   max-height: calc(100% - var(--space-4));
   padding: 0;
   overflow: hidden;
@@ -9999,11 +10038,12 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 48px 48px 35px;
+  grid-template-columns: 48px minmax(0, 1fr) 48px 48px var(--touch-row-height);
   gap: var(--space-1);
   overflow: visible;
 }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--tmux-prefix { grid-column: 1; }
+.mobile-terminal-keyrow--primary .mobile-terminal-key--upload { grid-column: 2; }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--backspace { grid-column: 3; }
 .mobile-terminal-keyrow--primary .mobile-terminal-key--more { grid-column: 4; }
 .mobile-terminal-keyrow-shell {
@@ -10039,7 +10079,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   display: none;
 }
 .mobile-terminal-key-content--more {
-  grid-template-columns: repeat(3, minmax(0, 1fr)) 48px 35px;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) 48px var(--touch-row-height);
   grid-template-rows: repeat(3, minmax(var(--touch-row-height), 1fr));
   gap: var(--space-1);
 }
@@ -10854,6 +10894,15 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .panel-toast-stack .toast {
   width: 100%;
+  pointer-events: auto;
+}
+body.app-topbar-touch-compact .attention-alerts {
+  top: calc(var(--topbar-height) + 2 * var(--pane-tab-height) + var(--space-4));
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert {
+  pointer-events: none;
+}
+body.app-topbar-touch-compact .attention-alerts .attention-alert :is(button, a, input, select, [role="button"], [tabindex]) {
   pointer-events: auto;
 }
 .attention-alerts .startup-helper-toast {
@@ -15002,8 +15051,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   margin: 0.2em 0 0;
   accent-color: var(--active-control-bg);
 }
-.markdown-body li.task-list-item > :not(input[type="checkbox"]) {
+.markdown-body li.task-list-item > .markdown-task-label {
   grid-column: 2;
+  min-width: 0;
 }
 /* a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
@@ -16096,6 +16146,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
+.file-editor-upload-panel,
 .file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel {
@@ -16114,6 +16165,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
+.file-editor-upload-panel,
 .file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
@@ -16462,6 +16514,15 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-panel button:disabled {
   opacity: 0.42;
+}
+/* The desktop font-size group is pinned to the pane center. A narrow iPad pane keeps the same compact
+   button geometry but puts that group in flex flow so it cannot cover the mode buttons. */
+body.app-topbar-coarse-pointer .file-editor-toolbar-center {
+  position: static;
+  left: auto;
+  top: auto;
+  transform: none;
+  flex: 0 0 auto;
 }
 .file-editor-preview-find-match {
   color: inherit;

@@ -275,6 +275,8 @@ def filesystem_batch_limits_payload() -> dict[str, int]:
 INLINE_FAVICON_LINK = (
     "<link rel=\"icon\" data-yolomux-favicon href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='10' fill='%2399d441'/%3E%3Ctext x='32' y='47' text-anchor='middle' font-family='Arial,sans-serif' font-size='46' font-weight='900' fill='%23111827'%3EY%3C/text%3E%3C/svg%3E\" type=\"image/svg+xml\">"
 )
+MOBILE_VIEWPORT_CONTENT = "width=device-width, initial-scale=1, viewport-fit=cover"
+MOBILE_VIEWPORT_META = f'<meta name="viewport" content="{MOBILE_VIEWPORT_CONTENT}">'
 
 
 def html_page(
@@ -365,7 +367,7 @@ def html_page(
 <html {html_lang_dir_attrs(bootstrap["locale"])}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{MOBILE_VIEWPORT_META}
 <title>{html.escape(server_string(locale, "app.documentTitle"))}</title>
 {INLINE_FAVICON_LINK}
 <link rel="stylesheet" href="{static_asset_url("vendor/xterm.css")}">
@@ -559,7 +561,7 @@ def login_html(next_path: str = "/", error: str = "", secure: bool = True, curre
 <html {html_lang_dir_attrs(locale)}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{MOBILE_VIEWPORT_META}
 <title>{html.escape(server_string(locale, "login.documentTitle"))}</title>
 {INLINE_FAVICON_LINK}
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">
@@ -640,7 +642,7 @@ def setup_auth_html(current_locale: str = SYSTEM_LOCALE_PREFERENCE, accept_langu
 <html {html_lang_dir_attrs(locale)}>
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+{MOBILE_VIEWPORT_META}
 <title>{html.escape(server_string(locale, "setup.documentTitle"))}</title>
 {INLINE_FAVICON_LINK}
 <link rel="stylesheet" href="{static_asset_url("brand.css")}">

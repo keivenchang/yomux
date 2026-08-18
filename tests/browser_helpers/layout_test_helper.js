@@ -847,6 +847,11 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       },
       body: element('body'),
       createElement: tag => new TestElement('', tag),
+      createTextNode(text) {
+        const node = new TestElement('', '#text');
+        node.textContent = String(text ?? '');
+        return node;
+      },
       documentElement: element('html'),
       execCommand(command) {
         if (String(command || '').toLowerCase() !== 'copy') return false;
@@ -895,6 +900,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     Notification: notification,
     performance: options.performance || {now: () => 0},
     PerformanceObserver: options.PerformanceObserver,
+    ResizeObserver: options.ResizeObserver,
     requestAnimationFrame: options.requestAnimationFrame || (callback => callback()),
     cancelAnimationFrame: options.cancelAnimationFrame || (() => {}),
     setInterval: testSetInterval,
@@ -910,6 +916,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     window: {
       __listeners: windowListeners,
       Notification: notification,
+      ResizeObserver: options.ResizeObserver,
       addEventListener(type, listener) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
@@ -1100,7 +1107,7 @@ globalThis.__layoutTestApi = {
   normalizeFileEditorSaveContentForTest: normalizeFileEditorSaveContent,
   fileEditorTextMetricsForTest: fileEditorTextMetrics,
   fileEditorCountStatusTextForTest: fileEditorCountStatusText,
-  fileEditorImageVersionForTest: fileEditorImageVersion,
+  fileEditorImageVersionForTest: rawFileMediaVersion,
   updateCodeMirrorCursorStatusForTest: updateCodeMirrorCursorStatus,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
@@ -1442,6 +1449,30 @@ globalThis.__layoutTestApi = {
   lineDiffRows,
   fileConflictCompareHtml,
   childPathParts,
+  writeOwnedElementScrollForTest: writeOwnedElementScroll,
+  restoreElementScrollPositionForTest: restoreElementScrollPosition,
+  restorePaneElementScrollStateForTest: restorePaneElementScrollState,
+  applyPreviewZoomSurfaceForTest: applyPreviewZoomSurface,
+  hydratePreviewZoomSurfaceForTest: hydratePreviewZoomSurface,
+  renderFileEditorPreviewSurfaceForTest: renderFileEditorPreviewSurface,
+  renderFileEditorImagePaneForTest: renderFileEditorImagePane,
+  beginFilePreviewPopoutScrollInputForTest: beginFilePreviewPopoutScrollInput,
+  endFilePreviewPopoutScrollInputForTest: endFilePreviewPopoutScrollInput,
+  scheduleFilePreviewPopoutApplyWhenIdleForTest: scheduleFilePreviewPopoutApplyWhenIdle,
+  installPreviewScrollOwnershipCaptureForTest: installPreviewScrollOwnershipCapture,
+  previewScrollUserOwnershipGenerationForTest: previewScrollUserOwnershipGeneration,
+  expirePreviewScrollOwnershipForTest() {
+    previewScrollTraceState.active = null;
+    previewScrollTraceState.last = null;
+  },
+  renderMermaidSourceIntoForTest: renderMermaidSourceInto,
+  renderRawImagePreviewIntoForTest: renderRawImagePreviewInto,
+  schedulePreviewDeferredWorkAfterUserScrollForTest: schedulePreviewDeferredWorkAfterUserScroll,
+  setMermaidApiForTest(value) {
+    window.mermaid = value;
+    mermaidApiPromise = null;
+  },
+  recordTerminalMobileInputTraceForTest: recordTerminalMobileInputTrace,
   debugModeEnabledForTest() { return debugModeEnabled; },
   debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
@@ -1459,6 +1490,8 @@ globalThis.__layoutTestApi = {
     };
   },
   debugEventCountsForTest: debugEventCounts,
+  debugMobileCaptureSnapshotForTest: debugMobileCaptureSnapshot,
+  debugMobileCaptureTextForClipboardForTest: debugMobileCaptureTextForClipboard,
   debugGraphExactResolutionChoicesForTest: debugGraphExactResolutionChoices,
   jsDebugCurrentCoverageIntervalsForTest: jsDebugCurrentCoverageIntervals,
   clearJsDebugGraphDataForTest: clearJsDebugGraphData,
@@ -1731,6 +1764,9 @@ globalThis.__layoutTestApi = {
   noteTerminalExplicitInputForTest: noteTerminalExplicitInput,
   handleTerminalDataForTest: handleTerminalData,
   terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
+  ensureFileUploadChooserForTest: ensureFileUploadChooser,
+  openFileUploadChooserForSessionForTest: openFileUploadChooserForSession,
+  openFileUploadChooserForEditorForTest: openFileUploadChooserForEditor,
   terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
   terminalDataWithMobileAccessoryModifiersForTest: terminalDataWithMobileAccessoryModifiers,
   terminalMobileAccessoryPalettePlacementForTest: terminalMobileAccessoryPalettePlacement,
@@ -2382,6 +2418,7 @@ globalThis.__layoutTestApi = {
   renderFileEditorPanel,
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
+  fileEditorPreviewScrollSyncSourceForTest: fileEditorPreviewScrollSyncSource,
   sourcePositionForPreviewScrollForTest: sourcePositionForPreviewScroll,
   editorScrollTopForSourcePositionForTest: editorScrollTopForSourcePosition,
   fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
@@ -2456,6 +2493,7 @@ globalThis.__layoutTestApi = {
   changesFolderCollapsedForTest() { return Array.from(changesFolderCollapsed).sort(); },
   changesRepoCollapsedForTest() { return Array.from(changesRepoCollapsed).sort(); },
   rawFileUrl,
+  rawFileMediaVersion,
   rawFileDownloadUrl,
   fetchRawFileBlobForTest: fetchRawFileBlob,
   installRawFileMediaSourceForTest: installRawFileMediaSource,

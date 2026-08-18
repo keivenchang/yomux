@@ -141,7 +141,10 @@ CURRENT_FAMILIES = (
     FamilySpec(
         "cpu", "cpu", 1, 1, FoldKind.AVERAGE,
         (_field("process_percent", NUMBER), _field("system_percent", NUMBER)),
-        ("system_cpu_percent", "process_cpu_percent"), True,
+        (
+            "system_cpu_percent", "system_cpu_min_percent", "system_cpu_max_percent",
+            "process_cpu_percent", "process_cpu_min_percent", "process_cpu_max_percent",
+        ), True,
     ),
     FamilySpec(
         "agent_status", "agent_status", 10, 60, FoldKind.STATUS,
@@ -157,12 +160,17 @@ CURRENT_FAMILIES = (
         ("gpu_util_percent", "gpu_memory_bytes"), True,
     ),
     FamilySpec(
-        "service_load", "service_load", 10, 60, FoldKind.AVERAGE,
+        # Every 10-second display bucket needs multiple real process samples, including history
+        # collected before a browser opens; otherwise its minimum, average, and maximum collapse.
+        "service_load", "service_load", 1, 1, FoldKind.AVERAGE,
         (
             _field("running", BOOLEAN), _field("cpu_percent", NUMBER),
             _field("rss_bytes", NULLABLE_NUMBER),
         ),
-        ("service_cpu_percent", "service_rss_bytes"), True,
+        (
+            "service_cpu_percent", "service_cpu_min_percent",
+            "service_cpu_max_percent", "service_rss_bytes",
+        ), True,
     ),
     FamilySpec(
         "system_memory", "system_memory", 60, 60, FoldKind.GAUGE,

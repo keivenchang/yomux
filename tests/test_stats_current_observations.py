@@ -138,6 +138,7 @@ def test_statsd_browser_status_counts_accepted_authenticated_reports(tmp_path):
 def test_statsd_browser_upload_returns_request_order_receipts_for_accept_and_duplicate(tmp_path):
     current_service = service.StatsCurrentService(
         tmp_path / "stats.sock", tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     current_service.writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
     upload = payload(observations=[
@@ -167,6 +168,7 @@ def test_statsd_browser_upload_returns_request_order_receipts_for_accept_and_dup
 def test_statsd_browser_upload_normalizes_whitespace_event_id_alias_once(tmp_path):
     current_service = service.StatsCurrentService(
         tmp_path / "stats.sock", tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     current_service.writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
     canonical = payload(observations=[{**payload()["observations"][0], "event_id": "page-1:7"}])
@@ -195,6 +197,7 @@ def test_statsd_browser_upload_normalizes_whitespace_event_id_alias_once(tmp_pat
 def test_statsd_browser_upload_rejects_reused_event_identity_without_receipts(tmp_path):
     current_service = service.StatsCurrentService(
         tmp_path / "stats.sock", tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
     )
     current_service.writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
     first = payload()
@@ -479,7 +482,9 @@ def test_statsd_decodes_validates_and_appends_browser_upload(tmp_path):
 
 def test_statsd_appends_accepted_browser_failure_to_durable_jsonl(tmp_path):
     database = tmp_path / storage.DATABASE_FILENAME
-    current_service = service.StatsCurrentService(tmp_path / "stats.sock", database)
+    current_service = service.StatsCurrentService(
+        tmp_path / "stats.sock", database, clock=lambda: 100_000.0,
+    )
     body = json.dumps(payload(observations=[{
         "event_id": "request-failure-1", "family": "browser", "source_id": "browser-private",
         "observed_at": 100.5, "epoch_id": "page-1",

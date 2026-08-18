@@ -3238,6 +3238,10 @@ function enableTerminalScroll(session, term, container) {
   let touchState = null;
   let suppressSyntheticMouseUntil = 0;
 
+  const armSyntheticMouseSuppression = () => {
+    suppressSyntheticMouseUntil = performanceNow() + terminalTouchSyntheticMouseSuppressMs;
+  };
+
   const clearTouchTimer = state => {
     if (!state?.timer) return;
     clearTimeout(state.timer);
@@ -3273,6 +3277,7 @@ function enableTerminalScroll(session, term, container) {
 
   container.addEventListener('touchstart', event => {
     if (event.touches?.length !== 1) {
+      armSyntheticMouseSuppression();
       cancelTouch(touchState);
       touchState = null;
       return;
@@ -3289,6 +3294,9 @@ function enableTerminalScroll(session, term, container) {
       pendingLines: 0,
       timer: 0,
     };
+    recordTerminalMobileInputTrace(session, 'touch-start', {
+      touches: event.touches.length, clientX: touch.clientX, clientY: touch.clientY,
+    });
   }, {passive: true});
 
   container.addEventListener('touchmove', event => {
@@ -3309,8 +3317,12 @@ function enableTerminalScroll(session, term, container) {
     }
     if (!state.claimed) {
       const decision = terminalTouchGestureDecision(touch.clientX - state.startX, touch.clientY - state.startY);
+      recordTerminalMobileInputTrace(session, 'touch-decision', {
+        decision, deltaX: touch.clientX - state.startX, deltaY: touch.clientY - state.startY,
+      });
       if (decision === 'pending') return;
       if (decision === 'horizontal') {
+        armSyntheticMouseSuppression();
         cancelTouch(state);
         touchState = null;
         return;
@@ -3333,8 +3345,10 @@ function enableTerminalScroll(session, term, container) {
     const touch = touchForIdentifier(event, state.identifier);
     if (!touch && event.touches?.length) return;
     touchState = null;
+    if (state.claimed || cancelled) {
+      armSyntheticMouseSuppression();
+    }
     if (state.claimed) {
-      suppressSyntheticMouseUntil = performanceNow() + terminalTouchSyntheticMouseSuppressMs;
       event.preventDefault();
       event.stopPropagation();
     }
@@ -3346,6 +3360,7 @@ function enableTerminalScroll(session, term, container) {
       // Panel pointerdown deliberately defers touch focus until this shared
       // classifier proves the gesture was a tap. Focusing xterm sooner opens
       // the iPad keyboard before a vertical pan can claim terminal scroll.
+      recordTerminalMobileInputTrace(session, 'touch-focus-attempt', {gesture: 'tap'});
       focusTerminalFromUserAction(session);
     }
   };
@@ -3363,7 +3378,8 @@ function enableTerminalScroll(session, term, container) {
   });
 
   // iPadOS may synthesize a complete mouse chain after touchend even when touchmove was prevented.
-  // Swallow only that short post-pan window; an unclaimed tap never arms the latch and still focuses.
+  // Swallow only that short post-pan/cancellation window; an unclaimed tap never arms the latch and
+  // still focuses.
   const suppressSyntheticMouse = event => {
     if (performanceNow() > suppressSyntheticMouseUntil) return;
     event.preventDefault();
@@ -3374,6 +3390,18 @@ function enableTerminalScroll(session, term, container) {
   for (const type of ['mousedown', 'mouseup', 'click']) {
     container.addEventListener(type, suppressSyntheticMouse, {capture: true, passive: false});
   }
+
+  // Some iPad WebKit builds finish a short tap through the synthesized click path without leaving
+  // xterm's textarea focused after touchend. A claimed pan is stopped by the latch above; this
+  // fallback therefore retries only an unclaimed terminal tap and keeps xterm's textarea/transport
+  // as the single native-input owner.
+  container.addEventListener('click', event => {
+    if (event.button !== 0 || !eventTargetIsTerminalFocusSurface(event.target)) return;
+    const textarea = term?.textarea || container.querySelector?.('textarea.xterm-helper-textarea');
+    if (document.activeElement === textarea) return;
+    recordTerminalMobileInputTrace(session, 'click-focus-fallback', {textareaPresent: Boolean(textarea)});
+    focusTerminalFromUserAction(session);
+  });
 
   container.addEventListener('wheel', event => {
     if (dispatchingSyntheticWheel) return;

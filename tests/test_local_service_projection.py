@@ -554,7 +554,7 @@ def test_the_collector_is_the_only_path_into_the_projection():
 
 
 def test_the_sampler_reads_the_typed_rows_not_a_reparsed_payload(monkeypatch, tmp_path):
-    """The 10s/60s `service_load` collector emits one sample per inventory service.
+    """The continuous-1-Hz `service_load` collector emits one sample per service.
 
     This is the sampler the DOIT names as the existing periodic observer. It now samples the
     collector's typed rows -- including a watchd row that is running and has real memory,
@@ -597,7 +597,7 @@ class _SamplerAttempt:
     epoch_id = "epoch-1"
     epoch_started_at = 1.0
     scheduled_at = 2.0
-    cadence_seconds = 10.0
+    cadence_seconds = 1.0
     owner_generation = 1
 
 

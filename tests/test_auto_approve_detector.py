@@ -1031,6 +1031,156 @@ def test_visible_agent_working_cases(visible_text, expected_working, expected_ke
 
 
 @pytest.mark.parametrize(
+    "footer",
+    [
+        "  gpt-5.6-sol high · ~/dev/yolomux.dev7771",
+        "  gpt-5.6-sol high · ~/dev/yolomux.dev7771 · Main [default]  Pursuing goal (30m)",
+        "  gpt-5.6-sol high · ~/dev/yolomux.dev7771        Goal blocked (/goal resume)",
+        "  gpt-5.6-sol high  Goal blocked (/goal resume)",
+        "  future-client footer shape",
+        "⏸ plan mode on (shift+tab to cycle) · esc to interrupt",
+        "▶▶ bypass permissions on · 1 shell · esc to interrupt",
+    ],
+)
+def test_working_row_is_unchanged_by_incidental_footer_shape(footer):
+    visible_text = "Working (1s • esc to interrupt)\n" + footer
+
+    assert prompt_detector.visible_agent_working(visible_text) is True
+
+
+def test_later_shell_prompt_discards_working_row_with_diagnostic():
+    visible_text = "Working (1s • esc to interrupt)\nuser@host$ echo done"
+
+    working_state = prompt_detector.visible_agent_working_state(visible_text)
+    screen_state = prompt_detector.agent_screen_state(visible_text)
+
+    assert working_state["working"] is False
+    assert working_state["discarded"] is True
+    assert working_state["discard_reason"] == "later shell prompt"
+    assert working_state["discard_line"] == "user@host$ echo done"
+    assert screen_state["key"] == "idle"
+    assert screen_state["negative_reason"] == "working row discarded: later shell prompt"
+    assert screen_state["evidence_lines"] == ["user@host$ echo done"]
+
+
+def test_later_assistant_completion_and_bottom_composer_discard_working_row():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "",
+        "• Done. The requested change is complete.",
+        "",
+        "› Explain this codebase",
+        "",
+        "  gpt-5.6-sol high · ~/dev/yolomux.dev7771",
+    ])
+
+    working_state = prompt_detector.visible_agent_working_state(visible_text)
+    screen_state = prompt_detector.agent_screen_state(visible_text)
+
+    assert working_state["working"] is False
+    assert working_state["discard_reason"] == "later assistant output"
+    assert working_state["discard_line"] == "• Done. The requested change is complete."
+    assert screen_state["key"] == "idle"
+
+
+def test_later_generic_choice_prompt_discards_working_row_and_needs_input():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "",
+        "Which backend should I use?",
+        "❯ 1. vLLM",
+        "  2. SGLang",
+    ])
+
+    working_state = prompt_detector.visible_agent_working_state(visible_text)
+    screen_state = prompt_detector.agent_screen_state(visible_text)
+
+    assert working_state["working"] is False
+    assert working_state["discard_reason"] == "later choice prompt"
+    assert screen_state["key"] == "needs-input"
+    assert screen_state["question_text"] == "Which backend should I use?\n1. vLLM\n2. SGLang"
+
+
+def test_later_ask_user_question_discards_working_row_and_needs_input():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "",
+        "Which verifier mode should we use?",
+        "  1. Pane capture",
+        "  2. Transcript capture",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+    ])
+
+    working_state = prompt_detector.visible_agent_working_state(visible_text)
+    screen_state = prompt_detector.agent_screen_state(visible_text)
+
+    assert working_state["working"] is False
+    assert working_state["discard_reason"] == "later AskUserQuestion"
+    assert screen_state["key"] == "needs-input"
+    assert screen_state["question_text"] == "Which verifier mode should we use?"
+
+
+def test_current_generic_choice_beats_stale_working_and_sticky_goal_blocked():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "",
+        "Which backend should I use?",
+        "❯ 1. vLLM",
+        "  2. SGLang",
+        "",
+        "  gpt-5.6-sol high  Goal blocked (/goal resume)",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Which backend should I use?\n1. vLLM\n2. SGLang"
+
+
+def test_current_ask_user_question_beats_stale_working_and_sticky_goal_blocked():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "",
+        "Which verifier mode should we use?",
+        "  1. Pane capture",
+        "  2. Transcript capture",
+        "",
+        "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        "  gpt-5.6-sol high  Goal blocked (/goal resume)",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "needs-input"
+    assert state["question_text"] == "Which verifier mode should we use?"
+
+
+def test_sticky_goal_blocked_without_current_prompt_remains_blocked():
+    visible_text = "  gpt-5.6-sol high  Goal blocked (/goal resume)"
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state == {"key": "blocked", "text": "goal blocked", "negative_reason": "goal blocked"}
+
+
+def test_sticky_goal_blocked_keeps_discarded_working_diagnostic():
+    visible_text = "\n".join([
+        "Working (1s • esc to interrupt)",
+        "user@host$ echo done",
+        "  gpt-5.6-sol high  Goal blocked (/goal resume)",
+    ])
+
+    state = prompt_detector.agent_screen_state(visible_text)
+
+    assert state["key"] == "blocked"
+    assert state["negative_reason"] == "working row discarded: later shell prompt"
+    assert state["working_discard_reason"] == "later shell prompt"
+    assert state["working_discard_row_from_bottom"] == 1
+    assert state["evidence_lines"] == ["user@host$ echo done"]
+
+
+@pytest.mark.parametrize(
     "line, elapsed, tokens",
     [
         ("✽ Tomfoolering… (7m 12s · ↓ 30.1k tokens · almost done thinking with xhigh effort)", 432, 30100),

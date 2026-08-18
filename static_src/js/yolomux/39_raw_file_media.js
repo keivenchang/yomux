@@ -11,6 +11,13 @@ function rawFileUrl(path, params = {}) {
   return `/api/fs/raw?${queryParts.join('&')}`;
 }
 
+function rawFileMediaVersion(state) {
+  const identity = physicalFileIdentityFromPayload(state);
+  const mtime = String(state?.mtime_ns ?? state?.mtime ?? 0);
+  const size = state?.size == null ? null : Number(state.size);
+  return JSON.stringify([identity, mtime, size]);
+}
+
 function rawFileFailureFallback(status, path) {
   if (status === 401) return {key: 'auth.error.authenticationRequired', params: {}, fallback: 'Authentication required.'};
   if (status === 404) return {key: 'common.pathNotFound', params: {path}, fallback: `path not found: ${path}`};
@@ -71,7 +78,7 @@ function rawFileImageFailureResult(path, installed) {
 
 function rawFileImageReadiness(media, path, installed, options = {}) {
   let settle = null;
-  const promise = new Promise(resolve => {
+  const promise = new Promise((resolve, reject) => {
     let promiseSettled = false;
     let failureReported = false;
     const cleanup = () => {
@@ -89,9 +96,11 @@ function rawFileImageReadiness(media, path, installed, options = {}) {
       failureReported = true;
       cleanup();
       const failure = rawFileImageFailureResult(path, installed);
-      resolveOnce(failure);
       releaseRawFileMediaSource(media);
-      options.onDecodeFailure?.(failure.error, failure);
+      Promise.resolve(options.onDecodeFailure?.(failure.error, failure)).then(
+        () => resolveOnce(failure),
+        reject,
+      );
     };
     const handleLoad = () => {
       if (Number(media.naturalWidth || 0) <= 0 || Number(media.naturalHeight || 0) <= 0) {
@@ -122,7 +131,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
   if (media._rawFileAbortController !== controller || options.isCurrent?.() === false) return result;
   media._rawFileAbortController = null;
   if (!result.ok) {
-    if (!result.aborted) options.onFailure?.(result.error, result);
+    if (!result.aborted) await options.onFailure?.(result.error, result);
     return result;
   }
   const objectUrl = URL.createObjectURL(result.blob);
@@ -139,10 +148,12 @@ async function installRawFileMediaSource(media, path, options = {}) {
     return readiness.promise;
   }
   if (typeof options.onDecodeFailure === 'function') {
+    let decodeFailurePromise = null;
     const handleDecodeFailure = () => {
-      if (media._rawFileErrorHandler !== handleDecodeFailure) return;
+      if (media._rawFileErrorHandler !== handleDecodeFailure) return decodeFailurePromise;
       releaseRawFileMediaSource(media);
-      options.onDecodeFailure();
+      decodeFailurePromise = Promise.resolve(options.onDecodeFailure());
+      return decodeFailurePromise;
     };
     media._rawFileErrorHandler = handleDecodeFailure;
     media.addEventListener?.('error', handleDecodeFailure, {once: true});
@@ -152,7 +163,7 @@ async function installRawFileMediaSource(media, path, options = {}) {
     try {
       await media.decode();
     } catch (_) {
-      media._rawFileErrorHandler?.();
+      await media._rawFileErrorHandler?.();
     }
   }
   return installed;

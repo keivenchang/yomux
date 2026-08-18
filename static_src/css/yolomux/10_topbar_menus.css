@@ -693,12 +693,15 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu[data-app-menu="tabs"] > .app-menu-popover {
   max-height: var(--app-menu-tab-max-block-size);
 }
-/* The phone/iPad Menus root is an accordion, not a desktop-width dropdown. Keep its open sheet inside
-   the visual viewport; command rows may handle their own compact overflow without clipping the page. */
-body.app-topbar-touch-compact .app-menu--nested-root > .app-menu-popover {
+/* Every coarse-pointer top-level menu uses the same bounded sheet. Measured topbar packing may keep
+   the five desktop roots when they fit, so limiting this rule to the compact Menus root left a
+   perfectly valid File menu clipped off the phone viewport. */
+body.app-topbar-touch-compact .app-menu > .app-menu-popover {
   position: fixed;
-  inset-block: calc(var(--topbar-height) + var(--space-4)) var(--space-4);
-  inset-inline: var(--space-4);
+  inset-block-start: calc(max(var(--topbar-height), env(safe-area-inset-top)) + var(--space-4));
+  inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
+  inset-inline-start: max(var(--space-4), env(safe-area-inset-left));
+  inset-inline-end: max(var(--space-4), env(safe-area-inset-right));
   width: auto !important;
   max-width: none;
   max-height: none;

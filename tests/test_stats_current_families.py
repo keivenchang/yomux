@@ -17,7 +17,7 @@ def test_manifest_owns_every_current_family_cadence_and_fold():
         "cpu": ("cpu", 1, 1, families.FoldKind.AVERAGE, True),
         "agent_status": ("agent_status", 10, 60, families.FoldKind.STATUS, True),
         "gpu": ("gpu", 10, 60, families.FoldKind.GAUGE, True),
-        "service_load": ("service_load", 10, 60, families.FoldKind.AVERAGE, True),
+        "service_load": ("service_load", 1, 1, families.FoldKind.AVERAGE, True),
         "system_memory": ("system_memory", 60, 60, families.FoldKind.GAUGE, True),
         "agent_tokens": ("agent_tokens", 10, 60, families.FoldKind.RATE, False),
         "cost": ("agent_tokens", 10, 60, families.FoldKind.USAGE, False),
@@ -35,9 +35,11 @@ def test_manifest_owns_every_current_family_cadence_and_fold():
     } == expected
     assert families.FAMILY_BY_NAME["agent_tokens"].cadence_seconds(watched=True) == 10
     assert families.FAMILY_BY_NAME["agent_tokens"].cadence_seconds(watched=False) == 60
-    for name in ("agent_status", "gpu", "service_load"):
+    for name in ("agent_status", "gpu"):
         assert families.FAMILY_BY_NAME[name].cadence_seconds(watched=True) == 10
         assert families.FAMILY_BY_NAME[name].cadence_seconds(watched=False) == 60
+    assert families.FAMILY_BY_NAME["service_load"].cadence_seconds(watched=True) == 1
+    assert families.FAMILY_BY_NAME["service_load"].cadence_seconds(watched=False) == 1
     assert families.FAMILY_BY_NAME["browser"].cadence_seconds(watched=True) is None
     assert families.FAMILY_BY_NAME["cost"].coverage_family == "agent_tokens"
 

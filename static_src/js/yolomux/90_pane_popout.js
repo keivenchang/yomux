@@ -100,12 +100,14 @@ function writePanePopoutDocument(popoutWindow, options = {}) {
   const bodyStyle = options.bodyStyle || panePopoutVariableStyle();
   const style = options.style || '';
   const bodyHtml = options.bodyHtml || '<main class="pane-popout-shell"><section data-pane-popout-root></section></main>';
+  const viewportContent = document.querySelector('meta[name="viewport"]')?.getAttribute('content')
+    || 'width=device-width, initial-scale=1, viewport-fit=cover';
   doc.open();
   doc.write(`<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="${esc(viewportContent)}">
   <title>${esc(title)}</title>
   <link rel="stylesheet" href="${esc(cssHref)}">
   ${style ? `<style>${style}</style>` : ''}

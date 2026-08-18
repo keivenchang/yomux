@@ -8054,7 +8054,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      const keyboardActions = ['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'backspace', 'copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down', 'shift', 'alt', 'cmd', 'command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'];
+      const keyboardActions = ['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'upload', 'backspace', 'copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down', 'shift', 'alt', 'cmd', 'command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'];
       assert.equal(keyboardActions.every(action => keyboardHtml.includes(`data-terminal-mobile-key="${action}"`)), true, 'the touch palette exposes every primary and extra key in one surface');
       const handleIndex = keyboardHtml.indexOf('mobile-terminal-key-grabber');
       const closeIndex = keyboardHtml.indexOf('data-terminal-mobile-close="1"');

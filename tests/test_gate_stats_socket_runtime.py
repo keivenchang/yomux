@@ -87,7 +87,12 @@ def test_two_state_roots_append_usage_atoms_to_their_own_statsd(gate_runtime_pat
             state_dir = tmp_path / name
             database_path = storage.default_database_path(state_dir)
             socket_path = storage.default_socket_path(state_dir)
-            service = stats_service.StatsCurrentService(socket_path, database_path, idle_seconds=60)
+            service = stats_service.StatsCurrentService(
+                socket_path,
+                database_path,
+                idle_seconds=60,
+                clock=lambda: 100_000.0,
+            )
             thread = threading.Thread(target=service.run, daemon=True)
             thread.start()
             assert service.cache_ready_event.wait(20), service._status()

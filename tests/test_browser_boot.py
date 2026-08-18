@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import json
+import subprocess
 from urllib.parse import urlencode
 
 import pytest
@@ -265,6 +266,747 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         assert extended.startswith(marker) and len(extended) > len(marker), extended
     finally:
         browser.execute_script("""const probe = window.__realXtermTouchLongPressProbe; if (probe?.observe) { document.removeEventListener('pointerdown', probe.observe, true); document.removeEventListener('contextmenu', probe.observe, true); if (probe.originalExecCommand) document.execCommand = probe.originalExecCommand; }""")
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+        stop_browser_server(server, thread, browser=browser)
+        stop_isolated_browser_app(runtime)
+
+
+@pytest.mark.parametrize(
+    "mobile_viewports",
+    [
+        pytest.param(
+            {
+                "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1",
+                "portrait": {"width": 390, "height": 844},
+                "keyboard": {"width": 390, "height": 520},
+                "landscape": {"width": 844, "height": 390},
+            },
+            id="phone",
+        ),
+        pytest.param(
+            {
+                "user_agent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1",
+                "portrait": {"width": 768, "height": 1024},
+                "keyboard": {"width": 768, "height": 640},
+                "landscape": {"width": 1024, "height": 768},
+            },
+            id="tablet",
+        ),
+    ],
+)
+def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_and_rotation(browser, monkeypatch, tmp_path, mobile_viewports):
+    preview_path = tmp_path / "mobile-preview.md"
+    terminal_upload_path = tmp_path / "mobile-terminal-upload.txt"
+    editor_upload_path = tmp_path / "mobile-editor-upload.png"
+    preview_base = "# Mobile Preview\n\n" + "Preview row\n\n" * 80
+    preview_path.write_text(preview_base, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", preview_path.name], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "user.name=YOLOmux Tests",
+            "-c", "user.email=yolomux-tests@example.invalid",
+            "commit", "-qm", "mobile preview base",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    preview_committed = preview_base + "Committed on mobile\n"
+    preview_path.write_text(preview_committed, encoding="utf-8")
+    subprocess.run(["git", "add", preview_path.name], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "user.name=YOLOmux Tests",
+            "-c", "user.email=yolomux-tests@example.invalid",
+            "commit", "-qm", "update mobile preview",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    preview_path.write_text(preview_committed + "Changed on mobile\n", encoding="utf-8")
+    terminal_upload_path.write_text("mobile terminal upload\n", encoding="utf-8")
+    editor_upload_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\x00\x00\x00\x0bIDATx\xda"
+        b"cd\xf8\x0f\x00\x01\x05\x01\x01'\x18\xe3f\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_count=2, session_cwd=tmp_path)
+    session, other_session = runtime.sessions
+    server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    marker = "mobile-native-input"
+    original_user_agent = browser.execute_script("return navigator.userAgent;")
+    pane_heights = []
+
+    def terminal_point(target_session):
+        return WebDriverWait(browser, 12).until(
+            lambda driver: (
+                geometry if (geometry := driver.execute_script(
+                    """
+                    const session = arguments[0], item = terminals.get(session);
+                    const terminal = document.querySelector(`#term-${session} .xterm`);
+                    const buffer = item?.term?.buffer?.active;
+                    const rendered = buffer
+                      ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').some(line => line.length > 0)
+                      : false;
+                    const rect = terminal?.getBoundingClientRect();
+                    if (!rect || !(rect.width > 0) || !(rect.height > 0)
+                        || item?.socket?.readyState !== WebSocket.OPEN || !item?.term?.textarea || !rendered
+                        || (item.fitFrame || 0) !== 0 || (item.fitTimer || 0) !== 0) return null;
+                    const points = [0.2, 0.5, 0.8].flatMap(xFraction =>
+                      [0.25, 0.5, 0.75].map(yFraction => ({
+                        x: rect.left + rect.width * xFraction,
+                        y: rect.top + rect.height * yFraction,
+                      }))
+                    );
+                    return points.find(point => terminal.contains(document.elementFromPoint(point.x, point.y))) || null;
+                    """,
+                    target_session,
+                )) else False
+            ),
+            message=f"real xterm mobile input surface {target_session!r} did not mount",
+        )
+
+    def touch_tap(point, touch_id):
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "id": touch_id}]})
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+
+    def assert_app_geometry(stage):
+        geometry = browser.execute_script(
+            """
+            const box = node => {
+              const rect = node?.getBoundingClientRect();
+              return rect ? {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height} : null;
+            };
+            const root = document.getElementById('appRoot');
+            const grid = document.getElementById('grid');
+            const topbar = document.querySelector('.topbar');
+            return {
+              root: box(root),
+              grid: box(grid),
+              topbar: box(topbar),
+              viewport: {width: visualViewport.width, height: visualViewport.height},
+              documentWidth: document.documentElement.scrollWidth,
+            };
+            """
+        )
+        assert geometry["root"] and geometry["grid"] and geometry["topbar"], {stage: geometry}
+        assert geometry["root"]["left"] >= -1 and geometry["root"]["right"] <= geometry["viewport"]["width"] + 1, {stage: geometry}
+        assert geometry["topbar"]["left"] >= -1 and geometry["topbar"]["right"] <= geometry["viewport"]["width"] + 1, {stage: geometry}
+        assert geometry["grid"]["left"] >= -1 and geometry["grid"]["right"] <= geometry["viewport"]["width"] + 1, {stage: geometry}
+        assert geometry["documentWidth"] <= geometry["viewport"]["width"] + 1, {stage: geometry}
+        return geometry
+
+    def assert_editor_surface_geometry(editor_item, mode):
+        geometry = browser.execute_script(
+            """
+            const panel = panelNodes.get(arguments[0]);
+            const editor = panel?.querySelector('.cm-editor');
+            const content = panel?.querySelector('.cm-content');
+            const rect = node => {
+              const value = node?.getBoundingClientRect();
+              return value ? {left: value.left, top: value.top, right: value.right, bottom: value.bottom, width: value.width, height: value.height} : null;
+            };
+            return {
+              panel: rect(panel),
+              editor: rect(editor),
+              content: rect(content),
+              text: content?.textContent || '',
+              viewport: {width: visualViewport.width, height: visualViewport.height},
+              mode: panel?._cmMode || '',
+            };
+            """,
+            editor_item,
+        )
+        assert geometry["panel"] and geometry["editor"] and geometry["content"], {mode: geometry}
+        assert geometry["mode"] == mode, geometry
+        assert geometry["panel"]["left"] >= -1 and geometry["panel"]["right"] <= geometry["viewport"]["width"] + 1, geometry
+        assert geometry["editor"]["width"] >= min(240, geometry["viewport"]["width"] - 24), geometry
+        assert geometry["editor"]["height"] >= 80 and geometry["content"]["height"] > 0, geometry
+        expected_text = "Changed on mobile" if mode == "diff" else "Mobile Preview"
+        assert expected_text in geometry["text"], geometry
+        return geometry
+
+    def assert_upload_event(event_type, filename, session_name=None):
+        def matching_event(_driver):
+            events = runtime.app.event_log.tail(session=session_name, limit=30)
+            return next((event for event in reversed(events) if event.get("type") == event_type and any(filename in path for path in event.get("details", {}).get("files", []))), False)
+
+        return WebDriverWait(browser, 12).until(matching_event, message=f"{event_type} chooser upload did not reach the shared server upload owner")
+
+    def touch_mobile_menu(touch_id):
+        geometry = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                value if (value := driver.execute_script(
+                    """
+                    const root = document.querySelector('.app-menu--nested-root') || document.querySelector('.app-menu');
+                    const button = root?.querySelector(':scope > .app-menu-button');
+                    const rect = button?.getBoundingClientRect();
+                    return rect && rect.width > 0 && rect.height > 0
+                      ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height, menuId: root.dataset.appMenu}
+                      : null;
+                    """
+                )) else False
+            ),
+            message="mobile topbar did not expose a usable menu owner",
+        )
+        assert geometry["height"] >= 36, geometry
+        touch_tap(geometry, touch_id)
+        opened = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const root = document.querySelector(`.app-menu[data-app-menu="${arguments[0]}"].open`);
+                const sheet = root?.querySelector(':scope > .app-menu-popover');
+                const rect = sheet?.getBoundingClientRect();
+                return rect ? {
+                  left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+                  width: rect.width, height: rect.height,
+                  viewport: {width: visualViewport.width, height: visualViewport.height},
+                  commands: sheet.querySelectorAll('.app-menu-command').length,
+                } : null;
+                """,
+                geometry["menuId"],
+            ),
+            message="trusted touch did not open the mobile menu sheet",
+        )
+        assert opened["commands"] >= 5, opened
+        assert opened["left"] >= -1 and opened["right"] <= opened["viewport"]["width"] + 1, opened
+        assert opened["top"] >= -1 and opened["bottom"] <= opened["viewport"]["height"] + 1, opened
+        touch_tap(geometry, touch_id + 1)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return !document.querySelector(`.app-menu[data-app-menu=\"${arguments[0]}\"].open`);",
+                geometry["menuId"],
+            )
+        )
+
+    def tap_terminal_and_send(stage, touch_id):
+        point = terminal_point(session)
+        browser.execute_script("document.body.tabIndex = -1; document.body.focus();")
+        touch_tap(point, touch_id)
+        focused = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return document.activeElement === terminals.get(arguments[0])?.term?.textarea;",
+                session,
+            ),
+            message=f"terminal tap after {stage} did not focus xterm's native textarea",
+        )
+        assert focused is True
+        pane_geometry = browser.execute_script(
+            """
+            const panel = document.getElementById(`panel-${arguments[0]}`);
+            const rect = panel?.getBoundingClientRect();
+            return {height: rect?.height || 0, viewportHeight: visualViewport.height};
+            """,
+            session,
+        )
+        assert 120 <= pane_geometry["height"] <= pane_geometry["viewportHeight"] + 1, pane_geometry
+        pane_heights.append({"stage": stage, **pane_geometry})
+        stage_marker = f"{marker}-{stage}"
+        browser.execute_cdp_cmd("Input.insertText", {"text": f"echo {stage_marker}"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+        try:
+            output = WebDriverWait(browser, 12).until(
+                lambda driver: (
+                    text if (text := driver.execute_script(
+                        """
+                        const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
+                        const text = buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
+                        return text.split('\\n').filter(line => line.trim() === arguments[1]).length === 1 ? text : '';
+                        """,
+                        session,
+                        stage_marker,
+                    )) else False
+                ),
+                message=f"focused real xterm did not deliver native text after {stage}",
+            )
+        except TimeoutException as exc:
+            state = browser.execute_script(
+                """
+                const item = terminals.get(arguments[0]), buffer = item?.term?.buffer?.active;
+                return {
+                  buffer: buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '',
+                  phases: jsDebugEvents.filter(event => event.type === 'terminal_mobile_input_trace').map(event => event.phase),
+                  socketState: item?.socket?.readyState ?? -1,
+                  textareaValue: item?.term?.textarea?.value || '',
+                };
+                """,
+                session,
+            )
+            pane_capture = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-S", "-100", "-t", f"{session}:")
+            state["tmuxPane"] = pane_capture.stdout
+            raise AssertionError(f"focused real xterm input state after {stage}: {state}") from exc
+        assert sum(line.strip() == stage_marker for line in output.splitlines()) == 1, output
+        return output
+
+    def touch_tab(target_session, touch_id):
+        point = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                geometry if (geometry := driver.execute_script(
+                    """
+                        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${arguments[0]}"]`);
+                        tab?.scrollIntoView({block: 'nearest', inline: 'center'});
+                        const rect = tab?.getBoundingClientRect();
+                        if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+                        const y = rect.top + rect.height / 2;
+                        const hits = [0.2, 0.35, 0.5, 0.65, 0.8].map(fraction => {
+                          const x = rect.left + rect.width * fraction;
+                          const target = document.elementFromPoint(x, y);
+                          return {x, target, label: target ? `${target.tagName}.${target.className}` : 'none'};
+                        });
+                        const hit = hits.find(candidate => tab.contains(candidate.target) && !candidate.target.closest('[data-pane-tab-close], [data-auto-session]'));
+                        const stack = hits[0]?.target?.closest('.panel-toast-stack, .attention-alerts');
+                        const stackRect = stack?.getBoundingClientRect();
+                        return hit ? {x: hit.x, y} : {
+                          blocked: hits.map(candidate => candidate.label),
+                          bodyClass: document.body.className,
+                          rect: {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width},
+                          stack: stackRect ? {top: stackRect.top, bottom: stackRect.bottom, computedTop: getComputedStyle(stack).top} : null,
+                        };
+                    """,
+                    target_session,
+                )) else False
+            ),
+            message=f"mobile tab {target_session!r} did not become tappable",
+        )
+        assert "x" in point, point
+        touch_tap(point, touch_id)
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return activeItemForSide(slotForItem(arguments[0])) === arguments[0];",
+                target_session,
+            ),
+            message=f"mobile tab tap did not activate {target_session!r}",
+        )
+
+    def touch_editor_mode(editor_item, mode, touch_id):
+        point = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                geometry if (geometry := driver.execute_script(
+                    """
+                    const panel = panelNodes.get(arguments[0]);
+                    const button = panel?.querySelector(`[data-action="editor-mode"][data-editor-mode="${arguments[1]}"]`);
+                    const rect = button?.getBoundingClientRect();
+                    return rect && rect.width > 0 && rect.height > 0
+                      ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height}
+                      : null;
+                    """,
+                    editor_item,
+                    mode,
+                )) else False
+            ),
+            message=f"mobile editor mode {mode!r} did not become tappable",
+        )
+        assert abs(point["width"] - 20) <= 1 and abs(point["height"] - 20) <= 1, point
+        touch_tap(point, touch_id)
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return editorViewModeFor(arguments[0], arguments[1]) === arguments[2];",
+                str(preview_path),
+                editor_item,
+                mode,
+            ),
+            message=f"mobile editor mode touch did not activate {mode!r}",
+        )
+
+    def touch_editor_diff(editor_item, touch_id):
+        point = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                geometry if (geometry := driver.execute_script(
+                    """
+                    const panel = panelNodes.get(arguments[0]);
+                    const button = panel?.querySelector('.file-editor-diff-panel:not([hidden])');
+                    const rect = button?.getBoundingClientRect();
+                    return rect && rect.width > 0 && rect.height > 0 && button.disabled !== true
+                      ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height}
+                      : null;
+                    """,
+                    editor_item,
+                )) else False
+            ),
+            message="mobile Diff action did not become tappable",
+        )
+        assert point["width"] >= 44 and abs(point["height"] - 20) <= 1, point
+        touch_tap(point, touch_id)
+        return WebDriverWait(browser, 12).until(
+            lambda driver: driver.execute_script(
+                """
+                const panel = panelNodes.get(arguments[0]);
+                return editorViewModeFor(arguments[1], arguments[0]) === 'diff' && panel?._cmMode === 'diff';
+                """,
+                editor_item,
+                str(preview_path),
+            ),
+            message="mobile Diff action did not activate the shared diff surface",
+        )
+
+    try:
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": mobile_viewports["user_agent"]})
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {**mobile_viewports["portrait"], "deviceScaleFactor": 1, "mobile": True})
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+        search = "?" + urlencode({
+            "debug": "1",
+            "sessions": f"{session},{other_session}",
+            "layout": "slot1",
+            "tabs": f"slot1:{session},{other_session}",
+        })
+        browser.get(f"{origin}/{search}")
+        assert_live_runtime_boot_healthy(browser, "real-xterm-mobile-input", timeout=12)
+        assert_app_geometry("initial-mobile")
+        touch_mobile_menu(21)
+        touch_tab(session, 1)
+        assert marker in tap_terminal_and_send("initial", 2)
+
+        point = terminal_point(session)
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"] + 80, "id": 3}]})
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": point["x"], "y": point["y"] - 80, "id": 3}]})
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pan_trace = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return jsDebugEvents.filter(event => event.type === 'terminal_mobile_input_trace' && event.phase === 'touch-decision').at(-1) || null;"
+            ),
+            message="terminal finger pan never reached the shared touch classifier",
+        )
+        assert pan_trace["decision"] == "vertical", pan_trace
+        assert marker in tap_terminal_and_send("after-pan", 4)
+
+        preview_item = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            openFileInEditor(arguments[0], {name: 'mobile-preview.md'}, {viewMode: 'preview', userInitiated: true})
+              .then(item => done({item, active: activeItemForSide(slotForItem(item))}))
+              .catch(error => done({error: String(error?.stack || error)}));
+            """,
+            str(preview_path),
+        )
+        assert preview_item.get("error") is None and preview_item["active"] == preview_item["item"], preview_item
+        touch_tab(session, 5)
+        assert marker in tap_terminal_and_send("after-preview", 6)
+
+        launcher_point = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                geometry if (geometry := driver.execute_script(
+                    """
+                    const launcher = document.querySelector(`[data-terminal-mobile-toggle="${arguments[0]}"]`);
+                    const rect = launcher?.getBoundingClientRect();
+                    return rect && rect.width > 0 && rect.height > 0
+                      ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2}
+                      : null;
+                    """,
+                    session,
+                )) else False
+            ),
+            message="mobile terminal accessory launcher did not render",
+        )
+        touch_tap(launcher_point, 10)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return terminalMobileAccessoryState(arguments[0])?.open === true;", session))
+        upload_point = browser.execute_script(
+            """
+            const upload = document.querySelector(`[data-terminal-mobile-key="upload"][data-terminal-mobile-session="${arguments[0]}"]`);
+            const rect = upload?.getBoundingClientRect();
+            return rect && rect.width > 0 && rect.height > 0
+              ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height}
+              : null;
+            """,
+            session,
+        )
+        assert upload_point and upload_point["height"] >= 44, upload_point
+        touch_tap(upload_point, 23)
+        terminal_chooser = WebDriverWait(browser, 5).until(
+            lambda driver: driver.find_element("css selector", '.file-upload-chooser[type="file"]')
+        )
+        assert terminal_chooser.get_attribute("accept") == ""
+        terminal_chooser.send_keys(str(terminal_upload_path))
+        terminal_upload_event = assert_upload_event("upload", terminal_upload_path.name, session)
+        assert terminal_upload_event["session"] == session, terminal_upload_event
+        # The terminal upload parent inserts the saved path at the prompt. Clear only this fixture's
+        # pending readline buffer before the next native-input stage so the two journeys do not merge.
+        cleared = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", "C-u")
+        assert cleared.returncode == 0, cleared.stderr or cleared.stdout
+        close_point = browser.execute_script(
+            """
+            const close = document.querySelector(`[data-terminal-mobile-close="${arguments[0]}"]`);
+            const rect = close.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            """,
+            session,
+        )
+        touch_tap(close_point, 11)
+        WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return terminalMobileAccessoryState(arguments[0])?.open === false;", session))
+        assert marker in tap_terminal_and_send("after-accessory", 12)
+
+        before_keyboard_viewport = browser.execute_script("return {width: visualViewport.width, height: visualViewport.height};")
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {**mobile_viewports["keyboard"], "deviceScaleFactor": 1, "mobile": True})
+        after_keyboard_viewport = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                viewport if (viewport := driver.execute_script("return {width: visualViewport.width, height: visualViewport.height};"))["height"] < before_keyboard_viewport["height"] else False
+            ),
+            message="software-keyboard viewport shrink did not reach visualViewport",
+        )
+        assert after_keyboard_viewport["width"] == before_keyboard_viewport["width"], after_keyboard_viewport
+        assert marker in tap_terminal_and_send("after-keyboard-resize", 13)
+
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {**mobile_viewports["landscape"], "deviceScaleFactor": 1, "mobile": True})
+        rotated_viewport = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                viewport if (viewport := driver.execute_script("return {width: visualViewport.width, height: visualViewport.height};"))["width"] > viewport["height"] else False
+            ),
+            message="mobile rotation did not reach landscape visualViewport geometry",
+        )
+        assert rotated_viewport["width"] > before_keyboard_viewport["width"], rotated_viewport
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                """
+                const item = terminals.get(arguments[0]);
+                return (item?.fitFrame || 0) === 0 && (item?.fitTimer || 0) === 0 && item?.remoteResizePending !== true;
+                """,
+                session,
+            ),
+            message="terminal rotation refit did not settle",
+        )
+        assert marker in tap_terminal_and_send("after-rotation", 14)
+
+        browser.execute_cdp_cmd("Input.insertText", {"text": "printf 'mobile-native-input-xx"})
+        for _ in range(2):
+            browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8})
+            browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8})
+        browser.execute_cdp_cmd("Input.insertText", {"text": "ok\\n'"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+        output = WebDriverWait(browser, 12).until(
+            lambda driver: (
+                text if (text := driver.execute_script(
+                    """
+                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
+                    const text = buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
+                    return text.split('\\n').some(line => line.trim() === arguments[1]) ? text : '';
+                    """,
+                    session,
+                    "mobile-native-input-ok",
+                )) else False
+            ),
+            message="focused real xterm did not deliver mobile-style text, Backspace, and Return to the PTY",
+        )
+        assert sum(line.strip() == "mobile-native-input-ok" for line in output.splitlines()) == 1 and "mobile-native-input-xxok" not in output, output
+
+        browser.execute_cdp_cmd("Input.insertText", {"text": "printf 'mobile-native-ime-"})
+        browser.execute_cdp_cmd("Input.imeSetComposition", {"text": "漢", "selectionStart": 1, "selectionEnd": 1})
+        browser.execute_cdp_cmd("Input.insertText", {"text": "漢"})
+        browser.execute_cdp_cmd("Input.insertText", {"text": "\\n'"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+        ime_output = WebDriverWait(browser, 12).until(
+            lambda driver: (
+                text if (text := driver.execute_script(
+                    """
+                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
+                    return buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
+                    """,
+                    session,
+                )).count("mobile-native-ime-漢") == 2 else False
+            ),
+            message="focused real xterm did not commit one IME composition to the PTY",
+        )
+        assert ime_output.count("mobile-native-ime-漢") == 2, ime_output
+
+        paste_marker = "mobile-native-paste"
+        paste_dispatched = browser.execute_script(
+            """
+            const textarea = terminals.get(arguments[0])?.term?.textarea;
+            const transfer = new DataTransfer();
+            transfer.setData('text/plain', arguments[1]);
+            return textarea?.dispatchEvent(new ClipboardEvent('paste', {clipboardData: transfer, bubbles: true, cancelable: true})) ?? false;
+            """,
+            session,
+            f"printf '{paste_marker}\\n'",
+        )
+        assert isinstance(paste_dispatched, bool)
+        WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                "return jsDebugEvents.some(event => event.type === 'terminal_mobile_input_trace' && event.phase === 'paste');"
+            ),
+            message="clipboard payload did not reach xterm's native paste event",
+        )
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+        paste_output = WebDriverWait(browser, 12).until(
+            lambda driver: (
+                text if (text := driver.execute_script(
+                    """
+                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
+                    return buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
+                    """,
+                    session,
+                )).count(paste_marker) == 2 else False
+            ),
+            message="focused real xterm did not deliver one paste through xterm's native event path",
+        )
+        assert paste_output.count(paste_marker) == 2, paste_output
+        trace_phases = browser.execute_script(
+            """
+            return jsDebugEvents
+              .filter(event => event.type === 'terminal_mobile_input_trace')
+              .map(event => event.phase);
+            """
+        )
+        assert "compositionstart" in trace_phases and "compositionend" in trace_phases and "paste" in trace_phases, trace_phases
+
+        touch_tab(preview_item["item"], 15)
+        touch_editor_mode(preview_item["item"], "edit", 16)
+        editor_ready = WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return Boolean(panelNodes.get(arguments[0])?._cmView?.contentDOM);",
+                preview_item["item"],
+            ),
+            message="mobile Markdown editor did not expose the shared CodeMirror surface",
+        )
+        assert editor_ready is True
+        assert_editor_surface_geometry(preview_item["item"], "edit")
+        git_metadata_ready = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            refreshOpenFileGitMetadata(arguments[0]).then(ok => {
+              const panel = panelNodes.get(arguments[1]);
+              renderFileEditorPanel(panel, arguments[1]);
+              const state = fileState.get(arguments[0]);
+              const button = panel?.querySelector('.file-editor-diff-panel');
+              done({
+                ok,
+                gitRoot: state?.gitRoot || '',
+                gitTracked: state?.gitTracked === true,
+                gitHasHistory: state?.gitHasHistory === true,
+                gitHistory: state?.gitHistory || [],
+                diffAvailable: openFileDiffAvailable(state),
+                hidden: button?.hidden === true,
+                disabled: button?.disabled === true,
+              });
+            }, error => done({error: String(error)}));
+            """,
+            str(preview_path),
+            preview_item["item"],
+        )
+        assert git_metadata_ready.get("ok") is True, git_metadata_ready
+        assert git_metadata_ready.get("hidden") is False and git_metadata_ready.get("disabled") is False, git_metadata_ready
+        assert touch_editor_diff(preview_item["item"], 17) is True
+        assert_editor_surface_geometry(preview_item["item"], "diff")
+        touch_editor_mode(preview_item["item"], "edit", 24)
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                "return Boolean(panelNodes.get(arguments[0])?._cmView?.contentDOM);",
+                preview_item["item"],
+            ),
+            message="mobile Markdown editor did not return from Diff",
+        )
+        editor_upload_point = browser.execute_script(
+            """
+            const panel = panelNodes.get(arguments[0]);
+            const upload = panel?.querySelector('.file-editor-upload-panel:not([hidden])');
+            const rect = upload?.getBoundingClientRect();
+            return rect && rect.width > 0 && rect.height > 0
+              ? {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height}
+              : null;
+            """,
+            preview_item["item"],
+        )
+        assert editor_upload_point and abs(editor_upload_point["width"] - 20) <= 1 and abs(editor_upload_point["height"] - 20) <= 1, editor_upload_point
+        touch_tap(editor_upload_point, 25)
+        editor_chooser = WebDriverWait(browser, 5).until(
+            lambda driver: driver.find_element("css selector", '.file-upload-chooser[type="file"]')
+        )
+        assert editor_chooser.get_attribute("accept") == "image/*"
+        editor_chooser.send_keys(str(editor_upload_path))
+        assert_upload_event("editor_upload", editor_upload_path.name)
+        chooser_reference = WebDriverWait(browser, 12).until(
+            lambda driver: (
+                value if "![image](" in (value := driver.execute_script(
+                    "return panelNodes.get(arguments[0])?._cmView?.state?.doc?.toString?.() || '';",
+                    preview_item["item"],
+                )) else False
+            ),
+            message="mobile editor native chooser did not insert one Markdown image reference",
+        )
+        assert chooser_reference.count("![image](") == 1, chooser_reference
+        image_paste_claimed = browser.execute_script(
+            """
+            const panel = panelNodes.get(arguments[0]);
+            const content = panel?._cmView?.contentDOM;
+            if (!content) return false;
+            content.focus();
+            const png = Uint8Array.from(
+              atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='),
+              byte => byte.charCodeAt(0),
+            );
+            const clipboardData = new DataTransfer();
+            clipboardData.items.add(new File([png], 'mobile-checkin.png', {type: 'image/png'}));
+            const event = new ClipboardEvent('paste', {bubbles: true, cancelable: true, clipboardData});
+            content.dispatchEvent(event);
+            return event.defaultPrevented;
+            """,
+            preview_item["item"],
+        )
+        assert image_paste_claimed is True
+        inserted_reference = WebDriverWait(browser, 12).until(
+            lambda driver: (
+                value if (value := driver.execute_script(
+                    "return panelNodes.get(arguments[0])?._cmView?.state?.doc?.toString?.() || '';",
+                    preview_item["item"],
+                )).count("![image](") == 2 else False
+            ),
+            message="mobile editor image paste did not upload and insert one Markdown reference",
+        )
+        assert inserted_reference.count("![image](") == 2, inserted_reference
+        touch_editor_mode(preview_item["item"], "preview", 18)
+        preview_after_upload = WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                """
+                const panel = panelNodes.get(arguments[0]);
+                return Boolean(panel?.querySelector('.file-editor-preview-pane-panel:not([hidden])'));
+                """,
+                preview_item["item"],
+            ),
+            message="mobile editor did not return to Preview through its shared mode action",
+        )
+        assert preview_after_upload is True
+        assert_app_geometry("mobile-after-editor-and-uploads")
+        touch_tab(session, 19)
+        assert marker in tap_terminal_and_send("after-editor-upload", 20)
+        assert len(pane_heights) == 7 and all(item["height"] >= 120 for item in pane_heights), pane_heights
+        mobile_capture = browser.execute_script("return debugMobileCaptureSnapshot();")
+        assert mobile_capture["debugArmed"] is True and "debug=1" in mobile_capture["url"], mobile_capture
+        assert {item["item"] for item in mobile_capture["layout"]["activeItems"]} >= {session}, mobile_capture
+        assert mobile_capture["layout"]["focusedItem"] == session and mobile_capture["layout"]["visualItem"] == session, mobile_capture
+        assert any(item["item"] == preview_item["item"] and "markdown-body" in item["classes"] for item in mobile_capture["preview"]), mobile_capture
+        assert {event["type"] for event in mobile_capture["events"]} >= {"terminal_mobile_input_trace"}, mobile_capture
+
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 1440, "height": 900, "deviceScaleFactor": 1, "mobile": False})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+        desktop_geometry = WebDriverWait(browser, 8).until(
+            lambda driver: (
+                value if (value := driver.execute_script(
+                    """
+                    const menuIds = Array.from(document.querySelectorAll('.app-menu:not(.app-menu--nested-root)')).map(node => node.dataset.appMenu || '');
+                    return !document.body.classList.contains('app-topbar-coarse-pointer') && menuIds.length >= 5
+                      ? {menuIds, compactRoots: document.querySelectorAll('.app-menu--nested-root').length}
+                      : null;
+                    """
+                )) else False
+            ),
+            message="wide desktop viewport did not restore full desktop menus and pointer geometry",
+        )
+        assert set(("file", "view", "tmux", "tabs", "help")).issubset(desktop_geometry["menuIds"]), desktop_geometry
+        assert desktop_geometry["compactRoots"] == 0, desktop_geometry
+        assert_app_geometry("wide-desktop-parity")
+        assert_browser_journey_error_free(browser)
+    finally:
+        browser.execute_cdp_cmd("Browser.resetPermissions", {})
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})

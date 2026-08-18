@@ -888,8 +888,9 @@ body.editor-theme-light .file-editor-content .markdown-body pre code {
   margin: 0.2em 0 0;
   accent-color: var(--active-control-bg);
 }
-.markdown-body li.task-list-item > :not(input[type="checkbox"]) {
+.markdown-body li.task-list-item > .markdown-task-label {
   grid-column: 2;
+  min-width: 0;
 }
 /* a <p> directly inside an <li> (loose lists) carries no vertical margin, so a loose
    list renders as tightly as a tight one. Safe for the file-editor preview too. */
@@ -1982,6 +1983,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-diff-expand-panel,
 .file-editor-theme-panel,
 .file-editor-reload-panel,
+.file-editor-upload-panel,
 .file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-save-panel {
@@ -2000,6 +2002,7 @@ body.editor-theme-light .file-editor-diff-codemirror .cm-merge-b .cm-changedText
 .file-editor-wrap-panel,
 .file-editor-find-panel,
 .file-editor-diff-expand-panel,
+.file-editor-upload-panel,
 .file-editor-popout-preview-panel,
 .file-editor-blame-panel,
 .file-editor-theme-panel {
@@ -2348,6 +2351,15 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-panel button:disabled {
   opacity: 0.42;
+}
+/* The desktop font-size group is pinned to the pane center. A narrow iPad pane keeps the same compact
+   button geometry but puts that group in flex flow so it cannot cover the mode buttons. */
+body.app-topbar-coarse-pointer .file-editor-toolbar-center {
+  position: static;
+  left: auto;
+  top: auto;
+  transform: none;
+  flex: 0 0 auto;
 }
 .file-editor-preview-find-match {
   color: inherit;

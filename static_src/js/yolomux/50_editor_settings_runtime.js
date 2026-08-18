@@ -533,11 +533,20 @@ function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) 
 // All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
 // selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
 function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
-  if (!pane) return;
+  if (!pane) return false;
+  if (previewScrollUserOwnsElementNow(pane)) {
+    void schedulePreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render', () => (
+      renderFileEditorPreviewSurface(host, pane, path, text, options)
+    ));
+    return false;
+  }
+  cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = fileEditorPreviewSelectionOffsets(pane);
-  renderEditorPreviewPane(pane, path, text, options);
+  const rendered = renderEditorPreviewPane(pane, path, text, options);
+  if (rendered === false) return false;
   refreshPreviewFind(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
+  return rendered;
 }
 
 function updateEditorFindButton(button, state, host = null) {

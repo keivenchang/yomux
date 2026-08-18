@@ -476,7 +476,7 @@ async function runLayoutRestoreSuite() {
 
     const mobileActions = api.terminalRuntimeFacadeForTest('mobile-accessory-actions');
     assert.deepStrictEqual(canonical(mobileActions), {
-      primary: ['tmux-prefix', 'backspace', 'more'],
+      primary: ['tmux-prefix', 'upload', 'backspace', 'more'],
       side: ['tab', 'shift', 'ctrl'],
       dpad: ['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down'],
     });
@@ -610,6 +610,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(markdownSource.includes('`Image unavailable: ${target.path || original}`'), false, 'Markdown image fallback retains no raw-English duplicate');
     assert.ok(previewSource.includes("doc.title = t('preview.popout.title', {name: basenameOf(path)});"), 'preview popout title reuses its existing locale key');
     assert.ok(/function panePopoutDefaultTitle[\s\S]*t\('pane\.popout\.title'[\s\S]*function writePanePopoutDocument[\s\S]*panePopoutDefaultTitle\(\)/.test(panePopoutSource), 'generic pane popouts share one localized fallback-title owner');
+    assert.ok(/function writePanePopoutDocument[\s\S]*document\.querySelector\('meta\[name="viewport"\]'\)[\s\S]*viewport-fit=cover[\s\S]*<meta name="viewport" content="\$\{esc\(viewportContent\)\}">/.test(panePopoutSource), 'pane popouts inherit the shared mobile safe-area viewport contract');
     assert.ok(/function terminalTmuxWindowShortcut\(key, options = \{\}\)[\s\S]*terminalTmuxWindowShortcutDefs[\s\S]*t\(definition\.labelKey\)/.test(terminalBootSource), 'tmux prefix and Alt shortcuts share one lazy localized semantic classifier');
     assert.ok(/function terminalTmuxPrefixWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key, \{includePrefixOnly: true, includeNumbers: true\}\)[\s\S]*function terminalTmuxAltWindowShortcut[\s\S]*terminalTmuxWindowShortcut\(key\)/.test(terminalBootSource), 'tmux prefix and Alt wrappers contain no duplicated shortcut labels');
     assert.ok(/function infoDimensionCountText[\s\S]*tPlural\(infoDimensionCountKeys\[key\]/.test(terminalBootSource), 'YO!info child counts use plural-aware locale keys');
@@ -1415,8 +1416,8 @@ async function runLayoutRestoreSuite() {
     assert.ok(anchoredMarkdown.includes('|---|---|'), 'GFM table delimiter rows stay intact before parsing');
     assert.ok(anchoredMarkdown.includes('\n---'), 'thematic breaks stay intact before parsing');
     assert.deepStrictEqual(canonical(api.markdownTaskLineEntries('- [ ] Open\n- [x] Done\ntext')), [
-      {line: 1, checked: false},
-      {line: 2, checked: true},
+      {line: 1, checked: false, inlineNumber: null, inlineNumberText: '', inlineDelimiter: ''},
+      {line: 2, checked: true, inlineNumber: null, inlineNumberText: '', inlineDelimiter: ''},
     ], 'Markdown task lines are detected in source order for Preview checkbox binding');
     assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 1, true), '- [x] Open\n- [x] Done', 'Preview can toggle an unchecked task line to checked source');
     assert.equal(api.markdownTextWithTaskLineToggled('- [ ] Open\n- [x] Done', 2, false), '- [ ] Open\n- [ ] Done', 'Preview can toggle a checked task line to unchecked source');
@@ -1795,10 +1796,59 @@ async function runLayoutRestoreSuite() {
     assert.equal(htmlPreview.children[0].children[1].dataset.htmlPreviewAuth, '1');
     assert.equal((htmlPreview.children[0].children[1].listeners.get('click') || []).length, 1);
     assert.equal(htmlPreview.children[1].className, 'file-editor-html-preview');
-    assert.equal(htmlPreview.children[1].attributes.sandbox, '', 'HTML preview iframe is sandboxed with scripts disabled');
+    assert.equal(htmlPreview.children[1].attributes.sandbox, 'allow-same-origin', 'HTML preview iframe keeps scripts disabled while exposing its native scroll owner to the parent');
+    assert.equal((htmlPreview.children[1].listeners.get('load') || []).length, 1, 'HTML preview load binds its nested touch and scroll owner');
     assert.ok(htmlPreview.children[1].srcdoc.includes('<h1>Hello</h1>'), 'HTML preview renders markup through srcdoc');
     assert.equal(htmlPreview.scrollTop, 37, 'HTML preview refresh preserves vertical scroll');
     assert.equal(htmlPreview.scrollLeft, 6, 'HTML preview refresh preserves horizontal scroll');
+    const htmlFrame = htmlPreview.children[1];
+    api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<style>h1{color:red}</style><h1>Hello</h1><script>window.bad = true</script>');
+    assert.equal(htmlPreview.children[1], htmlFrame, 'an unchanged passive HTML render preserves the iframe and its native internal scroll owner');
+    const embeddedScroller = new TestElement('html-document-scroller');
+    embeddedScroller.scrollTop = 123;
+    embeddedScroller.scrollLeft = 4;
+    const embeddedListeners = new Map();
+    htmlFrame.contentDocument = {
+      scrollingElement: embeddedScroller,
+      documentElement: embeddedScroller,
+      addEventListener(type, listener) {
+        if (!embeddedListeners.has(type)) embeddedListeners.set(type, []);
+        embeddedListeners.get(type).push(listener);
+      },
+    };
+    htmlFrame.listeners.get('load')[0]();
+    embeddedListeners.get('touchstart')[0]({target: embeddedScroller, touches: [{identifier: 8, clientX: 10, clientY: 20}]});
+    embeddedListeners.get('touchmove')[0]({target: embeddedScroller, touches: [{identifier: 8, clientX: 10, clientY: 34}]});
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(htmlPreview), 1, 'an iframe touch claims the outer Preview render owner');
+    assert.equal(api.previewScrollUserOwnershipGenerationForTest(embeddedScroller), 1, 'the same iframe touch claims its native scroll geometry owner');
+    assert.equal(api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<h1>Changed while touching</h1>'), false);
+    assert.equal(htmlPreview.children[1], htmlFrame, 'active iframe touch ownership defers changed HTML instead of replacing the document');
+    api.expirePreviewScrollOwnershipForTest();
+    api.renderEditorPreviewPane(htmlPreview, '/home/test/index.html', '<h1>Changed</h1>');
+    assert.notEqual(htmlPreview.children.at(-1), htmlFrame, 'changed HTML still replaces the sandboxed document');
+    const replacementFrame = htmlPreview.children.at(-1);
+    const replacementScroller = new TestElement('replacement-html-document-scroller');
+    replacementFrame.contentDocument = {
+      scrollingElement: replacementScroller,
+      documentElement: replacementScroller,
+      addEventListener() {},
+    };
+    replacementFrame.listeners.get('load')[0]();
+    assert.deepStrictEqual(
+      {top: replacementScroller.scrollTop, left: replacementScroller.scrollLeft},
+      {top: 123, left: 4},
+      'changed HTML restores the nested document position through the same deferred owner',
+    );
+    const pdfPath = '/home/test/manual.pdf';
+    const pdfPreview = new TestElement('pdf-preview');
+    api.setOpenFileStateForTest(pdfPath, {kind: 'pdf', mtime_ns: 11, size: 4567});
+    api.renderEditorPreviewPane(pdfPreview, pdfPath, '');
+    const pdfFrame = pdfPreview.querySelector('.file-editor-pdf-preview');
+    api.renderEditorPreviewPane(pdfPreview, pdfPath, '');
+    assert.equal(pdfPreview.querySelector('.file-editor-pdf-preview'), pdfFrame, 'an unchanged passive PDF render preserves the iframe native scroll owner');
+    api.setOpenFileStateForTest(pdfPath, {kind: 'pdf', mtime_ns: 12, size: 4567});
+    api.renderEditorPreviewPane(pdfPreview, pdfPath, '');
+    assert.notEqual(pdfPreview.querySelector('.file-editor-pdf-preview'), pdfFrame, 'a changed PDF version replaces the retained iframe');
     api.setFileEditorViewMode('/home/test/app.py', 'split');
     assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
     api.setFileEditorViewMode('/home/test/README.md', 'split');
@@ -3036,6 +3086,12 @@ async function runLayoutRestoreSuite() {
     api.cacheFileExplorerRepoInfoForTest('/tmp/repo-alias', {root: '/private/tmp/repo-alias', name: 'repo-alias', branch: 'alias-branch'});
     const aliasParts = api.fileTreeDisplayParts('/tmp/repo-alias', {kind: 'dir', is_repo: true, name: 'repo-alias'});
     assert.ok(aliasParts.html.includes('alias-branch'), 'a macOS lexical /tmp Finder row retains metadata from its /private/tmp Git root');
+    api.setFileExplorerRepoInfoForTest('/repo/unknown-head', {root: '/repo/unknown-head', name: 'unknown-head', branch: ''});
+    const unknownHeadParts = api.fileTreeDisplayParts('/repo/unknown-head', {kind: 'dir', is_repo: true, name: 'unknown-head'});
+    assert.equal(unknownHeadParts.text, 'unknown-head', 'missing Git branch metadata never invents a detached Finder badge');
+    api.setFileExplorerRepoInfoForTest('/repo/detached-head', {root: '/repo/detached-head', name: 'detached-head', branch: '', detached: true});
+    const detachedHeadParts = api.fileTreeDisplayParts('/repo/detached-head', {kind: 'dir', is_repo: true, name: 'detached-head'});
+    assert.equal(detachedHeadParts.text, 'detached-head [detached]', 'a positively identified detached HEAD keeps its Finder badge');
     // Rich hover popover (replaces the native title tooltip) carries branch / upstream / stat / path.
     const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
     assert.ok(pop.includes('feature/x') && pop.includes('2 ahead') && pop.includes('1 behind') && pop.includes('3 dirty'), 'repo popover shows branch + ahead/behind/dirty');
@@ -3317,6 +3373,844 @@ async function runLayoutRestoreSuite() {
     assert.ok(/\.ci-indicator\.pr-review-required[\s\S]*?line-through/.test(css), '#38: the review-required badge is crossed out');
   });
 
+  test('debug mobile capture names Preview scroll writers and terminal input transitions', () => {
+    const api = loadYolomux('?debug=1', ['1']);
+    const preview = new TestElement('preview');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.scrollTop = 19;
+    preview.scrollLeft = 3;
+    preview.scrollHeight = 900;
+    preview.scrollWidth = 700;
+    preview.clientHeight = 200;
+    preview.clientWidth = 300;
+    api.clearJsDebugEventsForTest();
+    api.writeOwnedElementScrollForTest(preview, {top: 41, left: 7}, 'preview-render-restore', {
+      previewSurface: 'markdown', renderGeneration: 5,
+    });
+    api.recordTerminalMobileInputTraceForTest('1', 'touch-focus-attempt', {
+      gesture: 'tap', textareaFocused: false,
+    });
+    const events = api.jsDebugEventsForTest();
+    const scroll = events.find(event => event.type === 'preview_scroll_trace');
+    const terminal = events.find(event => event.type === 'terminal_mobile_input_trace');
+    assert.deepStrictEqual(canonical({
+      owner: scroll.owner,
+      surface: scroll.surface,
+      beforeTop: scroll.beforeTop,
+      top: scroll.top,
+      beforeLeft: scroll.beforeLeft,
+      left: scroll.left,
+      renderGeneration: scroll.renderGeneration,
+    }), {
+      owner: 'preview-render-restore', surface: 'markdown', beforeTop: 19, top: 41,
+      beforeLeft: 3, left: 7, renderGeneration: 5,
+    });
+    assert.deepStrictEqual(canonical({
+      session: terminal.session,
+      phase: terminal.phase,
+      gesture: terminal.gesture,
+      textareaFocused: terminal.textareaFocused,
+    }), {session: '1', phase: 'touch-focus-attempt', gesture: 'tap', textareaFocused: false});
+
+    const quiet = loadYolomux('', ['1']);
+    const quietPreview = new TestElement('quiet-preview');
+    quietPreview.className = 'file-editor-preview-pane-panel';
+    quiet.clearJsDebugEventsForTest();
+    quiet.writeOwnedElementScrollForTest(quietPreview, {top: 12}, 'preview-render-restore', {previewSurface: 'markdown'});
+    quiet.recordTerminalMobileInputTraceForTest('1', 'touch-focus-attempt', {textareaFocused: false});
+    assert.deepStrictEqual(canonical(quiet.jsDebugEventsForTest()), [], 'mobile capture has zero retention cost without explicit debug mode');
+
+    const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+    const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    const terminalTouchSource = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8');
+    const popoutSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
+    const splitSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
+    const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function bindPreviewScrollOwnershipCapture[\s\S]*touchstart[\s\S]*touchmove[\s\S]*touchend[\s\S]*scroll/.test(coreSource), 'the shared owner captures the native touch/scroll sequence in both parent and embedded documents');
+    assert.ok(/function boot\(\)[\s\S]*installPreviewScrollOwnershipCapture\(\)/.test(terminalSource), 'boot installs the native Preview scroll owner');
+    assert.ok(/function restorePaneElementScrollState[\s\S]*writeDeferredElementScrollIfOwned[\s\S]*pane-view-state-restore/.test(layoutSource), 'pane restore names its Preview scroll writes');
+    assert.ok(/function renderEditorPreviewPane[\s\S]*restoreElementScrollPosition[\s\S]*preview-render-restore/.test(previewSource), 'Preview rerender names immediate and deferred restore writes');
+    assert.ok(/function scheduleMarkdownImageFallbackAfterUserScroll[\s\S]*schedulePreviewDeferredWorkAfterUserScroll/.test(fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8')), 'Markdown image failure uses the shared Preview deferred-work owner');
+    assert.ok(/function renderNativeMediaPreviewInto[\s\S]*scheduleRawMediaFallbackAfterUserScroll/.test(previewSource), 'audio and video failure use the shared Preview deferred-work owner');
+    assert.ok(/function renderEditorPreviewPane[\s\S]*_previewTraceRenderGeneration[\s\S]*renderGeneration/.test(previewSource), 'Preview capture correlates stale restores with the render generation that scheduled them');
+    assert.ok(/function applyPreviewZoomSurface[\s\S]*writeDeferredElementScrollIfOwned[\s\S]*preview-zoom-apply/.test(previewSource), 'zoom hydration names its deferred writes');
+    assert.ok(/function applyPreviewZoomSurface[\s\S]*_previewZoomApplyGeneration[\s\S]*zoomGeneration/.test(previewSource), 'zoom capture correlates deferred fit writes with their scheduling generation');
+    assert.ok(/function createDeferredElementScrollOwner[\s\S]*function createPassiveDeferredElementScrollOwner[\s\S]*function deferredElementScrollOwnerOwnsElement[\s\S]*function writeDeferredElementScrollIfOwned/.test(coreSource), 'deferred restores and geometry share one live-coordinate and gesture-generation ownership check');
+    assert.ok(/function createPassiveDeferredElementScrollOwner[\s\S]*previewScrollUserOwnsElementNow[\s\S]*state\.superseded\.add/.test(coreSource), 'passive restores scheduled after a claimed gesture begin superseded instead of adopting the user position');
+    assert.ok(/previewScrollGestureMaxActiveMs = 30000[\s\S]*startedAt: Date\.now/.test(coreSource), 'a lost mobile touch-end cannot hold Preview work forever');
+    assert.ok(/function writeOwnedElementScroll[\s\S]*gesture[\s\S]*gestureEndedMs/.test(coreSource), 'every product scroll write is correlated with the active or just-ended touch gesture');
+    assert.ok(/function recordJsDebugEvent\(type, payload = \{\}, options = \{\}\)[\s\S]*options\.graph !== false[\s\S]*options\.refresh !== false/.test(coreSource), 'debug events share one retention owner with explicit graph and refresh controls');
+    assert.ok(/recordJsDebugEvent\('preview_scroll_trace',[\s\S]*\{graph: false, refresh: false\}\)/.test(coreSource), 'high-frequency Preview capture cannot feed chart observations or rerender Debug during a gesture');
+    assert.ok(/recordJsDebugEvent\('terminal_mobile_input_trace',[\s\S]*\{graph: false, refresh: false\}\)/.test(coreSource), 'terminal metadata capture stays out of chart observations and cannot rerender Debug while native input is arriving');
+    assert.ok(/function syncFilePreviewPopoutFromPanel[\s\S]*syncScrollPositionByRatio\([^)]*preview-popout-panel-reflection/.test(popoutSource), 'popout reflection names its Preview writes');
+    assert.ok(/function writeFileEditorSplitScrollIfOwned[\s\S]*writeDeferredElementScrollIfOwned[\s\S]*preview-split-reflection/.test(splitSource), 'queued split reflections yield through the shared Preview scroll owner');
+    assert.ok(/function applyPendingLayoutUrlState[\s\S]*createPassiveDeferredElementScrollOwner[\s\S]*applyLayoutUrlScrollSnapshot\(state\.scroll, scrollOwner\)/.test(layoutSource), 'repeated layout URL restores share the same passive scroll owner');
+    for (const phase of ['touch-start', 'touch-decision', 'touch-focus-attempt', 'touch-focus-result', 'focusin', 'keydown', 'beforeinput', 'compositionstart', 'compositionend', 'on-data']) {
+      assert.ok(terminalTouchSource.includes(`'${phase}'`) || terminalSource.includes(`'${phase}'`) || coreSource.includes(`'${phase}'`), `terminal mobile capture includes ${phase}`);
+    }
+  });
+
+  test('debug mobile capture exports raw browser-local evidence without Web Inspector', () => {
+    const api = loadYolomux('?debug=1', ['1']);
+    api.clearJsDebugEventsForTest();
+    api.recordJsDebugEventForTest('preview_scroll_trace', {
+      phase: 'owned-write', owner: 'preview-render-restore', gesture: 7,
+      beforeTop: 148, top: 100, renderGeneration: 5,
+    }, {graph: false, refresh: false});
+    api.recordTerminalMobileInputTraceForTest('1', 'beforeinput', {
+      inputType: 'insertText', textareaFocused: true,
+    });
+    const snapshot = api.debugMobileCaptureSnapshotForTest();
+    assert.equal(snapshot.debugArmed, true);
+    assert.equal(snapshot.url.includes('debug=1'), true);
+    assert.deepStrictEqual(canonical(snapshot.layout.activeItems), [
+      {item: '__finder__', slot: 'slot1'},
+      {item: '1', slot: 'left'},
+    ], 'mobile capture retains every active pane and its current slot');
+    assert.equal(snapshot.layout.slots.left.active, '1', 'mobile capture retains the normalized live tabs/active layout instead of relying on the original URL');
+    assert.equal(snapshot.layout.focusedItem, '', 'mobile capture distinguishes an active tab from the pane that most recently owned focus');
+    assert.equal(snapshot.events.length, 2);
+    assert.deepStrictEqual(canonical(snapshot.events.map(event => ({
+      type: event.type,
+      phase: event.phase,
+      owner: event.owner || '',
+      beforeTop: event.beforeTop ?? null,
+      top: event.top ?? null,
+      renderGeneration: event.renderGeneration ?? null,
+      inputType: event.inputType || '',
+    }))), [
+      {
+        type: 'preview_scroll_trace', phase: 'owned-write', owner: 'preview-render-restore',
+        beforeTop: 148, top: 100, renderGeneration: 5, inputType: '',
+      },
+      {
+        type: 'terminal_mobile_input_trace', phase: 'beforeinput', owner: '',
+        beforeTop: null, top: null, renderGeneration: null, inputType: 'insertText',
+      },
+    ]);
+    assert.deepStrictEqual(JSON.parse(api.debugMobileCaptureTextForClipboardForTest(snapshot)), canonical(snapshot));
+    const source = fs.readFileSync('static_src/js/yolomux/84_debug_observation.js', 'utf8');
+    const panelSource = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
+    assert.ok(/data-js-debug-mobile-copy/.test(source), 'debug events view exposes one raw mobile-capture copy action');
+    assert.ok(/'debug-mobile': \(\) => debugMobileCaptureTextForClipboard\(\)/.test(panelSource), 'the generic copy route keeps the raw JSON owner');
+    assert.ok(/closest\('\[data-copy-feedback-key\]'\)/.test(panelSource), 'all debug copy buttons share one delegated handler');
+  });
+
+  test('deferred Preview restore yields when native scroll takes ownership', () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const preview = new TestElement('preview-scroll-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.scrollTop = 100;
+    preview.scrollLeft = 4;
+
+    api.restoreElementScrollPositionForTest(preview, 100, 4, {
+      owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 8,
+    });
+    assert.equal(frames.length, 1, 'Preview restore schedules one geometry-settling frame');
+    preview.scrollTop = 148;
+    preview.scrollLeft = 9;
+    frames.shift()();
+
+    assert.deepStrictEqual(
+      {top: preview.scrollTop, left: preview.scrollLeft},
+      {top: 148, left: 9},
+      'the deferred restore cannot overwrite coordinates changed by native scrolling',
+    );
+  });
+
+  test('a native vertical Preview gesture invalidates deferred writes before geometry moves', () => {
+    const frames = [];
+    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const preview = new TestElement('preview-touch-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.scrollTop = 100;
+    preview.scrollLeft = 4;
+    api.restoreElementScrollPositionForTest(preview, 100, 4, {
+      owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 11,
+    });
+    api.installPreviewScrollOwnershipCaptureForTest();
+    const touchstart = api.documentListenersForTest('touchstart')[0];
+    const touchmove = api.documentListenersForTest('touchmove')[0];
+    touchstart({
+      target: preview,
+      touches: [{identifier: 7, clientX: 20, clientY: 30}],
+    });
+    touchmove({
+      target: preview,
+      touches: [{identifier: 7, clientX: 21, clientY: 42}],
+    });
+    assert.ok(
+      api.jsDebugEventsForTest().some(event => event.type === 'preview_scroll_trace' && event.phase === 'ownership-claimed'),
+      'the real touch listener claims a vertical gesture before the deferred frame',
+    );
+    api.clearJsDebugEventsForTest();
+    frames.shift()();
+    assert.equal(
+      api.jsDebugEventsForTest().some(event => event.type === 'preview_scroll_trace' && event.phase === 'owned-write'),
+      false,
+      'gesture generation blocks the stale frame even before scrollTop changes',
+    );
+  });
+
+  test('a native Preview scroll claims ownership before touch slop is crossed', () => {
+    const frames = [];
+    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const preview = new TestElement('preview-native-scroll-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.scrollTop = 100;
+    api.restoreElementScrollPositionForTest(preview, 100, 0, {
+      owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 13,
+    });
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 12, clientX: 20, clientY: 30}],
+    });
+    preview.scrollTop = 101;
+    api.documentListenersForTest('scroll').at(-1)({target: preview});
+    frames.shift()();
+
+    assert.equal(preview.scrollTop, 101, 'the native one-pixel movement cancels the stale restore');
+    assert.ok(
+      api.jsDebugEventsForTest().some(event => (
+        event.type === 'preview_scroll_trace'
+        && event.phase === 'ownership-claimed'
+        && event.claimSource === 'native-scroll'
+      )),
+      'the native scroll boundary names the short-gesture claim',
+    );
+  });
+
+  test('a passive Preview restore scheduled after touch ownership cannot adopt the gesture', () => {
+    const frames = [];
+    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const preview = new TestElement('preview-touch-already-owned');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.scrollTop = 148;
+    preview.scrollLeft = 9;
+    api.installPreviewScrollOwnershipCaptureForTest();
+    const touchstart = api.documentListenersForTest('touchstart')[0];
+    const touchmove = api.documentListenersForTest('touchmove')[0];
+    touchstart({target: preview, touches: [{identifier: 10, clientX: 20, clientY: 30}]});
+    touchmove({target: preview, touches: [{identifier: 10, clientX: 20, clientY: 42}]});
+
+    api.restoreElementScrollPositionForTest(preview, 100, 4, {
+      owner: 'preview-render-restore', previewSurface: 'markdown', renderGeneration: 12,
+    });
+    assert.deepStrictEqual(
+      {top: preview.scrollTop, left: preview.scrollLeft},
+      {top: 148, left: 9},
+      'a restore created after ownership was claimed cannot perform even its first stale write',
+    );
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: preview.scrollTop, left: preview.scrollLeft},
+      {top: 148, left: 9},
+      'the same superseded owner also blocks the later frame',
+    );
+  });
+
+  test('a passive Preview rerender waits until touch ownership settles', () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        timers.push({callback, delay: Number(delay)});
+        return timers.length;
+      },
+    });
+    const preview = new TestElement('preview-render-touch-owned');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    api.renderEditorPreviewPane(preview, '/repo/touch-owned.md', '# Before');
+    const renderedChild = preview.children[0];
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 11, clientX: 20, clientY: 30}],
+    });
+    api.documentListenersForTest('touchmove')[0]({
+      target: preview,
+      touches: [{identifier: 11, clientX: 20, clientY: 42}],
+    });
+
+    assert.equal(api.renderEditorPreviewPane(preview, '/repo/touch-owned.md', '# After'), false);
+    assert.equal(preview.children[0], renderedChild, 'an async content refresh cannot replace Preview beneath the active finger');
+    assert.equal(timers.filter(timer => timer.delay === 100).length, 1, 'the latest Preview render is coalesced behind one ownership retry');
+  });
+
+  test('the shared Preview redraw wrapper defers all redraw side effects during native touch ownership', () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        timers.push({callback, delay: Number(delay)});
+        return timers.length;
+      },
+    });
+    const host = new TestElement('preview-redraw-host');
+    const preview = new TestElement('preview-redraw-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    host.appendChild(preview);
+    api.renderEditorPreviewPane(preview, '/repo/redraw.md', '# Before');
+    const renderedChild = preview.firstElementChild;
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 31, clientX: 20, clientY: 30}],
+    });
+    api.documentListenersForTest('touchmove')[0]({
+      target: preview,
+      touches: [{identifier: 31, clientX: 20, clientY: 44}],
+    });
+    preview.scrollTop = 260;
+
+    assert.equal(api.renderFileEditorPreviewSurfaceForTest(host, preview, '/repo/redraw.md', '# After'), false);
+    assert.equal(preview.firstElementChild, renderedChild, 'the wrapper cannot refresh Find or replace Preview beneath the finger');
+    assert.equal(preview.scrollTop, 260, 'the wrapper preserves the user-owned position');
+    assert.equal(timers.filter(timer => timer.delay === 100).length, 1, 'the wrapper owns one deferred redraw');
+  });
+
+  await testAsync('Mermaid completion waits for native Preview touch ownership', async () => {
+    const timers = new Map();
+    let nextTimer = 1;
+    let resolveRender;
+    let renderStarted;
+    const renderStartedPromise = new Promise(resolve => { renderStarted = resolve; });
+    const renderPromise = new Promise(resolve => { resolveRender = resolve; });
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        timers.set(timer, {callback, delay: Number(delay)});
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); },
+    });
+    api.setMermaidApiForTest({
+      initialize() {},
+      render() {
+        renderStarted();
+        return renderPromise;
+      },
+    });
+    const preview = new TestElement('mermaid-preview-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    const host = new TestElement('mermaid-host');
+    host.className = 'mermaid-preview-host';
+    preview.appendChild(host);
+    const completion = api.renderMermaidSourceIntoForTest(host, 'graph TD; A-->B', {
+      path: '/repo/graph.mmd',
+      isCurrent: () => preview.contains(host),
+    });
+    await renderStartedPromise;
+    const loading = host.firstElementChild;
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 21, clientX: 20, clientY: 30}],
+    });
+    preview.scrollTop = 1;
+    api.documentListenersForTest('scroll').at(-1)({target: preview});
+    resolveRender({svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>'});
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(host.firstElementChild, loading, 'Mermaid success cannot replace its loading node beneath the active finger');
+    const held = Array.from(timers.values()).filter(timer => timer.delay === 100);
+    assert.equal(held.length, 1, 'Mermaid completion owns one shared Preview retry');
+    api.expirePreviewScrollOwnershipForTest();
+    held[0].callback();
+    assert.equal(await completion, true);
+    assert.ok(host.classList.contains('file-editor-preview-zoom-shell'), 'the deferred Mermaid completion applies after touch ownership ends');
+  });
+
+  await testAsync('embedded Mermaid completions keep independent deferred-work owners', async () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        timers.push({callback, delay: Number(delay)});
+        return timers.length;
+      },
+    });
+    const preview = new TestElement('embedded-mermaid-owner');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    const firstHost = new TestElement('first-mermaid-host');
+    const secondHost = new TestElement('second-mermaid-host');
+    preview.append(firstHost, secondHost);
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 23, clientX: 20, clientY: 30}],
+    });
+    preview.scrollTop = 1;
+    api.documentListenersForTest('scroll').at(-1)({target: preview});
+    const applied = [];
+    const staleFirst = api.schedulePreviewDeferredWorkAfterUserScrollForTest(firstHost, 'mermaid-completion', () => applied.push('stale-first'));
+    const first = api.schedulePreviewDeferredWorkAfterUserScrollForTest(firstHost, 'mermaid-completion', () => applied.push('first'));
+    const second = api.schedulePreviewDeferredWorkAfterUserScrollForTest(secondHost, 'mermaid-completion', () => applied.push('second'));
+
+    const held = timers.filter(timer => timer.delay === 100);
+    assert.equal(held.length, 2, 'separate embedded Mermaid hosts do not coalesce each other');
+    assert.equal(first, staleFirst, 'the same Mermaid host coalesces to its latest completion');
+    api.expirePreviewScrollOwnershipForTest();
+    held.forEach(timer => timer.callback());
+    await Promise.all([first, second]);
+    assert.deepStrictEqual(applied, ['first', 'second']);
+  });
+
+  await testAsync('raw image failure fallback waits for native Preview touch ownership', async () => {
+    const timers = new Map();
+    let nextTimer = 1;
+    let resolveFetch;
+    const fetchPromise = new Promise(resolve => { resolveFetch = resolve; });
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        timers.set(timer, {callback, delay: Number(delay)});
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); },
+    });
+    api.setFetchForTest(() => fetchPromise);
+    const preview = new TestElement('raw-image-preview-owner');
+    preview.className = 'file-editor-preview-pane-panel image-preview-body';
+    api.renderRawImagePreviewIntoForTest(preview, '/repo/missing.png', {size: 512, mtime_ns: 7});
+    const renderedSurface = preview.firstElementChild;
+    const completion = preview._previewAsync;
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: preview,
+      touches: [{identifier: 22, clientX: 20, clientY: 30}],
+    });
+    preview.scrollTop = 1;
+    api.documentListenersForTest('scroll').at(-1)({target: preview});
+    resolveFetch(jsonResponse({error: 'missing'}, 404));
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(preview.firstElementChild, renderedSurface, 'raw-media failure cannot replace Preview beneath the active finger');
+    const held = Array.from(timers.values()).filter(timer => timer.delay === 100);
+    assert.equal(held.length, 1, 'raw-media failure owns one shared Preview retry');
+    let trackedAsyncSettled = false;
+    preview._previewAsync.then(() => { trackedAsyncSettled = true; });
+    await flushAsyncWork();
+    assert.equal(trackedAsyncSettled, false, '_previewAsync remains pending while the fallback is held');
+    api.expirePreviewScrollOwnershipForTest();
+    held[0].callback();
+    await completion;
+    await preview._previewAsync;
+    assert.equal(trackedAsyncSettled, true, '_previewAsync settles after the deferred fallback applies');
+    assert.ok(preview.querySelector('.file-editor-preview-fallback'), 'the deferred raw-media fallback applies after touch ownership ends');
+  });
+
+  await testAsync('direct image-pane failure keeps its zoom surface through native touch ownership', async () => {
+    const timers = new Map();
+    let nextTimer = 1;
+    let resolveFetch;
+    const fetchPromise = new Promise(resolve => { resolveFetch = resolve; });
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        timers.set(timer, {callback, delay: Number(delay)});
+        return timer;
+      },
+      clearTimeout(timer) { timers.delete(timer); },
+    });
+    api.setFetchForTest(() => fetchPromise);
+    const imagePane = new TestElement('direct-image-pane-owner');
+    imagePane.className = 'file-editor-image-panel';
+    api.renderFileEditorImagePaneForTest(imagePane, '/repo/missing.png', {size: 512, mtime_ns: 7}, () => {});
+    const renderedSurface = imagePane.firstElementChild;
+    const viewport = imagePane.querySelector('.file-editor-preview-zoom-viewport');
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: viewport,
+      touches: [{identifier: 33, clientX: 20, clientY: 30}],
+    });
+    api.documentListenersForTest('touchmove')[0]({
+      target: viewport,
+      touches: [{identifier: 33, clientX: 20, clientY: 44}],
+    });
+    resolveFetch(jsonResponse({error: 'missing'}, 404));
+    await flushAsyncWork();
+    await flushAsyncWork();
+
+    assert.equal(imagePane.firstElementChild, renderedSurface, 'late failure cannot remove the user-owned zoom viewport');
+    const held = Array.from(timers.values()).filter(timer => timer.delay === 100);
+    assert.equal(held.length, 1, 'direct image failure reuses the shared Preview deferred-work owner');
+    api.expirePreviewScrollOwnershipForTest();
+    held[0].callback();
+    await imagePane._previewAsync;
+    assert.ok(imagePane.querySelector('.file-editor-empty-state'), 'the fallback applies after touch ownership ends');
+  });
+
+  test('every repeated Preview restore yields after live coordinates change', () => {
+    const frames = [];
+    const timers = [];
+    let captureTimers = false;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+      setTimeout(callback, delay) {
+        if (captureTimers && Number(delay) === 0) timers.push(callback);
+        return timers.length || 1;
+      },
+    });
+    captureTimers = true;
+    const panel = new TestElement('preview-panel');
+    const preview = new TestElement('preview-scroll-container');
+    preview.className = 'file-editor-preview-pane-panel markdown-body';
+    preview.clientWidth = 320;
+    preview.clientHeight = 240;
+    panel.appendChild(preview);
+
+    api.restorePaneElementScrollStateForTest(panel, {
+      scrollContainers: [{key: 'id:preview-scroll-container', scrollTop: 80, scrollLeft: 2}],
+    });
+    assert.deepStrictEqual({top: preview.scrollTop, left: preview.scrollLeft}, {top: 80, left: 2});
+    preview.scrollTop = 133;
+    preview.scrollLeft = 6;
+    while (frames.length) frames.shift()();
+    while (timers.length) timers.shift()();
+    assert.deepStrictEqual(
+      {top: preview.scrollTop, left: preview.scrollLeft},
+      {top: 133, left: 6},
+      'rAF, nested-rAF, and timeout restores all surrender together',
+    );
+  });
+
+  test('deferred Preview zoom yields when native scroll takes ownership', () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const shell = new TestElement('preview-zoom-shell');
+    const viewport = new TestElement('preview-zoom-viewport');
+    const content = new TestElement('preview-zoom-content');
+    viewport.className = 'file-editor-preview-zoom-viewport';
+    viewport.clientWidth = 320;
+    viewport.clientHeight = 240;
+    viewport.scrollWidth = 900;
+    viewport.scrollHeight = 700;
+    viewport.scrollTop = 40;
+    viewport.scrollLeft = 8;
+    content.naturalWidth = 800;
+    content.naturalHeight = 600;
+    shell._previewZoomState = {mode: 'fit', scale: 1};
+    shell.appendChild(viewport);
+
+    api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'});
+    assert.equal(frames.length, 1, 'zoom hydration schedules one positioning frame');
+    viewport.scrollTop = 96;
+    viewport.scrollLeft = 12;
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 96, left: 12},
+      'deferred fit positioning cannot overwrite native movement',
+    );
+
+    viewport.scrollTop = 55;
+    viewport.scrollLeft = 5;
+    api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'});
+    api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'});
+    assert.equal(frames.length, 2, 'two zoom applications expose both scheduled generations');
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 55, left: 5},
+      'an older zoom generation cannot apply after a newer one is scheduled',
+    );
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 0, left: 0},
+      'the newest unchanged fit generation still applies its requested position',
+    );
+  });
+
+  test('Preview zoom hydration keeps its pre-gesture owner through delayed fit work', () => {
+    const frames = [];
+    const api = loadYolomux('?debug=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const shell = new TestElement('preview-hydration-shell');
+    const toolbar = new TestElement('preview-hydration-toolbar');
+    const viewport = new TestElement('preview-hydration-viewport');
+    const content = new TestElement('preview-hydration-content');
+    toolbar.className = 'file-editor-preview-zoom-toolbar';
+    viewport.className = 'file-editor-preview-zoom-viewport';
+    viewport.clientWidth = 320;
+    viewport.clientHeight = 240;
+    viewport.scrollWidth = 900;
+    viewport.scrollHeight = 700;
+    viewport.scrollTop = 40;
+    viewport.scrollLeft = 8;
+    content.naturalWidth = 800;
+    content.naturalHeight = 600;
+    shell._previewZoomState = {mode: 'fit', scale: 1};
+    shell.appendChild(toolbar);
+    shell.appendChild(viewport);
+
+    assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
+    api.installPreviewScrollOwnershipCaptureForTest();
+    const touchstart = api.documentListenersForTest('touchstart')[0];
+    const touchmove = api.documentListenersForTest('touchmove')[0];
+    touchstart({target: viewport, touches: [{identifier: 9, clientX: 20, clientY: 30}]});
+    touchmove({target: viewport, touches: [{identifier: 9, clientX: 20, clientY: 42}]});
+    viewport.scrollTop = 96;
+    viewport.scrollLeft = 12;
+
+    assert.equal(frames.length, 1, 'hydration schedules its initial apply before the gesture');
+    frames.shift()();
+    assert.equal(frames.length, 0, 'the delayed apply cannot schedule a fit-write frame after the gesture claims geometry');
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 96, left: 12},
+      'load/resize hydration cannot adopt an already-claimed gesture and reset it to fit',
+    );
+
+    assert.equal(api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), false);
+    assert.equal(frames.length, 0, 'later passive refits cannot schedule geometry or coordinate writes');
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 96, left: 12},
+      'later passive refits keep yielding through the same hydration lifecycle',
+    );
+
+    api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}, {userInitiated: true});
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 0, left: 0},
+      'an explicit zoom action starts a fresh owner and may move to the requested fit position',
+    );
+  });
+
+  test('a new post-gesture resize gets a fresh passive Preview zoom owner', () => {
+    const frames = [];
+    const observers = [];
+    class TestResizeObserver {
+      constructor(callback) { this.callback = callback; observers.push(this); }
+      observe() {}
+      disconnect() {}
+    }
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      ResizeObserver: TestResizeObserver,
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const shell = new TestElement('preview-resize-shell');
+    const toolbar = new TestElement('preview-resize-toolbar');
+    const viewport = new TestElement('preview-resize-viewport');
+    const stage = new TestElement('preview-resize-stage');
+    const content = new TestElement('preview-resize-content');
+    toolbar.className = 'file-editor-preview-zoom-toolbar';
+    viewport.className = 'file-editor-preview-zoom-viewport';
+    stage.className = 'file-editor-preview-zoom-stage';
+    content.className = 'file-editor-preview-zoom-content';
+    viewport.clientWidth = 320;
+    viewport.clientHeight = 240;
+    content.naturalWidth = 800;
+    content.naturalHeight = 600;
+    shell._previewZoomState = {mode: 'fit', scale: 1};
+    shell.append(toolbar, viewport);
+    viewport.appendChild(stage);
+    stage.appendChild(content);
+
+    assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
+    api.installPreviewScrollOwnershipCaptureForTest();
+    api.documentListenersForTest('touchstart')[0]({
+      target: viewport,
+      touches: [{identifier: 32, clientX: 20, clientY: 30}],
+    });
+    api.documentListenersForTest('touchmove')[0]({
+      target: viewport,
+      touches: [{identifier: 32, clientX: 20, clientY: 44}],
+    });
+    frames.shift()();
+    assert.equal(frames.length, 0, 'the pre-gesture apply yields without queuing a positioning write');
+
+    api.expirePreviewScrollOwnershipForTest();
+    viewport.clientWidth = 640;
+    viewport.clientHeight = 480;
+    observers[0].callback();
+    frames.shift()();
+    assert.equal(frames.length, 1, 'the post-gesture resize captures a new owner and schedules fit positioning');
+    frames.shift()();
+    assert.equal(content.style.width, '608px', 'the new viewport geometry converges without a manual zoom click');
+    assert.equal(content.style.height, '456px');
+  });
+
+  test('Preview zoom fit cannot mutate geometry after native touch claims the surface', () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const shell = new TestElement('preview-geometry-shell');
+    const viewport = new TestElement('preview-geometry-viewport');
+    const stage = new TestElement('preview-geometry-stage');
+    const content = new TestElement('preview-geometry-content');
+    viewport.className = 'file-editor-preview-zoom-viewport';
+    stage.className = 'file-editor-preview-zoom-stage';
+    viewport.clientWidth = 320;
+    viewport.clientHeight = 240;
+    viewport.scrollWidth = 900;
+    viewport.scrollHeight = 700;
+    viewport.scrollTop = 40;
+    content.naturalWidth = 800;
+    content.naturalHeight = 600;
+    content.style.width = '800px';
+    content.style.height = '600px';
+    stage.style.width = '900px';
+    stage.style.height = '700px';
+    shell._previewZoomState = {mode: 'fit', scale: 1};
+    shell.appendChild(viewport);
+    viewport.appendChild(stage);
+    stage.appendChild(content);
+
+    api.installPreviewScrollOwnershipCaptureForTest();
+    const touchstart = api.documentListenersForTest('touchstart')[0];
+    const touchmove = api.documentListenersForTest('touchmove')[0];
+    touchstart({target: viewport, touches: [{identifier: 4, clientX: 20, clientY: 30}]});
+    touchmove({target: viewport, touches: [{identifier: 4, clientX: 20, clientY: 45}]});
+
+    assert.equal(api.applyPreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), false);
+    assert.deepStrictEqual(canonical({
+      contentWidth: content.style.width,
+      contentHeight: content.style.height,
+      stageWidth: stage.style.width,
+      stageHeight: stage.style.height,
+      frameCount: frames.length,
+    }), {
+      contentWidth: '800px', contentHeight: '600px', stageWidth: '900px', stageHeight: '700px', frameCount: 0,
+    }, 'claimed touch ownership freezes fit geometry as well as scroll coordinates');
+  });
+
+  test('rehydrating a Preview zoom surface invalidates its already queued apply frame', () => {
+    const frames = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    });
+    const shell = new TestElement('preview-rehydrate-shell');
+    const toolbar = new TestElement('preview-rehydrate-toolbar');
+    const viewport = new TestElement('preview-rehydrate-viewport');
+    const content = new TestElement('preview-rehydrate-content');
+    toolbar.className = 'file-editor-preview-zoom-toolbar';
+    viewport.className = 'file-editor-preview-zoom-viewport';
+    viewport.clientWidth = 320;
+    viewport.clientHeight = 240;
+    viewport.scrollWidth = 900;
+    viewport.scrollHeight = 700;
+    viewport.scrollTop = 40;
+    viewport.scrollLeft = 8;
+    content.naturalWidth = 800;
+    content.naturalHeight = 600;
+    shell._previewZoomState = {mode: 'fit', scale: 1};
+    shell.appendChild(toolbar);
+    shell.appendChild(viewport);
+
+    assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
+    frames.shift()();
+    assert.equal(frames.length, 1, 'the first hydration has queued its inner fit write');
+    viewport.scrollTop = 96;
+    viewport.scrollLeft = 12;
+    assert.equal(api.hydratePreviewZoomSurfaceForTest(shell, content, {zoomKey: 'image'}), true);
+    frames.shift()();
+    assert.deepStrictEqual(
+      {top: viewport.scrollTop, left: viewport.scrollLeft},
+      {top: 96, left: 12},
+      'the disconnected lifecycle invalidates its held inner write before the replacement hydration runs',
+    );
+  });
+
+  await testAsync('popout snapshot refresh coalesces behind active touch ownership without dropping the latest content', async () => {
+    const timers = new Map();
+    let nextTimer = 1;
+    const setTestTimeout = (callback, delay) => {
+      const timer = nextTimer++;
+      timers.set(timer, {callback, delay: Number(delay)});
+      return timer;
+    };
+    const clearTestTimeout = timer => { timers.delete(timer); };
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout: setTestTimeout,
+      clearTimeout: clearTestTimeout,
+    });
+    const previewWindow = {
+      setTimeout: setTestTimeout,
+      clearTimeout: clearTestTimeout,
+    };
+    const record = {window: previewWindow};
+    const applied = [];
+    api.beginFilePreviewPopoutScrollInputForTest(record, 'touch');
+    const stale = api.scheduleFilePreviewPopoutApplyWhenIdleForTest(record, () => {
+      applied.push('stale');
+      return true;
+    });
+    const latest = api.scheduleFilePreviewPopoutApplyWhenIdleForTest(record, () => {
+      applied.push('latest');
+      return true;
+    });
+    assert.equal(await stale, false, 'a newer snapshot retires the older held apply');
+    assert.deepStrictEqual(applied, [], 'neither snapshot replaces the popout DOM beneath an active touch');
+    const heldSnapshotTimers = Array.from(timers.values()).filter(timer => timer.delay === 100);
+    assert.equal(heldSnapshotTimers.length, 1, 'the latest snapshot owns one bounded retry');
+
+    api.endFilePreviewPopoutScrollInputForTest(record, 'touch');
+    record.popupScrollInputUntil = -1;
+    const retry = heldSnapshotTimers[0].callback;
+    timers.clear();
+    retry();
+    assert.equal(await latest, true);
+    assert.deepStrictEqual(applied, ['latest'], 'the latest content applies once after touch ownership ends');
+
+    api.beginFilePreviewPopoutScrollInputForTest(record, 'pointer');
+    record.popupScrollActiveUntil = -1;
+    record.popupScrollInputUntil = -1;
+    const afterLostPointerEnd = api.scheduleFilePreviewPopoutApplyWhenIdleForTest(record, () => {
+      applied.push('bounded');
+      return true;
+    });
+    assert.equal(await afterLostPointerEnd, true, 'a missing pointer-end event cannot hold snapshot replacement forever');
+    assert.deepStrictEqual(applied, ['latest', 'bounded']);
+  });
+
   test('tab popover placement follows the owning tab', () => {
     const api = loadYolomux('', ['1']);
     const strip = new TestElement('strip');
@@ -3351,7 +4245,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(/mermaidFull: Object\.freeze\(\{[\s\S]*panDrag: true/.test(source), 'Mermaid preview zoom owns drag pan through renderer defaults');
     assert.equal(source.includes('wheelZoom'), false, 'visual previews leave every wheel gesture to native scrolling');
     assert.equal(source.includes("bind(viewport, 'wheel'"), false, 'visual preview surfaces do not intercept native wheel scrolling');
-    assert.ok(/function bindPreviewZoomDragPan[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*viewport\.scrollLeft/.test(source), 'Mermaid preview drag pan is routed through the shared zoom surface');
+    assert.ok(/function bindPreviewZoomDragPan[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*writeOwnedElementScroll[\s\S]*preview-zoom-drag-pan/.test(source), 'Mermaid preview drag pan is routed through the shared zoom surface');
+    assert.ok(source.includes('function bindPreviewZoomDragPan(shell, viewport, bind, options)'), 'Mermaid drag pan receives the zoom surface identity it records');
+    assert.ok(source.includes('bindPreviewZoomDragPan(shell, viewport, bind, resolvedOptions)'), 'zoom hydration passes its resolved surface identity into drag pan');
     assert.ok(source.includes('function previewZoomScopedKey'), 'visual preview zoom state is scoped by surface context');
     assert.ok(source.includes('function svgReadableEdgeColor'), 'Mermaid SVG edges are restyled through one readable color helper');
     assert.ok(source.includes('function svgCssStyleValue'), 'Mermaid SVG color repair reads Mermaid class-based style rules');

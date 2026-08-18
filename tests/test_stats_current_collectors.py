@@ -49,7 +49,7 @@ def test_builders_emit_only_normalized_current_family_facts():
         ),
         collectors.service_load_success(
             (collectors.ServiceLoadSample("service:statsd", True, 4, 400),),
-            **BASE, observed_at=110, cadence_seconds=10,
+            **BASE, observed_at=110, cadence_seconds=1,
         ),
         collectors.system_memory_success(
             **BASE, observed_at=160, cadence_seconds=60, source_id="host",
@@ -106,7 +106,7 @@ def test_system_memory_without_macos_details_keeps_the_linux_payload_exactly_leg
         ("cpu", 10),
         ("agent_status", 1),
         ("gpu", 1),
-        ("service_load", 1),
+        ("service_load", 10),
         ("system_memory", 10),
     ],
 )
@@ -183,7 +183,7 @@ def test_absent_devices_services_and_agents_never_gain_placeholder_values():
         (), **BASE, observed_at=110, cadence_seconds=10,
     )
     services = collectors.service_load_success(
-        (), **BASE, observed_at=110, cadence_seconds=10,
+        (), **BASE, observed_at=110, cadence_seconds=1,
     )
     agents = collectors.agent_status_success(
         **BASE, observed_at=110, cadence_seconds=10, source_id="scan", states={},

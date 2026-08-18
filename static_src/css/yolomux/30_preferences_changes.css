@@ -1287,6 +1287,40 @@
   font: 700 var(--js-debug-display-label-font-size)/1.15 var(--ui-font);
   text-align: end;
 }
+.js-debug-service-load-mode-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-2xs)/1 var(--ui-font);
+}
+.js-debug-service-load-mode-control label {
+  position: relative;
+  cursor: pointer;
+}
+.js-debug-service-load-mode-control input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+.js-debug-service-load-mode-control span {
+  display: block;
+  padding: var(--space-3) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.js-debug-service-load-mode-control input:checked + span {
+  border-color: var(--active-accent-bright);
+  color: var(--active-accent-bright);
+  background: var(--active-accent-soft);
+}
+.js-debug-service-load-mode-control input:focus-visible + span {
+  box-shadow: var(--active-control-focus-shadow-compact);
+}
 .js-debug-agent-window-detail {
   display: flex;
   flex-wrap: wrap;
@@ -2179,10 +2213,10 @@
   fill: var(--accent-sky-strong);
 }
 .js-debug-line--cpu {
-  stroke: var(--js-debug-series-color, var(--active-accent-bright));
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
 }
 .js-debug-line--systemCpu {
-  stroke: var(--bad);
+  stroke: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
 }
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);
@@ -2273,10 +2307,10 @@
   overflow: visible;
 }
 .js-debug-legend-swatch--cpu {
-  color: var(--js-debug-series-color, var(--active-accent-bright));
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-violet));
 }
 .js-debug-legend-swatch--systemCpu {
-  color: var(--bad);
+  color: var(--js-debug-series-color, var(--js-debug-agent-token-cyan));
 }
 .js-debug-graph-empty {
   display: grid;

@@ -357,7 +357,7 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
-  --touch-row-height: 36px;
+  --touch-row-height: var(--touch-target-min-size);
   --session-label-dir-max-inline-size: clamp(5rem, 12vw, 6.5rem);
   --session-label-detail-max-inline-size: clamp(3.5rem, 8vw, 4rem);
   --tmux-window-tab-max-inline-size: clamp(4.5rem, 12vw, 6rem);
@@ -1812,9 +1812,11 @@ body {
 }
 .app-root {
   position: relative;
+  box-sizing: border-box;
   width: var(--app-root-width, 100vw);
   height: var(--app-root-height, 100vh);
   min-height: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;

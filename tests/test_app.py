@@ -970,6 +970,16 @@ def test_stats_sample_parallel_scalars_are_retired():
         assert f"self.{name}" not in source
 
 
+def test_service_load_keeps_one_second_collection_cadence_without_browser_demand():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.client_events = app_module.ClientEventBroker()
+
+    assert webapp.client_events.has_demand("stats") is False
+    assert webapp.stats_current_family_cadence_seconds("service_load") == 1
+    assert webapp.stats_current_family_cadence_seconds("agent_status") == 60
+    assert webapp.stats_current_token_cadence_seconds() == 60
+
+
 def test_stats_history_sampler_parallel_state_is_retired():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 

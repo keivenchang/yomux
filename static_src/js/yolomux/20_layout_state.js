@@ -1411,7 +1411,7 @@ function layoutUrlScrollElementForPayload(payload = {}) {
   return null;
 }
 
-function applyLayoutUrlScrollSnapshot(scroll = []) {
+function applyLayoutUrlScrollSnapshot(scroll = [], deferredOwner = null) {
   if (!Array.isArray(scroll)) return;
   for (const payload of scroll.slice(0, 100)) {
     if (!payload || typeof payload !== 'object') continue;
@@ -1426,8 +1426,11 @@ function applyLayoutUrlScrollSnapshot(scroll = []) {
       descriptor.term.scrollToLine(top);
       continue;
     }
-    descriptor.element.scrollTop = top;
-    descriptor.element.scrollLeft = left;
+    if (deferredOwner) {
+      writeDeferredElementScrollIfOwned(deferredOwner, descriptor.element, {top, left}, 'layout-url-scroll-restore');
+    } else {
+      writeOwnedElementScroll(descriptor.element, {top, left}, 'layout-url-scroll-restore');
+    }
     if (descriptor.kind === 'editor') descriptor.panel?._cmView?.requestMeasure?.();
   }
 }
@@ -1544,9 +1547,12 @@ function applyPendingLayoutUrlState() {
   }
   applyLayoutUrlPreferencesSeed(state.preferences || {}, {includeLocalizedSections: true});
   if (Array.isArray(state.scroll)) {
-    applyLayoutUrlScrollSnapshot(state.scroll);
-    requestAnimationFrame(() => applyLayoutUrlScrollSnapshot(state.scroll));
-    setTimeout(() => applyLayoutUrlScrollSnapshot(state.scroll), 0);
+    const scrollOwner = createPassiveDeferredElementScrollOwner(
+      ...state.scroll.map(payload => layoutUrlScrollElementForPayload(payload)?.element).filter(Boolean),
+    );
+    applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner);
+    requestAnimationFrame(() => applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner));
+    setTimeout(() => applyLayoutUrlScrollSnapshot(state.scroll, scrollOwner), 0);
   }
   layoutUrlState.applied = true;
   return true;
@@ -2330,12 +2336,15 @@ function restorePaneElementScrollState(panel, state) {
   paneScrollContainers(panel).forEach((element, index) => {
     current.set(paneScrollContainerKey(element, index), element);
   });
+  const deferredOwner = createPassiveDeferredElementScrollOwner(...current.values());
   const restore = () => {
     for (const entry of entries) {
       const element = current.get(entry.key);
       if (!paneScrollContainerHasLayout(element)) continue;
-      element.scrollTop = Number(entry.scrollTop || 0);
-      element.scrollLeft = Number(entry.scrollLeft || 0);
+      writeDeferredElementScrollIfOwned(deferredOwner, element, {
+        top: Number(entry.scrollTop || 0),
+        left: Number(entry.scrollLeft || 0),
+      }, 'pane-view-state-restore');
     }
   };
   restore();

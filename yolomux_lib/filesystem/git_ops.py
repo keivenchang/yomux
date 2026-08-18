@@ -102,18 +102,30 @@ def pinned_repo_path(handle: paths.SafePathHandle, *, operation: str = ""):
         yield repo, rel_path, repo_handle
 
 
+def git_branch_state(
+    repo: Path,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> tuple[str, bool]:
+    """Return the checked-out branch and whether Git positively reported detached HEAD."""
+    run = runner or (lambda args: git(args, cwd=str(repo), timeout=1.0))
+    symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if symbolic.returncode == 0:
+        return symbolic.stdout.strip(), False
+    resolved = run(["rev-parse", "--abbrev-ref", "HEAD"])
+    if resolved.returncode != 0:
+        return "", False
+    name = resolved.stdout.strip()
+    return ("", True) if name == "HEAD" else (name, False)
+
+
 def git_branch_name(
     repo: Path,
     *,
     runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
 ) -> str:
-    """Return the checked-out branch, or an empty string for a detached HEAD."""
-    run = runner or (lambda args: git(args, cwd=str(repo), timeout=1.0))
-    branch = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
-    if branch.returncode != 0:
-        branch = run(["rev-parse", "--abbrev-ref", "HEAD"])
-    name = branch.stdout.strip() if branch.returncode == 0 else ""
-    return "" if name == "HEAD" else name
+    """Return the checked-out branch, or an empty string when none is available."""
+    return git_branch_state(repo, runner=runner)[0]
 
 
 # A repository whose HEAD identity cannot be read -- not a repository, an unborn repository with
@@ -316,7 +328,7 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
         timed_out = timed_out or result.returncode == 124 or (deadline is not None and time.monotonic() >= deadline)
         return result
 
-    branch = git_branch_name(repo, runner=lambda args: run(args, 1.0))
+    branch, detached = git_branch_state(repo, runner=lambda args: run(args, 1.0))
     upstream = run(["rev-parse", "--abbrev-ref", "@{upstream}"], 1.0)
     ahead = 0
     behind = 0
@@ -339,6 +351,7 @@ def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None
         "root": root,
         "name": repo.name,
         "branch": branch,
+        "detached": detached,
         "dirty_count": dirty_count,
         "upstream": upstream.stdout.strip() if upstream.returncode == 0 else "",
         "ahead": ahead,

@@ -152,7 +152,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
   if (source.service_load && typeof source.service_load === 'object' && !Array.isArray(source.service_load)) {
     for (const [key, record] of Object.entries(source.service_load)) {
       if (!record || typeof record !== 'object') continue;
-      const item = target.serviceLoad.get(key) || {label: String(record.label || key), cpuTotalPercent: 0, cpuSamples: 0, cpuMinPercent: 0, cpuMaxPercent: 0, rssTotalBytes: 0, rssSamples: 0, rssMinBytes: 0, rssMaxBytes: 0};
+      const item = target.serviceLoad.get(key) || debugGraphNewServiceLoadItem(record.label || key);
       item.label = String(record.label || item.label || key);
       for (const prefix of ['cpu', 'rss']) {
         const unit = prefix === 'cpu' ? 'Percent' : 'Bytes';
@@ -164,6 +164,11 @@ function debugGraphApplyHostMetrics(bucket, source) {
         item[samplesKey] = sourceSamples;
         item[`${prefix}Min${unit}`] = Math.max(0, Number(record[`${prefix}_min_${sourceUnit}`] || 0));
         item[`${prefix}Max${unit}`] = Math.max(0, Number(record[`${prefix}_max_${sourceUnit}`] || 0));
+        if (prefix === 'cpu') {
+          item.cpuRangeAvailable = record.cpu_min_percent !== null && record.cpu_min_percent !== undefined
+            && record.cpu_max_percent !== null && record.cpu_max_percent !== undefined
+            && Number.isFinite(Number(record.cpu_min_percent)) && Number.isFinite(Number(record.cpu_max_percent));
+        }
       }
       target.serviceLoad.set(key, item);
     }
@@ -1285,14 +1290,61 @@ function debugGraphHostMetricSeriesDefs(buckets) {
   ];
 }
 
-function debugGraphServiceLoadSeriesDefs(buckets) {
-  const services = new Map();
-  for (const bucket of buckets) {
+function normalizedDebugGraphServiceLoadMode(value) {
+  return debugGraphServiceLoadModes.includes(value) ? value : 'avg';
+}
+
+const debugGraphServiceLoadModes = Object.freeze(['avg', 'max', 'min']);
+
+function normalizedDebugGraphServiceLoadPreference(value) {
+  return debugGraphServiceLoadModes.includes(value) ? value : 'auto';
+}
+
+function debugGraphDefaultServiceLoadMode(buckets) {
+  return (buckets || []).some(bucket => Number(bucket?.durationMs || 0) >= 60000) ? 'max' : 'avg';
+}
+
+function debugGraphVisibleServiceLoadItems(buckets) {
+  const items = [];
+  for (const bucket of buckets || []) {
     for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
       // Old retained buckets contain the synthetic web row. Its PID is already shown by CPU.
-      if (key === 'web') continue;
-      if (Number(item?.cpuSamples || 0) > 0) services.set(key, String(item.label || key));
+      if (key === 'web' || Number(item?.cpuSamples || 0) <= 0) continue;
+      items.push([key, item]);
     }
+  }
+  return items;
+}
+
+function debugGraphServiceLoadRangeAvailable(buckets) {
+  let sampled = 0;
+  for (const [, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+    sampled += 1;
+    if (item.cpuRangeAvailable !== true) return false;
+  }
+  return sampled > 0;
+}
+
+function debugGraphServiceLoadEffectiveMode(buckets, mode = debugRuntimeState.serviceLoadMode) {
+  const preferred = normalizedDebugGraphServiceLoadPreference(mode);
+  const normalized = preferred === 'auto' ? debugGraphDefaultServiceLoadMode(buckets) : preferred;
+  return normalized === 'avg' || debugGraphServiceLoadRangeAvailable(buckets) ? normalized : 'avg';
+}
+
+function debugGraphServiceLoadValue(item, mode = debugRuntimeState.serviceLoadMode) {
+  const samples = Number(item?.cpuSamples || 0);
+  if (samples <= 0) return 0;
+  const normalized = normalizedDebugGraphServiceLoadMode(mode);
+  if (normalized === 'max' && item.cpuRangeAvailable === true) return Math.max(0, Number(item.cpuMaxPercent || 0));
+  if (normalized === 'min' && item.cpuRangeAvailable === true) return Math.max(0, Number(item.cpuMinPercent || 0));
+  return Math.max(0, Number(item.cpuTotalPercent || 0)) / samples;
+}
+
+function debugGraphServiceLoadSeriesDefs(buckets) {
+  const mode = debugGraphServiceLoadEffectiveMode(buckets);
+  const services = new Map();
+  for (const [key, item] of debugGraphVisibleServiceLoadItems(buckets)) {
+    services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
   const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
@@ -1302,11 +1354,11 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
-      return Number(item?.cpuSamples || 0) > 0 ? Number(item.cpuTotalPercent || 0) / Number(item.cpuSamples) : 0;
+      return debugGraphServiceLoadValue(item, mode);
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => [...(bucket?.hostMetrics?.serviceLoad?.values?.() || [])].some(item => Number(item?.cpuSamples || 0) > 0),
+    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }
@@ -1461,6 +1513,21 @@ function debugGraphLayoutControlsHtml() {
 
 function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-range-resolution-controls">${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}</div>`;
+}
+
+function debugGraphServiceLoadModeLabel(mode) {
+  return t(`debug.graph.serviceLoad.mode.${normalizedDebugGraphServiceLoadMode(mode)}`);
+}
+
+function debugGraphServiceLoadModeControlsHtml(buckets = []) {
+  const rangeAvailable = debugGraphServiceLoadRangeAvailable(buckets);
+  const selected = debugGraphServiceLoadEffectiveMode(buckets);
+  const label = t('debug.graph.chart.serversLoad');
+  return `<fieldset class="js-debug-service-load-mode-control" role="radiogroup" aria-label="${esc(label)}">${debugGraphServiceLoadModes.map(mode => {
+    const checked = mode === selected;
+    const disabled = mode !== 'avg' && !rangeAvailable;
+    return `<label class="preferences-radio"><input type="radio" name="js-debug-service-load-mode" value="${esc(mode)}" data-js-debug-service-load-mode="${esc(mode)}"${checked ? ' checked' : ''}${disabled ? ' disabled' : ''} aria-checked="${checked ? 'true' : 'false'}" aria-disabled="${disabled ? 'true' : 'false'}"><span>${esc(debugGraphServiceLoadModeLabel(mode))}</span></label>`;
+  }).join('')}</fieldset>`;
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
@@ -1913,10 +1980,13 @@ function debugGraphAgentTokenPatternIndex(series) {
 function debugGraphAgentTokenPatternId(series, suffix = '') {
   const patternIndex = debugGraphAgentTokenPatternIndex(series);
   if (patternIndex < 0) return '';
+  const scope = String(series?.agentTokenPatternScope || '')
+    .replace(/[^A-Za-z0-9_-]/g, '-')
+    .slice(-64);
   const key = String(series?.agentTokenKey || series?.key || 'series')
     .replace(/[^A-Za-z0-9_-]/g, '-')
     .slice(-64);
-  return `js-debug-agent-token-pattern-${patternIndex}-${key || 'series'}${suffix}`;
+  return `js-debug-agent-token-pattern-${scope ? `${scope}-` : ''}${patternIndex}-${key || 'series'}${suffix}`;
 }
 
 function debugGraphAgentTokenPatternShapeHtml(patternIndex) {
@@ -2443,10 +2513,12 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
       const samples = Number(item?.cpuSamples || 0);
       if (samples <= 0) return [];
       const avg = Number(item.cpuTotalPercent || 0) / samples;
-      return [`${series.label}: ${debugGraphValueText(avg, 'percent')} (${t('debug.graph.serviceLoad.range', {
-        minimum: debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent'),
+      const mode = debugGraphServiceLoadEffectiveMode(data.buckets);
+      const rangeAvailable = item.cpuRangeAvailable === true;
+      return [`${series.label}: ${debugGraphValueText(debugGraphServiceLoadValue(item, mode), 'percent')} (${t('debug.graph.serviceLoad.range', {
+        minimum: rangeAvailable ? debugGraphValueText(Number(item.cpuMinPercent || 0), 'percent') : t('common.notAvailable'),
         average: debugGraphValueText(avg, 'percent'),
-        maximum: debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent'),
+        maximum: rangeAvailable ? debugGraphValueText(Number(item.cpuMaxPercent || 0), 'percent') : t('common.notAvailable'),
       })})`];
     });
     return details.join(' · ') || debugGraphValueText(0, data.group.unit);
@@ -2613,6 +2685,13 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  // Both subviews stay mounted so switching modes preserves their DOM. Namespace the
+  // SVG paint-server IDs by surface; otherwise Cost bars resolve Graphs' now-hidden
+  // <pattern> definitions and become invisible even though both views share the data.
+  const patternScope = String(options.patternScope || `graphs-${group.key}`).replace(/[^A-Za-z0-9_-]/g, '-');
+  const scopedPatternSeries = series => ({...series, agentTokenPatternScope: patternScope});
+  const renderedLegendSeries = legendSeries.map(scopedPatternSeries);
+  const renderedPlotSeries = plotSeries.map(scopedPatternSeries);
   const spikeAxis = (group.key === 'agentTokens' || group.key === 'modelTokens')
     ? options.spikeAxis
     : (group.key === 'serversLoad' ? debugGraphSpikeCompressedAxisDescriptor(group, plotSeries.flatMap(debugGraphSeriesPlotValues)) : null);
@@ -2647,20 +2726,20 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
-        ${displayedSummaryHtml}
+        ${group.key === 'serversLoad' ? debugGraphServiceLoadModeControlsHtml(buckets) : displayedSummaryHtml}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries)}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
-          ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
+          ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(renderedPlotSeries) : ''}
           ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges)).join('') : ''}
-          ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
+          ${group.kind === 'bar' ? renderedPlotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
           ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
@@ -3720,7 +3799,7 @@ async function refreshDebugCostPricingStatus(scope = debugPricingRefreshLifecycl
   return true;
 }
 
-function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true} = {}) {
+function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisibleChartGroups(seriesItems), nowMs = Date.now(), {includeCostSummary = true, patternScope = 'graphs'} = {}) {
   const domain = debugGraphDomain(nowMs);
   const overlayBuckets = debugGraphSourceBuckets(domain);
   const disconnectedRanges = debugGraphDisconnectedRanges(overlayBuckets, domain);
@@ -3731,7 +3810,7 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
       const groupBuckets = debugGraphBucketsForChartGroup(group, buckets, nowMs);
       const groupSeriesItems = groupBuckets === buckets ? seriesItems : debugGraphSeriesData(groupBuckets);
       const items = visibleGroupKeys.has(group.key)
-        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis})]
+        ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {spikeAxis, patternScope: `${patternScope}-${group.key}`})]
         : [];
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
       // displayed bucket array from the unified cache, but adds no axes, bars, or
@@ -4264,6 +4343,31 @@ function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
   return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
 }
 
+function jsDebugCurrentCpuProjectionValue(series, averageName, maximumName, duration) {
+  const average = jsDebugCurrentSeriesValue(series, averageName);
+  if (average === null) return null;
+  const maximum = jsDebugCurrentSeriesValue(series, maximumName);
+  return duration >= 60 && maximum !== null ? maximum : average;
+}
+
+function jsDebugCurrentServiceLoadItem(record, source) {
+  const serviceLoad = record.host_metrics.service_load;
+  if (!serviceLoad[source]) {
+    serviceLoad[source] = {
+      label: source,
+      cpu_total_percent: 0,
+      cpu_samples: 0,
+      cpu_min_percent: null,
+      cpu_max_percent: null,
+      rss_total_bytes: 0,
+      rss_samples: 0,
+      rss_min_bytes: 0,
+      rss_max_bytes: 0,
+    };
+  }
+  return serviceLoad[source];
+}
+
 function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost = null) {
   const series = bucket?.series || {};
   const duration = Math.max(1, Number(bucket?.duration) || 1);
@@ -4285,11 +4389,12 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     const value = jsDebugCurrentSeriesValue(series, name);
     if (value === null) continue;
     if (name === 'system_cpu_percent') {
-      record.system_cpu_total_percent = value;
+      record.system_cpu_total_percent = jsDebugCurrentCpuProjectionValue(series, name, 'system_cpu_max_percent', duration);
       record.system_cpu_count = 1;
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
-      record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `cpu_max_percent:${source}`, duration);
+      record.servers[source] = {label: source, cpu_total_percent: projected, cpu_count: 1};
       // No serving-port preference: the exact serving port owns the solid CPU series in
       // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
       if (!record.cpu_count) {
@@ -4336,12 +4441,21 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
       record.host_metrics.gpu_devices[source] = device;
     } else if (name.startsWith('service_cpu_percent:')) {
       const source = name.slice('service_cpu_percent:'.length);
-      record.host_metrics.service_load[source] = {label: source, cpu_total_percent: value, cpu_samples: 1, cpu_min_percent: value, cpu_max_percent: value, rss_total_bytes: 0, rss_samples: 0, rss_min_bytes: 0, rss_max_bytes: 0};
+      const sourceCount = Math.max(1, Number(series[name]?.source_count) || 1);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      Object.assign(service, {cpu_total_percent: value * sourceCount, cpu_samples: sourceCount});
+    } else if (name.startsWith('service_cpu_min_percent:')) {
+      const source = name.slice('service_cpu_min_percent:'.length);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      service.cpu_min_percent = value;
+    } else if (name.startsWith('service_cpu_max_percent:')) {
+      const source = name.slice('service_cpu_max_percent:'.length);
+      const service = jsDebugCurrentServiceLoadItem(record, source);
+      service.cpu_max_percent = value;
     } else if (name.startsWith('service_rss_bytes:')) {
       const source = name.slice('service_rss_bytes:'.length);
-      const service = record.host_metrics.service_load[source] || {label: source, cpu_total_percent: 0, cpu_samples: 0, cpu_min_percent: 0, cpu_max_percent: 0};
+      const service = jsDebugCurrentServiceLoadItem(record, source);
       Object.assign(service, {rss_total_bytes: value, rss_samples: 1, rss_min_bytes: value, rss_max_bytes: value});
-      record.host_metrics.service_load[source] = service;
     } else if (name === 'cost_micro_usd') bucketMarginalMicroUsd = value;
     else if (name === 'api_list_cost_micro_usd') bucketApiListMicroUsd = value;
     else if (name === 'usage_tokens') bucketUsageTokens = value;
@@ -4672,6 +4786,17 @@ function jsDebugTextForClipboard() {
     ...(clientPerfRows.length ? ['Client work counters:', ...clientPerfRows, ''] : []),
     ...rows,
   ].join('\n');
+}
+
+const jsDebugCopyTextProviders = Object.freeze({
+  'debug-api': () => jsDebugTextForClipboard(),
+  'debug-logs': () => debugLogsTextForClipboard(),
+  'debug-mobile': () => debugMobileCaptureTextForClipboard(),
+});
+
+function jsDebugCopyTextForFeedbackKey(key) {
+  const provider = jsDebugCopyTextProviders[String(key || '')];
+  return typeof provider === 'function' ? provider() : null;
 }
 
 function debugSystemNumber(value, digits = 0) {
@@ -6477,7 +6602,7 @@ function yoCostPanelHtml() {
   const buckets = debugGraphDisplayBuckets(nowMs);
   const tokenGroups = jsDebugGraphChartGroups.filter(group => group.key === 'agentTokens' || group.key === 'modelTokens');
   const charts = buckets.length
-    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false})
+    ? debugGraphSvgHtml(buckets, debugGraphSeriesData(buckets), tokenGroups, nowMs, {includeCostSummary: false, patternScope: 'cost'})
     : `<div class="js-debug-graph-empty">${esc(t('debug.empty'))}</div>`;
   const costBuckets = debugGraphAgentTokenDisplayBuckets(nowMs);
   const refreshedAtMs = Math.max(Number(jsDebugStatsPollState.lastSampleAtMs) || 0, Number(jsDebugPricingRefreshState.lastRequestedAtMs) || 0);
@@ -7175,6 +7300,16 @@ function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = f
   } catch (_) {}
 }
 
+function setDebugGraphServiceLoadMode(value) {
+  loadJsDebugStatsUiPreferences();
+  const normalized = normalizedDebugGraphServiceLoadMode(value);
+  if (normalized === debugRuntimeState.serviceLoadMode) return false;
+  debugRuntimeState.serviceLoadMode = normalized;
+  saveJsDebugStatsUiPreferences();
+  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  return true;
+}
+
 function setDebugGraphChartLayout(value) {
   loadJsDebugStatsUiPreferences();
   debugRuntimeState.graphChartLayout = Math.max(0, Math.min(4, Math.round(Number(value) || 0)));
@@ -7643,6 +7778,11 @@ function handleDebugGraphControlEvent(event, panel) {
     void refreshDebugCostPricing();
     return true;
   }
+  const serviceLoadMode = event.target.closest('[data-js-debug-service-load-mode]');
+  if (event.type === 'change' && serviceLoadMode && panel.contains(serviceLoadMode)) {
+    setDebugGraphServiceLoadMode(serviceLoadMode.dataset.jsDebugServiceLoadMode);
+    return true;
+  }
   const chartClose = event.target.closest('[data-js-debug-chart-close]');
   // A chart close reflows the grid. Handling it on pointerdown replaces the target before the
   // corresponding pointerup, so that follow-up event can land on another chart's X. Click is the
@@ -7797,12 +7937,6 @@ function bindDebugPanel(panel) {
       refreshDebugLogsViews();
       return;
     }
-    const logsCopy = event.target.closest('[data-js-debug-logs-copy]');
-    if (logsCopy && panel.contains(logsCopy)) {
-      event.preventDefault();
-      void runDebugCopy(debugLogsTextForClipboard(), {button: logsCopy, feedbackKey: 'debug-logs'});
-      return;
-    }
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
@@ -7811,10 +7945,13 @@ function bindDebugPanel(panel) {
       statusEl.textContent = t('debug.logs.cleared');
       return;
     }
-    const copy = event.target.closest('[data-js-debug-copy]');
+    const copy = event.target.closest('[data-copy-feedback-key]');
     if (copy && panel.contains(copy)) {
+      const feedbackKey = String(copy.dataset.copyFeedbackKey || '');
+      const text = jsDebugCopyTextForFeedbackKey(feedbackKey);
+      if (text === null) return;
       event.preventDefault();
-      void runDebugCopy(jsDebugTextForClipboard(), {button: copy, feedbackKey: 'debug-api'});
+      void runDebugCopy(text, {button: copy, feedbackKey});
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');

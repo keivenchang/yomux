@@ -1,96 +1,107 @@
 # Progress
 
-Updated: 2026-08-16 07:43 AM PT
+Updated: 2026-08-17 08:37 PM PT
 Worktree: `/home/keivenc/dev/yolomux.dev7771`
 
 **Goal:** Eliminate the urgent refresh-fanout and background-CPU regression, then finish the remaining v0.7.8 queues
 
-**Goal totals:** 4/7 done (57%); 3 TODO.
+**Feature goal totals:** 8/8 implemented (100%). **Release closure:** 28/31 supporting queue checkboxes done; 3 landing steps pending.
 
 ## Goal checklist
 
 - [x] 1. Bound single-browser refresh fan-out and eliminate recurring GIL-bound web CPU with timing-attributed, generation-keyed owners and matched live Chrome evidence
 - [x] 2. Fix relative product-root resolution and prove a restarted server writes no unexpected product state under $HOME
-- [ ] 3. Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone
+- [x] 3. Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone
 - [x] 4. Decide whether multi-machine connectivity has a justified bounded workflow, recording NO_BUILD or one separately approved implementation queue
 - [x] 5. Remove the standalone YO!cost panel and place Cost immediately after Graphs inside YO!stats, migrating legacy saved references without breaking restored layouts
-- [ ] 6. Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb
-- [ ] 7. Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts
+- [x] 6. Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb
+- [x] 7. Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts
+- [x] 8. Restore usable Preview touch scrolling and native xterm typing on real mobile devices, then deliver responsive single-pane focus behavior without desktop regressions
 
-**Supporting queue totals:** 18/29 done; 11 pending.
+**Supporting queue totals:** 28/31 done; 3 pending.
 
 ## Active queues
 
 | queue | done | pending | complete |
 | --- | ---: | ---: | ---: |
-| `queues/backlog/DOIT.p1.e2.merge-unify-quick-open-exclusions.md` | 11 | 2 | 85% |
-| `queues/backlog/DOIT.p1.e3.statsd-wal-growth.md` | 5 | 7 | 42% |
-| `queues/backlog/DOIT.p2.e1.license-history-remote-finalization.md` | 2 | 2 | 50% |
+| `queues/backlog/DOIT.p1.e2.working-detector-footer-fragility.md` | 9 | 1 | 90% |
+| `queues/backlog/DOIT.p2.e2.daemon-load-min-max-average.md` | 10 | 1 | 91% |
+| `queues/backlog/DOIT.p2.e2.markdown-task-list-continuity.md` | 9 | 1 | 90% |
 
 ## All queue checkboxes
 
-### `queues/backlog/DOIT.p1.e2.merge-unify-quick-open-exclusions.md` (11/13)
-- [x] Settle the bare-name claim before merging. Run a bare directory name through `index_exclude_paths` on the branch and assert whether Quick Open actually exclude…
-- [x] Do not merge into a dirty tree. Wait until the in-flight work touching `server.py`, `tools/check.py`, and `registry.py` is committed, then re-run `merge-tree`…
-- [x] Re-derive `tests/fixtures/architecture_budgets/v1.json` after the merge rather than taking either side. Two independently regenerated ratchets cannot be reconc…
-- [x] Rebuild `static/yolomux.js` and the generated locales from source after the merge; both sides regenerate them, so whichever survives is wrong. DONE: rebuilt fr…
-- [ ] Verify the macOS fixes on real macOS hardware, since that is what they are for. Confirm a Finder repo opened through `/tmp` resolves against its `/private/tmp`…
-- [x] Confirm the xterm helper still rethrows non-teardown errors. Its value is that it narrows a swallowed exception; a merge that widens it back to a bare catch si…
-- [x] Give the landed work an accurate description in `docs/DONE/`. Neither the branch name nor the commit message covers this change, and the next person searching…
-- [x] `git log HEAD..origin/fix/unify-quick-open-exclusions` is empty. DONE: `59676f11b` is the second parent of merge `a544089e2`; the log range is empty and `merge…
-- [x] A bare directory name in `index_exclude_paths` either excludes as documented, covered by a test seen to fail first, or the help text is corrected to match real…
-- [x] `tests/fixtures/architecture_budgets/v1.json` regenerated post-merge, not inherited. DONE: regenerated after the final xterm regression and passed the ratchet…
-- [x] Generated assets rebuilt from source; the generated-asset check exits 0. DONE: current post-merge check exited 0.
-- [ ] macOS acceptance on real hardware, or explicitly recorded as blocked with the reason. BLOCKED: the real Mac at `ereview.com:8882` serves the exact merged bundl…
-- [x] Canonical gate green, no new Warnings or Errors. DONE: at `1406566f9`, all nine functional lanes passed in `/tmp/yolomux-check-runs/check-1786882610409235988-5…
+### `queues/backlog/DOIT.p1.e2.working-detector-footer-fragility.md` (9/10)
+- [x] Settle the narrow-pane prediction first. Drive a real Codex pane at a width that truncates the footer while the agent is mid-turn, capture the exact footer tex…
+- [x] Enumerate the real footer shapes rather than guessing. Collect actual last lines from Claude and Codex panes at several widths and with several trailing states…
+- [x] Make an unrecognized trailing line non-authoritative. A line the recognizer cannot classify must not be promoted to "later prompt" and must not cancel a workin…
+- [x] Make the cancellation observable. When a working row is discarded because of a later-prompt verdict, that decision needs to be inspectable; today it is a silen…
+- [x] Add fixtures per collected footer shape asserting the classification does not change when only the footer's incidental text changes.
+- [x] The narrow-pane case is either reproduced and fixed, or explicitly recorded as not reproducible with the evidence that settles it.
+- [x] A byte-identical working row classifies identically across every collected footer shape, covered by fixtures seen to fail first.
+- [x] An unrecognized trailing line never cancels a working row.
+- [x] A discarded working row records why, and a test covers it.
+- [ ] Canonical gate green, no new Warnings or Errors.
 
-### `queues/backlog/DOIT.p1.e3.statsd-wal-growth.md` (5/12)
-- [x] Prove or disprove the WAL-size-to-CPU link before changing anything. Checkpoint the WAL to truncation on a live instance and measure `statsd` CPU before and af…
-- [x] Establish why the automatic checkpoint never completes. Identify which reader holds the oldest snapshot and for how long; a long-lived read transaction, not ju…
-- [x] Give the WAL a bounded owner. Whatever the fix — periodic explicit `wal_checkpoint(TRUNCATE)`, releasing read snapshots between cycles, or a tighter `wal_autoc…
-- [ ] Fix the retention overrun so the retained span matches `RETENTION_SECONDS` rather than exceeding it by ~20 hours, and confirm the daily prune completes. REOPEN…
-- [ ] Close the second compaction gate, or record why it is acceptable. If `pending` can be non-empty every time the max-defer cap elapses, then `VACUUM_MAX_DEFER_SE…
-- [ ] Re-measure over a full day. This defect is only visible across many hours, so a short post-fix sample proves nothing; the acceptance evidence is a flat `statsd…
-- [ ] `statsd` CPU is flat over 24 hours under comparable load, shown as a before/after chart or sampled series rather than asserted.
-- [ ] The WAL has a stated ceiling and stays under it during sustained load, verified on a live instance.
-- [ ] Retained `observations` span is within `RETENTION_SECONDS`. FAILED on the pre-`3f22391f7` soak: maximum measured span was 172,918.85 seconds against 172,800 se…
-- [x] If the WAL turns out not to drive the CPU climb, the real cause is named and this queue is re-scoped, not closed. DONE 2026-08-16 02:45 AM PT: production's old…
-- [ ] No stats data is lost by any change made here; row counts and coverage before and after are compared.
-- [x] Canonical gate green, no new Warnings or Errors. DONE 2026-08-16 06:45 AM PT: after regenerating the three stale architecture-budget counts in `d1167f4f6`, a c…
+### `queues/backlog/DOIT.p2.e2.daemon-load-min-max-average.md` (10/11)
+- [x] Reproduce the hard-coded average projection with a deterministic retained item whose average, maximum, and minimum differ.
+- [x] Route `Avg`, `Max`, and `Min` through one normalized `debugGraphServiceLoadValue` owner while retaining the existing line, axis, spike compression, zoom, gaps,…
+- [x] Add an accessible localized radio group to the Daemons load card heading; fresh 60s/300s views choose `Max`, finer views choose `Avg`, a user choice persists w…
+- [x] Preserve zero versus missing samples, CPU values above 100%, Range, Resolution, zoom, chart size, theme, locale, and complete min/avg/max hover context.
+- [x] Remove the interrupted Option B partial implementation and prove no range-marker, small-multiple, or range-bar path remains.
+- [x] Update `README.md` and `docs/specs/GUI.md` with the selector and shared-renderer contract.
+- [x] Capture red-first focused Node coverage, rebuild generated assets, pass the focused `node-layout` lane, and deploy byte-identical source/generated assets to 77…
+- [x] Reproduce the 300s false projection from Keiven's 2026-08-17 screenshot, publish genuine coarse-bucket extrema, choose Max for fresh 60s/300s views, and disabl…
+- [x] Apply the same three-fold persistence contract to the independent 1-second host/process CPU family: save Min/Avg/Max in 10s/60s/300s rings and project Max at 6…
+- [x] Fix 10s Daemons buckets that still showed identical Min/Avg/Max: sample the existing shared process owner every 1s continuously so both historical and live 10s…
+- [ ] At the separately authorized landing step, run the one exact-SHA full gate, record the result, archive this queue in `docs/DONE/`, and remove the backlog file.…
 
-### `queues/backlog/DOIT.p2.e1.license-history-remote-finalization.md` (2/4)
-- [x] Reverify the local rewritten history, target remote branch, lease SHA, current tree license, key historical searches, and fresh-clone procedure without changin…
-- [x] Verify a fresh branch-only clone from remote `main` against every key license search and current-tree file identity. DONE: `/tmp/yolomux-078-license-clone.8sAR…
-- [ ] Obtain explicit authorization to atomically delete or replace only remote tags `v0.2.0`, `v0.3.0`, and `v0.4.5`, leased respectively at tag objects `f3a8a71e33…
-- [ ] Every remote ref is free of the old license lineage, and a fresh all-ref clone verifies the result. Live re-verification found 29 remote refs and exactly these…
+### `queues/backlog/DOIT.p2.e2.markdown-task-list-continuity.md` (9/10)
+- [x] Reproduce in the product, not only in the parser. Open a Markdown file containing `- [x] 1. text` in the YOLOmux preview and confirm the two-line rendering, so…
+- [x] Keep the checkbox and its text on one line by presentation only. A single-item ordered list nested directly inside a task-list item should render inline and pr…
+- [x] Preserve the number. `1.`, `2.`, `3.` are meaningful here — `marked` already emits `<ol start="2">` for the second item, so the rendered output must keep showi…
+- [x] Confirm ordinary nested lists still indent. A genuine multi-item nested list inside a task item must keep its block layout; only the single-item inline case ch…
+- [x] Confirm the checkbox stays interactive. `88_markdown_preview.js` binds task checkboxes back to source lines through `markdownTaskLineEntries` and `data-source-…
+- [x] `- [x] 1. text` renders as one continuous line with the number intact, confirmed in a real browser.
+- [x] Toggling that checkbox still writes to the correct source line, covered by a test.
+- [x] A multi-item nested list inside a task item still renders as an indented block.
+- [x] No change to `static/vendor/marked.min.js` and no source-text rewriting in the preview path.
+- [ ] Canonical gate green, no new Warnings or Errors.
 
 ## Pending goal items
 
-- 3. Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone
-- 6. Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb
-- 7. Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts
+- Create a committed v0.7.8 release-candidate SHA after explicit commit/CPS authorization.
+- Run the one canonical full gate against that exact SHA.
+- Record the gate result, archive the three completed queues in `docs/DONE/`, remove their backlog files, and update this report to 31/31.
 
 ## Hourly history (last 24 hours)
 
 | PT hour | done | pending | delta done | note |
 | --- | ---: | ---: | ---: | --- |
-| 2026-08-15 12:00 PT | 0 | 3 | - | Queued the three score <=3 tasks for v0.7.8 after verified 0.7.7 promotion on ports 7770 and 7771 |
-| 2026-08-15 13:00 PT | 1 | 2 | +1 | Recorded NO_BUILD for a duplicate multi-machine connector; root safety is 10/11 and tag cleanup remains authorization-gated |
-| 2026-08-15 14:00 PT | 1 | 2 | +0 | Completed root-path implementation and focused validation; exact-SHA certification and tag authorization remained open |
-| 2026-08-15 15:00 PT | 1 | 2 | +0 | Fixed the architecture scanner race with live document-lock heartbeat files and started the fresh canonical gate |
-| 2026-08-15 16:00 PT | 1 | 3 | +0 | Accepted a 208/208 exact request join with zero evictions; proved watch/roots repeats byte-identical, fs/batch bodies distinct, and operations/ack the top request-thread CPU route |
-| 2026-08-15 17:00 PT | 1 | 3 | +0 |  |
-| 2026-08-15 18:00 PT | 1 | 3 | +0 | Statsd dirty-cell/no-data materialization reached zero unchanged fragments across ten revisions; current focused matrix passed 359/359 |
-| 2026-08-15 19:00 PT | 1 | 4 | +0 | Added the YO!cost-to-YO!stats migration to v0.7.8 and fixed the E2E fixture receipt race exposed by the integrated browser journey |
-| 2026-08-15 21:00 PT | 1 | 4 | +0 |  |
-| 2026-08-15 22:00 PT | 1 | 4 | +0 |  |
-| 2026-08-15 23:00 PT | 1 | 4 | +0 | Cost live/browser/function gates are green after aligning the EventSource fixture with canonical demand identity; exact-SHA certification remains blocked by dirty checkout and host I/O admission |
-| 2026-08-16 00:00 PT | 1 | 4 | +0 | Background owner lanes are green: Statusd 588/588, Jobd 105/105, Watchd/session-files 302/302, and Browser/refresh 164/164 plus 62/62 with live 89/89 joins and concurrency eight |
-| 2026-08-16 02:00 PT | 1 | 5 | +0 | Bound statsd WAL allocation at 8 MiB, restored one-minute retention sweeps and the one-hour max-defer guarantee, named growing unchanged-cell materialization as the CPU owner, and started the 24-hour acceptance window |
-| 2026-08-16 04:00 PT | 1 | 6 | +0 | Landed merge a544089e2 after bare-name red-first fix 325bfb094; regenerated assets and budgets, 19 Node shards and 269-test merge matrix green; real macOS and canonical gate remain |
-| 2026-08-16 05:00 PT | 1 | 6 | +0 | Exact-SHA certification passed all seven units on 1406566f9; the merged Quick Open/macOS/xterm queue remains blocked only on two real-macOS checks |
-| 2026-08-16 06:00 PT | 4 | 3 | +3 | Exact-SHA canonical gate passed at d1167f4f6 in 539.65s with all seven certification units; archived the completed refresh/CPU queue and kept Statsd live-soak acceptance open |
-| 2026-08-16 07:00 PT | 4 | 3 | +0 | Fixed fractional Statsd prune deadlines and cross-app watchd test attribution; all nine canonical functional lanes passed at 7dd4c7633, while certification tests passed but host postflight I/O admission refused the loaded soak host |
+| 2026-08-16 20:00 PT | 6 | 2 | - |  |
+| 2026-08-16 21:00 PT | 6 | 2 | +0 | Corrected the certification blocker to disk busy, added `gputest` through 7770's production-compatible bare-name exclusion field without restarting it, and measured a qualified post-change host at disk busy 0.032300; the pre-change crawl had already gone idle, so this is not claimed as a controlled causal A/B |
+| 2026-08-16 22:00 PT | 6 | 2 | +0 | Live frontier evidence corrected the disk owner from already-excluded `gputest` to `.migration-backup` and `commits`; production-compatible absolute exclusions and an in-place index refresh cut indexd writes from 89.8 MB to 36.9 KB per 15 seconds, and a fresh host qualifier passed at disk busy 0.089936 without restarting 7770. Current 7771 PID 1547423 serves the debug-armed mobile fixes byte-for-byte at JavaScript SHA-256 `9106f279133bcbcfd42440c3ad94f0ac4f31ae6d2697f3d6b908116bbbf428b1`; real-iPad acceptance is handed to Keiven at `https://10.110.40.68:7771/?debug=1` and remains open pending his capture. |
+| 2026-08-16 23:00 PT | 6 | 2 | +0 | Accepted Statsd's 35.5x production-cardinality regression and 16,205-sample four-hour live run in place of the waived 24-hour wait; mobile journey now passes Preview open, xterm input, pan, and first pane return, with the remaining focused failure narrowed to the global startup toast covering a shifted mobile tab row. |
+| 2026-08-17 00:00 PT | 7 | 1 | +1 | Accepted accelerated Statsd cardinality evidence, archived its 14/14 queue, fixed seven mobile/browser expectation drifts plus two real touch-target defects, passed static and all 19 Node shards, and deployed byte-identical debug-armed source to 7771 PID 1593400; real-iPad confirmation remains |
+| 2026-08-17 01:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 02:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 03:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 04:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 05:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 06:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 07:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 08:00 PT | 7 | 1 | +0 |  |
+| 2026-08-17 09:00 PT | 7 | 1 | +0 | Keiven's real-iPad screenshots exposed the 44 px editor controls overlapping the absolutely centered Preview-font group and then showed the corrected row was too tall; the 577 CSS-pixel regression failed first for both states, coarse-pointer controls now remain 44 px wide but use a 36 px toolbar height, and restarted 7771 PID 528747 serves byte-identical corrected CSS pending iPad retest |
+| 2026-08-17 10:00 PT | 7 | 1 | +0 | Keiven rejected special iPad editor button sizing after the 36 px row still consumed excessive space; the 577 CSS-pixel regression failed first, then passed with desktop-identical control geometry while retaining non-overlapping flex ownership for the Preview-font and action groups; restarted 7771 PID 1333059 serves byte-identical corrected CSS pending iPad retest |
+| 2026-08-17 11:00 PT | 8 | 0 | +1 | Keiven accepted Preview scrolling, terminal input, and copy/paste on iPadOS 26.6 in a split pane; the final compact-control pins and architecture ratchet passed the static and mobile boot lanes, the disk-busy certification refusal was recorded under the reduced evidence bar, and v0.7.8 reached 8/8 |
+| 2026-08-17 12:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 13:00 PT | 8 | 0 | +0 | Fixed 300s Daemons load extrema at the server fold instead of fabricating min/max from average; focused materializer and 77/77 panel tests plus the node-layout lane passed, and restarted 7772 PID 55514 serves a live 300s approvald bucket at 0.0% min, 3.331% avg, 14.844% max. |
+| 2026-08-17 14:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 15:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 16:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 17:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 18:00 PT | 8 | 0 | +0 |  |
+| 2026-08-17 19:00 PT | 8 | 0 | +0 | Added a real mouse-driven Daemons Avg/Max/Min browser regression, replaced Markdown source preprocessing with a post-parse numbered-task presentation transform, fixed Working/footer classification plus current-question precedence, passed 179 detector tests and the 26-test architecture suite, and raised the supporting denominator from 10/11 to 28/31; only the three landing-gate/archive boxes remain. |
+| 2026-08-17 20:00 PT | 8 | 0 | +0 | Three parallel audits found and fixed five pre-gate defects: raw Markdown checkboxes no longer steal task source lines, hidden legacy web rows no longer disable Daemons extrema, client service-load cadence matches the server's 1 Hz owner, retained service-load initialization has one owner, and sticky blocked screens retain discarded-Working diagnostics. Focused suites pass 62/62, 79/79, and 180/180; the architecture guard and node-layout lane pass. The 17,230-test unit lane had one unrelated live-port fixture failure that passed alone after correction and was not broadly repeated under the reduced evidence policy. Restarted 7771 PID 2748230 serves byte-identical source/generated JavaScript; closure remains 28/31 pending authorized exact-SHA landing. |
 
-<!-- progress-report-goal: {"goal":"Eliminate the urgent refresh-fanout and background-CPU regression, then finish the remaining v0.7.8 queues","items":[{"id":1,"text":"Bound single-browser refresh fan-out and eliminate recurring GIL-bound web CPU with timing-attributed, generation-keyed owners and matched live Chrome evidence","done":true},{"id":2,"text":"Fix relative product-root resolution and prove a restarted server writes no unexpected product state under $HOME","done":true},{"id":3,"text":"Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone","done":false},{"id":4,"text":"Decide whether multi-machine connectivity has a justified bounded workflow, recording NO_BUILD or one separately approved implementation queue","done":true},{"id":5,"text":"Remove the standalone YO!cost panel and place Cost immediately after Graphs inside YO!stats, migrating legacy saved references without breaking restored layouts","done":true},{"id":6,"text":"Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb","done":false},{"id":7,"text":"Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts","done":false}],"queues":["queues/backlog/DOIT.p1.e3.statsd-wal-growth.md","queues/backlog/DOIT.p2.e1.license-history-remote-finalization.md","queues/backlog/DOIT.p1.e2.merge-unify-quick-open-exclusions.md"]} -->
-<!-- progress-report-history: [{"hour":"2026-08-15 12:00 PT","done":0,"pending":3,"note":"Queued the three score <=3 tasks for v0.7.8 after verified 0.7.7 promotion on ports 7770 and 7771"},{"hour":"2026-08-15 13:00 PT","done":1,"pending":2,"note":"Recorded NO_BUILD for a duplicate multi-machine connector; root safety is 10/11 and tag cleanup remains authorization-gated"},{"hour":"2026-08-15 14:00 PT","done":1,"pending":2,"note":"Completed root-path implementation and focused validation; exact-SHA certification and tag authorization remained open"},{"hour":"2026-08-15 15:00 PT","done":1,"pending":2,"note":"Fixed the architecture scanner race with live document-lock heartbeat files and started the fresh canonical gate"},{"hour":"2026-08-15 16:00 PT","done":1,"pending":3,"note":"Accepted a 208/208 exact request join with zero evictions; proved watch/roots repeats byte-identical, fs/batch bodies distinct, and operations/ack the top request-thread CPU route"},{"hour":"2026-08-15 17:00 PT","done":1,"pending":3},{"hour":"2026-08-15 18:00 PT","done":1,"pending":3,"note":"Statsd dirty-cell/no-data materialization reached zero unchanged fragments across ten revisions; current focused matrix passed 359/359"},{"hour":"2026-08-15 19:00 PT","done":1,"pending":4,"note":"Added the YO!cost-to-YO!stats migration to v0.7.8 and fixed the E2E fixture receipt race exposed by the integrated browser journey"},{"hour":"2026-08-15 21:00 PT","done":1,"pending":4},{"hour":"2026-08-15 22:00 PT","done":1,"pending":4},{"hour":"2026-08-15 23:00 PT","done":1,"pending":4,"note":"Cost live/browser/function gates are green after aligning the EventSource fixture with canonical demand identity; exact-SHA certification remains blocked by dirty checkout and host I/O admission"},{"hour":"2026-08-16 00:00 PT","done":1,"pending":4,"note":"Background owner lanes are green: Statusd 588/588, Jobd 105/105, Watchd/session-files 302/302, and Browser/refresh 164/164 plus 62/62 with live 89/89 joins and concurrency eight"},{"hour":"2026-08-16 02:00 PT","done":1,"pending":5,"note":"Bound statsd WAL allocation at 8 MiB, restored one-minute retention sweeps and the one-hour max-defer guarantee, named growing unchanged-cell materialization as the CPU owner, and started the 24-hour acceptance window"},{"hour":"2026-08-16 04:00 PT","done":1,"pending":6,"note":"Landed merge a544089e2 after bare-name red-first fix 325bfb094; regenerated assets and budgets, 19 Node shards and 269-test merge matrix green; real macOS and canonical gate remain"},{"hour":"2026-08-16 05:00 PT","done":1,"pending":6,"note":"Exact-SHA certification passed all seven units on 1406566f9; the merged Quick Open/macOS/xterm queue remains blocked only on two real-macOS checks"},{"hour":"2026-08-16 06:00 PT","done":4,"pending":3,"note":"Exact-SHA canonical gate passed at d1167f4f6 in 539.65s with all seven certification units; archived the completed refresh/CPU queue and kept Statsd live-soak acceptance open"},{"hour":"2026-08-16 07:00 PT","done":4,"pending":3,"note":"Fixed fractional Statsd prune deadlines and cross-app watchd test attribution; all nine canonical functional lanes passed at 7dd4c7633, while certification tests passed but host postflight I/O admission refused the loaded soak host"}] -->
+<!-- progress-report-goal: {"goal":"Eliminate the urgent refresh-fanout and background-CPU regression, then finish the remaining v0.7.8 queues","items":[{"id":1,"text":"Bound single-browser refresh fan-out and eliminate recurring GIL-bound web CPU with timing-attributed, generation-keyed owners and matched live Chrome evidence","done":true},{"id":2,"text":"Fix relative product-root resolution and prove a restarted server writes no unexpected product state under $HOME","done":true},{"id":3,"text":"Remove the three remote tags that still expose old license history, only after explicit tag-mutation authorization, then verify all refs from a fresh clone","done":true},{"id":4,"text":"Decide whether multi-machine connectivity has a justified bounded workflow, recording NO_BUILD or one separately approved implementation queue","done":true},{"id":5,"text":"Remove the standalone YO!cost panel and place Cost immediately after Graphs inside YO!stats, migrating legacy saved references without breaking restored layouts","done":true},{"id":6,"text":"Bound statsd WAL growth, restore retention/compaction guarantees, and prove whether WAL size causes the reported multi-hour CPU climb","done":true},{"id":7,"text":"Land the macOS path-alias and xterm teardown fixes with truthful Quick Open exclusion behavior and preserved generated artifacts","done":true},{"id":8,"text":"Restore usable Preview touch scrolling and native xterm typing on real mobile devices, then deliver responsive single-pane focus behavior without desktop regressions","done":true}],"queues":["queues/backlog/DOIT.p1.e2.working-detector-footer-fragility.md","queues/backlog/DOIT.p2.e2.daemon-load-min-max-average.md","queues/backlog/DOIT.p2.e2.markdown-task-list-continuity.md"]} -->
+<!-- progress-report-history: [{"hour":"2026-08-16 20:00 PT","done":6,"pending":2},{"hour":"2026-08-16 21:00 PT","done":6,"pending":2,"note":"Corrected the certification blocker to disk busy, added `gputest` through 7770's production-compatible bare-name exclusion field without restarting it, and measured a qualified post-change host at disk busy 0.032300; the pre-change crawl had already gone idle, so this is not claimed as a controlled causal A/B"},{"hour":"2026-08-16 22:00 PT","done":6,"pending":2,"note":"Live frontier evidence corrected the disk owner from already-excluded `gputest` to `.migration-backup` and `commits`; production-compatible absolute exclusions and an in-place index refresh cut indexd writes from 89.8 MB to 36.9 KB per 15 seconds, and a fresh host qualifier passed at disk busy 0.089936 without restarting 7770. Current 7771 PID 1547423 serves the debug-armed mobile fixes byte-for-byte at JavaScript SHA-256 `9106f279133bcbcfd42440c3ad94f0ac4f31ae6d2697f3d6b908116bbbf428b1`; real-iPad acceptance is handed to Keiven at `https://10.110.40.68:7771/?debug=1` and remains open pending his capture."},{"hour":"2026-08-16 23:00 PT","done":6,"pending":2,"note":"Accepted Statsd's 35.5x production-cardinality regression and 16,205-sample four-hour live run in place of the waived 24-hour wait; mobile journey now passes Preview open, xterm input, pan, and first pane return, with the remaining focused failure narrowed to the global startup toast covering a shifted mobile tab row."},{"hour":"2026-08-17 00:00 PT","done":7,"pending":1,"note":"Accepted accelerated Statsd cardinality evidence, archived its 14/14 queue, fixed seven mobile/browser expectation drifts plus two real touch-target defects, passed static and all 19 Node shards, and deployed byte-identical debug-armed source to 7771 PID 1593400; real-iPad confirmation remains"},{"hour":"2026-08-17 01:00 PT","done":7,"pending":1},{"hour":"2026-08-17 02:00 PT","done":7,"pending":1},{"hour":"2026-08-17 03:00 PT","done":7,"pending":1},{"hour":"2026-08-17 04:00 PT","done":7,"pending":1},{"hour":"2026-08-17 05:00 PT","done":7,"pending":1},{"hour":"2026-08-17 06:00 PT","done":7,"pending":1},{"hour":"2026-08-17 07:00 PT","done":7,"pending":1},{"hour":"2026-08-17 08:00 PT","done":7,"pending":1},{"hour":"2026-08-17 09:00 PT","done":7,"pending":1,"note":"Keiven's real-iPad screenshots exposed the 44 px editor controls overlapping the absolutely centered Preview-font group and then showed the corrected row was too tall; the 577 CSS-pixel regression failed first for both states, coarse-pointer controls now remain 44 px wide but use a 36 px toolbar height, and restarted 7771 PID 528747 serves byte-identical corrected CSS pending iPad retest"},{"hour":"2026-08-17 10:00 PT","done":7,"pending":1,"note":"Keiven rejected special iPad editor button sizing after the 36 px row still consumed excessive space; the 577 CSS-pixel regression failed first, then passed with desktop-identical control geometry while retaining non-overlapping flex ownership for the Preview-font and action groups; restarted 7771 PID 1333059 serves byte-identical corrected CSS pending iPad retest"},{"hour":"2026-08-17 11:00 PT","done":8,"pending":0,"note":"Keiven accepted Preview scrolling, terminal input, and copy/paste on iPadOS 26.6 in a split pane; the final compact-control pins and architecture ratchet passed the static and mobile boot lanes, the disk-busy certification refusal was recorded under the reduced evidence bar, and v0.7.8 reached 8/8"},{"hour":"2026-08-17 12:00 PT","done":8,"pending":0},{"hour":"2026-08-17 13:00 PT","done":8,"pending":0,"note":"Fixed 300s Daemons load extrema at the server fold instead of fabricating min/max from average; focused materializer and 77/77 panel tests plus the node-layout lane passed, and restarted 7772 PID 55514 serves a live 300s approvald bucket at 0.0% min, 3.331% avg, 14.844% max."},{"hour":"2026-08-17 14:00 PT","done":8,"pending":0},{"hour":"2026-08-17 15:00 PT","done":8,"pending":0},{"hour":"2026-08-17 16:00 PT","done":8,"pending":0},{"hour":"2026-08-17 17:00 PT","done":8,"pending":0},{"hour":"2026-08-17 18:00 PT","done":8,"pending":0},{"hour":"2026-08-17 19:00 PT","done":8,"pending":0,"note":"Added a real mouse-driven Daemons Avg/Max/Min browser regression, replaced Markdown source preprocessing with a post-parse numbered-task presentation transform, fixed Working/footer classification plus current-question precedence, passed 179 detector tests and the 26-test architecture suite, and raised the supporting denominator from 10/11 to 28/31; only the three landing-gate/archive boxes remain."},{"hour":"2026-08-17 20:00 PT","done":8,"pending":0}] -->

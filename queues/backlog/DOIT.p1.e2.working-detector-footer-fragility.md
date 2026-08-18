@@ -47,19 +47,28 @@ This is the same shape as `DOIT.p0.window-strip-vanishes.md`: an input the recog
 
 ## Plan
 
-- [ ] Settle the narrow-pane prediction first. Drive a real Codex pane at a width that truncates the footer while the agent is mid-turn, capture the exact footer text, and record whether `visible_agent_working` returns False. If it does not reproduce, say so and re-scope this queue to the general fragility rather than quietly closing it.
-- [ ] Enumerate the real footer shapes rather than guessing. Collect actual last lines from Claude and Codex panes at several widths and with several trailing states, and use them as fixtures.
-- [ ] Make an unrecognized trailing line non-authoritative. A line the recognizer cannot classify must not be promoted to "later prompt" and must not cancel a working row. Defaulting to "this cancels the signal" is the wrong default for an unknown input.
-- [ ] Make the cancellation observable. When a working row is discarded because of a later-prompt verdict, that decision needs to be inspectable; today it is a silent boolean and the reason never reaches a diagnostic.
-- [ ] Add fixtures per collected footer shape asserting the classification does not change when only the footer's incidental text changes.
+- [x] Settle the narrow-pane prediction first. Drive a real Codex pane at a width that truncates the footer while the agent is mid-turn, capture the exact footer text, and record whether `visible_agent_working` returns False. If it does not reproduce, say so and re-scope this queue to the general fragility rather than quietly closing it.
+- [x] Enumerate the real footer shapes rather than guessing. Collect actual last lines from Claude and Codex panes at several widths and with several trailing states, and use them as fixtures.
+- [x] Make an unrecognized trailing line non-authoritative. A line the recognizer cannot classify must not be promoted to "later prompt" and must not cancel a working row. Defaulting to "this cancels the signal" is the wrong default for an unknown input.
+- [x] Make the cancellation observable. When a working row is discarded because of a later-prompt verdict, that decision needs to be inspectable; today it is a silent boolean and the reason never reaches a diagnostic.
+- [x] Add fixtures per collected footer shape asserting the classification does not change when only the footer's incidental text changes.
 
 ## Done Criteria
 
-- [ ] The narrow-pane case is either reproduced and fixed, or explicitly recorded as not reproducible with the evidence that settles it.
-- [ ] A byte-identical working row classifies identically across every collected footer shape, covered by fixtures seen to fail first.
-- [ ] An unrecognized trailing line never cancels a working row.
-- [ ] A discarded working row records why, and a test covers it.
+- [x] The narrow-pane case is either reproduced and fixed, or explicitly recorded as not reproducible with the evidence that settles it.
+- [x] A byte-identical working row classifies identically across every collected footer shape, covered by fixtures seen to fail first.
+- [x] An unrecognized trailing line never cancels a working row.
+- [x] A discarded working row records why, and a test covers it.
 - [ ] Canonical gate green, no new Warnings or Errors.
+
+## Evidence
+
+- Real Codex 0.147.0 was exercised at 120, 100, 90, 80, 70, 60, and 50 columns. Every sampled width retained the Working row, composer, and model/cwd footer, so the predicted narrow-width failure did not reproduce; the queue is explicitly re-scoped to the general unknown-footer defect.
+- Red-first fixtures showed unknown no-cwd and future footer shapes canceling a byte-identical Working row. Additional red regressions caught stale Working incorrectly surviving assistant completion, generic choice, AskUserQuestion, and current questions combined with sticky `Goal blocked`.
+- One structured verdict now owns Working classification and diagnostic reason/evidence/row. Unknown footer chrome is non-authoritative; recognized shell prompts, completion rows, generic choices, and AskUserQuestion are authoritative; a current question outranks stale `Goal blocked`, while live Working still outranks stale questions.
+- `python3 -m pytest tests/test_auto_approve_detector.py -q` passed 179 tests after the final precedence correction, and `git diff --check` passes. The final landing gate remains open.
+- The pre-landing source audit found that a discarded Working verdict lost its structured reason when sticky `Goal blocked` won the final screen state. Blocked and idle now share `_nonworking_screen_diagnostics`; the exact sticky-blocked regression failed first, then the detector suite passed 180/180 with current-question and live-Working precedence unchanged.
+- The combined `pytest-unit` lane passed 17,230 tests before failing only the unrelated live-port fixture guard. That exact guard passed after its inert test key moved from live port 7772 to safe port 7442; under the reduced evidence policy the 11-minute lane was not repeated. The exact-SHA full gate remains the landing step.
 
 ## Completion
 
