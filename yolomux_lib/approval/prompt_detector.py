@@ -537,7 +537,10 @@ _CLAUDE_AGENT_TOKEN_SUBLINE_RE = re.compile(
 )
 _STATUS_COUNTER_STALE_SECONDS = 75.0
 _STATUS_COUNTER_MARKER_RE = re.compile(rf"^\s*(?P<marker>{_WORKING_LEADING_SYMBOL_RE})\s*(?P<body>\S.*)$")
-_STATUS_COUNTER_ELAPSED_RE = re.compile(r"\b(?:\d+(?:\.\d+)?[hms]\s*)+\b", re.IGNORECASE)
+_STATUS_COUNTER_ELAPSED_RE = re.compile(
+    r"\b(?:\d+(?:\.\d+)?[hms](?!\s*(?:context|tokens?)\b)\s*)+\b",
+    re.IGNORECASE,
+)
 _STATUS_COUNTER_DURATION_TOKEN_RE = re.compile(r"(?P<value>\d+(?:\.\d+)?)(?P<unit>[hms])\b", re.IGNORECASE)
 _STATUS_COUNTER_TOKEN_RE = re.compile(r"(?:[↑↓]\s*)?(?P<count>\d+(?:\.\d+)?)\s*(?P<suffix>[kKmM])?\s+tokens?\b", re.IGNORECASE)
 _STATUS_COUNTER_TOOL_USE_RE = re.compile(r"\b(?P<count>\d+)\s+tool uses?\b", re.IGNORECASE)

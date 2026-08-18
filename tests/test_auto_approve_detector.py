@@ -1213,6 +1213,22 @@ def test_parse_claude_background_agent_status_counter():
     assert counter["status_marker"] == "○"
 
 
+def test_claude_startup_model_context_is_not_an_activity_counter():
+    model_line = "▝▜█████▛▘  Opus 4.8 (1M context) with xhigh effort · API Usage Billing"
+    visible_text = "\n".join([
+        " ▐▛███▜▌   Claude Code v2.1.185",
+        model_line,
+        "────────────────────────────────────────────────────────────────",
+        '❯ Try "fix typecheck errors"',
+        "────────────────────────────────────────────────────────────────",
+        "  ? for shortcuts · ← for agents",
+    ])
+
+    assert prompt_detector.parse_agent_status_counter(model_line) is None
+    assert prompt_detector.visible_agent_status_counter(visible_text) is None
+    assert prompt_detector.agent_screen_state(visible_text)["key"] == "idle"
+
+
 def test_claude_live_shell_status_counter_is_verb_independent():
     counter = prompt_detector.parse_agent_status_counter("✻ Crunched for 4m 57s · 1 shell still running")
 
