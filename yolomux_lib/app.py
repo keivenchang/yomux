@@ -7226,7 +7226,7 @@ class SystemStatusProjector:
         statsd_row = rows.get("statsd") or {}
         migration = statsd_row.get("migration")
         return app.stats_current_recovery_events(migration if isinstance(migration, Mapping) else {})
-    def local_services_snapshot(self, app) -> local_service_projection.LocalServicesSnapshot:
+    def local_services_snapshot(self, app, *, include_diagnostics: bool = True) -> local_service_projection.LocalServicesSnapshot:
         """Collect the one immutable local-services snapshot.
 
         This is the single owner. `runtime_local_services()` renders it for HTTP, and the
@@ -7239,7 +7239,7 @@ class SystemStatusProjector:
             ledger=app.runtime_process_ledger,
             recovery_events=app.local_services_recovery_events,
         )
-        return collector.collect()
+        return collector.collect(include_diagnostics=include_diagnostics)
     def attach_backend_health_store(self, app, store: Any) -> None:
         """Hold this port's live retained-health store so the projection never reads its file.
 
@@ -8370,7 +8370,7 @@ class TmuxWebtermApp:
         # rendered HTTP payload, which meant a second parse of a projection it did not own;
         # the typed rows already carry exactly these three fields.
         samples = []
-        for row in self.local_services_snapshot().rows:
+        for row in self.local_services_snapshot(include_diagnostics=False).rows:
             samples.append(stats_current_collectors.ServiceLoadSample(
                 row.service,
                 row.running,
@@ -12192,8 +12192,8 @@ class TmuxWebtermApp:
     def local_services_recovery_events(self, rows: Mapping[str, Mapping[str, Any]]) -> list[dict[str, str]]:
         return system_status_projector_for(self).local_services_recovery_events(self, rows)
 
-    def local_services_snapshot(self) -> local_service_projection.LocalServicesSnapshot:
-        return system_status_projector_for(self).local_services_snapshot(self)
+    def local_services_snapshot(self, *, include_diagnostics: bool = True) -> local_service_projection.LocalServicesSnapshot:
+        return system_status_projector_for(self).local_services_snapshot(self, include_diagnostics=include_diagnostics)
 
     def attach_backend_health_store(self, store: Any) -> None:
         return system_status_projector_for(self).attach_backend_health_store(self, store)

@@ -18,7 +18,7 @@ from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -90,6 +90,14 @@ MAX_DELTA_RING_ENTRIES = max(DELTA_RING_ENTRY_BOUNDS.values())
 # idle clients stop multiplying every per-tick slice/encode/delta.
 PRIVATE_DEMAND_GRACE_SECONDS = 120.0
 UNDEMANDED_ENCODE_SECONDS = 60.0
+# Appends can arrive independently from the host sampler and usage collectors, but
+# the finest public view advances only once per second. Coalesce adjacent dirty
+# notifications to that shared policy boundary so they do not reread and refold
+# the same open cells more often than any consumer can observe.
+MATERIALIZATION_COALESCE_SECONDS = float(min(
+    stats_resolution.live_cadence_seconds(resolution)
+    for resolution in stats_resolution.RESOLUTION_CHOICES
+))
 MAX_REQUEST_TRACES = 32
 MAX_BROWSER_PROFILES = 128
 MAX_BROWSER_QUEUE_EXEMPLARS = 8
@@ -316,6 +324,36 @@ class PublishedSnapshotOwner:
     ring_current: bool
     public: bool
     ring_cursor: RingCursor | None
+
+
+@dataclass(slots=True)
+class _CoverageGapCache:
+    epochs_by_key: dict[tuple[str, str, str], storage.CoverageEpoch] = field(default_factory=dict)
+    latest_by_source: dict[tuple[str, str], storage.CoverageEpoch] = field(default_factory=dict)
+    latest_by_family: dict[str, float] = field(default_factory=dict)
+    metadata_ready: bool = False
+    static_by_source: dict[tuple[str, str], tuple[materializer.NoData, ...]] = field(default_factory=dict)
+    ready: bool = False
+    version: int = -1
+    oldest: float = 0.0
+
+    @classmethod
+    def from_coverage(
+        cls,
+        coverage: tuple[storage.CoverageEpoch, ...],
+    ) -> _CoverageGapCache:
+        latest_by_source, latest_by_family = materializer._coverage_latest_metadata(
+            coverage
+        )
+        return cls(
+            epochs_by_key={
+                (item.family, item.source_id, item.epoch_id): item
+                for item in coverage
+            },
+            latest_by_source=latest_by_source,
+            latest_by_family=latest_by_family,
+            metadata_ready=True,
+        )
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -1067,8 +1105,6 @@ def _wire_snapshot_delta(
     candidate: protocol.SnapshotWire,
     revision_number: int,
 ) -> protocol.DeltaWire:
-    previous = protocol.validate_snapshot(previous)
-    candidate = protocol.validate_snapshot(candidate)
     if (
         previous["range_seconds"],
         previous["resolution_seconds"],
@@ -1172,6 +1208,7 @@ class StatsCurrentService:
         self.started_at, self.last_client_at = self.clock(), self.monotonic()
         self._pending_full = True
         self._pending_dirty: set[materializer.DirtyCell] = set()
+        self._next_materialization_at: float | None = None
         self._pending_ring_dirty: set[materializer.DirtyCell] = set()
         self._ring_source_generation = 0
         self._next_ring_flush_at: float | None = None
@@ -1205,6 +1242,8 @@ class StatsCurrentService:
         self._cached_unavailable_spans: tuple[storage.UnavailableSpan, ...] = ()
         self._coverage_cache_ready = False
         self._coverage_version = 0
+        self._coverage_gap_cache = _CoverageGapCache()
+        self._projection_cache = materializer.ProjectionCache()
         self._latest_source_generation = self._next_cache_generation = 0
         self._cache: PublishedCache | None = None
         self._delta_entries: dict[DeltaKey, list[CacheEntry]] = {}
@@ -1444,14 +1483,27 @@ class StatsCurrentService:
         self.stop_event.set()
         self.work_event.set()
 
-    def _take_work(self) -> tuple[bool, frozenset[materializer.DirtyCell], bool] | None:
+    def _take_work(
+        self,
+        *,
+        scheduled: bool = False,
+    ) -> tuple[bool, frozenset[materializer.DirtyCell], bool] | None:
         with self.work_lock:
             if (
                 not self._pending_full
                 and not self._pending_dirty
                 and not self._pending_coverage_refresh
             ):
+                self._next_materialization_at = None
                 return None
+            if scheduled and not self._pending_full:
+                now = self.monotonic()
+                if self._next_materialization_at is None:
+                    self._next_materialization_at = (
+                        now + MATERIALIZATION_COALESCE_SECONDS
+                    )
+                if now < self._next_materialization_at:
+                    return None
             work = (
                 self._pending_full,
                 frozenset(self._pending_dirty),
@@ -1460,6 +1512,7 @@ class StatsCurrentService:
             self._pending_full = False
             self._pending_dirty.clear()
             self._pending_coverage_refresh = False
+            self._next_materialization_at = None
             return work
 
     def _stage_ring_cells_locked(
@@ -1568,6 +1621,11 @@ class StatsCurrentService:
     def _ring_wait_timeout(self) -> float | None:
         with self.work_lock:
             deadlines = [self._next_prune_check_at, self._next_vacuum_at]
+            if (
+                self._next_materialization_at is not None
+                and (self._pending_dirty or self._pending_coverage_refresh)
+            ):
+                deadlines.append(self._next_materialization_at)
             if self.collector_context is not None:
                 deadlines.extend((self._next_host_cpu_at, self._next_host_gpu_at))
             if self._pending_ring_dirty and self._next_ring_flush_at is not None:
@@ -1764,6 +1822,7 @@ class StatsCurrentService:
                 self.database_path,
                 writer_protocol=storage.MIN_WRITER_PROTOCOL,
                 writer_build=storage.MIN_WRITER_BUILD,
+                include_browser_diagnostics=False,
             )
             # sqlite3 connections are thread-owned. This connection belongs to
             # the elected statsd worker; work_lock still serializes it with the
@@ -1772,6 +1831,7 @@ class StatsCurrentService:
                 self.database_path,
                 writer_protocol=storage.MIN_WRITER_PROTOCOL,
                 writer_build=storage.MIN_WRITER_BUILD,
+                include_browser_diagnostics=True,
             )
         except (OSError, sqlite3.Error, storage.StatsCurrentError) as error:
             self._record_build_failure(error)
@@ -1790,7 +1850,7 @@ class StatsCurrentService:
                 self._prune_if_due(publisher)
                 self._vacuum_if_due_while_idle(publisher)
                 self._collect_host_facts_if_due(publisher)
-                work = self._take_work()
+                work = self._take_work(scheduled=True)
                 if work is not None:
                     self._build_once(reader, *work)
                 self._flush_ring_if_due(publisher)
@@ -2114,19 +2174,36 @@ class StatsCurrentService:
                         snapshot,
                         coverage_epochs=coverage_epochs,
                         unavailable_spans=unavailable_spans,
+                        coverage_normalized=True,
                     )
                     with self.work_lock:
                         if self._coverage_version == coverage_version:
                             self._cached_coverage_epochs = coverage_epochs
                             self._cached_unavailable_spans = unavailable_spans
                             self._coverage_cache_ready = True
+                            self._coverage_gap_cache = _CoverageGapCache.from_coverage(
+                                coverage_epochs
+                            )
                 else:
                     snapshot = replace(
                         snapshot,
                         coverage_epochs=cached_coverage_epochs,
                         unavailable_spans=cached_unavailable_spans,
+                        coverage_normalized=True,
                     )
                 source_generation = snapshot.schema.source_generation
+            gap_oldest = min(
+                math.floor(observed_until / resolution) * resolution
+                + resolution
+                - materializer.LAYER_SECONDS[resolution]
+                for resolution in stats_resolution.RESOLUTION_CHOICES
+            )
+            coverage_gaps = self._coverage_gaps_for_build(
+                snapshot,
+                coverage_version,
+                gap_oldest,
+                observed_until,
+            )
             with self.work_lock:
                 self._latest_source_generation = max(self._latest_source_generation, source_generation)
             now = self.clock()
@@ -2144,6 +2221,8 @@ class StatsCurrentService:
                 generated_at=now,
                 observed_until=observed_until,
                 price_resolver=self.price_resolver,
+                coverage_gaps=coverage_gaps,
+                projection_cache=self._projection_cache,
             )
             if build is self.full_builder:
                 self._full_builds += 1
@@ -3049,6 +3128,7 @@ class StatsCurrentService:
             self._cached_coverage_epochs = ()
             self._cached_unavailable_spans = ()
             self._coverage_cache_ready = False
+            self._coverage_gap_cache = _CoverageGapCache()
         else:
             self._merge_cached_coverage(coverage, unavailable)
         self._pending_coverage_refresh = True
@@ -3063,41 +3143,115 @@ class StatsCurrentService:
 
         if not self._coverage_cache_ready:
             return False
-        if coverage:
-            epochs = {
-                (item.family, item.source_id, item.epoch_id): item
-                for item in self._cached_coverage_epochs
-            }
-            epochs.update({
-                (item.family, item.source_id, item.epoch_id): item
-                for item in coverage
-            })
-            self._cached_coverage_epochs = tuple(sorted(
-                epochs.values(),
-                key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
-            ))
-        if unavailable:
-            spans = {
-                (item.family, item.source_id, item.epoch_id, item.started_at): item
-                for item in self._cached_unavailable_spans
-            }
-            spans.update({
-                (item.family, item.source_id, item.epoch_id, item.started_at): item
-                for item in unavailable
-            })
-            unavailable_spans = tuple(sorted(
-                spans.values(),
-                key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
-            ))
-        else:
-            unavailable_spans = self._cached_unavailable_spans
+        gap_cache = self._coverage_gap_cache
+        topology_changed = bool(unavailable) or not gap_cache.metadata_ready
+        gap_geometry_changed = topology_changed
+        latest_updates: dict[str, float] = {}
+        for item in coverage:
+            key = (item.family, item.source_id, item.epoch_id)
+            source_key = (item.family, item.source_id)
+            previous = gap_cache.epochs_by_key.get(key)
+            previous_latest = gap_cache.latest_by_source.get(source_key)
+            previous_end = math.inf if previous is not None and previous.ended_at is None else (
+                float("-inf") if previous is None else float(previous.ended_at)
+            )
+            item_end = math.inf if item.ended_at is None else float(item.ended_at)
+            if (
+                previous is None
+                or previous.started_at != item.started_at
+                or previous.native_cadence_seconds != item.native_cadence_seconds
+                or previous.owner_generation != item.owner_generation
+                or item_end < previous_end
+                or previous_latest is None
+                or previous_latest.epoch_id != item.epoch_id
+            ):
+                topology_changed = True
+                gap_geometry_changed = True
+            latest_updates[item.family] = max(
+                latest_updates.get(item.family, float("-inf")), item_end,
+            )
         self._cached_coverage_epochs, self._cached_unavailable_spans = (
-            materializer.normalize_coverage_model(
+            materializer.merge_normalized_coverage_model(
                 self._cached_coverage_epochs,
-                unavailable_spans,
+                self._cached_unavailable_spans,
+                coverage,
+                unavailable,
             )
         )
+        if topology_changed:
+            gap_cache = _CoverageGapCache.from_coverage(
+                self._cached_coverage_epochs
+            )
+            self._coverage_gap_cache = gap_cache
+        else:
+            for item in coverage:
+                gap_cache.epochs_by_key[
+                    (item.family, item.source_id, item.epoch_id)
+                ] = item
+                gap_cache.latest_by_source[(item.family, item.source_id)] = item
+            for family, latest_end in latest_updates.items():
+                gap_cache.latest_by_family[family] = max(
+                    gap_cache.latest_by_family.get(family, float("-inf")),
+                    latest_end,
+                )
+        if gap_geometry_changed:
+            gap_cache.ready = False
+        elif gap_cache.ready:
+            gap_cache.version = self._coverage_version
         return True
+
+    def _coverage_gaps_for_build(
+        self,
+        snapshot: storage.StoreSnapshot,
+        coverage_version: int,
+        oldest: float,
+        observed_until: float,
+    ) -> tuple[materializer.NoData, ...]:
+        with self.work_lock:
+            gap_cache = self._coverage_gap_cache
+            reusable = (
+                gap_cache.ready
+                and gap_cache.version == coverage_version
+                and oldest >= gap_cache.oldest
+            )
+            static_by_source = dict(gap_cache.static_by_source)
+            latest_by_source = dict(gap_cache.latest_by_source)
+            latest_by_family = dict(gap_cache.latest_by_family)
+            static_oldest = gap_cache.oldest
+        if reusable:
+            gaps = materializer._compose_coverage_gaps(
+                static_by_source,
+                latest_by_source,
+                latest_by_family,
+                static_oldest,
+                oldest,
+                observed_until,
+            )
+        else:
+            gaps = materializer._coverage_gaps(snapshot, oldest, observed_until)
+            latest_by_source, latest_by_family = materializer._coverage_latest_metadata(
+                snapshot.coverage_epochs
+            )
+            static_by_source = materializer._static_coverage_gaps(
+                gaps,
+                latest_by_source,
+                latest_by_family,
+                observed_until,
+            )
+        with self.work_lock:
+            if (
+                self._coverage_version == coverage_version
+                and not any(
+                    item.started_at < observed_until < item.ended_at
+                    for item in snapshot.unavailable_spans
+                )
+            ):
+                gap_cache = self._coverage_gap_cache
+                gap_cache.static_by_source = static_by_source
+                gap_cache.ready = True
+                gap_cache.version = coverage_version
+                gap_cache.oldest = oldest
+        return gaps
 
     def _usage_identity_conflict_response(
         self,

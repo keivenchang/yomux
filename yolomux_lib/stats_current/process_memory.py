@@ -24,6 +24,8 @@ MAX_PROCESS_BINARY_LENGTH = 64
 _PYTHON_BINARY_RE = re.compile(r"python(?:\d+(?:\.\d+)*)?", re.IGNORECASE)
 _VERSION_BINARY_RE = re.compile(r"\d+(?:\.\d+){1,3}")
 _SAFE_BINARY_RE = re.compile(r"[^a-z0-9._+-]+")
+_PROC_ROOT = Path("/proc")
+_LINUX_PROCESS_BINARY_CACHE: dict[tuple[str, str], str] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,33 +109,52 @@ def _linux_process_binary(comm: str, executable: str) -> str:
     return normalize_process_binary(comm)
 
 
-def _linux_process_census() -> tuple[ProcessCensusRow, ...] | None:
+def _linux_process_census(
+    proc_root: Path = _PROC_ROOT,
+    *,
+    binary_cache: dict[tuple[str, str], str] | None = None,
+) -> tuple[ProcessCensusRow, ...] | None:
     try:
         page_size = int(os.sysconf("SC_PAGE_SIZE"))
         clock_ticks = float(os.sysconf("SC_CLK_TCK"))
-        entries = tuple(Path("/proc").iterdir())
+        with os.scandir(proc_root) as entries:
+            pid_entries = tuple(entry.name for entry in entries if entry.name.isdigit())
     except (OSError, ValueError):
         return None
-    pid_entries = tuple(entry for entry in entries if entry.name.isdigit())
     rows: list[ProcessCensusRow] = []
-    for entry in pid_entries:
+    retained_binaries: dict[tuple[str, str], str] = {}
+    root = os.fspath(proc_root)
+    for pid_text in pid_entries:
         try:
-            fields = (entry / "stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-            pid = int(entry.name)
+            process_root = os.path.join(root, pid_text)
+            with open(os.path.join(process_root, "stat"), encoding="utf-8") as stat_file:
+                stat_head, stat_tail = stat_file.read().rsplit(") ", 1)
+            comm_prefix = f"{pid_text} ("
+            if not stat_head.startswith(comm_prefix):
+                raise ValueError("invalid proc stat identity")
+            comm = stat_head[len(comm_prefix):]
+            fields = stat_tail.split()
+            pid = int(pid_text)
             cpu_seconds = (float(fields[11]) + float(fields[12])) / clock_ticks
             started_at_ticks = int(fields[19])
             rss = max(0, int(fields[21]) * page_size)
-            comm = (entry / "comm").read_text(encoding="utf-8").strip()
-            try:
-                executable = os.readlink(entry / "exe")
-            except OSError:
-                executable = ""
-            binary = _linux_process_binary(comm, executable) if comm else executable
+            identity = f"{pid}:{started_at_ticks}"
+            cache_key = (identity, comm)
+            binary = None if binary_cache is None else binary_cache.get(cache_key)
+            if binary is None:
+                try:
+                    executable = os.readlink(os.path.join(process_root, "exe"))
+                except OSError:
+                    executable = ""
+                binary = _linux_process_binary(comm, executable)
         except (IndexError, OSError, ValueError):
             continue
-        normalized = normalize_process_binary(binary)
-        if normalized:
-            rows.append(ProcessCensusRow(pid, f"{pid}:{started_at_ticks}", normalized, cpu_seconds, rss))
+        if binary:
+            retained_binaries[cache_key] = binary
+            rows.append(ProcessCensusRow(pid, identity, binary, cpu_seconds, rss))
+    if binary_cache is not None:
+        binary_cache.clear()
+        binary_cache.update(retained_binaries)
     if pid_entries and not rows:
         return None
     return tuple(rows)
@@ -189,7 +210,11 @@ def _darwin_process_census() -> tuple[ProcessCensusRow, ...] | None:
 def process_census() -> tuple[ProcessCensusRow, ...] | None:
     """Read one all-process native snapshot for both CPU and memory grouping."""
 
-    return _darwin_process_census() if sys.platform == "darwin" else _linux_process_census()
+    return (
+        _darwin_process_census()
+        if sys.platform == "darwin"
+        else _linux_process_census(binary_cache=_LINUX_PROCESS_BINARY_CACHE)
+    )
 
 
 def process_memory_by_binary() -> dict[str, int] | None:

@@ -1031,32 +1031,32 @@ def test_native_process_memory_failure_is_distinct_from_a_valid_empty_census(mon
 
 
 def test_linux_process_memory_reports_proc_enumeration_failure(monkeypatch):
-    class MissingProc:
-        def iterdir(self):
-            raise OSError("proc unavailable")
+    def fail_scandir(_root):
+        raise OSError("proc unavailable")
 
     monkeypatch.setattr(process_memory.sys, "platform", "linux")
-    monkeypatch.setattr(process_memory, "Path", lambda _value: MissingProc())
+    monkeypatch.setattr(process_memory.os, "scandir", fail_scandir)
 
     assert process_memory.process_memory_by_binary() is None
 
 
 def test_linux_process_memory_reports_total_pid_read_failure(monkeypatch):
-    class UnreadablePid:
+    class PidEntry:
         name = "123"
 
-        def __truediv__(self, _value):
-            return self
+    class PidEntries:
+        def __enter__(self):
+            return iter((PidEntry(),))
 
-        def read_text(self, **_kwargs):
-            raise OSError("pid disappeared")
+        def __exit__(self, _exc_type, _exc_value, _traceback):
+            return False
 
-    class ProcWithUnreadablePid:
-        def iterdir(self):
-            return (UnreadablePid(),)
+    def fail_open(*_args, **_kwargs):
+        raise OSError("pid disappeared")
 
     monkeypatch.setattr(process_memory.sys, "platform", "linux")
-    monkeypatch.setattr(process_memory, "Path", lambda _value: ProcWithUnreadablePid())
+    monkeypatch.setattr(process_memory.os, "scandir", lambda _root: PidEntries())
+    monkeypatch.setattr(process_memory, "open", fail_open, raising=False)
 
     assert process_memory.process_memory_by_binary() is None
 

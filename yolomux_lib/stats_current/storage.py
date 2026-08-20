@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,8 +36,9 @@ SCHEMA_VERSION = 7
 MIN_WRITER_PROTOCOL = 24
 # Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
 # strict process-memory payload. Build 6 makes the same census the sole owner of
-# grouped CPU and RSS, so an older elected writer must yield before publishing.
-MIN_WRITER_BUILD = 6
+# grouped CPU and RSS. Build 7 stores large persisted-ring JSON as bounded zlib
+# blobs, so an older reader must yield before it can reinterpret those slots.
+MIN_WRITER_BUILD = 7
 # How long original facts stay on disk. Retention and the GUI's longest display
 # window (stats_resolution.MAX_RANGE_SECONDS) are two independent knobs that used
 # to be spelled with the same literal, which invited the assumption that moving
@@ -117,6 +119,8 @@ WRITER_FENCE_FILENAME = "stats-writer-compat.json"
 MAX_DIRTY_INTERVALS = 32
 MAX_BROWSER_FAILURE_FINGERPRINTS = 128
 MAX_RING_BUCKET_BYTES = 256 * 1024
+_RING_BUCKET_ZLIB_MAGIC = b"YRB1\0"
+_RING_BUCKET_ZLIB_LEVEL = 1
 
 _BROWSER_PROFILE_KINDS = frozenset(
     {"api", "page_load", "finder_usable", "interaction", "operation_wait", "long_task"}
@@ -372,6 +376,7 @@ class StoreSnapshot:
     usage_atoms: tuple[UsageAtom, ...]
     migration_reconciliation: tuple[MigrationReconciliation, ...]
     unavailable_spans: tuple[UnavailableSpan, ...] = ()
+    coverage_normalized: bool = False
 
 
 @dataclass(frozen=True)
@@ -520,7 +525,42 @@ def _validate_nonnegative_integer(value: object, name: str) -> int:
     return value
 
 
-def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str, int]:
+def _stored_ring_bucket_json(bucket_json: str) -> str | bytes:
+    raw = bucket_json.encode("utf-8")
+    compressed = _RING_BUCKET_ZLIB_MAGIC + zlib.compress(
+        raw,
+        level=_RING_BUCKET_ZLIB_LEVEL,
+    )
+    return compressed if len(compressed) < len(raw) else bucket_json
+
+
+def _decoded_ring_bucket_json(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, bytes) or not value.startswith(_RING_BUCKET_ZLIB_MAGIC):
+        raise SchemaMismatchError("aggregate ring bucket encoding is unavailable")
+    decompressor = zlib.decompressobj()
+    try:
+        raw = decompressor.decompress(
+            value[len(_RING_BUCKET_ZLIB_MAGIC):],
+            MAX_RING_BUCKET_BYTES + 1,
+        )
+    except zlib.error as error:
+        raise SchemaMismatchError("aggregate ring bucket compression is invalid") from error
+    if (
+        len(raw) > MAX_RING_BUCKET_BYTES
+        or not decompressor.eof
+        or decompressor.unconsumed_tail
+        or decompressor.unused_data
+    ):
+        raise SchemaMismatchError("aggregate ring bucket compression is invalid")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SchemaMismatchError("aggregate ring bucket compression is invalid") from error
+
+
+def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | bytes, int]:
     if not isinstance(bucket, RingBucketWrite):
         raise StorageValidationError("ring bucket must be a RingBucketWrite")
     resolution_seconds = _validate_nonnegative_integer(
@@ -549,7 +589,13 @@ def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str, in
     if not isinstance(bucket.complete, bool):
         raise StorageValidationError("complete must be a boolean")
     slot_index = (bucket_start // resolution_seconds) % slot_count
-    return resolution_seconds, slot_index, bucket_start, bucket.bucket_json, int(bucket.complete)
+    return (
+        resolution_seconds,
+        slot_index,
+        bucket_start,
+        _stored_ring_bucket_json(bucket.bucket_json),
+        int(bucket.complete),
+    )
 
 
 def _encode_json_object(value: Mapping[str, object], name: str) -> str:
@@ -1138,6 +1184,33 @@ def _read_header(connection: sqlite3.Connection) -> _Header:
     return _Header(application_id, schema_version, int(row[0]), int(row[1]), int(row[2]))
 
 
+def _schema_metadata(header: _Header) -> SchemaMetadata:
+    return SchemaMetadata(
+        header.schema_version,
+        header.minimum_writer_protocol,
+        header.minimum_writer_build,
+        header.source_generation,
+    )
+
+
+def _read_migration_reconciliations(
+    connection: sqlite3.Connection,
+) -> tuple[MigrationReconciliation, ...]:
+    rows = connection.execute(
+        "SELECT migration_id, completed_at, source_digest, details_json "
+        "FROM migration_reconciliation ORDER BY completed_at, migration_id"
+    ).fetchall()
+    return tuple(
+        MigrationReconciliation(
+            str(row[0]),
+            float(row[1]),
+            str(row[2]),
+            _decode_json_object(row[3], "migration reconciliation details"),
+        )
+        for row in rows
+    )
+
+
 def _validate_database_path(path: Path) -> None:
     if path.name != DATABASE_FILENAME:
         raise SchemaMismatchError(f"current stats database must be named {DATABASE_FILENAME}")
@@ -1438,6 +1511,7 @@ class Store:
         *,
         writer_protocol: int = MIN_WRITER_PROTOCOL,
         writer_build: int = MIN_WRITER_BUILD,
+        include_browser_diagnostics: bool = True,
     ) -> Store:
         database_path = Path(path)
         protocol = _validate_nonnegative_integer(writer_protocol, "writer_protocol")
@@ -1476,7 +1550,8 @@ class Store:
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
             connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
-            _initialize_browser_diagnostics(connection)
+            if include_browser_diagnostics:
+                _initialize_browser_diagnostics(connection)
             # A clean writer takeover must not inherit the largest WAL allocation
             # a prior large transaction left behind. The service singleton lock
             # makes this the safe startup boundary before worker readers exist.
@@ -1493,6 +1568,7 @@ class Store:
         *,
         writer_protocol: int = MIN_WRITER_PROTOCOL,
         writer_build: int = MIN_WRITER_BUILD,
+        include_browser_diagnostics: bool = True,
     ) -> Store:
         """Open the exact current database without publishing or accepting writes."""
 
@@ -1514,7 +1590,8 @@ class Store:
             header = _read_header(connection)
             _check_writer(header, protocol, build)
             cls._validate_schema_shape(connection)
-            _initialize_browser_diagnostics(connection)
+            if include_browser_diagnostics:
+                _initialize_browser_diagnostics(connection)
             connection.execute("PRAGMA query_only = ON")
         except (sqlite3.Error, StatsCurrentError):
             if connection is not None:
@@ -1892,7 +1969,7 @@ class Store:
                     RingBucketRow(
                         resolution_value,
                         bucket_start,
-                        str(candidate[2]),
+                        _decoded_ring_bucket_json(candidate[2]),
                         bool(candidate[3]),
                         int(candidate[4]),
                         int(candidate[5]),
@@ -2306,6 +2383,17 @@ class Store:
         ) as read:
             return read()
 
+    def read_migration_state(
+        self,
+    ) -> tuple[SchemaMetadata, tuple[MigrationReconciliation, ...]]:
+        """Read only the current writer header and durable migration record."""
+
+        connection = self._connection()
+        with _transaction(connection):
+            header = _read_header(connection)
+            reconciliations = _read_migration_reconciliations(connection)
+        return _schema_metadata(header), reconciliations
+
     def recent_browser_profiles(self, limit: int = 128) -> tuple[dict[str, object], ...]:
         """Read bounded durable request, page, and perceptual profiles newest first."""
 
@@ -2481,17 +2569,8 @@ class Store:
                     + "ORDER BY started_at, family, source_id, epoch_id",
                     () if window is None else window,
                 ).fetchall()
-                reconciliation_rows = connection.execute(
-                    "SELECT migration_id, completed_at, source_digest, details_json "
-                    "FROM migration_reconciliation ORDER BY completed_at, migration_id"
-                ).fetchall()
                 return StoreSnapshot(
-                    schema=SchemaMetadata(
-                        header.schema_version,
-                        header.minimum_writer_protocol,
-                        header.minimum_writer_build,
-                        header.source_generation,
-                    ),
+                    schema=_schema_metadata(header),
                     observations=tuple(
                         Observation(
                             str(row[0]), str(row[1]), str(row[2]), float(row[3]),
@@ -2516,13 +2595,7 @@ class Store:
                         )
                         for row in usage_rows
                     ),
-                    migration_reconciliation=tuple(
-                        MigrationReconciliation(
-                            str(row[0]), float(row[1]), str(row[2]),
-                            _decode_json_object(row[3], "migration reconciliation details"),
-                        )
-                        for row in reconciliation_rows
-                    ),
+                    migration_reconciliation=_read_migration_reconciliations(connection),
                     unavailable_spans=tuple(
                         UnavailableSpan(
                             str(row[0]), str(row[1]), str(row[2]), float(row[3]),

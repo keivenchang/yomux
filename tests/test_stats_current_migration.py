@@ -13,6 +13,7 @@ import pytest
 
 from yolomux_lib.stats_current import migration
 from yolomux_lib.stats_current import identity
+from yolomux_lib.stats_current import storage as storage_module
 from yolomux_lib.stats_current.storage import DATABASE_FILENAME
 from yolomux_lib.stats_current.storage import RETENTION_SECONDS
 from yolomux_lib.stats_current.storage import SCHEMA_VERSION
@@ -507,6 +508,45 @@ def test_current_database_reopens_after_live_facts_change_activation_counts(tmp_
     assert _file_state(first.active_database) == before
     with Store.open_reader(first.active_database) as reader:
         assert {item.event_id for item in reader.read_snapshot().observations} == {"cpu-live"}
+
+
+def test_current_database_restart_does_not_decode_post_activation_fact_history(
+    tmp_path,
+    monkeypatch,
+):
+    state = tmp_path / "state"
+    first = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+    with Store.open(first.active_database) as store:
+        result = store.append_batch(observations=(Observation(
+            "cpu-live",
+            "cpu",
+            "web",
+            201,
+            "cpu:live",
+            1,
+            {"process_percent": 1, "system_percent": 2},
+        ),))
+        assert result.source_generation > 0
+
+    monkeypatch.setattr(
+        Store,
+        "read_snapshot",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current restart decoded post-activation fact history")
+        ),
+    )
+    monkeypatch.setattr(
+        storage_module,
+        "_initialize_browser_diagnostics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("current restart rebuilt browser diagnostics")
+        ),
+    )
+
+    second = migration.migrate(migration.MigrationInputs(state), completed_at=300)
+
+    assert second.already_active is True
+    assert second.source_digest == first.source_digest
 
 
 def test_current_restart_removes_stale_retired_files_recreated_by_an_old_runner(tmp_path):

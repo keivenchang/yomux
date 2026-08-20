@@ -944,7 +944,7 @@ def test_observer_and_service_load_share_one_row_producer_map(monkeypatch):
         def __init__(self, producers: Any, *, ledger: Any = None, recovery_events: Any = None) -> None:
             handed.append(producers)
 
-        def collect(self) -> SentinelSnapshot:
+        def collect(self, *, include_diagnostics: bool = True) -> SentinelSnapshot:
             return SentinelSnapshot()
 
     monkeypatch.setattr(local_service_projection, "LocalServicesCollector", RecordingCollector)

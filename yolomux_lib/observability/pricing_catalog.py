@@ -101,6 +101,7 @@ class ResolvedRate:
     source_kind: str
     source_url: str
     catalog_revision: int
+    effective_until: str | None = None
 
     def public_payload(self) -> dict[str, Any]:
         """JSON-safe rate evidence for stats/projection and the source popover."""
@@ -483,7 +484,52 @@ class PricingCatalog:
                 source_kind = "seed" if row is not None else ""
             if row is None:
                 return None
-            return ResolvedRate(provider, str(row["model"]), model, direction, modality, cache_role, unit, int(row["scale"]), Decimal(str(row["usd"])), str(row["effective_from"]), source_kind, str(row["source_url"]), int(row["revision"]))
+            selected_priority = SOURCE_PRIORITY[str(row["source_kind"])]
+            boundary_kinds = tuple(
+                kind
+                for kind, priority in SOURCE_PRIORITY.items()
+                if priority >= selected_priority and kind != "inferred"
+            )
+            boundary_placeholders = ",".join("?" for _kind in boundary_kinds)
+            effective_until_row = connection.execute(
+                "SELECT MIN(effective_from) FROM price_rates WHERE provider = ? AND model = ? "
+                "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ? "
+                "AND profile = ? AND service_tier = ? AND effective_from > ? AND active = 1 "
+                f"AND source_kind IN ({boundary_placeholders})",
+                (
+                    provider,
+                    row["model"],
+                    direction,
+                    modality,
+                    cache_role,
+                    unit,
+                    profile,
+                    service_tier,
+                    row["effective_from"],
+                    *boundary_kinds,
+                ),
+            ).fetchone()
+            effective_until = (
+                None
+                if effective_until_row is None or effective_until_row[0] is None
+                else str(effective_until_row[0])
+            )
+            return ResolvedRate(
+                provider,
+                str(row["model"]),
+                model,
+                direction,
+                modality,
+                cache_role,
+                unit,
+                int(row["scale"]),
+                Decimal(str(row["usd"])),
+                str(row["effective_from"]),
+                source_kind,
+                str(row["source_url"]),
+                int(row["revision"]),
+                effective_until,
+            )
 
     def estimate_rate_band(self, *, provider: str = "unknown", direction: str, modality: str = "text", cache_role: str = "none", unit: str = "tokens", profile: str = "default", service_tier: str = "default", timestamp: str = "9999-12-31T23:59:59Z") -> EstimatedRateBand | None:
         """Return a defensible low/high comparable rate band for unknown models.

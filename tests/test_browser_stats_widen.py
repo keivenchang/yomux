@@ -1016,6 +1016,26 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
     assert retained["fingerprint"]["kind"] == "warning", retained
     assert retained["fingerprint"]["provenance"] == "unknown", retained
 
+    def ready_only_delta_stream(
+        _raw_query: str,
+        *,
+        authenticated_username: str,
+    ) -> stats_current_http.DeltaStreamResult:
+        assert authenticated_username
+        return stats_current_http.DeltaStreamResult(
+            HTTPStatus.NOT_MODIFIED,
+            {"ok": True, "not_modified": True, "cache_generation": 0},
+        )
+
+    # A prior test may have left a publishable generation in the fixture-owned
+    # service. Hold this stream at a validated ready heartbeat so the assertion
+    # below proves snapshot readiness cannot clear the latch; the test injects
+    # its accepted push explicitly after taking the stream base.
+    monkeypatch.setattr(
+        runtime.app.stats_current_http,
+        "delta_stream",
+        ready_only_delta_stream,
+    )
     monkeypatch.setattr(runtime.app.stats_current_http, "capabilities", original_capabilities)
     healthy = WebDriverWait(authenticated_e2e_browser.driver, 12, poll_frequency=0.05).until(
         lambda driver: driver.execute_script(
