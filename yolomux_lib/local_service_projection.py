@@ -718,7 +718,7 @@ class LocalServicesCollector:
         self.inventory = tuple(inventory)
         self.clock = clock
 
-    def collect(self) -> LocalServicesSnapshot:
+    def collect(self, *, include_diagnostics: bool = True) -> LocalServicesSnapshot:
         producers = self._row_producers()
         missing = [service for service in self.inventory if service not in producers]
         extra = [service for service in producers if service not in self.inventory]
@@ -750,10 +750,10 @@ class LocalServicesCollector:
             processes=processes,
             cpu_percent=cpu_percent,
             rss_bytes=rss_bytes,
-            ledger=MappingProxyType(dict(self._ledger() or {})) if self._ledger is not None else MappingProxyType({}),
+            ledger=MappingProxyType(dict(self._ledger() or {})) if include_diagnostics and self._ledger is not None else MappingProxyType({}),
             recovery_events=tuple(
                 MappingProxyType(dict(event))
-                for event in (self._recovery_events(rows_by_service) if self._recovery_events is not None else ())
+                for event in (self._recovery_events(rows_by_service) if include_diagnostics and self._recovery_events is not None else ())
                 if isinstance(event, Mapping)
             ),
         )

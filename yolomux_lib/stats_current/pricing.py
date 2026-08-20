@@ -89,11 +89,17 @@ class _RateDimension:
 @dataclass(slots=True)
 class _RateWindow:
     start: str | None
-    end: str
+    end: str | None
     rate: ResolvedRate | None
 
     def contains(self, timestamp: str) -> bool:
-        return timestamp <= self.end and (self.start is None or self.start <= timestamp)
+        if self.rate is None:
+            return self.end is not None and timestamp <= self.end
+        return (
+            self.start is not None
+            and self.start <= timestamp
+            and (self.end is None or timestamp < self.end)
+        )
 
 
 class UsagePriceProjector:
@@ -220,12 +226,14 @@ class UsagePriceProjector:
     ) -> None:
         windows = self._windows.setdefault(dimension, [])
         start = None if rate is None else rate.effective_from
+        end = timestamp if rate is None else rate.effective_until
         for window in windows:
             if window.start == start and window.rate == rate:
-                window.end = max(window.end, timestamp)
+                if rate is None:
+                    window.end = max(window.end or timestamp, timestamp)
                 self._windows.move_to_end(dimension)
                 return
-        windows.append(_RateWindow(start, timestamp, rate))
+        windows.append(_RateWindow(start, end, rate))
         windows.sort(key=lambda window: window.start or "", reverse=True)
         self._windows.move_to_end(dimension)
         while len(self._windows) > self.max_rate_dimensions:

@@ -507,6 +507,48 @@ def test_steady_publication_is_one_transaction_and_uses_no_aggregate_insert_or_d
     ), normalized
 
 
+def test_large_ring_payload_is_compressed_without_changing_the_read_contract(
+    tmp_path: Path,
+) -> None:
+    bucket_json = json.dumps(
+        {"series": {"fixture": {"payload": "repeat-me" * 8_192}}},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(
+            store,
+            storage.RingBucketWrite(1, 299, bucket_json, False),
+            source_generation=1,
+            published_at=300.0,
+        )
+        stored_type, stored_bytes = store._connection().execute(
+            "SELECT typeof(bucket_json), length(bucket_json) FROM aggregate_ring_slots "
+            "WHERE resolution_seconds = 1 AND slot_index = 299"
+        ).fetchone()
+        compressed = store.read_ring_window(
+            range_seconds=300,
+            resolution_seconds=1,
+            window_end=300,
+        )
+        store._connection().execute(
+            "UPDATE aggregate_ring_slots SET bucket_json = ? "
+            "WHERE resolution_seconds = 1 AND slot_index = 299",
+            (bucket_json,),
+        )
+        legacy = store.read_ring_window(
+            range_seconds=300,
+            resolution_seconds=1,
+            window_end=300,
+        )
+
+    assert stored_type == "blob"
+    assert stored_bytes < len(bucket_json.encode("utf-8")) // 4
+    assert compressed.rows[0].bucket_json == bucket_json
+    assert legacy.rows[0].bucket_json == bucket_json
+
+
 def test_lap_stale_slot_is_absent_from_the_current_window(tmp_path: Path) -> None:
     with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
         store.initialize_ring_storage()

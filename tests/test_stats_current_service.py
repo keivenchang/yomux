@@ -310,6 +310,28 @@ def test_worker_open_failure_stops_the_listener(tmp_path):
     assert service._failed_builds == 1
 
 
+def test_worker_reader_skips_diagnostics_but_pruning_publisher_retains_them(tmp_path):
+    store = FakeStore()
+    diagnostic_options = []
+
+    def open_store(*_args, **kwargs):
+        diagnostic_options.append(kwargs.get("include_browser_diagnostics"))
+        return store
+
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        store_opener=open_store,
+        reader_opener=open_store,
+    )
+    service.stop_event.set()
+
+    service._worker_loop()
+
+    assert diagnostic_options == [False, True]
+    assert store.closed == 2
+
+
 def test_scheduled_prune_failure_stops_the_listener(tmp_path):
     class FailingPruneStore(FakeStore):
         def prune(self, *, now):
@@ -1277,6 +1299,47 @@ def test_server_wire_builders_do_not_revalidate_each_preencoded_private_variant(
     assert "return protocol.validate_delta(wire)" not in source
 
 
+def test_ring_delta_does_not_revalidate_trusted_preencoded_snapshots(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    empty = storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), (),
+    )
+    first = materializer.build_generation(
+        empty,
+        source_generation=0,
+        cache_generation=10,
+        generated_at=100_000,
+        observed_until=100_000,
+    )
+    second = materializer.build_generation(
+        empty,
+        source_generation=0,
+        cache_generation=20,
+        generated_at=100_001,
+        observed_until=100_001,
+    )
+    first_entry = service._encode_generation(first)[(300, 1, None)]
+    second_entry = service._encode_generation(second)[(300, 1, None)]
+    validate_snapshot = protocol.validate_snapshot
+    monkeypatch.setattr(
+        protocol,
+        "validate_snapshot",
+        lambda _wire: (_ for _ in ()).throw(
+            AssertionError("trusted ring bridge revalidated a full snapshot")
+        ),
+    )
+
+    delta = service._ring_delta_entry(first_entry, second_entry, 1)
+
+    wire = json.loads(delta.binary)
+    protocol.validate_delta(wire)
+    assert validate_snapshot(json.loads(first_entry.binary))["cache_generation"] == 10
+    assert validate_snapshot(json.loads(second_entry.binary))["cache_generation"] == 20
+
+
 def test_every_trusted_preencoded_snapshot_and_delta_passes_the_canonical_validator(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
@@ -1901,6 +1964,48 @@ def test_ring_wait_timeout_uses_only_owned_deadlines(
     service._next_vacuum_at = now + service_module.VACUUM_INTERVAL_SECONDS
 
     assert service._ring_wait_timeout() == expected
+
+
+def test_worker_coalesces_incremental_appends_to_the_finest_public_cadence(tmp_path):
+    monotonic_now = [100.0]
+    service = service_module.StatsCurrentService(
+        tmp_path / "stats.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0],
+    )
+    service._pending_full = False
+    first = materializer.DirtyCell(1, 99)
+    second = materializer.DirtyCell(10, 90)
+    service._pending_dirty.add(first)
+
+    assert service._take_work(scheduled=True) is None
+    assert service._next_materialization_at == (
+        monotonic_now[0] + service_module.MATERIALIZATION_COALESCE_SECONDS
+    )
+
+    monotonic_now[0] += service_module.MATERIALIZATION_COALESCE_SECONDS / 2
+    service._pending_dirty.add(second)
+    assert service._take_work(scheduled=True) is None
+    assert service._pending_dirty == {first, second}
+
+    monotonic_now[0] += service_module.MATERIALIZATION_COALESCE_SECONDS / 2
+    assert service._take_work(scheduled=True) == (
+        False,
+        frozenset((first, second)),
+        False,
+    )
+    assert service._next_materialization_at is None
+
+
+def test_worker_never_delays_a_required_full_materialization(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "stats.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: 100.0,
+    )
+
+    assert service._take_work(scheduled=True) == (True, frozenset(), False)
+    assert service._next_materialization_at is None
 
 
 def test_collector_context_accepts_only_bounded_owner_identity(tmp_path):
@@ -3127,7 +3232,7 @@ def test_incremental_build_does_not_rescan_retired_private_browser_history(tmp_p
     assert incremental_rows == [(current,)]
 
 
-def test_incremental_build_reuses_compacted_legacy_coverage_model(tmp_path, monkeypatch):
+def test_incremental_build_reuses_compacted_legacy_coverage_without_renormalizing(tmp_path, monkeypatch):
     now = [100_000.0]
     store = FakeStore()
     legacy_rows = tuple(
@@ -3205,8 +3310,7 @@ def test_incremental_build_reuses_compacted_legacy_coverage_model(tmp_path, monk
         frozenset(service._dirty_cells((current,), ())),
     )
 
-    assert len(raw_coverage) == coalesce_sizes[0] == 22_243
-    assert max(coalesce_sizes[1:]) == 6_066
+    assert coalesce_sizes == [len(raw_coverage)] == [22_243]
     assert len(service._cached_coverage_epochs) == 6_066
 
 

@@ -504,11 +504,11 @@ def _active_report(path: Path) -> MigrationReport:
     try:
         # Existing current databases are audited without publishing a fence,
         # changing journal mode, or otherwise mutating an idempotent restart.
-        with Store.open_reader(path) as store:
-            snapshot = store.read_snapshot()
+        with Store.open_reader(path, include_browser_diagnostics=False) as store:
+            schema, reconciliations = store.read_migration_state()
     except (OSError, sqlite3.Error, StatsCurrentError, ValueError) as error:
         raise UnreadableCurrentDatabase(f"active current database is invalid: {error}") from error
-    records = [item for item in snapshot.migration_reconciliation if item.migration_id == MIGRATION_ID]
+    records = [item for item in reconciliations if item.migration_id == MIGRATION_ID]
     if len(records) != 1:
         raise MigrationError("active current database has no completed migration reconciliation")
     record = records[0]
@@ -524,18 +524,25 @@ def _active_report(path: Path) -> MigrationReport:
         _nonnegative_count(stored_counts[name], f"migration count {name}")
         for name in ("observations", "coverage_epochs", "usage_atoms", "unavailable_spans")
     )
-    actual_counts = (
-        len(snapshot.observations), len(snapshot.coverage_epochs),
-        len(snapshot.usage_atoms), len(snapshot.unavailable_spans),
-    )
     activation_generation = 1 if any(expected_counts) else 0
-    if (
-        snapshot.schema.source_generation == activation_generation
-        and expected_counts != actual_counts
-    ):
-        raise MigrationError(
-            f"active migration reconciliation counts {expected_counts} do not match {actual_counts}"
+    if schema.source_generation == activation_generation:
+        try:
+            with Store.open_reader(path, include_browser_diagnostics=False) as store:
+                snapshot = store.read_snapshot()
+        except (OSError, sqlite3.Error, StatsCurrentError, ValueError) as error:
+            raise UnreadableCurrentDatabase(
+                f"active current database is invalid: {error}"
+            ) from error
+        actual_counts = (
+            len(snapshot.observations),
+            len(snapshot.coverage_epochs),
+            len(snapshot.usage_atoms),
+            len(snapshot.unavailable_spans),
         )
+        if expected_counts != actual_counts:
+            raise MigrationError(
+                f"active migration reconciliation counts {expected_counts} do not match {actual_counts}"
+            )
     raw_issues = record.details.get("issues")
     if not isinstance(raw_issues, list) or len(raw_issues) > 100:
         raise MigrationError("active current database has malformed migration issues")

@@ -8,10 +8,13 @@ import bisect
 import hashlib
 import math
 import re
+from contextlib import contextmanager
+from contextlib import nullcontext
 from dataclasses import dataclass
 from dataclasses import replace
 from typing import Callable
 from typing import Iterable
+from typing import Iterator
 from typing import Mapping
 
 from . import identity
@@ -50,6 +53,7 @@ TOKEN_DETAIL_DIMENSIONS = (
     "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "reasoning", "other",
 )
 MAX_PRIVATE_BROWSER_CLIENTS = 4
+MAX_CACHED_OBSERVATION_PROJECTIONS = 32_768
 PUBLIC_EXECUTION_SOURCES = frozenset({
     "claude", "codex", "images", "messages", "responses", "unknown",
 })
@@ -243,6 +247,75 @@ class _CostDetailAtom:
     evidence: CostEvidenceValue | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectedObservation:
+    observed_at: float
+    samples: tuple[_Sample, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectedUsageAtom:
+    observed_at: float
+    samples: tuple[_Sample, ...]
+    cost_detail: _CostDetailAtom
+
+
+class ProjectionCache:
+    """Bound repeated projection work without retaining the full history."""
+
+    def __init__(self, max_observations: int = MAX_CACHED_OBSERVATION_PROJECTIONS):
+        if (
+            isinstance(max_observations, bool)
+            or not isinstance(max_observations, int)
+            or max_observations < 1
+        ):
+            raise ValueError("max_observations must be a positive integer")
+        self.max_observations = max_observations
+        self._observations: dict[
+            tuple[str, str, str],
+            tuple[Observation, _ProjectedObservation],
+        ] = {}
+        self._generation_keys: set[tuple[str, str, str]] | None = None
+
+    def __len__(self) -> int:
+        return len(self._observations)
+
+    @contextmanager
+    def generation(self) -> Iterator[None]:
+        """Retain only projections that can be reused by the next build."""
+
+        if self._generation_keys is not None:
+            raise RuntimeError("projection cache generation is already active")
+        self._generation_keys = set()
+        try:
+            yield
+        except BaseException:
+            self._generation_keys = None
+            raise
+        else:
+            retained = self._generation_keys
+            self._generation_keys = None
+            for key in tuple(self._observations):
+                if key not in retained:
+                    del self._observations[key]
+
+    def observation(self, observation: Observation) -> _ProjectedObservation:
+        key = (observation.family, observation.source_id, observation.event_id)
+        if self._generation_keys is not None:
+            self._generation_keys.add(key)
+        cached = self._observations.get(key)
+        if cached is not None and cached[0] == observation:
+            return cached[1]
+        projected = _ProjectedObservation(
+            observation.observed_at,
+            _observation_samples(observation),
+        )
+        if cached is None and len(self._observations) >= self.max_observations:
+            self._observations.pop(next(iter(self._observations)))
+        self._observations[key] = (observation, projected)
+        return projected
+
+
 def resolve_resolution(range_seconds: int, requested: int | str) -> int:
     try:
         return stats_resolution.resolve_requested(range_seconds, requested)
@@ -258,10 +331,12 @@ def build_generation(
     generated_at: float,
     observed_until: float,
     price_resolver: PriceResolver | None = None,
+    coverage_gaps: tuple[NoData, ...] | None = None,
+    projection_cache: ProjectionCache | None = None,
 ) -> Generation:
     return _build(
         snapshot, source_generation, cache_generation, generated_at, observed_until,
-        price_resolver, None, None,
+        price_resolver, None, None, coverage_gaps, projection_cache,
     )
 
 
@@ -275,12 +350,14 @@ def update_generation(
     generated_at: float,
     observed_until: float,
     price_resolver: PriceResolver | None = None,
+    coverage_gaps: tuple[NoData, ...] | None = None,
+    projection_cache: ProjectionCache | None = None,
 ) -> Generation:
     if source_generation < previous.source_generation or cache_generation <= previous.cache_generation:
         raise StaleGenerationError("incremental generation is not newer than its base")
     return _build(
         snapshot, source_generation, cache_generation, generated_at, observed_until,
-        price_resolver, previous, frozenset(dirty),
+        price_resolver, previous, frozenset(dirty), coverage_gaps, projection_cache,
     )
 
 
@@ -370,6 +447,8 @@ def _build(
     price_resolver: PriceResolver | None,
     previous: Generation | None,
     dirty: frozenset[DirtyCell] | None,
+    coverage_gaps: tuple[NoData, ...] | None,
+    projection_cache: ProjectionCache | None,
 ) -> Generation:
     _validate_generation_inputs(source_generation, cache_generation, generated_at, observed_until)
     bounds = {
@@ -379,7 +458,15 @@ def _build(
         )
         for resolution in RESOLUTIONS
     }
-    all_gaps = _coverage_gaps(snapshot, min(end - span for end, span in bounds.values()), observed_until)
+    all_gaps = (
+        _coverage_gaps(
+            snapshot,
+            min(end - span for end, span in bounds.values()),
+            observed_until,
+        )
+        if coverage_gaps is None
+        else coverage_gaps
+    )
     shared_gaps = all_gaps
     previous_layers = {
         layer.resolution: layer
@@ -391,13 +478,32 @@ def _build(
         )
         for resolution, (end, span) in bounds.items()
     }
-    observation_cells: dict[tuple[int, int], list[Observation]] = {}
-    usage_cells: dict[tuple[int, int], list[UsageAtom]] = {}
-    for observation in snapshot.observations:
-        for resolution in RESOLUTIONS:
-            start = math.floor(observation.observed_at / resolution) * resolution
-            if start in shared_fold_starts[resolution]:
-                observation_cells.setdefault((resolution, start), []).append(observation)
+    observation_cells: dict[tuple[int, int], list[_ProjectedObservation]] = {}
+    usage_cells: dict[tuple[int, int], list[_ProjectedUsageAtom]] = {}
+    projection_cache_generation = (
+        projection_cache.generation()
+        if projection_cache is not None and previous is not None
+        else nullcontext()
+    )
+    with projection_cache_generation:
+        for observation in snapshot.observations:
+            cells = []
+            for resolution in RESOLUTIONS:
+                start = math.floor(observation.observed_at / resolution) * resolution
+                if start in shared_fold_starts[resolution]:
+                    cells.append((resolution, start))
+            if not cells:
+                continue
+            projected = (
+                _ProjectedObservation(
+                    observation.observed_at,
+                    _observation_samples(observation),
+                )
+                if projection_cache is None or previous is None
+                else projection_cache.observation(observation)
+            )
+            for cell in cells:
+                observation_cells.setdefault(cell, []).append(projected)
     identities: set[tuple[str, str, str, str, str]] = set()
     for raw_atom in snapshot.usage_atoms:
         try:
@@ -408,10 +514,17 @@ def _build(
         if identity in identities:
             continue
         identities.add(identity)
+        cells = []
         for resolution in RESOLUTIONS:
             start = math.floor(atom.observed_at / resolution) * resolution
             if start in shared_fold_starts[resolution]:
-                usage_cells.setdefault((resolution, start), []).append(atom)
+                cells.append((resolution, start))
+        if not cells:
+            continue
+        samples, cost_detail = _usage_projection(atom, price_resolver)
+        projected = _ProjectedUsageAtom(atom.observed_at, samples, cost_detail)
+        for cell in cells:
+            usage_cells.setdefault(cell, []).append(projected)
     layers = []
     for resolution in RESOLUTIONS:
         end, span = bounds[resolution]
@@ -426,7 +539,6 @@ def _build(
             observation_cells,
             usage_cells,
             observed_until,
-            price_resolver,
         )
         layers.append(Layer(
             resolution, start, end, buckets, _clip_gaps(shared_gaps, start, end),
@@ -479,10 +591,9 @@ def _updated_layer_buckets(
     start: int,
     end: int,
     resolution: int,
-    observation_cells: Mapping[object, list[Observation]],
-    usage_cells: Mapping[object, list[UsageAtom]],
+    observation_cells: Mapping[object, list[_ProjectedObservation]],
+    usage_cells: Mapping[object, list[_ProjectedUsageAtom]],
     observed_until: float,
-    price_resolver: PriceResolver | None,
     *,
     private_source_id: str | None = None,
 ) -> tuple[Bucket, ...]:
@@ -534,7 +645,6 @@ def _updated_layer_buckets(
             observation_cells.get(observation_key, ()),
             usage_cells.get(usage_key, ()),
             observed_until,
-            price_resolver,
         )
     if any(bucket is None for bucket in buckets):
         raise MaterializationError("incremental layer window is not contiguous")
@@ -573,43 +683,39 @@ def _fold_or_reuse_bucket(
     dirty: frozenset[DirtyCell] | None,
     start: int,
     duration: int,
-    observations: Iterable[Observation],
-    usage_atoms: Iterable[UsageAtom],
+    observations: Iterable[_ProjectedObservation],
+    usage_atoms: Iterable[_ProjectedUsageAtom],
     observed_until: float,
-    price_resolver: PriceResolver | None,
 ) -> Bucket:
     complete = start + duration <= observed_until
     if dirty is not None and identity not in dirty and reusable is not None:
         return reusable if reusable.complete == complete else replace(reusable, complete=complete)
     return _fold_bucket(
-        start, duration, observations, usage_atoms, observed_until, price_resolver,
+        start, duration, observations, usage_atoms, observed_until,
     )
 
 
 def _fold_bucket(
     start: int,
     duration: int,
-    observations: Iterable[Observation],
-    usage_atoms: Iterable[UsageAtom],
+    observations: Iterable[_ProjectedObservation],
+    usage_atoms: Iterable[_ProjectedUsageAtom],
     observed_until: float,
-    price_resolver: PriceResolver | None,
 ) -> Bucket:
     observation_values = tuple(observations)
     usage_values = tuple(usage_atoms)
     samples = []
     projected_timestamps = []
     for observation in observation_values:
-        observation_samples = _observation_samples(observation)
-        samples.extend(observation_samples)
-        if observation_samples:
+        samples.extend(observation.samples)
+        if observation.samples:
             projected_timestamps.append(observation.observed_at)
     cost_atoms = []
     for atom in usage_values:
-        atom_samples, cost_atom = _usage_projection(atom, price_resolver)
-        samples.extend(atom_samples)
-        if atom_samples:
+        samples.extend(atom.samples)
+        if atom.samples:
             projected_timestamps.append(atom.observed_at)
-        cost_atoms.append(cost_atom)
+        cost_atoms.append(atom.cost_detail)
     grouped: dict[str, list[_Sample]] = {}
     for sample in samples:
         grouped.setdefault(sample.series, []).append(sample)
@@ -1594,57 +1700,98 @@ def normalize_coverage_model(
     )
 
 
+def merge_normalized_coverage_model(
+    retained_coverage: tuple[CoverageEpoch, ...],
+    retained_unavailable: tuple[UnavailableSpan, ...],
+    coverage: tuple[CoverageEpoch, ...],
+    unavailable: tuple[UnavailableSpan, ...],
+) -> tuple[tuple[CoverageEpoch, ...], tuple[UnavailableSpan, ...]]:
+    """Apply accepted facts without renormalizing unchanged retained history."""
+
+    if not coverage and not unavailable:
+        return retained_coverage, retained_unavailable
+    replacements = {
+        (item.family, item.source_id, item.epoch_id): item
+        for item in coverage
+    }
+    merged = tuple(
+        replacements.pop((item.family, item.source_id, item.epoch_id), item)
+        for item in retained_coverage
+    )
+    new_coverage = bool(replacements)
+    if replacements:
+        merged = tuple(sorted(
+            (*merged, *replacements.values()),
+            key=lambda item: (
+                item.started_at, item.family, item.source_id, item.epoch_id,
+            ),
+        ))
+    if not new_coverage and not unavailable:
+        return merged, retained_unavailable
+    spans = {
+        (item.family, item.source_id, item.epoch_id, item.started_at): item
+        for item in retained_unavailable
+    }
+    spans.update({
+        (item.family, item.source_id, item.epoch_id, item.started_at): item
+        for item in unavailable
+    })
+    return normalize_coverage_model(merged, tuple(sorted(
+        spans.values(),
+        key=lambda item: (
+            item.started_at, item.family, item.source_id, item.epoch_id,
+        ),
+    )))
+
+
 def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float) -> tuple[NoData, ...]:
     gaps: list[NoData] = []
-    coverage_epochs, unavailable_spans = normalize_coverage_model(
-        snapshot.coverage_epochs,
-        snapshot.unavailable_spans,
-    )
+    if snapshot.coverage_normalized:
+        coverage_epochs = snapshot.coverage_epochs
+        unavailable_spans = snapshot.unavailable_spans
+    else:
+        coverage_epochs, unavailable_spans = normalize_coverage_model(
+            snapshot.coverage_epochs,
+            snapshot.unavailable_spans,
+        )
+    coverage_by_source: dict[tuple[str, str], list[CoverageEpoch]] = {}
+    unavailable_by_source: dict[tuple[str, str], list[UnavailableSpan]] = {}
+    sources_by_family: dict[str, set[str]] = {}
+    latest_family_end: dict[str, float] = {}
+    for item in coverage_epochs:
+        key = (item.family, item.source_id)
+        coverage_by_source.setdefault(key, []).append(item)
+        sources_by_family.setdefault(item.family, set()).add(item.source_id)
+        item_end = observed_until if item.ended_at is None else item.ended_at
+        latest_family_end[item.family] = max(
+            latest_family_end.get(item.family, oldest),
+            item_end,
+        )
+    for item in unavailable_spans:
+        key = (item.family, item.source_id)
+        unavailable_by_source.setdefault(key, []).append(item)
+        sources_by_family.setdefault(item.family, set()).add(item.source_id)
     for spec in CURRENT_FAMILIES:
         if not spec.no_data_eligible:
             continue
-        family_coverage = tuple(
-            item for item in coverage_epochs
-            if item.family == spec.coverage_family
-        )
-        latest_family_end = max(
-            (
-                observed_until if item.ended_at is None else item.ended_at
-                for item in family_coverage
-            ),
-            default=oldest,
-        )
-        sources = {
-            item.source_id
-            for item in family_coverage
-        }
-        sources.update(
-            item.source_id
-            for item in unavailable_spans
-            if item.family == spec.coverage_family
-        )
-        for source_id in sorted(sources):
+        coverage_family = spec.coverage_family
+        for source_id in sorted(sources_by_family.get(coverage_family, ())):
             intervals = sorted(
-                (
-                    item for item in family_coverage
-                    if item.source_id == source_id
-                ),
+                coverage_by_source.get((coverage_family, source_id), ()),
                 key=lambda item: (item.started_at, item.epoch_id),
             )
-            explicit_gaps = [
+            explicit_gaps = sorted((
                 NoData(
                     spec.name, source_id, item.epoch_id,
                     max(oldest, item.started_at), min(observed_until, item.ended_at),
                     item.native_cadence_seconds, item.reason,
                 )
-                for item in unavailable_spans
-                if item.family == spec.coverage_family
-                and item.source_id == source_id
-                and item.ended_at > oldest
+                for item in unavailable_by_source.get((coverage_family, source_id), ())
+                if item.ended_at > oldest
                 and item.started_at < observed_until
-            ]
+            ), key=lambda item: (item.start, item.end, item.epoch_id))
             if not intervals:
-                for gap in sorted(explicit_gaps, key=lambda item: (item.start, item.end, item.epoch_id)):
+                for gap in explicit_gaps:
                     _append_gap(gaps, gap)
                 continue
             # Built once per source: explicit_gaps is already start-ordered and
@@ -1675,7 +1822,7 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
             if (
                 cursor < observed_until
                 and previous.ended_at is not None
-                and previous.ended_at >= latest_family_end
+                and previous.ended_at >= latest_family_end.get(coverage_family, oldest)
             ):
                 _append_uncovered_gap(explicit_gaps, explicit_starts, computed_gaps, NoData(
                     spec.name, source_id, previous.epoch_id, cursor, observed_until,
@@ -1687,18 +1834,146 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
         gaps,
         key=lambda item: (item.family, item.source_id, item.start, item.end, item.epoch_id),
     ))
-    for item in result:
-        for name, value in (
-            ("no-data family", item.family),
-            ("no-data source_id", item.source_id),
-            ("no-data epoch_id", item.epoch_id),
-            ("no-data reason", item.reason),
-        ):
-            try:
-                identity.identity_text(value, name)
-            except identity.IdentityValidationError as error:
-                raise MaterializationError(str(error)) from error
+    if not snapshot.coverage_normalized:
+        for item in result:
+            for name, value in (
+                ("no-data family", item.family),
+                ("no-data source_id", item.source_id),
+                ("no-data epoch_id", item.epoch_id),
+                ("no-data reason", item.reason),
+            ):
+                try:
+                    identity.identity_text(value, name)
+                except identity.IdentityValidationError as error:
+                    raise MaterializationError(str(error)) from error
     return result
+
+
+def _coverage_latest_metadata(
+    coverage: tuple[CoverageEpoch, ...],
+) -> tuple[
+    dict[tuple[str, str], CoverageEpoch],
+    dict[str, float],
+]:
+    """Index the latest retained epoch per source and family."""
+
+    latest_by_source: dict[tuple[str, str], CoverageEpoch] = {}
+    for item in coverage:
+        key = (item.family, item.source_id)
+        previous = latest_by_source.get(key)
+        if previous is None or (item.started_at, item.epoch_id) > (
+            previous.started_at, previous.epoch_id
+        ):
+            latest_by_source[key] = item
+    latest_by_family: dict[str, float] = {}
+    for item in latest_by_source.values():
+        item_end = math.inf if item.ended_at is None else float(item.ended_at)
+        latest_by_family[item.family] = max(
+            latest_by_family.get(item.family, float("-inf")), item_end,
+        )
+    return latest_by_source, latest_by_family
+
+
+def _static_coverage_gaps(
+    gaps: tuple[NoData, ...],
+    latest_by_source: Mapping[tuple[str, str], CoverageEpoch],
+    latest_by_family: Mapping[str, float],
+    observed_until: float,
+) -> dict[tuple[str, str], tuple[NoData, ...]]:
+    """Retain gap geometry that cannot change merely because now advances."""
+
+    coverage_family_by_name = {
+        spec.name: spec.coverage_family
+        for spec in CURRENT_FAMILIES
+        if spec.no_data_eligible
+    }
+    grouped: dict[tuple[str, str], list[NoData]] = {}
+    for gap in gaps:
+        coverage_family = coverage_family_by_name.get(gap.family)
+        latest = (
+            None
+            if coverage_family is None
+            else latest_by_source.get((coverage_family, gap.source_id))
+        )
+        latest_end = (
+            None if latest is None or latest.ended_at is None
+            else float(latest.ended_at)
+        )
+        dynamic_tail = (
+            gap.reason == "coverage_gap"
+            and latest is not None
+            and latest.epoch_id == gap.epoch_id
+            and latest_end is not None
+            and gap.start >= latest_end
+            and gap.end <= observed_until
+            and latest_end >= latest_by_family.get(coverage_family, math.inf)
+        )
+        if not dynamic_tail:
+            grouped.setdefault((gap.family, gap.source_id), []).append(gap)
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _compose_coverage_gaps(
+    static_by_source: Mapping[tuple[str, str], tuple[NoData, ...]],
+    latest_by_source: Mapping[tuple[str, str], CoverageEpoch],
+    latest_by_family: Mapping[str, float],
+    static_oldest: float,
+    oldest: float,
+    observed_until: float,
+) -> tuple[NoData, ...]:
+    """Combine cached historical gaps with the small moving live tail."""
+
+    name_by_coverage_family = {
+        spec.coverage_family: spec.name
+        for spec in CURRENT_FAMILIES
+        if spec.no_data_eligible
+    }
+    grouped = {
+        key: (
+            values
+            if oldest == static_oldest
+            else _clip_gaps(values, oldest, observed_until)
+        )
+        for key, values in static_by_source.items()
+    }
+    for (coverage_family, source_id), latest in latest_by_source.items():
+        family = name_by_coverage_family.get(coverage_family)
+        latest_end = latest.ended_at
+        if (
+            family is None
+            or latest_end is None
+            or latest_end >= observed_until
+            or latest_end < latest_by_family.get(coverage_family, math.inf)
+        ):
+            continue
+        key = (family, source_id)
+        explicit = list(grouped.get(key, ()))
+        computed: list[NoData] = []
+        _append_uncovered_gap(
+            explicit,
+            [item.start for item in explicit],
+            computed,
+            NoData(
+                family,
+                source_id,
+                latest.epoch_id,
+                max(oldest, float(latest_end)),
+                observed_until,
+                latest.native_cadence_seconds,
+            ),
+        )
+        combined: list[NoData] = []
+        for gap in sorted(
+            (*explicit, *computed),
+            key=lambda item: (item.start, item.end, item.epoch_id),
+        ):
+            _append_gap(combined, gap)
+        grouped[key] = tuple(combined)
+    result: list[NoData] = []
+    for key in sorted(grouped):
+        for gap in grouped[key]:
+            _append_gap(result, gap)
+    return tuple(result)
 
 
 def _append_uncovered_gap(
@@ -1771,10 +2046,16 @@ def _clip_gaps(gaps: Iterable[NoData], start: float, end: float) -> tuple[NoData
     for gap in gaps:
         if gap.end <= start or gap.start >= end:
             continue
-        _append_gap(clipped, NoData(
-            gap.family, gap.source_id, gap.epoch_id,
-            max(gap.start, start), min(gap.end, end), gap.native_cadence_seconds, gap.reason,
-        ))
+        _append_gap(
+            clipped,
+            gap
+            if gap.start >= start and gap.end <= end
+            else NoData(
+                gap.family, gap.source_id, gap.epoch_id,
+                max(gap.start, start), min(gap.end, end),
+                gap.native_cadence_seconds, gap.reason,
+            ),
+        )
     return tuple(clipped)
 
 

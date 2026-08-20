@@ -63,6 +63,46 @@ def test_catalog_requires_exact_alias_and_effective_date(tmp_path):
     assert catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input", timestamp="2024-12-31T00:00:00Z") is None
 
 
+def test_lower_priority_future_rate_does_not_truncate_override_cache_window(tmp_path):
+    catalog = PricingCatalog(tmp_path)
+    catalog.set_override({
+        "schema_version": 1,
+        "catalog_revision": 5,
+        "models": [{
+            "provider": "openai",
+            "model": "gpt-4.1",
+            "aliases": ["gpt-4.1"],
+            "rates": [{
+                "direction": "input",
+                "modality": "text",
+                "cache_role": "none",
+                "unit": "tokens",
+                "scale": 1_000_000,
+                "usd": "9.00",
+                "effective_from": "2024-01-01T00:00:00Z",
+                "profile": "default",
+                "service_tier": "default",
+            }],
+            "source": {
+                "url": "https://platform.openai.com/docs/pricing",
+                "kind": "override",
+            },
+        }],
+    })
+
+    rate = catalog.resolve_rate(
+        provider="openai",
+        model="gpt-4.1",
+        direction="input",
+        timestamp="2026-08-20T00:00:00Z",
+    )
+
+    assert rate is not None
+    assert rate.source_kind == "override"
+    assert rate.effective_from == "2024-01-01T00:00:00Z"
+    assert rate.effective_until is None
+
+
 def test_catalog_estimates_unknown_model_rate_band_from_comparable_active_rates(tmp_path):
     catalog = PricingCatalog(tmp_path)
     catalog.set_override({

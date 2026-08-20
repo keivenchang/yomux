@@ -239,6 +239,53 @@ def test_warm_full_reconciliation_reuses_effective_rate_window():
 
     assert _total_cost(first) == _total_cost(second) == 60_000_000
     assert catalog.status_calls == 1
+    assert catalog.resolve_calls == 1
+
+
+def test_effective_rate_boundaries_are_cached_without_crossing_price_changes():
+    class EffectiveCatalog(CountingCatalog):
+        def resolve_rate(self, **fields):
+            self.resolve_calls += 1
+            before_change = fields["timestamp"] < "2026-07-12T00:00:00Z"
+            return ResolvedRate(
+                "openai",
+                "gpt-5.6-sol",
+                "gpt-5.6-sol",
+                "output",
+                "text",
+                "none",
+                "tokens",
+                1_000_000,
+                Decimal("30.00" if before_change else "40.00"),
+                "2026-07-09T00:00:00Z" if before_change else "2026-07-12T00:00:00Z",
+                "seed",
+                "",
+                7,
+                "2026-07-12T00:00:00Z" if before_change else None,
+            )
+
+    catalog = EffectiveCatalog()
+    resolver = pricing.UsagePriceProjector(
+        catalog,
+        revision_check_seconds=60,
+        monotonic=lambda: 10.0,
+    )
+    before = _observed_at()
+    after = datetime(2026, 7, 13, tzinfo=timezone.utc).timestamp()
+
+    projections = (
+        resolver(_atom(event_id="before-1", observed_at=before)),
+        resolver(_atom(event_id="before-2", observed_at=before + 1)),
+        resolver(_atom(event_id="after-1", observed_at=after)),
+        resolver(_atom(event_id="after-2", observed_at=after + 1)),
+    )
+
+    assert [item.micro_usd for item in projections] == [
+        30_000_000,
+        30_000_000,
+        40_000_000,
+        40_000_000,
+    ]
     assert catalog.resolve_calls == 2
 
 

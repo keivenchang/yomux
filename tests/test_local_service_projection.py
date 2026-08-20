@@ -539,7 +539,7 @@ def test_the_collector_is_the_only_path_into_the_projection():
     # Exactly one construction site for the collector in the whole app.
     assert app_text.count("local_service_projection.LocalServicesCollector(") == 1
     assert "app.local_services_snapshot()" in projection_source
-    assert "self.local_services_snapshot()" in sampler_source
+    assert "self.local_services_snapshot(include_diagnostics=False)" in sampler_source
     # The sampler must no longer re-parse the rendered HTTP payload. Read the executable
     # source, not the text: the comment recording why it stopped doing that names the old
     # call, and a test that could not tell those apart would forbid explaining itself.
@@ -548,7 +548,7 @@ def test_the_collector_is_the_only_path_into_the_projection():
     callers = frozenset(
         line.strip()
         for line in app_text.splitlines()
-        if "local_services_snapshot()" in line and not line.strip().startswith("#") and "def " not in line
+        if any(marker in line for marker in ("app.local_services_snapshot()", "self.local_services_snapshot(include_diagnostics=False)")) and not line.strip().startswith("#")
     )
     assert len(callers) == 2, sorted(callers)
 
