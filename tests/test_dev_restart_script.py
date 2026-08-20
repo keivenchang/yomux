@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import platform
 import shutil
@@ -233,6 +234,136 @@ def test_macos_lsof_no_match_is_an_empty_listener_set(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+def test_macos_submit_uses_callers_row_plan_not_tmux_daemon_environment(tmp_path):
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        return
+
+    checkout = tmp_path / "checkout"
+    tools_dir = checkout / "tools"
+    tools_dir.mkdir(parents=True)
+    shutil.copy2(ROOT / "tools" / "instance_isolation.py", tools_dir / "instance_isolation.py")
+    result_path = tmp_path / "result.json"
+    server_script = checkout / "yolomux.py"
+    server_script.write_text(
+        """from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "YOLOMUX_ROOT": os.environ.get("YOLOMUX_ROOT"),
+            "PYTHONPYCACHEPREFIX": os.environ.get("PYTHONPYCACHEPREFIX"),
+            "YOLOMUX_ROW_PLAN_FILE": os.environ.get("YOLOMUX_ROW_PLAN_FILE"),
+        }
+    ),
+    encoding="utf-8",
+)
+subprocess.run(["tmux", "-L", sys.argv[2], "wait-for", "-S", "server-ready"], check=True)
+""",
+        encoding="utf-8",
+    )
+
+    socket_name = f"yolomux-test-{os.getpid()}-{tmp_path.name}"
+    stale_plan_path = tmp_path / "stale-plan.json"
+    fresh_plan_path = tmp_path / "fresh-plan.json"
+    stale_plan_path.write_text(
+        json.dumps(
+            {
+                "unset": ["YOLOMUX_ROOT", "PYTHONPYCACHEPREFIX"],
+                "assign": {
+                    "YOLOMUX_ROOT": str(tmp_path / "stale-root"),
+                    "PYTHONPYCACHEPREFIX": str(tmp_path / "stale-root" / "pycache"),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    fresh_plan_path.write_text(
+        json.dumps(
+            {
+                "unset": ["YOLOMUX_ROOT", "PYTHONPYCACHEPREFIX", "YOLOMUX_ROW_PLAN_FILE"],
+                "assign": {"YOLOMUX_ROOT": str(tmp_path / "fresh-root")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    daemon_env = {
+        **os.environ,
+        "YOLOMUX_ROW_PLAN_FILE": str(stale_plan_path),
+        "YOLOMUX_ROOT": str(tmp_path / "stale-daemon-root"),
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "stale-daemon-pycache"),
+    }
+    subprocess.run(
+        [tmux, "-L", socket_name, "new-session", "-d", "-s", "keeper", "tail", "-f", "/dev/null"],
+        env=daemon_env,
+        check=True,
+    )
+    try:
+        launch = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; test_socket="$2"; yolomux_macos_server_tmux_socket() { printf "%s" "$test_socket"; }; '
+                'export YOLOMUX_ROW_PLAN_FILE="$3"; '
+                'yolomux_submit_macos_server "$4" "$5" "$6" "$7" 48125 "$8" "" "$9" "$2"',
+                "submit-clean-plan",
+                str(STARTUP_COMMON),
+                socket_name,
+                str(fresh_plan_path),
+                str(checkout),
+                sys.executable,
+                os.environ.get("SHELL", "/bin/bash"),
+                os.environ["PATH"],
+                str(tmp_path / "server.log"),
+                str(result_path),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        assert launch.returncode == 0, launch.stderr
+        subprocess.run([tmux, "-L", socket_name, "wait-for", "server-ready"], check=True, timeout=10)
+        child_environment = json.loads(result_path.read_text(encoding="utf-8"))
+        assert child_environment == {
+            "YOLOMUX_ROOT": str(tmp_path / "fresh-root"),
+            "PYTHONPYCACHEPREFIX": None,
+            "YOLOMUX_ROW_PLAN_FILE": None,
+        }
+    finally:
+        subprocess.run([tmux, "-L", socket_name, "kill-server"], check=False, capture_output=True)
+
+
+def test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir():
+    env = {
+        **os.environ,
+        "TMPDIR": "/private/var/folders/retained-service-daemon-tempdir-that-is-too-deep-for-sockets",
+        "PYTHONPYCACHEPREFIX": "/private/tmp/stale-pycache",
+    }
+    for key in ("YOLOMUX_ROOT", "YOLOMUX_ROW_PLAN_FILE"):
+        env.pop(key, None)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; yolomux_validate_instance_isolation "$2" "$3" 8881',
+            "instance-preflight",
+            str(STARTUP_COMMON),
+            str(ROOT),
+            sys.executable,
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):

@@ -62,6 +62,7 @@ class RouteFixture:
     repo: Path
     text_file: Path
     html_file: Path
+    commit: str
     session: str
 
 
@@ -98,6 +99,7 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
     repo = quote(str(fixture.repo), safe="")
     text_file = quote(str(fixture.text_file), safe="")
     html_file = quote(str(fixture.html_file), safe="")
+    commit = quote(fixture.commit, safe="")
     query_by_handler = {
         "get_stats_delta": "range_seconds=300&resolution_seconds=1&client_id=route-sweep&after_cache_generation=0&after_revision=0",
         "get_stats_snapshot": "range_seconds=300&resolution=AUTO&client_id=route-sweep&since_generation=0",
@@ -127,6 +129,8 @@ def _route_request(route: http_routes.Route, fixture: RouteFixture, credentials:
         "get_fs_read": f"path={text_file}",
         "get_fs_info": f"path={text_file}",
         "get_fs_diff": f"path={text_file}&from=HEAD&to=current",
+        "get_fs_git_history": f"path={repo}&limit=1",
+        "get_fs_git_commit": f"path={repo}&commit={commit}&head={commit}",
         "get_fs_watch_diff": "full=1",
         "get_blame": f"path={text_file}",
         "get_fs_raw": f"path={text_file}",
@@ -686,6 +690,13 @@ def route_fixture(gate_runtime_paths, gate_tmux, gate_authenticated_live_server:
     ):
         subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
     text_file.write_text("working route sweep content\n", encoding="utf-8")
+    commit = subprocess.run(
+        ("git", "-C", str(repo), "rev-parse", "HEAD"),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.strip()
     session = str(gate_tmux.sessions[0])
     marker = f"route-sweep-cwd-{os.getpid()}"
     command = f"cd {shlex.quote(str(repo))} && printf '{marker}\\n'"
@@ -703,6 +714,7 @@ def route_fixture(gate_runtime_paths, gate_tmux, gate_authenticated_live_server:
         repo=repo,
         text_file=text_file,
         html_file=html_file,
+        commit=commit,
         session=session,
     )
 

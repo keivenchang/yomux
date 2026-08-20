@@ -18,6 +18,7 @@ from tools.instance_isolation import clean_row_environment
 from tools.instance_isolation import is_managed_instance_port
 from tools.instance_isolation import parse_instance
 from tools.instance_isolation import resolve_instance_environment
+from tools.instance_isolation import resolve_direct_launch_plan
 from tools.instance_isolation import resolve_row_plan
 from tools.instance_isolation import scan_port
 from yolomux_lib.infra.root_paths import YolomuxRoots
@@ -127,6 +128,67 @@ def test_row_plan_resolves_once_serializes_and_applies_without_secrets(tmp_path:
     # a default (production) port carries no managed assignment
     default_plan = resolve_row_plan(7770, {}, platform="Linux")
     assert default_plan.assign == {}
+
+
+def test_direct_launch_plan_preserves_explicit_root_but_drops_stale_authority(tmp_path: Path):
+    root = Path(f"/tmp/ydp{os.getpid()}")
+    plan = resolve_direct_launch_plan(
+        8881,
+        {
+            YOLOMUX_ROOT_ENV: str(root),
+            "PYTHONPYCACHEPREFIX": str(root / "pycache"),
+            INSTANCE_ENV: "9999:managed",
+            "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT": "9999",
+            "YOLOMUX_ROW_PLAN_FILE": "/tmp/stale-plan.json",
+            "XDG_RUNTIME_DIR": str(tmp_path / "foreign-runtime"),
+        },
+        platform="Darwin",
+    )
+
+    assert plan.assign[YOLOMUX_ROOT_ENV] == str(root)
+    assert plan.assign["PYTHONPYCACHEPREFIX"] == str(root / "pycache")
+    assert INSTANCE_ENV not in plan.assign
+    assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" not in plan.assign
+    assert "YOLOMUX_ROW_PLAN_FILE" not in plan.assign
+    assert "XDG_RUNTIME_DIR" not in plan.assign
+
+
+def test_direct_managed_launch_plan_ignores_ambient_tmpdir_on_macos():
+    plan = resolve_direct_launch_plan(
+        8881,
+        {
+            "TMPDIR": "/private/var/folders/very-long-retained-daemon-tempdir",
+            "PYTHONPYCACHEPREFIX": "/private/tmp/stale-pycache",
+        },
+        platform="Darwin",
+    )
+
+    assert plan.assign[YOLOMUX_ROOT_ENV] == str(Path("/tmp").resolve() / f"y{os.getuid()}" / "p8881")
+    assert "TMPDIR" not in plan.assign
+    assert "PYTHONPYCACHEPREFIX" not in plan.assign
+
+
+def test_exec_mode_accepts_inline_plan_json(tmp_path: Path):
+    plan = resolve_row_plan(7771, {}, platform="Linux", tempdir=SHORT_TEMP_ROOT)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "tools/instance_isolation.py",
+            "exec",
+            "--plan-json",
+            plan.to_json(),
+            "--",
+            sys.executable,
+            "-c",
+            "import os; print(os.environ.get('YOLOMUX_INSTANCE', ''))",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, INSTANCE_ENV: "9999:managed"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "7771:managed"
 
 
 def test_exec_mode_strips_inherited_and_applies_the_row_before_the_command(tmp_path: Path):

@@ -56,6 +56,43 @@ _STATS_ROUTE_INSTRUMENTATION = r"""
 """
 
 
+def test_stats_area_legend_key_is_a_thick_block(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug&layout=left&tabs=left:__debug__")
+    WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script("return typeof debugGraphLegendSwatchHtml === 'function'")
+    )
+    result = browser.execute_script(
+        """
+        const probe = document.createElement('div');
+        probe.style.cssText = 'display:flex;align-items:center;gap:8px';
+        probe.innerHTML = debugGraphLegendSwatchHtml({key: 'memory', hostMetric: 'memory', hostProcessId: 'python'}, 'area')
+          + debugGraphLegendSwatchHtml({key: 'latency', clientMetric: true}, 'line');
+        document.body.append(probe);
+        const area = probe.querySelector('.js-debug-legend-area');
+        const lineSvg = probe.querySelector('.js-debug-legend-line');
+        const line = lineSvg?.querySelector('line');
+        const result = {
+          areaTag: area?.tagName || '',
+          areaWidth: area?.getBoundingClientRect().width || 0,
+          areaHeight: area?.getBoundingClientRect().height || 0,
+          lineTag: lineSvg?.tagName || '',
+          lineHeight: lineSvg?.getBoundingClientRect().height || 0,
+          lineStrokeWidth: Number.parseFloat(line ? getComputedStyle(line).strokeWidth : '0') || 0,
+        };
+        probe.remove();
+        return result;
+        """
+    )
+    assert result == {
+        "areaTag": "SPAN",
+        "areaWidth": 18,
+        "areaHeight": 6,
+        "lineTag": "svg",
+        "lineHeight": 4,
+        "lineStrokeWidth": 1.5,
+    }, result
+
+
 def _register_stats_route_instrumentation(harness: Any) -> None:
     register_browser_new_document_script(harness.driver, _STATS_ROUTE_INSTRUMENTATION)
 

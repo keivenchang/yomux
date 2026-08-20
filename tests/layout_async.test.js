@@ -77,7 +77,380 @@ function summarizedHangingShard(closeOnSignal) {
   return {child, signals};
 }
 
-async function runLayoutAsyncSuite() { await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
+async function runLayoutAsyncSuite() {
+  test('Git history commit rows keep the approved field order and responsive retention contract', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    api.setGitDiffTabStateForTest(item, {hostedRemote: {provider: 'github', base_url: 'https://github.com/owner/project'}});
+    const row = api.gitDiffCommitRowForTest(item, {
+      sha: 'a'.repeat(40), short: 'a'.repeat(9), authored_at: 1786931640,
+      files: 3, added: 42, removed: 11, binary_files: 0,
+      author: 'Keiven Chang', subject: 'Record release evidence #123', parents: ['b'.repeat(40)],
+    });
+    assert.deepStrictEqual([...row.children].map(child => child.className), [
+      'git-diff-commit-caret ui-disclosure-triangle',
+      'git-diff-commit-sha',
+      'git-diff-commit-date',
+      'git-diff-commit-changes',
+      'git-diff-commit-author',
+      'git-diff-commit-description',
+    ]);
+    assert.equal(row.localName, 'div', 'commit links are never nested inside a button');
+    assert.equal(row.getAttribute('aria-expanded'), 'false');
+    assert.equal(row.children[1].textContent, 'aaaaaaaaa', 'SHA is always rendered');
+    assert.equal(row.children[1].href, `https://github.com/owner/project/commit/${'a'.repeat(40)}`);
+    assert.equal(row.querySelector('.git-diff-change-link').href, 'https://github.com/owner/project/pull/123');
+    assert.deepStrictEqual([
+      row.querySelector('.git-diff-commit-added').textContent,
+      row.querySelector('.git-diff-commit-removed').textContent,
+    ], ['+42', '-11']);
+    assert.ok(row.getAttribute('aria-label').includes('Keiven Chang') && row.getAttribute('aria-label').includes('+42') && row.getAttribute('aria-label').includes('Record release evidence'), 'the accessible name retains every visible summary field');
+    const gitlabItem = api.gitDiffItemFor('/gitlab');
+    api.setGitDiffTabStateForTest(gitlabItem, {hostedRemote: {provider: 'gitlab', base_url: 'https://gitlab.example.com/group/project'}});
+    const gitlabRow = api.gitDiffCommitRowForTest(gitlabItem, {sha: 'b'.repeat(40), short: 'b'.repeat(9), subject: 'Merge #9'});
+    assert.equal(gitlabRow.querySelector('.git-diff-commit-sha').href, `https://gitlab.example.com/group/project/-/commit/${'b'.repeat(40)}`);
+    assert.equal(gitlabRow.querySelector('.git-diff-change-link').href, 'https://gitlab.example.com/group/project/-/merge_requests/9');
+    const plainRow = api.gitDiffCommitRowForTest(api.gitDiffItemFor('/plain'), {sha: 'c'.repeat(40), short: 'c'.repeat(9), subject: 'Plain #7'});
+    assert.equal(plainRow.querySelector('.git-diff-commit-sha').localName, 'span');
+    assert.equal(plainRow.querySelector('.git-diff-change-link').localName, 'span');
+    const css = fs.readFileSync('static_src/css/yolomux/35_git_diff_viewer.css', 'utf8');
+    const authorDrop = css.indexOf('.git-diff-commit-author');
+    const dateDrop = css.indexOf('.git-diff-commit-date', authorDrop + 1);
+    const changesDrop = css.indexOf('.git-diff-commit-changes', dateDrop + 1);
+    assert.ok(authorDrop >= 0 && dateDrop > authorDrop && changesDrop > dateDrop, 'responsive rules remove author, then date, then changes');
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*grid-template-columns:\s*14px max-content max-content max-content/,
+      'one commit-list grid owns the shared semantic column tracks');
+    assert.match(css, /\.git-diff-commit\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
+      'each commit group inherits the list tracks');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*grid-template-columns:\s*subgrid/,
+      'each summary row inherits the same list tracks');
+    assert.match(css, /\.git-diff-commits\s*\{[\s\S]*gap:\s*0 var\(--space-8\)/,
+      'collapsed commit rows have no extra inter-row whitespace');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*min-height:\s*24px;[\s\S]*padding:\s*var\(--space-2\) var\(--space-6\)/,
+      'commit summaries keep the approved compact row height and padding');
+    assert.match(css, /\.git-diff-commit-row\s*\{[\s\S]*white-space:\s*nowrap/);
+    assert.match(css, /\.git-diff-commit-added\s*\{[\s\S]*color:\s*var\(--git-staged\)/);
+    assert.match(css, /\.git-diff-commit-removed\s*\{[\s\S]*color:\s*var\(--git-deleted\)/);
+    assert.match(css, /body\.theme-light \.git-diff-panel\s*\{[\s\S]*--git-diff-row-separator:\s*#[0-9a-f]+;[\s\S]*--git-diff-secondary-text:\s*#[0-9a-f]+/i);
+    assert.match(css, /\.git-diff-commit\s*\{[\s\S]*box-shadow:\s*inset 0 -1px var\(--git-diff-row-separator\)/);
+    assert.match(css, /\.git-diff-commit-detail\s*\{[\s\S]*margin-inline-start:/, 'commit detail indentation follows inline direction in RTL locales');
+  });
+
+  test('Git history commit rows use shared roving focus and valid tree ownership', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const first = 'a'.repeat(40), second = 'b'.repeat(40);
+    api.setGitDiffTabStateForTest(item, {path: '/repo', head: 'f'.repeat(40), commits: [{sha: first, short: 'aaaaaaaaa', subject: 'first'}, {sha: second, short: 'bbbbbbbbb', subject: 'second'}], loaded: true, loadAttempted: true});
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    api.renderGitDiffPanelForTest(item, {panel});
+    const body = panel.querySelector('.git-diff-panel-body');
+    const tree = panel.querySelector('.git-diff-commits');
+    const rows = tree.querySelectorAll('.git-diff-commit-row');
+    assert.equal(body.getAttribute('role'), undefined, 'status and pagination controls are not direct children of a tree');
+    assert.equal(tree.getAttribute('role'), 'tree', 'only the commit list owns the commit tree role');
+    assert.deepStrictEqual(rows.map(row => row.tabIndex), [0, -1], 'exactly one commit row participates in sequential focus');
+    const event = treeKeyEvent('ArrowDown', rows[0]);
+    tree.listeners.get('keydown')[0](event);
+    assert.equal(event.defaultPrevented, true, 'the shared tree keyboard owner consumes ArrowDown');
+    assert.deepStrictEqual(rows.map(row => row.tabIndex), [-1, 0], 'ArrowDown moves the roving tab stop');
+    assert.equal(rows[1].focused, true, 'ArrowDown moves DOM focus to the next commit');
+  });
+
+  await testAsync('Git history refresh prunes old SHA caches and records a reload cursor', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const oldSha = 'a'.repeat(40), freshSha = 'b'.repeat(40), head = 'f'.repeat(40);
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', head: oldSha, commits: [{sha: oldSha}], loaded: true, loadAttempted: true});
+    state.expanded.add(oldSha);
+    state.details.set(oldSha, {sha: oldSha});
+    state.detailCollapsedDirectories.set(oldSha, new Set(['/repo/old']));
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({path: '/repo', repo: '/repo', relative_path: '', head, snapshot_cursor: 'snapshot-zero', commits: [{sha: freshSha, short: 'bbbbbbbbb'}], next_cursor: '', truncated: false})));
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), true);
+    const refreshed = api.gitDiffTabStateForTest(item);
+    assert.equal(refreshed.snapshotCursor, 'snapshot-zero', 'the first page retains an opaque offset-zero cursor for exact reload');
+    assert.deepStrictEqual([...refreshed.expanded], [], 'Refresh drops disclosures outside the new bounded snapshot');
+    assert.equal(refreshed.details.has(oldSha), false, 'Refresh retires stale detail payloads');
+    assert.equal(refreshed.detailCollapsedDirectories.has(oldSha), false, 'Refresh retires stale per-SHA folder state');
+  });
+
+  await testAsync('Git history freezes pagination and fences stale refresh generations without dropping valid rows', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo/src');
+    const stale = deferredFetch();
+    const fresh = deferredFetch();
+    const older = deferredFetch();
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), signal: options.signal});
+      if (requests.length === 1) return stale.promise;
+      if (requests.length === 2) return fresh.promise;
+      return older.promise;
+    });
+    const staleLoad = api.refreshGitDiffHistoryForTest(item, {refresh: true});
+    const freshLoad = api.refreshGitDiffHistoryForTest(item, {refresh: true});
+    fresh.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'f'.repeat(40), short: 'fffffffff', subject: 'fresh'}], next_cursor: 'frozen-cursor', truncated: false}));
+    await freshLoad;
+    stale.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'e'.repeat(40), commits: [{sha: 'e'.repeat(40), short: 'eeeeeeeee', subject: 'stale'}], next_cursor: '', truncated: false}));
+    await staleLoad;
+    let state = api.gitDiffTabStateForTest(item);
+    assert.equal(state.head, 'f'.repeat(40), 'late refresh data cannot replace the newer generation');
+    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh']);
+    assert.match(requests[0].url, /^\/api\/fs\/git-history\?path=%2Frepo%2Fsrc&limit=50$/);
+
+    const append = api.loadOlderGitDiffHistoryForTest(item);
+    assert.ok(requests[2].url.includes('cursor=frozen-cursor'), 'pagination uses the frozen snapshot cursor');
+    older.resolve(jsonResponse({path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), commits: [{sha: 'd'.repeat(40), short: 'ddddddddd', subject: 'older'}], next_cursor: '', truncated: true, truncation_reason: 'cursor_limit'}));
+    await append;
+    state = api.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh', 'older']);
+    assert.equal(state.truncated, true, 'bounded pagination remains visibly partial');
+
+    api.setFetchForTest(() => Promise.reject(new Error('offline')));
+    assert.equal(await api.refreshGitDiffHistoryForTest(item, {refresh: true}), false);
+    state = api.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([...state.commits.map(commit => commit.subject)], ['fresh', 'older'], 'refresh failure retains the prior valid snapshot');
+    assert.ok(state.error, 'refresh failure is presented instead of silently clearing the list');
+  });
+
+  await testAsync('Git commit disclosures load independently and changed files retain status, rename, binary, and exact refs', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo');
+    const shaA = 'a'.repeat(40);
+    const shaB = 'b'.repeat(40);
+    const head = 'f'.repeat(40);
+    api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head, commits: [{sha: shaA, short: 'aaaaaaaaa'}, {sha: shaB, short: 'bbbbbbbbb'}], loaded: true});
+    const detailA = deferredFetch();
+    const detailB = deferredFetch();
+    api.setFetchForTest(url => String(url).includes(`commit=${shaA}`) ? detailA.promise : detailB.promise);
+    const loadA = api.setGitDiffCommitExpandedForTest(item, shaA, true);
+    const loadB = api.setGitDiffCommitExpandedForTest(item, shaB, true);
+    detailB.resolve(jsonResponse({repo: '/repo', sha: shaB, parents: [shaA], from_ref: shaA, to_ref: shaB, message: 'second\n\nbody', message_truncated: false, files: [{status: 'M', path: 'b.js', old_path: '', added: 1, removed: 0, binary: false, counts_available: true}], files_truncated: false, truncated: false}));
+    detailA.resolve(jsonResponse({
+      repo: '/repo', sha: shaA, parents: [], from_ref: '0'.repeat(40), to_ref: shaA,
+      message: '<script>first</script>\n\nbody', message_truncated: true,
+      files: [
+        {status: 'R', path: 'src/new.js', old_path: 'old.js', added: 5, removed: 2, binary: false, counts_available: true},
+        {status: 'M', path: 'assets/data.bin', old_path: '', added: null, removed: null, binary: true, counts_available: true},
+        {status: 'D', path: 'gone.txt', old_path: '', added: 0, removed: 4, binary: false, counts_available: true},
+      ], files_truncated: true, truncated: true,
+    }));
+    await Promise.all([loadA, loadB]);
+    const state = api.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([...state.expanded].sort(), [shaA, shaB], 'multiple commits remain expanded');
+    assert.equal(state.details.size, 2, 'one detail request does not invalidate another SHA');
+    const model = api.gitDiffCommitFileTreeForTest(state.details.get(shaA));
+    assert.equal(model.sessionFilesMap.get('/repo/src/new.js').status, 'R');
+    assert.equal(model.sessionFilesMap.get('/repo/src/new.js').old_path, 'old.js');
+    assert.equal(model.sessionFilesMap.get('/repo/assets/data.bin').binary, true);
+    assert.equal(model.sessionFilesMap.get('/repo/gone.txt').status, 'D');
+    const historicalItem = api.gitDiffHistoricalFileItemForTest(state.details.get(shaA), model.sessionFilesMap.get('/repo/src/new.js'));
+    assert.deepStrictEqual(canonical(api.historicalFileEditorIdentity(historicalItem)), {path: '/repo/src/new.js', fromRef: '0'.repeat(40), toRef: shaA});
+    assert.equal(api.gitDiffCommitMessageForTest(state.details.get(shaA)).textContent, '<script>first</script>\n\nbody', 'commit messages are rendered as text');
+  });
+
+  await testAsync('attached Diff repo panels load once, render disclosure DOM, and open the exact historical Editor tuple', async () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo/src');
+    const sha = 'a'.repeat(40);
+    const firstParent = 'b'.repeat(40);
+    const secondParent = 'c'.repeat(40);
+    const requests = [];
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      requests.push(parsed.pathname);
+      if (parsed.pathname === '/api/fs/git-history') {
+        return Promise.resolve(jsonResponse({
+          path: '/repo/src', repo: '/repo', relative_path: 'src', head: 'f'.repeat(40), next_cursor: '', truncated: false,
+          commits: [{sha, short: 'aaaaaaaaa', parents: [firstParent, secondParent], subject: 'Merge exact history', author: 'Keiven Chang', authored_at: 1786931640, files: 1, added: 3, removed: 1, binary_files: 0}],
+        }));
+      }
+      if (parsed.pathname === '/api/fs/git-commit') {
+        return Promise.resolve(jsonResponse({
+          repo: '/repo', scope_path: 'src', sha, parents: [firstParent, secondParent], from_ref: firstParent, to_ref: sha,
+          subject: 'Merge exact history', message: 'Merge exact history\n\nBody text', authored_at: 1786931640,
+          files: [{status: 'M', path: 'src/app.js', old_path: '', added: 3, removed: 1, binary: false, counts_available: true}],
+          message_truncated: false, files_truncated: false, truncated: false,
+        }));
+      }
+      if (parsed.pathname === '/api/fs/diff') {
+        assert.equal(parsed.searchParams.get('from'), firstParent);
+        assert.equal(parsed.searchParams.get('to'), sha);
+        return Promise.resolve(jsonResponse({
+          repo: '/repo', relative_path: 'src/app.js', from_ref: firstParent, to_ref: sha,
+          diff: '@@ -1 +1 @@\n-old\n+new\n', original: 'old\n', working: 'new\n',
+        }));
+      }
+      throw new Error(`unexpected request ${parsed.pathname}`);
+    });
+
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    api.renderGitDiffPanelForTest(item, {panel});
+    api.renderGitDiffPanelForTest(item, {panel});
+    assert.deepStrictEqual(requests, ['/api/fs/git-history'], 'an attached initial panel starts one history request');
+    await flushAsyncWork();
+    let row = panel.querySelector('.git-diff-commit-row');
+    assert.ok(row, 'the loaded history renders a commit disclosure row');
+    assert.equal(row.getAttribute('role'), 'treeitem');
+    assert.equal(row.getAttribute('aria-expanded'), 'false');
+
+    const commitTree = panel.querySelector('.git-diff-commits');
+    const expandEvent = treeKeyEvent('ArrowRight', row);
+    commitTree.listeners.get('keydown')[0](expandEvent);
+    assert.equal(expandEvent.defaultPrevented, true, 'Right Arrow owns disclosure expansion');
+    await flushAsyncWork();
+    row = panel.querySelector('.git-diff-commit-row');
+    assert.equal(row.getAttribute('aria-expanded'), 'true');
+    const detail = panel.querySelector('.git-diff-commit-detail');
+    assert.equal(detail.getAttribute('role'), 'group');
+    assert.equal(detail.querySelector('.git-diff-commit-message').textContent, 'Merge exact history\n\nBody text');
+    assert.equal(requests.filter(path => path === '/api/fs/git-commit').length, 1, 'one disclosure starts one detail request');
+
+    const fileRow = detail.querySelectorAll('.file-tree-row').find(candidate => candidate.dataset.gitDiffCommitPath === '/repo/src/app.js');
+    assert.ok(fileRow, 'the retained detail DOM contains the changed file row');
+    const fileTree = detail.querySelector('.git-diff-file-tree');
+    fileTree.listeners.get('click')[0]({target: fileRow, preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {}});
+    await flushAsyncWork();
+    const historicalItem = api.historicalFileEditorItemFor('/repo/src/app.js', firstParent, sha);
+    const historicalState = api.fileEditorStateForItemForTest('/repo/src/app.js', historicalItem);
+    assert.equal(api.tabTypeForItem(historicalItem)?.key, 'file-editor', 'changed files reuse the current Editor tab type');
+    assert.equal(api.editorViewModeFor('/repo/src/app.js', historicalItem), 'diff');
+    assert.equal(historicalState.historicalComparisonKind, 'merge-first-parent');
+    assert.equal(historicalState.content, 'new\n', 'historical Preview receives the immutable TO content');
+
+    const collapseEvent = treeKeyEvent('ArrowLeft', row);
+    row = panel.querySelector('.git-diff-commit-row');
+    commitTree.listeners.get('keydown')[0](collapseEvent);
+    assert.equal(collapseEvent.defaultPrevented, true, 'Left Arrow owns disclosure collapse');
+    assert.equal(panel.querySelector('.git-diff-commit-row').getAttribute('aria-expanded'), 'false');
+    const enterRow = panel.querySelector('.git-diff-commit-row');
+    const enterEvent = treeKeyEvent('Enter', enterRow);
+    commitTree.listeners.get('keydown')[0](enterEvent);
+    await flushAsyncWork();
+    assert.equal(panel.querySelector('.git-diff-commit-row').getAttribute('aria-expanded'), 'true', 'Enter reopens the cached disclosure');
+    assert.equal(requests.filter(path => path === '/api/fs/git-commit').length, 1, 'cached disclosure does not refetch detail');
+    assert.equal(api.gitDiffHistoricalComparisonKindForTest({parents: []}), 'root-empty-tree');
+    assert.equal(api.gitDiffHistoricalComparisonKindForTest({parents: [firstParent]}), 'parent');
+    assert.equal(api.gitDiffHistoricalComparisonKindForTest({parents: [firstParent, secondParent]}), 'merge-first-parent');
+  });
+
+  test('Diff repo relocalization rerenders labels and dates without replacing retained tab state', () => {
+    const enCatalog = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
+    const frCatalog = JSON.parse(fs.readFileSync('static/locales/fr.json', 'utf8'));
+    const enApi = loadYolomux('', ['1']);
+    const commit = {sha: 'd'.repeat(40), short: 'ddddddddd', parents: ['c'.repeat(40)], subject: 'Locale state', author: 'Keiven Chang', authored_at: 1786931640, files: 1, added: 2, removed: 1};
+    const enDate = enApi.gitDiffCommitRowForTest(enApi.gitDiffItemFor('/repo'), commit).querySelector('.git-diff-commit-date').textContent;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {locale: 'fr', strings: {en: enCatalog, fr: frCatalog}});
+    const item = api.gitDiffItemFor('/repo');
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo', repo: '/repo', relativePath: '', head: 'f'.repeat(40), commits: [commit], loaded: true, loadAttempted: true});
+    state.expanded.add(commit.sha);
+    state.details.set(commit.sha, {repo: '/repo', sha: commit.sha, parents: commit.parents, from_ref: commit.parents[0], to_ref: commit.sha, message: 'Locale state', files: []});
+    const panel = api.createGitDiffPanelForTest(item);
+    api.setPanelNodeForTest(item, panel);
+    api.renderGitDiffPanelForTest(item, {panel});
+    const body = panel.querySelector('.git-diff-panel-body');
+    body.scrollTop = 73;
+    const detailsIdentity = state.details;
+    const expandedIdentity = state.expanded;
+    panel.querySelector('.git-diff-heading').textContent = 'stale heading';
+    panel.querySelector('.git-diff-commit-date').textContent = 'stale date';
+    api.relocalizeGitDiffPanelForTest(item, panel);
+    assert.equal(panel.querySelector('.git-diff-heading').textContent, frCatalog['contextmenu.showDiff']);
+    assert.notEqual(panel.querySelector('.git-diff-commit-date').textContent, enDate, 'visible date/time uses the active locale');
+    assert.equal(panel.querySelector('.git-diff-commit-date').title.length > 0, true, 'localized date retains an absolute-time tooltip');
+    assert.equal(state.details, detailsIdentity);
+    assert.equal(state.expanded, expandedIdentity);
+    assert.equal(state.expanded.has(commit.sha), true);
+    assert.equal(body.scrollTop, 73, 'relocalization preserves the tab scroll position');
+  });
+
+  await testAsync('historical Editor controls and preview updates cannot mutate or borrow working-tree state', async () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/README.md';
+    const fromRef = '1'.repeat(40);
+    const toRef = '2'.repeat(40);
+    const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
+    api.setOpenFileStateForTest(path, {kind: 'text', original: '- [ ] WORKING', content: '- [ ] WORKING NEXT', dirty: true});
+    api.registerFileEditorLayoutItemForTest(path, {item});
+    api.setHistoricalFileStateForTest(item, {
+      historical: true, kind: 'text', original: '- [ ] HISTORICAL', content: '- [ ] HISTORICAL', dirty: false,
+      diffPinnedFromRef: fromRef, diffPinnedToRef: toRef, diffFromRef: fromRef, diffToRef: toRef,
+    });
+    const panel = new TestElement('historical-panel');
+    panel.className = 'file-editor-panel';
+    panel.dataset.layoutItem = item;
+    panel.dataset.filePath = path;
+    const preview = new TestElement('historical-preview');
+    preview.className = 'file-editor-preview-pane-panel';
+    panel.appendChild(preview);
+    api.setPanelNodeForTest(item, panel);
+    api.setFileEditorViewMode(path, 'preview', item);
+    api.renderLinkedFilePreviewPanelsForTest(null, path, '# WORKING UPDATED');
+    assert.equal(preview._previewText, '- [ ] HISTORICAL', 'working-tree updates render a historical panel from its own immutable TO content');
+    api.refreshEditorPreviewsForTest();
+    assert.equal(preview._previewText, '- [ ] HISTORICAL', 'global preview refresh uses item-scoped historical state');
+
+    const markdownPreview = new TestElement('historical-markdown-preview');
+    markdownPreview.dataset.mdPath = path;
+    markdownPreview._markdownReadOnly = true;
+    const taskList = new TestElement('historical-task-list', 'ul');
+    const taskItem = new TestElement('historical-task-item', 'li');
+    const task = new TestElement('historical-task', 'input');
+    task.setAttribute('type', 'checkbox');
+    task.classList.add('markdown-rendered-task-checkbox');
+    taskItem.appendChild(task);
+    taskList.appendChild(taskItem);
+    markdownPreview.appendChild(taskList);
+    panel.appendChild(markdownPreview);
+    api.bindMarkdownTaskCheckboxesForTest(markdownPreview, '- [ ] HISTORICAL', path);
+    assert.equal(task.disabled, true, 'historical Preview task controls are visibly disabled');
+    task.checked = true;
+    assert.equal(api.updateMarkdownTaskFromPreviewForTest(markdownPreview, task), false, 'historical Preview task controls fail closed');
+
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({ok: true, mtime: 1, size: 1}));
+    });
+    assert.equal(await api.saveFileEditorForTest(path, panel), false, 'a programmatic save from a historical panel fails closed');
+    assert.deepStrictEqual(requests, [], 'historical save cannot reach /api/fs/write');
+    assert.equal(api.openFileStateForTest(path).content, '- [ ] WORKING NEXT', 'historical controls cannot alter dirty working-tree content');
+    assert.equal(api.fileEditorStateForItemForTest(path, item).content, '- [ ] HISTORICAL');
+    assert.equal(api.tabTypeForItem(item).canPopout(item), false, 'the path-keyed working preview popout is unavailable for historical tuples');
+    assert.equal(api.openFilePreviewPopoutForTest(path, panel), false, 'programmatic historical popout fails closed');
+    const workingPopoutWindow = {closed: false, close() { this.closed = true; }};
+    api.setFilePreviewPopoutForTest(path, workingPopoutWindow);
+    api.setFileEditorViewMode(path, 'diff', item);
+    api.setFileEditorViewMode(path, 'preview', item);
+    assert.equal(workingPopoutWindow.closed, false, 'historical mode changes do not close the working tab popout');
+    assert.equal(api.closePopoutsForLayoutItemForTest(item), false, 'closing a historical tuple does not close the working tab popout');
+    assert.equal(workingPopoutWindow.closed, false);
+    assert.ok(api.filePreviewPopoutForTest(path));
+    const refs = api.historicalDiffRefControlsHtmlForTest(api.fileEditorStateForItemForTest(path, item));
+    assert.ok(refs.includes(fromRef) && refs.includes(toRef), 'historical FROM/TO refs are rendered from the immutable tuple');
+    assert.equal(refs.includes('data-diff-ref-input'), false, 'historical refs are labels, not mutable pickers');
+    assert.equal(refs.includes('data-diff-ref-reset'), false, 'historical refs cannot be reset to working-tree defaults');
+
+    api.setFetchForTest(() => Promise.resolve(jsonResponse({
+      path,
+      repo: '/repo',
+      relative_path: 'README.md',
+      diff: 'silently substituted working diff',
+      original: 'working original',
+      working: 'working current',
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    })));
+    const historicalState = api.fileEditorStateForItemForTest(path, item);
+    assert.equal(await api.refreshOpenFileDiffForTest(path, {item, state: historicalState, fromRef, toRef, silent: true, renderOnComplete: false}), false, 'a backend ref fallback is rejected for an immutable historical tuple');
+    assert.equal(historicalState.diffUnavailable, true, 'the historical Editor exposes a typed unavailable state');
+    assert.match(historicalState.diffError, /stale/i);
+    assert.equal(historicalState.content, '- [ ] HISTORICAL', 'a mismatched response cannot replace immutable Preview content');
+    assert.equal(api.openFileStateForTest(path).content, '- [ ] WORKING NEXT', 'a mismatched historical response cannot touch the working Editor');
+  });
+
+  await testAsync('API transport retirement is request-scoped and keeps live failures blocking', async () => assert.deepStrictEqual(canonical(await apiTransportRetirementScenario()), {retired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, lateRetired: {error: 'Failed to fetch', outcome: 'retired', reason: 'page_beforeunload', failures: 0, backendFailures: 0, consoleErrors: 0}, resumedLive: {error: 'Failed to fetch', outcome: 'failed', failures: 1, backendFailures: 1, consoleErrors: 0}, raced: {error: 'Failed to fetch', outcome: 'retired', failures: 0}, live: {error: 'Failed to fetch', type: 'api', endpoint: '/api/auto-approve', outcome: 'failed', backendFailures: 1}}));
   await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
     const api = loadYolomux('', ['1']);
     const requests = [];
@@ -4698,7 +5071,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       return request.promise;
     });
 
-    const request = api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    const request = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     assert.equal(api.fileExplorerSessionFilesStateForTest().loading, true, 'the HTTP generation owns loading');
     assert.equal(api.applySessionFilesPayloadFromPushForTest({
       session: '1',
@@ -4757,7 +5130,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
       return Promise.resolve(jsonResponse(receipt, 202));
     });
 
-    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     assert.equal(api.sessionFilesPayloadForTest().refreshing_elsewhere, true, 'the first accepted receipt paints queued state');
     assert.equal(api.applyApiOperationTerminalForTest({
       operation: {id: receipt.operation.id, cursor: {epoch: 'session-files-retained', seq: 1}},
@@ -4777,7 +5150,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     }), true, 'the accepted operation reaches one terminal result');
     assert.equal(api.sessionFilesPayloadForTest().files[0].path, 'DONE.md', 'the terminal result paints Differ');
 
-    await api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true});
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
     const state = api.sessionFilesPayloadForTest();
     assert.equal(state.loaded, true, 'a duplicate receipt cannot regress ready state');
     assert.equal(state.refreshing_elsewhere, false, 'a duplicate receipt cannot repaint queued state');
@@ -6316,6 +6689,152 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
     }
 
     {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/src/canonical.md';
+      api.setFetchForTest(url => {
+        const text = String(url);
+        if (text.startsWith('/api/fs/diff')) {
+          return Promise.resolve(jsonResponse({
+            repo: '/repo/app',
+            relative_path: 'src/canonical.md',
+            from_ref: 'a'.repeat(40),
+            to_ref: 'current',
+            diff: '@@ -1 +1 @@\n-old\n+dirty\n',
+            original: 'old\n',
+            working: 'dirty\n',
+          }));
+        }
+        return Promise.resolve(jsonResponse({
+          path,
+          content: '# original\n',
+          size: 11,
+          mtime: 1,
+          mtime_ns: 1,
+          realpath: path,
+          file_id: 'dev:10:ino:30',
+          git_root: '/repo/app',
+          git_tracked: true,
+          git_history: [{ref: 'a'}, {ref: 'b'}],
+          git_has_history: true,
+        }));
+      });
+
+      const first = await api.openFileInAdditionalEditorTabForTest(path, {name: 'canonical.md'}, {canonical: true, viewMode: 'edit'});
+      const opened = api.openFileStateForTest(path);
+      api.setOpenFileStateForTest(path, {...opened, content: '# dirty\n', dirty: true});
+      const preview = await api.openFileInAdditionalEditorTabForTest(path, {name: 'canonical.md'}, {canonical: true, viewMode: 'preview'});
+      const diff = await api.openFileInAdditionalEditorTabForTest(path, {name: 'canonical.md'}, {canonical: true, viewMode: 'diff'});
+
+      assert.equal(first, api.fileEditorItemFor(path));
+      assert.equal(preview, first);
+      assert.equal(diff, first);
+      assert.deepStrictEqual(canonical(api.openFileEditorItems()), [first], 'Finder mode actions retain one canonical working-tree item');
+      assert.equal(api.openFileStateForTest(path).content, '# dirty\n', 'Finder mode changes preserve the dirty working-tree buffer');
+      assert.equal(api.editorViewModeFor(path, first), 'diff', 'the last Finder action changes only the selected mode');
+    }
+
+    {
+      const api = loadYolomux('', ['1']);
+      const path = '/repo/app/src/history.js';
+      const firstFrom = '1'.repeat(40);
+      const firstTo = '2'.repeat(40);
+      const secondFrom = '3'.repeat(40);
+      const secondTo = '4'.repeat(40);
+      api.setOpenFileStateForTest(path, {kind: 'text', content: 'working\n', original: 'working\n', dirty: true});
+      api.setFetchForTest(url => {
+        const parsed = new URL(String(url), 'http://localhost');
+        const fromRef = parsed.searchParams.get('from');
+        const toRef = parsed.searchParams.get('to');
+        return Promise.resolve(jsonResponse({
+          repo: '/repo/app',
+          relative_path: 'src/history.js',
+          from_ref: fromRef,
+          to_ref: toRef,
+          diff: `@@ -1 +1 @@\n-${fromRef}\n+${toRef}\n`,
+          original: `${fromRef}\n`,
+          working: `${toRef}\n`,
+        }));
+      });
+
+      const first = await api.openHistoricalFileInEditorForTest(path, firstFrom, firstTo, {repo: '/repo/app'});
+      const repeat = await api.openHistoricalFileInEditorForTest(path, firstFrom, firstTo, {repo: '/repo/app'});
+      const second = await api.openHistoricalFileInEditorForTest(path, secondFrom, secondTo, {repo: '/repo/app'});
+      assert.equal(repeat, first, 'the same historical tuple activates the exact Editor instance');
+      assert.notEqual(second, first, 'another historical tuple creates another current-Editor instance');
+      assert.equal(api.tabTypeForItem(first)?.key, 'file-editor');
+      assert.equal(api.editorViewModeFor(path, first), 'diff');
+      assert.equal(api.fileEditorStateForItemForTest(path, first).content, `${firstTo}\n`, 'historical Preview owns immutable TO content');
+      assert.equal(api.fileEditorStateForItemForTest(path, second).content, `${secondTo}\n`, 'two tuples for one path retain isolated content');
+      api.registerFileEditorLayoutItemForTest(path, {item: first});
+      assert.equal(api.fileEditorStateForItemForTest(path, first).content, `${firstTo}\n`, 'layout registration cannot reapply loading defaults over immutable TO content');
+      assert.equal(api.fileEditorStateForItemForTest(path, first).readOnly, true);
+      assert.equal(api.openFileStateForTest(path).content, 'working\n', 'historical opens never replace dirty working-tree state');
+    }
+
+    {
+      const sessions = Array.from({length: 9}, (_, index) => String(index + 1));
+      const api = loadYolomux('', sessions);
+      const repo = '/repo/app';
+      const path = `${repo}/src/return.js`;
+      const fromRef = '5'.repeat(40);
+      const toRef = '6'.repeat(40);
+      const repoItem = api.resolveLayoutItem(api.gitDiffItemFor(repo));
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.leafNode('left');
+      slots.left = api.paneStateWithTabs(['1', repoItem], repoItem);
+      api.setLayoutSlotsForTest(slots);
+      api.setFocusedPanelItem(repoItem);
+      api.setFetchForTest(url => {
+        const parsed = new URL(String(url), 'http://localhost');
+        return Promise.resolve(jsonResponse({
+          repo,
+          relative_path: 'src/return.js',
+          from_ref: parsed.searchParams.get('from'),
+          to_ref: parsed.searchParams.get('to'),
+          diff: '@@ -1 +1 @@\n-old\n+new\n',
+          original: 'old\n',
+          working: 'new\n',
+        }));
+      });
+
+      const opened = await api.openGitDiffHistoricalFileForTest({
+        repo,
+        from_ref: fromRef,
+        to_ref: toRef,
+        parents: [fromRef],
+      }, {path: 'src/return.js', abs_path: path}, {returnToItem: repoItem});
+      assert.equal(api.layoutSlotsForTest().left.active, opened, 'clicking a commit file activates its historical diff tab');
+
+      const minimizeSlots = api.emptyLayoutSlots();
+      minimizeSlots[api.layoutTreeKey] = api.splitNode(
+        'row',
+        api.leafNode('left'),
+        api.splitNode('row', api.leafNode('slot1'), api.leafNode('slot2'), 50),
+        60,
+      );
+      minimizeSlots.left = api.paneStateWithTabs(['1'], '1');
+      minimizeSlots.slot1 = api.paneStateWithTabs([repoItem], repoItem);
+      minimizeSlots.slot2 = api.paneStateWithTabs([opened], opened);
+      api.setLayoutSlotsForTest(minimizeSlots);
+      api.minimizePaneFromLayout(opened);
+      assert.equal(api.layoutSlotsForTest().left.active, '1', 'minimizing retains the unrelated destination pane selection');
+      assert.equal(api.layoutSlotsForTest().slot1.active, repoItem, 'minimizing a historical diff pane returns to its originating Diff repo tab in another pane');
+
+      const capacitySlots = api.emptyLayoutSlots();
+      capacitySlots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('slot1'), 70);
+      capacitySlots.left = api.paneStateWithTabs([...sessions, repoItem], '1');
+      capacitySlots.slot1 = api.paneStateWithTabs([opened], opened);
+      api.setLayoutSlotsForTest(capacitySlots);
+      api.minimizePaneFromLayout(opened);
+      assert.equal(api.layoutSlotsForTest().left.tabs.includes(repoItem), true, 'a full destination cannot evict the originating Diff repo tab');
+      assert.equal(api.layoutSlotsForTest().left.active, repoItem, 'a full destination still returns to the originating Diff repo tab');
+
+      api.activatePaneTab('left', opened);
+      await api.closeFileTabForTest(path, {item: opened});
+      assert.equal(api.layoutSlotsForTest().left.active, repoItem, 'closing the historical diff returns to its originating Diff repo tab');
+    }
+
+    {
       const zhHant = JSON.parse(fs.readFileSync('static/locales/zh-Hant.json', 'utf8'));
       const differApi = loadYolomux('', ['1'], 'https:', 'Linux x86_64', 'admin', {
         strings: {en: JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8')), 'zh-Hant': zhHant},
@@ -6488,7 +7007,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/yolomux.dev2', root: '/home/test/yolomux.dev2'}},
         selected_pane: {current_path: '/home/test/yolomux.dev2'},
       });
-      syncTreeApi.setSessionFilesPayloadForTest({
+      syncTreeApi.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/yolomux.dev2'}, {repo: '/home/test/ai-config'}],
         files: [
@@ -6534,7 +7053,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
         selected_pane: {current_path: '/home/test/project/1/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [
@@ -6562,7 +7081,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/tmp/outside/src', root: '/tmp/outside'}},
         selected_pane: {current_path: '/tmp/outside/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '2',
         repos: [{repo: '/tmp/outside'}, {repo: '/home/test/project/3'}],
         files: [
@@ -6588,7 +7107,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/1/src', root: '/home/test/project/1'}},
         selected_pane: {current_path: '/home/test/project/1/src'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [
@@ -6622,7 +7141,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         project: {git: {cwd: '/home/test/project/3', root: '/home/test/project/3'}},
         selected_pane: {current_path: '/home/test/project/3'},
       });
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '2',
         repos: [{repo: '/home/test/project/3'}],
         files: [{repo: '/home/test/project/3', path: 'README.md', abs_path: '/home/test/project/3/README.md'}],
@@ -6635,7 +7154,7 @@ async function runLayoutAsyncSuite() { await testAsync('API transport retirement
         '/home/test/project/3',
       ], 'focusing another home tab swaps to that tab chain without carrying previous expanded folders');
 
-      api.setSessionFilesPayloadForTest({
+      api.setFinderSessionFilesPayloadForTest({
         session: '1',
         repos: [{repo: '/home/test/project/1'}, {repo: '/home/test/project/2'}],
         files: [

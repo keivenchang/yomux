@@ -44,7 +44,12 @@ yolomux_validate_instance_isolation() {
   local repo_root="$1"
   local python_bin="$2"
   local port="$3"
-  "$python_bin" "$repo_root/tools/instance_isolation.py" --port "$port" >/dev/null
+  if [[ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]]; then
+    "$python_bin" "$repo_root/tools/instance_isolation.py" exec --plan-file "$YOLOMUX_ROW_PLAN_FILE" -- \
+      "$python_bin" "$repo_root/tools/instance_isolation.py" validate-roots >/dev/null
+    return
+  fi
+  "$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port" >/dev/null
 }
 
 yolomux_validate_root_environment() {
@@ -178,14 +183,10 @@ yolomux_bootout_macos_server() {
 }
 
 yolomux_macos_server_launcher() {
-  # Two launch paths share this one supervised macOS launcher so they never drift:
-  #   * DIRECT (boot.sh, and any caller that sets no YOLOMUX_ROW_PLAN_FILE): keep
-  #     the historical behavior -- export the primary port and exec the server.
-  #   * EXEC PLAN (the supported launcher's per-row clean environment): apply the
-  #     one captured RowPlan through tools/instance_isolation.py exec, then run the
-  #     server under it. The primary port is passed only when non-empty (the
-  #     default/durable row); a managed self-owner receives none.
-  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; log_path=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; if [ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]; then if [ -n "$primary_port" ]; then set -- env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" "$python_bin" -u "$script" "$@"; else set -- "$python_bin" -u "$script" "$@"; fi; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-file "$YOLOMUX_ROW_PLAN_FILE" -- "$@" >> "$log_path" 2>&1; else export YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port"; exec "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1; fi'
+  # The plan JSON is a positional argument, not inherited state: a long-lived
+  # tmux server cannot substitute a stale root or stale plan-file path. Both the
+  # direct boot path and supported multi-row launcher use this same exec path.
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; log_path=$7; plan_json=$8; shift 8; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; if [ -n "$primary_port" ]; then set -- env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" "$python_bin" -u "$script" "$@"; else set -- "$python_bin" -u "$script" "$@"; fi; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-json "$plan_json" -- "$@" >> "$log_path" 2>&1'
 }
 
 yolomux_submit_macos_server() {
@@ -197,10 +198,15 @@ yolomux_submit_macos_server() {
   local log_path="$6"
   local primary_port="$7"
   shift 7
-  local launcher socket_name session_name
+  local launcher socket_name session_name plan_json
   launcher="$(yolomux_macos_server_launcher)"
   socket_name="$(yolomux_macos_server_tmux_socket)"
   session_name="$(yolomux_macos_server_tmux_session "$port")"
+  if [[ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]]; then
+    plan_json="$(< "$YOLOMUX_ROW_PLAN_FILE")"
+  else
+    plan_json="$("$python_bin" "$repo_root/tools/instance_isolation.py" plan-direct --port "$port")" || return
+  fi
   tmux -L "$socket_name" new-session -d -s "$session_name" -c "$repo_root" \
-    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$primary_port" "$log_path" "$@"
+    /bin/bash -c "$launcher" bash "$repo_root" "$launch_path" "$shell_bin" "$python_bin" "$repo_root/yolomux.py" "$primary_port" "$log_path" "$plan_json" "$@"
 }

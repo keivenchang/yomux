@@ -149,8 +149,10 @@ JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # stat-derived content key and `fresh_only` on `priority == "point"` -- and a mutation is a
 # non-coalescable side effect that would pay for that machinery without ever using it.  Capacity
 # matches `point` for the same reason `point` is two: one slow mutation must not strand the next.
-# Recursive `delete` is deliberately NOT here: `delete_path` walks and unlinks a whole subtree, so
-# its cost is unbounded in the input and it belongs on the bulk-shared `interactive` lane.
+# `delete` is admitted here ONLY in its bounded form (`recursive` absent/false): one `unlink`, or
+# one `rmdir` probe that returns a typed `pending: "subtree"` WITHOUT enumerating anything.  A
+# recursive `delete` walks and unlinks a whole subtree -- measured at 20,001 destructive syscalls
+# for one 20,000-entry directory -- so it stays on the bulk-shared `interactive` lane.
 JOBD_MAX_WORKERS = 2
 JOBD_INTERACTIVE_WORKERS = 1
 JOBD_POINT_WORKERS = 2
@@ -433,12 +435,19 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
         result = filesystem.count_directory_files(path)
     elif operation == "diff":
         result = filesystem.diff_file(path, from_ref=args.get("from_ref"), to_ref=args.get("to_ref"))
+    elif operation == "git_history":
+        result = filesystem.git_history(path, limit=args.get("limit"), cursor=str(args.get("cursor") or "") or None)
+    elif operation == "git_commit":
+        result = filesystem.git_commit(path, commit=str(args.get("commit") or ""), head=str(args.get("head") or ""))
     elif operation == "blame":
         result = filesystem.blame_file(path, ref=args.get("ref"))
     elif operation == "write":
         result = filesystem.write_file(path, str(args.get("content") or ""), expected_mtime=args.get("expected_mtime"))
     elif operation == "delete":
-        result = filesystem.delete_path(path)
+        # Still ONE `delete` arm.  `recursive` picks the cost class the caller already reserved a
+        # lane for; a bounded request that turns out to need a subtree walk comes back as a typed
+        # pending result and is re-submitted with `recursive=True` on the bulk lane.
+        result = filesystem.delete_path(path, recursive=args.get("recursive") is True)
     elif operation == "unindex":
         result = filesystem.unindex_root(path)
     elif operation == "rename":

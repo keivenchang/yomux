@@ -40,6 +40,10 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
+    # Cleared at the request boundary and set by the single body consumer, so every response owner
+    # can ask one question: was the declared request body ever taken off the socket?
+    request_body_consumed = False
+
     def basic_auth_credentials(self) -> tuple[str, str] | None:
         """Decode `Authorization: Basic` into (username, password), or None if the header
         is absent/malformed. Split out from verification so the credentials can be routed
@@ -211,7 +215,28 @@ class AuthMixin:
             self.send_header("Set-Cookie", self.clear_logout_marker_cookie_header())
 
     def request_has_unread_body(self) -> bool:
-        return self.command in {"POST", "PUT", "PATCH"} and bool(self.headers.get("Content-Length"))
+        """Report whether this request declared a body that no handler ever consumed.
+
+        BaseHTTPRequestHandler frames the next request at the byte after the response, so an
+        unconsumed body is read as the next request line: a large one produces a bogus 414 and a
+        small one without a newline blocks the parser until the peer gives up.  ``read_request_body``
+        is the only consumer, so it is the only place that clears this.
+        """
+        if self.request_body_consumed:
+            return False
+        declared_length = getattr(self, "_request_content_length", None)
+        if isinstance(declared_length, int):
+            return declared_length > 0
+        headers = getattr(self, "headers", {})
+        length_text = str(headers.get("Content-Length") or "").strip()
+        if not length_text:
+            return False
+        try:
+            return int(length_text) > 0
+        except ValueError:
+            # Invalid framing is rejected before dispatch. If an earlier error response reaches this
+            # fallback first, closing is still the only safe connection-reuse decision.
+            return True
 
     def close_after_unread_body(self) -> None:
         if self.request_has_unread_body():

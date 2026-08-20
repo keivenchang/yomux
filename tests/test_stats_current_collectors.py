@@ -38,6 +38,7 @@ def test_builders_emit_only_normalized_current_family_facts():
         collectors.cpu_success(
             **BASE, observed_at=101, cadence_seconds=1, source_id="process:web",
             process_percent=5, system_percent=20,
+            process_cpu_percent={"python": 4, "node": 3},
         ),
         collectors.agent_status_success(
             **BASE, observed_at=110, cadence_seconds=10, source_id="agent-scan",
@@ -98,6 +99,58 @@ def test_system_memory_without_macos_details_keeps_the_linux_payload_exactly_leg
     )
 
     assert dict(memory.observations[0].payload) == {"used_bytes": 6, "capacity_bytes": 7}
+
+
+def test_cpu_carries_a_bounded_normalized_binary_map():
+    cpu = collectors.cpu_success(
+        **BASE, observed_at=101, cadence_seconds=1, source_id="web",
+        process_percent=5, system_percent=20,
+        process_cpu_percent={"python": 4, "node": 3},
+    )
+
+    assert dict(cpu.observations[0].payload["process_cpu_percent"]) == {"python": 4, "node": 3}
+    with pytest.raises(ValueError, match="at most 4"):
+        collectors.cpu_success(
+            **BASE, observed_at=101, cadence_seconds=1, source_id="web",
+            process_percent=5, system_percent=20,
+            process_cpu_percent={f"process-{index}": index for index in range(5)},
+        )
+
+
+def test_system_memory_carries_a_bounded_binary_memory_map():
+    memory = collectors.system_memory_success(
+        **BASE, observed_at=160, cadence_seconds=60, source_id="host",
+        used_bytes=6, capacity_bytes=7,
+        process_memory_bytes={"python": 4, "node": 3},
+    )
+
+    assert dict(memory.observations[0].payload["process_memory_bytes"]) == {"python": 4, "node": 3}
+    # Eight-entry rows were persisted before the display was narrowed to top five. They remain
+    # readable, while nine is still rejected as outside the historical wire contract.
+    with pytest.raises(ValueError, match="at most 8"):
+        collectors.system_memory_success(
+            **BASE, observed_at=160, cadence_seconds=60, source_id="host",
+            used_bytes=6, capacity_bytes=7,
+            process_memory_bytes={f"process-{index}": index + 1 for index in range(9)},
+        )
+
+
+@pytest.mark.parametrize(
+    "processes",
+    [
+        {"/usr/bin/python": 1},
+        {"Python3": 1},
+        {"python": True},
+        {"python": -1},
+        {"python": float("inf")},
+    ],
+)
+def test_system_memory_rejects_unbounded_or_invalid_binary_memory_rows(processes):
+    with pytest.raises(ValueError):
+        collectors.system_memory_success(
+            **BASE, observed_at=160, cadence_seconds=60, source_id="host",
+            used_bytes=6, capacity_bytes=7, process_memory_bytes=processes,
+        )
 
 
 @pytest.mark.parametrize(

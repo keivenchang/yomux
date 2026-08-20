@@ -436,16 +436,7 @@ button.topbar-status-surface:focus-visible {
   gap: var(--space-4);
   padding: 0 var(--space-6);
 }
-.topbar-activity.has-attention {
-  border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
-  background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
-  color: var(--text);
-}
-.topbar-activity.has-attention:hover,
-.topbar-activity.has-attention:focus-visible {
-  border-color: var(--danger-strong);
-  background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
-}
+/* Per-state dots carry activity meaning; the aggregate summary is not an error surface. */
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;

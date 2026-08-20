@@ -535,6 +535,7 @@ class TestElement {
   getAttribute(name) { return this.attributes[name]; }
   hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this.attributes, name); }
   removeAttribute(name) { delete this.attributes[name]; }
+  focus() { this.focused = true; }
   replaceChildren(...nodes) {
     this.children.forEach(node => {
       node.parentElement = null;
@@ -743,6 +744,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     // split or about an unstated bound override this key explicitly.
     filesystemBatchLimits: {...SERVER_FILESYSTEM_BATCH_LIMITS},
     serverHostname: 'test-host',
+    cpuTopology: {logical_cpus: 8, physical_cores: 4},
     localeRegistry: {
       fallback: 'en',
       pseudo: 'en-XA',
@@ -1062,6 +1064,7 @@ globalThis.__layoutTestApi = {
   },
   i18nActiveLocaleId,
   i18nSetCatalogForTest,
+  applyLocaleForTest: applyLocale,
   transcriptItemHtmlForTest: transcriptItemHtml,
   transcriptAgentErrorTextForTest: transcriptAgentErrorText,
   transcriptContextLoadErrorTextForTest: transcriptContextLoadErrorText,
@@ -1120,6 +1123,7 @@ globalThis.__layoutTestApi = {
   recordEditorNav,
   cursorStyleFileReference,
   fileEditorPaneTabHtml,
+  paneTabAriaLabelForTest: paneTabAriaLabel,
   fileQuickOpenItem,
   fileQuickOpenItems,
   movingEllipsisHtml,
@@ -1180,12 +1184,23 @@ globalThis.__layoutTestApi = {
   fileExplorerFinderTargetSessionForTest: fileExplorerFinderTargetSession,
   switchFileExplorerFinderSessionForTest: switchFileExplorerFinderSession,
   sessionFilesCacheKeyForTest: sessionFilesCacheKey,
+  clientSessionFilesWatchRequestsForTest: clientSessionFilesWatchRequests,
+  setGlobalDiffRefsForTest(fromRef, toRef) {
+    diffRefFrom = String(fromRef || 'HEAD');
+    diffRefTo = String(toRef || 'current');
+  },
+  setRepoDiffRefsForTest: setRepoDiffRefs,
+  sessionFilesCacheSizesForTest() {
+    return {finder: fileExplorerFinderSessionFilesCache.size, differ: fileExplorerSessionFilesCache.size};
+  },
   noteFileExplorerChangesSessionInteractionForTest: noteFileExplorerChangesSessionInteraction,
   setFileExplorerChangesSelectedSessionForTest(value) { fileExplorerChangesSelectedSession = String(value || ''); },
   setFileExplorerFinderSelectedSessionForTest(value) { fileExplorerFinderSelectedSession = String(value || ''); },
   changesGroupsSnapshotHtmlForTest: changesGroupsSnapshotHtml,
   fetchSessionFilesForTest: fetchSessionFiles,
   fileExplorerSessionFilesStateForTest() { return {...fileExplorerSessionFilesState}; },
+  fileExplorerFinderSessionFilesStateForTest() { return {...fileExplorerFinderSessionFilesState}; },
+  sessionFilesRequestForDestinationForTest: sessionFilesRequestForDestination,
   sessionFilesPayloadSignatureForPayloadForTest: sessionFilesPayloadSignatureForPayload,
   fileExplorerChangesCollapseToggleHtml,
   fileExplorerChangesAllReposCollapsedForTest: fileExplorerChangesAllReposCollapsed,
@@ -1609,9 +1624,14 @@ globalThis.__layoutTestApi = {
   },
   toggleTabMetadataForTest: toggleTabMetadata,
   itemInLayout,
+  slotForItem,
   itemLabel,
   itemParam,
   resolveLayoutItem,
+  gitDiffItemFor,
+  gitDiffItemPath,
+  historicalFileEditorItemFor,
+  historicalFileEditorIdentity,
   itemIsBackgroundPaneTab,
   layoutFromParam,
   layoutParamValue,
@@ -1621,6 +1641,25 @@ globalThis.__layoutTestApi = {
   layoutWithSidePaneItems,
   layoutWithDefaultLeftSidePane,
   layoutSlotsForTest() { return cloneLayoutSlots(layoutSlots); },
+  dynamicVirtualLayoutItemsForTest() { return Array.from(dynamicVirtualLayoutItems); },
+  setGitDiffTabStateForTest(item, values = {}) { return ensureGitDiffTabState(item, values); },
+  gitDiffTabStateForTest(item) {
+    const state = gitDiffTabState.get(item);
+    return state ? {...state} : null;
+  },
+  gitDiffCommitRowForTest: gitDiffCommitRow,
+  gitDiffCommitMessageForTest: gitDiffCommitMessage,
+  gitDiffCommitFileTreeForTest: gitDiffCommitFilesTree,
+  gitDiffHistoricalFileItemForTest: gitDiffHistoricalFileItem,
+  gitDiffHistoricalComparisonKindForTest: gitDiffHistoricalComparisonKind,
+  openGitDiffHistoricalFileForTest: openGitDiffHistoricalFile,
+  createGitDiffPanelForTest: createGitDiffPanel,
+  renderGitDiffPanelForTest: renderGitDiffPanel,
+  relocalizeGitDiffPanelForTest: relocalizeGitDiffPanel,
+  refreshGitDiffHistoryForTest: refreshGitDiffHistory,
+  loadOlderGitDiffHistoryForTest: loadOlderGitDiffHistory,
+  loadGitDiffCommitDetailForTest: loadGitDiffCommitDetail,
+  setGitDiffCommitExpandedForTest: setGitDiffCommitExpanded,
   createLifecycleScopeForTest: createLifecycleScope,
   createLatestResourceForTest: createLatestResource,
   mobileSinglePaneModeForTest: mobileSinglePaneMode,
@@ -2065,6 +2104,8 @@ globalThis.__layoutTestApi = {
   replaceTmuxSessionInClient,
   renameTmuxSessionForTest: renameTmuxSession,
   applyLayoutSlotsForTest: applyLayoutSlots,
+  applyLayoutUrlEditorModeEntryForTest: applyLayoutUrlEditorModeEntry,
+  activateNavItemForTest: activateNavItem,
   layoutMutationSnapshotForTest() { return runtimeState.layoutMutationSnapshot(); },
   beginLayoutMutationCompletionForTest: beginLayoutMutationCompletion,
   completeLayoutMutationGenerationForTest: completeLayoutMutationGeneration,
@@ -2185,6 +2226,7 @@ globalThis.__layoutTestApi = {
   showSessionContextMenu,
   showTabContextMenu,
   openedWindowsForTest() { return globalThis.__openedWindows.map(record => ({url: record.url, name: record.name, features: record.features, focused: record.focused === true})); },
+  openedWindowClosedForTest(index = 0) { return globalThis.__openedWindows[index]?.window?.closed === true; },
   bodyChildren() { return document.body.children; },
   defaultLayoutSlots,
   layoutShapeSignature,
@@ -2293,12 +2335,17 @@ globalThis.__layoutTestApi = {
   setFileEditorCursorStyleForTest(value) { fileEditorCursorStyle = value; },
   editorVisualHighlightHtml,
   editorVisualLineFragments,
+  uiColorVisualPresetForTest: uiColorVisualPreset,
   applyGlobalThemeMode,
   globalThemeLabel,
   globalThemeIsDark,
   nextGlobalThemeMode,
   terminalThemeForGlobalTheme,
+  terminalRenderThemeForGlobalTheme,
+  terminalThemeForSession,
   terminalMinimumContrastRatio,
+  setFileEditorCursorColorForTest(value) { fileEditorCursorColor = normalizeEditorCursorColor(value); },
+  setFocusedPanelItemValueForTest(value) { focusedPanelItem = value; },
   globalThemeModeForTest() { return globalThemeMode; },
   setGlobalThemeModeForTest(value) { globalThemeMode = normalizeGlobalThemeMode(value); },
   resolvedGlobalThemeModeForTest: resolvedGlobalThemeMode,
@@ -2357,6 +2404,7 @@ globalThis.__layoutTestApi = {
   infoBranchRows,
   applyTmuxWindowActiveIndexToTranscriptInfoForTest: applyTmuxWindowActiveIndexToTranscriptInfo,
   fileContextMenuState,
+  finderOpenInNewTabActionsForContext,
   fileExplorerIndexContextAction,
   fileEditorItemFor,
   fileEditorCopyItemFor,
@@ -2416,6 +2464,9 @@ globalThis.__layoutTestApi = {
   },
   renderFileEditorPanelShouldCaptureViewStateForTest: renderFileEditorPanelShouldCaptureViewState,
   renderFileEditorPanel,
+  renderLinkedFilePreviewPanelsForTest: renderLinkedFilePreviewPanels,
+  refreshEditorPreviewsForTest: refreshEditorPreviews,
+  setPanelNodeForTest(item, panel) { panelNodes.set(item, panel); },
   scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
   scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
   fileEditorPreviewScrollSyncSourceForTest: fileEditorPreviewScrollSyncSource,
@@ -2454,6 +2505,8 @@ globalThis.__layoutTestApi = {
   },
   registerFileEditorLayoutItemForTest: registerFileEditorLayoutItem,
   setOpenFileStateForTest(path, state) { setFileState(path, state); },
+  setHistoricalFileStateForTest(item, state) { return setHistoricalFileState(item, state); },
+  fileEditorStateForItemForTest: fileEditorStateForItem,
   openPathForPhysicalFileForTest: openPathForPhysicalFile,
   setFileOpenPromiseForTest: setFileOpenPromise,
   fileOpenPromiseForTest: fileOpenPromiseFor,
@@ -2506,6 +2559,13 @@ globalThis.__layoutTestApi = {
   openChangedFileInDiffForTest: openChangedFileInDiff,
   openFileInEditorForTest: openFileInEditor,
   openFileInAdditionalEditorTabForTest: openFileInAdditionalEditorTab,
+  openHistoricalFileInEditorForTest: openHistoricalFileInEditor,
+  closeFileTabForTest: closeFileTab,
+  historicalDiffRefControlsHtmlForTest: historicalDiffRefControlsHtml,
+  openFilePreviewPopoutForTest: openFilePreviewPopout,
+  setFilePreviewPopoutForTest(path, previewWindow) { filePreviewPopouts.set(path, {window: previewWindow}); },
+  filePreviewPopoutForTest(path) { return filePreviewPopouts.get(path) || null; },
+  closePopoutsForLayoutItemForTest: closePopoutsForLayoutItem,
   focusPreferencesSearch,
   renderPreferencesPanelsForTest: renderPreferencesPanels,
   renderPaneTabStrips,
@@ -2837,6 +2897,8 @@ globalThis.__layoutTestApi = {
   markdownTextWithSourceAnchors,
   markdownTaskLineEntries,
   markdownTextWithTaskLineToggled,
+  bindMarkdownTaskCheckboxesForTest: bindMarkdownTaskCheckboxes,
+  updateMarkdownTaskFromPreviewForTest: updateMarkdownTaskFromPreview,
   markdownPreviewBlockedTagsForTest() { return Array.from(MARKDOWN_PREVIEW_BLOCKED_TAGS); },
   moveSessionToSlot,
   dropItemCanBeDraggedForTest: dropItemCanBeDragged,
@@ -2941,21 +3003,28 @@ globalThis.__layoutTestApi = {
   visualPointFromAppSpace,
   fitTerminalForTest: fitTerminal,
   setSessionFilesPayloadForTest(payload) {
-    setSessionFilesPayloadForDestination('finder', payload);
+    setSessionFilesPayloadForDestination('differ', payload);
   },
   setSessionFilesPayloadForDestinationForTest(payload) {
-    setSessionFilesPayloadForDestination('finder', payload);
+    setSessionFilesPayloadForDestination('differ', payload);
   },
   setSessionFilesLoadingForTest(loading) {
     fileExplorerSessionFilesState.loading = Boolean(loading);
   },
   setFileExplorerSessionFilesPayloadForTest(payload) {
+    setSessionFilesPayloadForDestination('differ', payload);
+  },
+  setFinderSessionFilesPayloadForTest(payload) {
     setSessionFilesPayloadForDestination('finder', payload);
   },
   sessionFilesPayloadForTest() {
     return fileExplorerSessionFilesState.payload;
   },
+  finderSessionFilesPayloadForTest() {
+    return fileExplorerFinderSessionFilesState.payload;
+  },
   applyLayoutUrlStateSeedForTest: applyLayoutUrlStateSeed,
+  layoutUrlStateSnapshotForTest: layoutUrlStateSnapshot,
   applyEditorStateFieldsForTest: applyEditorStateFields,
   applyPendingLayoutUrlStateForTest: applyPendingLayoutUrlState,
   scheduleLayoutUrlStateRefreshForTest: scheduleLayoutUrlStateRefresh,
@@ -2966,9 +3035,16 @@ globalThis.__layoutTestApi = {
       signature: sessionFilesPayloadSignatureForPayload(payload),
     });
   },
+  setFinderSessionFilesCachePayloadForTest(session, payload) {
+    fileExplorerFinderSessionFilesCache.set(sessionFilesCacheKey(session, 'finder'), {
+      payload: {...payload, session},
+      signature: sessionFilesPayloadSignatureForPayload(payload),
+    });
+  },
   applySessionFilesPayloadFromPushForTest: applySessionFilesPayloadFromPush,
   sessionFilesPanelIsLoadingForTest: sessionFilesPanelIsLoading,
   sessionFilesPushRequestMatchesCurrentForTest: sessionFilesPushRequestMatchesCurrent,
+  sessionFilesRequestMatchesDestinationForTest: sessionFilesRequestMatchesDestination,
   changedFileOwnerSessionForPathForTest: changedFileOwnerSessionForPath,
   fileTreeChangedAncestorStatsForTest(payload) {
     return Array.from(fileTreeChangedAncestorStats(payload).entries()).map(([path, stats]) => [path, {...stats}]);

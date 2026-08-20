@@ -1,5 +1,7 @@
 import os
+import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -100,7 +102,7 @@ def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
     ("argv", "verb"),
     [
         (["kill-server"], "kill-server"),
-        (["kill-session", "-t", "alpha:"], "kill-session"),
+        (["kill-session", "-t", "=alpha:"], "kill-session"),
         (["-C", "attach-session", "-t", "alpha:"], "-C attach-session"),
     ],
 )
@@ -165,29 +167,16 @@ def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):
     assert len(down_presses) == 1
 
 
-def test_cached_session_names_memoizes_within_ttl(monkeypatch):
-    # tmux_exact_target no longer runs `tmux list-sessions` on every capture — session-name
-    # resolution is cached for a short window so a poll's captures reuse one resolution.
-    calls = {"n": 0}
-
-    def fake_names():
-        calls["n"] += 1
-        return ["1", "2"]
-
-    monkeypatch.setattr(tmux_utils, "tmux_session_names", fake_names)
-    tmux_utils._session_names_cache.values.clear()  # force one fresh resolution
-    for _ in range(5):
-        assert tmux_utils.cached_session_names() == ["1", "2"]
-    assert calls["n"] == 1
-
-
-def test_tmux_exact_target_skips_resolution_for_unambiguous_targets(monkeypatch):
+def test_tmux_exact_target_reads_no_session_list(monkeypatch):
+    # Pinning is pure string work now: the exact `=name:` form is correct whether or not the
+    # session is alive, so no capture pays a `tmux list-sessions` subprocess to build a target.
     def fail_names():
-        raise AssertionError("must not resolve sessions for an unambiguous target")
+        raise AssertionError("must not resolve sessions to build a target")
 
-    monkeypatch.setattr(tmux_utils, "cached_session_names", fail_names)
+    monkeypatch.setattr(tmux_utils, "tmux_session_names", fail_names)
     assert tmux_utils.tmux_exact_target("%3") == "%3"
-    assert tmux_utils.tmux_exact_target("1:") == "1:"
+    assert tmux_utils.tmux_exact_target("1:") == "=1:"
+    assert tmux_utils.tmux_exact_target("1") == "=1:"
 
 
 def test_tmux_clear_input_moves_to_end_before_clearing(monkeypatch):
@@ -255,5 +244,153 @@ def test_target_resolution_self_test_cases_live_in_pytest():
     ]
     assert auto_approve_tmux.specs_have_wildcards(["project1", "project2:0.1"]) is False
     assert auto_approve_tmux.specs_have_wildcards(["project1", "dyn*"]) is True
-    assert auto_approve_tmux.tmux_exact_target_from_sessions("1", ["1", "6", "ant"]) == "1:"
+    assert auto_approve_tmux.tmux_exact_target_from_sessions("1", ["1", "6", "ant"]) == "=1:"
     assert auto_approve_tmux.tmux_exact_target_from_sessions("%79", ["1", "6", "ant"]) == "%79"
+
+
+# --- exact-target enforcement -------------------------------------------------
+# tmux resolves a bare `name:` target by prefix, so `-t 1:` lands on session `12` the moment
+# session `1` is gone or renamed. Sessions here are literally named `1`, `2`, `12`, so a session
+# kill aimed at `1:` can destroy `12`. Every destructive target must be the exact `=name:` form.
+
+
+def _private_socket(monkeypatch, path: str = "/tmp/declared-private.sock") -> None:
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, path)
+
+
+def test_session_target_is_an_exact_match_target():
+    assert tmux_utils.tmux_session_target("1") == "=1:"
+    assert tmux_utils.tmux_session_target("yolomux7771") == "=yolomux7771:"
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["alpha:", "alpha", "alpha:0", "=", "=:", "= :", "alpha*", "*", ""],
+)
+def test_kill_session_refuses_every_target_tmux_could_resolve_loosely(monkeypatch, target):
+    _private_socket(monkeypatch)
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
+        tmux_utils.tmux_command(["kill-session", "-t", target])
+
+    assert raised.value.verb == "kill-session"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["kill-session"],
+        ["kill-session", "-a", "-t", "=alpha:"],
+        ["kill-session", "-t", "=alpha:", "-t", "=beta:"],
+    ],
+)
+def test_kill_session_refuses_missing_multiple_and_all_but_targets(monkeypatch, argv):
+    _private_socket(monkeypatch)
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
+        tmux_utils.tmux_command(argv)
+
+    assert raised.value.verb == "kill-session"
+
+
+def test_kill_session_accepts_the_exact_target_on_a_private_socket(monkeypatch):
+    _private_socket(monkeypatch)
+
+    assert tmux_utils.tmux_command(["kill-session", "-t", tmux_utils.tmux_session_target("alpha")]) == [
+        "tmux",
+        "-S",
+        "/tmp/declared-private.sock",
+        "kill-session",
+        "-t",
+        "=alpha:",
+    ]
+
+
+def test_default_server_kill_session_needs_both_the_optin_and_an_exact_target(monkeypatch):
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    exact = ["kill-session", "-t", tmux_utils.tmux_session_target("alpha")]
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError):
+        tmux_utils.tmux_command(exact)
+
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, "1")
+    assert tmux_utils.tmux_command(exact) == ["tmux", "kill-session", "-t", "=alpha:"]
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
+        tmux_utils.tmux_command(["kill-session", "-t", "alpha:"])
+    assert raised.value.verb == "kill-session"
+
+
+@pytest.mark.parametrize("optin", [None, "", "0", "true", "yes", "1"])
+def test_default_server_kill_server_is_refused_in_every_optin_mode(monkeypatch, optin):
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    if optin is None:
+        monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, optin)
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
+        tmux_utils.tmux_command(["kill-server"])
+
+    assert raised.value.verb == "kill-server"
+
+
+def test_exact_target_cannot_kill_a_prefix_named_sibling_session(monkeypatch, tmp_path):
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux is not installed")
+    socket_path = str(tmp_path / "exact-target.sock")
+    sibling = f"yt-{uuid.uuid4().hex[:8]}-sibling"
+    prefix = sibling[: sibling.index("-sibling")]
+    created = subprocess.run(
+        ["tmux", "-S", socket_path, "new-session", "-d", "-s", sibling, "sleep", "300"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, socket_path)
+    try:
+        missed = tmux_utils.tmux(["kill-session", "-t", tmux_utils.tmux_session_target(prefix)])
+        assert missed.returncode != 0
+        assert tmux_utils.tmux_has_exact_session(sibling)
+
+        killed = tmux_utils.tmux(["kill-session", "-t", tmux_utils.tmux_session_target(sibling)])
+        assert killed.returncode == 0, killed.stderr
+        assert not tmux_utils.tmux_has_exact_session(sibling)
+    finally:
+        subprocess.run(["tmux", "-S", socket_path, "kill-server"], capture_output=True, text=True, check=False)
+
+
+# --- one exact-target owner ---------------------------------------------------
+# tmux_exact_target claimed the name but emitted the bare `1:` form, which tmux still resolves
+# by prefix onto `12`. Every session target it builds must satisfy tmux_exact_session_target().
+
+
+def test_tmux_exact_target_emits_the_exact_form_for_every_session_target(monkeypatch):
+    monkeypatch.setattr(tmux_utils, "tmux_session_names", lambda: ["1", "12"])
+
+    assert tmux_utils.tmux_exact_target("1") == "=1:"
+    assert tmux_utils.tmux_exact_target("1:") == "=1:"
+    assert tmux_utils.tmux_exact_target("1:2.0") == "=1:2.0"
+    assert tmux_utils.tmux_exact_target("=1:") == "=1:"
+    # pane ids, the current-session target and the empty target carry no session name to pin.
+    assert tmux_utils.tmux_exact_target("%3") == "%3"
+    assert tmux_utils.tmux_exact_target(":") == ":"
+    assert tmux_utils.tmux_exact_target("") == ""
+
+
+def test_tmux_exact_target_output_passes_the_destructive_precision_check(monkeypatch):
+    monkeypatch.setattr(tmux_utils, "tmux_session_names", lambda: ["1", "12"])
+
+    for target in ("1", "1:", "12", "12:", "project1:0.1"):
+        assert tmux_utils.tmux_exact_session_target(tmux_utils.tmux_exact_target(target)), target
+
+
+def test_tmux_exact_target_from_sessions_never_emits_a_bare_prefix_target():
+    # A session missing from the list used to fall through as a bare name, so tmux prefix-resolved
+    # a send-keys aimed at a dead `1` onto the live `12`. An unknown session must fail closed.
+    assert tmux_utils.tmux_exact_target_from_sessions("1", ["1", "6", "ant"]) == "=1:"
+    assert tmux_utils.tmux_exact_target_from_sessions("1", ["12", "ant"]) == "=1:"
+    assert tmux_utils.tmux_exact_target_from_sessions("1:2.0", ["12"]) == "=1:2.0"
+    assert tmux_utils.tmux_exact_target_from_sessions("%79", ["1", "6", "ant"]) == "%79"

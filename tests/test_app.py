@@ -7,6 +7,7 @@ from http import HTTPStatus
 import inspect
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -15,22 +16,32 @@ import threading
 import time
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
+
 import yaml
 
 from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
 from yolomux_lib import cli as cli_module
 from yolomux_lib.stats_current import host_collectors
+from yolomux_lib.stats_current import process_memory
 from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
 from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
+from tests.gate_harness import gate_auth_credentials  # noqa: F401 - fixture import
+from tests.gate_harness import gate_authenticated_live_server  # noqa: F401 - fixture import
+from tests.gate_harness import gate_http_port  # noqa: F401 - fixture import
+from tests.gate_harness import gate_http_request
+from tests.gate_harness import gate_runtime_paths  # noqa: F401 - fixture import
+from tests.gate_harness import gate_tmux  # noqa: F401 - fixture import
+from tests.helpers.http_routes import login_cookie
 from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
+from tests.tmux_runtime import run_isolated_tmux
 from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
 from tests.subsystems import app_darwin_memory
 from tests.subsystems import app_jobd_product
@@ -908,6 +919,148 @@ def test_generic_gpu_devices_use_aggregate_devices_without_process_scans(monkeyp
     assert calls == [["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
+def test_process_memory_rows_group_python_variants_and_keep_only_the_top_five():
+    rows = [
+        ("/usr/bin/python3.11", 10),
+        ("/usr/bin/python3.11 (deleted)", 5),
+        ("/venv/bin/python", 20),
+        ("Python3", 30),
+        ("/usr/bin/node", 100),
+        ("chrome", 90),
+        ("java", 80),
+        ("go", 70),
+        ("rust", 60),
+        ("bash", 50),
+        ("tmux", 40),
+        ("postgres", 30),
+        ("nginx", 20),
+    ]
+
+    assert process_memory.aggregate_process_memory_by_binary(rows) == {
+        "node": 100,
+        "chrome": 90,
+        "java": 80,
+        "go": 70,
+        "python": 65,
+    }
+
+
+def test_darwin_process_memory_uses_one_bounded_ps_census(monkeypatch):
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(returncode=0, stdout=(
+            "101 1024 0:01.00 Mon Aug 18 00:00:00 2026 /usr/bin/python3.12\n"
+            "102 2048 0:02.00 Mon Aug 18 00:00:01 2026 /opt/homebrew/bin/node\n"
+            "103 3072 0:03.00 Mon Aug 18 00:00:02 2026 Python\n"
+        ))
+
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(process_memory.subprocess, "run", run)
+
+    assert process_memory.process_memory_by_binary() == {"python": 4 * 1024 * 1024, "node": 2 * 1024 * 1024}
+    assert calls[0][0] == ["ps", "-axo", "pid=,rss=,time=,lstart=,comm="]
+    assert calls[0][1]["timeout"] == 0.75
+    assert calls[0][1]["env"]["LC_ALL"] == "C"
+
+
+def test_process_cpu_rows_group_by_binary_and_keep_deterministic_top_four():
+    assert process_memory.aggregate_process_cpu_by_binary([
+        ("python3.12", 10),
+        ("python", 5),
+        ("node", 20),
+        ("rustc", 20),
+        ("chromium", 30),
+        ("bash", 2),
+    ]) == {
+        "chromium": 30.0,
+        "node": 20.0,
+        "rustc": 20.0,
+        "python": 15.0,
+    }
+
+
+def test_linux_version_named_executable_uses_its_package_directory():
+    assert process_memory._linux_process_binary(
+        "2.1.226",
+        "/home/user/.local/share/claude/versions/2.1.226 (deleted)",
+    ) == "claude"
+
+
+def test_process_memory_normalization_does_not_merge_lossy_binary_names():
+    result = process_memory.aggregate_process_memory_by_binary([
+        ("Foo Bar", 10),
+        ("foo@bar", 20),
+    ])
+
+    assert sorted(result.values()) == [10, 20]
+    assert len(result) == 2
+    assert all(key.startswith("foo-bar-") for key in result)
+
+
+def test_linux_process_identity_prefers_the_full_executable_over_truncated_comm():
+    assert process_memory._linux_process_binary(
+        "very-long-binar",
+        "/opt/tools/very-long-binary-one",
+    ) == "very-long-binary-one"
+
+
+def test_native_process_memory_failure_is_distinct_from_a_valid_empty_census(monkeypatch):
+    monkeypatch.setattr(process_memory.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
+    )
+    assert process_memory.process_memory_by_binary() is None
+
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+    assert process_memory.process_memory_by_binary() == {}
+
+    monkeypatch.setattr(
+        process_memory.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="not-a-valid-ps-row\n"),
+    )
+    assert process_memory.process_memory_by_binary() is None
+
+
+def test_linux_process_memory_reports_proc_enumeration_failure(monkeypatch):
+    class MissingProc:
+        def iterdir(self):
+            raise OSError("proc unavailable")
+
+    monkeypatch.setattr(process_memory.sys, "platform", "linux")
+    monkeypatch.setattr(process_memory, "Path", lambda _value: MissingProc())
+
+    assert process_memory.process_memory_by_binary() is None
+
+
+def test_linux_process_memory_reports_total_pid_read_failure(monkeypatch):
+    class UnreadablePid:
+        name = "123"
+
+        def __truediv__(self, _value):
+            return self
+
+        def read_text(self, **_kwargs):
+            raise OSError("pid disappeared")
+
+    class ProcWithUnreadablePid:
+        def iterdir(self):
+            return (UnreadablePid(),)
+
+    monkeypatch.setattr(process_memory.sys, "platform", "linux")
+    monkeypatch.setattr(process_memory, "Path", lambda _value: ProcWithUnreadablePid())
+
+    assert process_memory.process_memory_by_binary() is None
+
+
 def test_macos_gpu_devices_read_ioreg_activity_and_unified_memory(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
@@ -955,6 +1108,19 @@ def test_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
     }
+
+
+def test_linux_physical_core_count_deduplicates_hyperthreads_and_skips_offline_cpus(tmp_path):
+    cpu_root = tmp_path / "cpu"
+    for cpu_id, core_id, online in ((0, 0, True), (1, 0, True), (2, 1, True), (3, 1, False)):
+        topology = cpu_root / f"cpu{cpu_id}" / "topology"
+        topology.mkdir(parents=True)
+        (topology / "physical_package_id").write_text("0\n", encoding="utf-8")
+        (topology / "core_id").write_text(f"{core_id}\n", encoding="utf-8")
+        if cpu_id > 0:
+            (topology.parent / "online").write_text("1\n" if online else "0\n", encoding="utf-8")
+
+    assert host_collectors._linux_physical_core_count(cpu_root) == 2
 
 
 def test_stats_sample_parallel_scalars_are_retired():
@@ -1015,11 +1181,42 @@ def test_statsd_cpu_push_updates_the_web_cache_without_a_web_sampler():
 
     response = webapp.handle_control_request({
         "action": "stats_cpu_sample",
-        "sample": {"time": 100.0, "pid": os.getpid(), "cpu_percent": 42.0, "system_cpu_percent": 11.0, "rss_bytes": 123},
+        "sample": {
+            "time": 100.0,
+            "pid": os.getpid(),
+            "cpu_percent": 42.0,
+            "system_cpu_percent": 11.0,
+            "rss_bytes": 123,
+            "process_cpu_percent": {"python": 4.0, "node": 3.0},
+            "process_memory_bytes": {"python": 400, "node": 300},
+        },
     })
 
     assert response == {"ok": True, "cpu_budget": {"status": "ok", "current_percent": 42.0}}
-    assert webapp.latest_stats_sample()["cpu_percent"] == 42.0
+    assert webapp.latest_stats_sample()["process_cpu_percent"] == {"python": 4.0, "node": 3.0}
+    assert webapp.latest_stats_sample()["process_memory_bytes"] == {"python": 400, "node": 300}
+    assert webapp.latest_stats_sample()["process_memory_time"] == 100.0
+
+
+def test_statsd_process_memory_push_is_fresh_without_a_cpu_sample(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    response = webapp.handle_control_request({
+        "action": "stats_process_memory_sample",
+        "sample": {
+            "time": 100.0,
+            "pid": os.getpid(),
+            "process_memory_bytes": {"python": 400, "node": 300},
+        },
+    })
+
+    assert response == {"ok": True}
+    sample = webapp.latest_stats_sample()
+    assert "time" not in sample
+    assert sample["cpu_percent"] is None
+    assert sample["process_memory_time"] == 100.0
+    assert sample["process_memory_bytes"] == {"python": 400, "node": 300}
 
 
 def test_cpu_budget_marks_a_missing_statsd_push_stale():
@@ -3347,9 +3544,9 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert payload["session"] == "1"
     assert payload["terminal"] == "bash"
     assert commands[0][:8] == ["new-session", "-d", "-s", "1", "-e", "TERM=xterm-256color", "-c", str(tmp_path)]
-    assert ["set-option", "-t", "1:", "status", "off"] in commands
-    assert ["set-option", "-t", "1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
-    assert ["set-window-option", "-t", "1:", "pane-active-border-style", "fg=#7c3aed"] in commands
+    assert ["set-option", "-t", "=1:", "status", "off"] in commands
+    assert ["set-option", "-t", "=1:", "status-style", "bg=#7c3aed,fg=#ffffff"] in commands
+    assert ["set-window-option", "-t", "=1:", "pane-active-border-style", "fg=#7c3aed"] in commands
     assert commands[-1] == ["refresh-client", "-S"]
     assert webapp.tmux_theme_color == "purple"
 
@@ -3442,10 +3639,10 @@ def test_cycle_tmux_status_mode_reads_and_updates_one_session(monkeypatch):
     assert payload == {"session": "1", "status": "bottom"}
     commands = [args for args, _timeout in tmux_calls]
     assert commands == [
-        ["show-options", "-A", "-t", "1:", "-v", "status"],
-        ["show-options", "-A", "-t", "1:", "-v", "status-position"],
-        ["set-option", "-t", "1:", "status", "on"],
-        ["set-option", "-t", "1:", "status-position", "bottom"],
+        ["show-options", "-A", "-t", "=1:", "-v", "status"],
+        ["show-options", "-A", "-t", "=1:", "-v", "status-position"],
+        ["set-option", "-t", "=1:", "status", "on"],
+        ["set-option", "-t", "=1:", "status-position", "bottom"],
     ]
 
 def test_cycle_tmux_status_mode_turns_bottom_off(monkeypatch):
@@ -3465,7 +3662,7 @@ def test_cycle_tmux_status_mode_turns_bottom_off(monkeypatch):
 
     assert status == HTTPStatus.OK
     assert payload == {"session": "1", "status": "none"}
-    assert [args for args, _timeout in tmux_calls][-1] == ["set-option", "-t", "1:", "status", "off"]
+    assert [args for args, _timeout in tmux_calls][-1] == ["set-option", "-t", "=1:", "status", "off"]
 
 
 def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
@@ -5763,8 +5960,12 @@ def test_session_metadata_work_graph_owner_reuses_unchanged_source_generations(m
     idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)])
     current = {"info": working}
     rebuilds = []
+    test_thread = threading.current_thread()
+    original_work_graph = app_module.session_work_graph
 
     def fake_work_graph(info, _cache, allow_network=False):
+        if threading.current_thread() is not test_thread:
+            return original_work_graph(info, _cache, allow_network=allow_network)
         rebuilds.append((info.agents[0].status, allow_network))
         graph = metadata.empty_work_graph()
         graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}
@@ -7060,7 +7261,7 @@ def test_active_window_for_can_refresh_live_tmux_window_off_input_path(monkeypat
     webapp = app_module.TmuxWebtermApp(["7770"])
 
     def fake_tmux(args, timeout=5.0):
-        assert args == ["display-message", "-p", "-t", "7770:", "#{window_index}"]
+        assert args == ["display-message", "-p", "-t", "=7770:", "#{window_index}"]
         return app_module.subprocess.CompletedProcess(args, 0, "0\n", "")
 
     try:
@@ -10767,6 +10968,7 @@ def _ready_filesystem_product(payload, *, schedule=None):
 
 def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_do_not():
     assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status"}
+    assert {"git_history", "git_commit"} <= app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
     for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
         assert app_module.filesystem_operation_priority(operation) == "point"
@@ -10784,17 +10986,27 @@ def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
     """The write-side boundary, held as tightly as the read-side one above.
 
     `point` stays reads-only: it carries the stat-derived coalescing key and `fresh_only`, which a
-    mutation must never get.  `delete` stays unbounded: `delete_path` recurses through a subtree.
+    mutation must never get.  `delete` is bounded ONLY without `recursive`: one `unlink`, or one
+    `rmdir` probe that refuses to enumerate.  A recursive delete walks a subtree (measured at 20,001
+    destructive syscalls for one 20,000-entry directory) and stays on the shared `interactive` lane.
     """
-    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir"}
+    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir", "delete"}
     for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS):
         assert app_module.filesystem_operation_priority(operation) == "mutation"
+        assert app_module.filesystem_operation_priority(operation, {}) == "mutation"
     # A mutation is not a retained read and must never enter the coalescing read lane.
     assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_POINT_OPERATIONS)
     assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_RETAINED_READ_OPERATIONS)
+    # The lane depends on the ARGUMENTS for exactly one operation, and only for the true flag.
+    assert app_module.filesystem_operation_priority("delete", {"recursive": True}) == "interactive"
+    assert app_module.filesystem_operation_priority("delete", {"recursive": False}) == "mutation"
+    assert app_module.filesystem_operation_priority("delete", {"recursive": "yes"}) == "mutation"
+    # No other bounded mutation is argument-sensitive.
+    for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS - {"delete"}):
+        assert app_module.filesystem_operation_priority(operation, {"recursive": True}) == "mutation"
     # Recursive/unbounded writes stay on the shared `interactive` lane no matter how point-shaped
     # they look at the call site.
-    for operation in ("delete", "unindex", "zip"):
+    for operation in ("unindex", "zip"):
         assert app_module.filesystem_operation_priority(operation) == "interactive"
     # The mutation lane is physically separate from the read lane and from every bulk lane.
     assert jobd.JOBD_PRIORITY_LANES["mutation"] == "mutation"
@@ -10803,7 +11015,7 @@ def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
     assert "mutation" in jobd.JOBD_PRIORITIES
 
 
-@pytest.mark.parametrize("operation", ["write", "rename", "mkdir"])
+@pytest.mark.parametrize("operation", ["write", "rename", "mkdir", "delete"])
 def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane(operation, tmp_path, monkeypatch):
     """A one-syscall mkdir must not wait for someone else's recursive tree walk.
 
@@ -10847,7 +11059,10 @@ def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane
     )
 
 
-@pytest.mark.parametrize("held_operation, probe_operation", [("mkdir", "read"), ("read", "mkdir")])
+@pytest.mark.parametrize(
+    "held_operation, probe_operation",
+    [("mkdir", "read"), ("read", "mkdir"), ("delete", "read"), ("read", "delete")],
+)
 def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operation, probe_operation, tmp_path, monkeypatch):
     """`point` and `mutation` are separate lanes with separate executors, so filling every slot of
     one must leave the other's capacity untouched in both directions."""
@@ -10884,6 +11099,188 @@ def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operati
     assert lanes[held_lane]["queued"] == 0
     assert probe.status == "running"
     assert lanes[jobd.PersistentJobBroker._lane_for_priority(probe_priority)]["active"] == 1
+
+
+def test_bounded_unlink_dispatches_while_recursive_deletes_hold_the_shared_lane(tmp_path, monkeypatch):
+    """The reproduced failure, in the form that made it a bug.
+
+    Before the split every `delete` -- including a one-entry unlink -- was classified `interactive`,
+    so deleting one file queued behind whatever recursive delete, count or Finder batch already
+    owned the single shared worker.  Here the shared lane is held at capacity by unresolved
+    RECURSIVE deletes; the one-entry unlink must still reach `running` on this pump.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for priority in ("freshness", "maintenance", "interactive"):
+        lane = jobd.PersistentJobBroker._lane_for_priority(priority)
+        for number in range(service._lane_capacity(lane)):
+            holder = service._queue_record(
+                "filesystem_operation",
+                app_module.filesystem_operation_descriptor(
+                    "delete", str(tmp_path / f"tree-{number}"), {"recursive": True},
+                ),
+                priority, number, f"recursive-delete-{priority}-{number}",
+            )
+            holder.status = "running"
+            holder.future = Future()
+            holders.append(holder)
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    unlink_args = {}
+    unlink = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor("delete", str(tmp_path / "one-file.txt"), unlink_args),
+        app_module.filesystem_operation_priority("delete", unlink_args), 1, "bounded-unlink",
+    )
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert unlink.status == "running", "one-entry unlink queued behind held recursive deletes"
+
+
+def test_recursive_delete_cannot_take_a_slot_the_bounded_mutation_lane_owns(tmp_path, monkeypatch):
+    """The other direction: filling the mutation lane with bounded unlinks must not admit a
+    recursive delete into it, and must not stop the shared lane from running one."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    mutation_lane = jobd.PersistentJobBroker._lane_for_priority("mutation")
+    for number in range(service._lane_capacity(mutation_lane)):
+        holder = service._queue_record(
+            "filesystem_operation",
+            app_module.filesystem_operation_descriptor("delete", str(tmp_path / f"file-{number}.txt"), {}),
+            app_module.filesystem_operation_priority("delete", {}), number, f"held-unlink-{number}",
+        )
+        holder.status = "running"
+        holder.future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    recursive_args = {"recursive": True}
+    recursive = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor("delete", str(tmp_path / "tree"), recursive_args),
+        app_module.filesystem_operation_priority("delete", recursive_args), 1, "recursive-delete",
+    )
+
+    service._pump()
+
+    lanes = service.common_status()["lanes"]
+    assert lanes[mutation_lane]["active"] == service._lane_capacity(mutation_lane)
+    assert lanes[mutation_lane]["queued"] == 0
+    assert recursive.status == "running"
+    assert lanes[jobd.PersistentJobBroker._lane_for_priority("interactive")]["active"] == 1
+
+
+def test_pending_delete_escalates_to_bulk_under_one_operation_id(monkeypatch, tmp_path):
+    """One click, one receipt, one terminal result -- across a lane change.
+
+    The bounded probe answers `pending: "subtree"`.  That must NOT terminalize the operation: the
+    browser is holding one receipt for one delete.  The completion releases the mutation lane,
+    reserves `bulk`, and re-produces the SAME delete with `recursive=True` under the SAME
+    `operation_id`, so exactly one terminal result ever reaches the client.
+    """
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    pending_payload = {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "dir", "reindex_roots": []}
+    job = _RecordingFilesystemJob([
+        _ready_filesystem_product(pending_payload),
+        _ready_filesystem_product(terminal_payload),
+    ])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    terminals = []
+    original_terminalize = webapp.terminalize_operation
+
+    def record_terminalize(operation_id, result, status):
+        terminals.append((operation_id, result, status))
+        return original_terminalize(operation_id, result, status)
+
+    monkeypatch.setattr(webapp, "terminalize_operation", record_terminalize)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    submissions = [(kwargs["priority"], payload["op"], payload["args"]) for _task, payload, kwargs in job.produced]
+    assert submissions == [
+        ("mutation", "delete", {}),
+        ("interactive", "delete", {"recursive": True}),
+    ], "the pending probe did not re-produce the same delete as recursive bulk work"
+    # ONE receipt: the same operation id, terminalized exactly once, and only by the recursive result.
+    assert [entry[0] for entry in terminals] == [operation_id]
+    assert terminals[0][2] == HTTPStatus.OK
+    assert terminals[0][1]["state"] == "ready"
+    assert terminals[0][1]["data"]["deleted"] is True
+    assert "pending" not in terminals[0][1]["data"]
+
+
+def test_bounded_delete_of_a_file_terminalizes_without_touching_the_bulk_lane(monkeypatch, tmp_path):
+    """The common case must stay one produce on one lane -- no speculative escalation."""
+    target = tmp_path / "one-file.txt"
+    target.write_text("payload", encoding="utf-8")
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "file", "reindex_roots": []}
+    job = _RecordingFilesystemJob([_ready_filesystem_product(terminal_payload)])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    terminals = []
+    original_terminalize = webapp.terminalize_operation
+    monkeypatch.setattr(
+        webapp, "terminalize_operation",
+        lambda operation_id, result, status: (
+            terminals.append((operation_id, status)) or original_terminalize(operation_id, result, status)
+        ),
+    )
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target),
+        )
+        operation_id = response.payload["operation"]["id"]
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [kwargs["priority"] for _task, _payload, kwargs in job.produced] == ["mutation"]
+    assert terminals == [(operation_id, HTTPStatus.OK)]
+
+
+def test_recursive_delete_request_never_reserves_the_mutation_lane(monkeypatch, tmp_path):
+    """A caller that already knows it wants the subtree goes straight to the shared lane."""
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    terminal_payload = {"path": str(target), "deleted": True, "kind": "dir", "reindex_roots": []}
+    job = _RecordingFilesystemJob([_ready_filesystem_product(terminal_payload)])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="POST /api/fs/delete", operation="delete", path=str(target), args={"recursive": True},
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert webapp.jobd_operation_service.wait_for_idle(30.0)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [kwargs["priority"] for _task, _payload, kwargs in job.produced] == ["interactive"]
 
 
 @pytest.mark.parametrize("operation", ["read", "info", "index_status"])
@@ -10966,6 +11363,47 @@ def test_identical_point_reads_coalesce_on_content_identity_and_change_with_the_
     assert app_module.filesystem_point_content_generation(str(tmp_path / "absent.md")) == ("", "stat_failed:ENOENT")
     identity, reason = app_module.filesystem_point_content_generation(str(target))
     assert reason == "" and identity.startswith("stat:")
+
+
+def test_git_history_refresh_does_not_join_inflight_work_after_head_advances(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("first\n", encoding="utf-8")
+    git(repo, "add", "tracked.txt")
+    git(repo, "commit", "-m", "first")
+    first_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        first = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/git-history",
+            operation="git_history",
+            path=str(repo),
+            args={"limit": 50, "cursor": ""},
+        )
+        tracked.write_text("second\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "second")
+        second_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        refreshed = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/git-history",
+            operation="git_history",
+            path=str(repo),
+            args={"limit": 50, "cursor": ""},
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first_head != second_head
+    assert first.status == refreshed.status == HTTPStatus.ACCEPTED
+    first_kwargs, refreshed_kwargs = [kwargs for _task, _payload, kwargs in job.produced]
+    assert first_kwargs["fresh_only"] is refreshed_kwargs["fresh_only"] is True
+    assert first_kwargs["coalesce_key"] != refreshed_kwargs["coalesce_key"]
 
 
 def test_transient_product_metadata_is_retried_inside_the_operation_budget(monkeypatch, tmp_path):
@@ -11674,6 +12112,8 @@ def test_concurrent_warm_filesystem_same_key_callers_do_not_mutate_ledgers(monke
         ("GET /api/fs/read", "read", {}),
         ("GET /api/fs/info", "info", {}),
         ("GET /api/fs/diff", "diff", {"from_ref": "HEAD", "to_ref": "current"}),
+        ("GET /api/fs/git-history", "git_history", {"limit": 50, "cursor": ""}),
+        ("GET /api/fs/git-commit", "git_commit", {"commit": "a" * 40, "head": "b" * 40}),
         ("GET /api/blame", "blame", {"ref": "HEAD"}),
         ("GET /api/fs/count", "count", {}),
     ),
@@ -11688,10 +12128,12 @@ def test_retained_filesystem_reads_scope_and_revision_warm_without_ledger_mutati
     product = _filesystem_json_product(body)
     generation = ["watchd:epoch-a:7"]
     keys = []
+    fresh_only_values = []
 
     class RetainedReadJob:
         def produce(self, _task, _payload, **kwargs):
             keys.append(kwargs["coalesce_key"])
+            fresh_only_values.append(kwargs["fresh_only"])
             return {"ok": True, "state": "ready", "product": product}, body
 
     webapp = app_module.TmuxWebtermApp([])
@@ -11718,6 +12160,7 @@ def test_retained_filesystem_reads_scope_and_revision_warm_without_ledger_mutati
 
     assert all(response.status == HTTPStatus.OK for response in (first, revised, other_scope))
     assert len(keys) == len(set(keys)) == 3
+    assert fresh_only_values == [operation in {"git_history", "git_commit"}] * 3
     assert diagnostics["queued_delivery_frames"] == []
     assert diagnostics["outstanding_queued"] == []
 
@@ -17671,12 +18114,21 @@ def test_a_recorded_statsd_failure_alarms_even_while_the_pin_is_pending(monkeypa
     assert panel["reason"] == "stats database migration failed", panel
 
 
-def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys):
+def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys, request):
     """The observer arms after the election is DECIDED, whatever it decided.
 
     A monitor that only runs on the process that won the background-owner election would be a
     worse defect than the flash it was reordered for, so both outcomes are proven here.
     """
+    root_logger = logging.getLogger()
+    original_handlers = tuple(root_logger.handlers)
+
+    def restore_root_handlers():
+        for handler in tuple(root_logger.handlers):
+            if all(handler is not original for original in original_handlers):
+                root_logger.removeHandler(handler)
+
+    request.addfinalizer(restore_root_handlers)
     for acquired in (True, False):
         order: list[str] = []
 
@@ -17809,3 +18261,66 @@ def test_an_absent_jobd_without_the_scheduler_lease_is_quiet_in_both_owners():
     owning_panel = _classify_service(owning)
     assert owning_panel["state"] == "unavailable", owning_panel
     assert owning_panel["alerting"] is True, owning_panel
+
+
+@pytest.mark.socket
+def test_authenticated_kill_session_api_removes_only_the_exact_private_socket_target(
+    gate_authenticated_live_server,
+    gate_auth_credentials,
+):
+    """One authenticated kill must leave a differently named sibling on the same server alive."""
+
+    runtime = gate_authenticated_live_server
+    tmux_runtime = runtime.tmux
+    target = str(tmux_runtime.sessions[0])
+    sibling = f"{target}-sibling"
+    exact_target = app_module.tmux_session_target(target)
+    exact_sibling = app_module.tmux_session_target(sibling)
+
+    def session_names() -> tuple[str, ...]:
+        result = run_isolated_tmux(
+            tmux_runtime,
+            "list-sessions",
+            "-F",
+            "#{session_name}",
+            timeout=5,
+            declared_socket=True,
+        )
+        if result.returncode != 0:
+            return ()
+        return tuple(sorted(line for line in result.stdout.splitlines() if line))
+
+    assert Path(os.environ["YOLOMUX_TMUX_SOCKET"]) == Path(tmux_runtime.socket_path)
+    assert session_names() == (target,)
+    created = run_isolated_tmux(
+        tmux_runtime,
+        "new-session",
+        "-d",
+        "-s",
+        sibling,
+        timeout=10,
+        declared_socket=True,
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    assert session_names() == tuple(sorted((target, sibling)))
+
+    cookie = login_cookie(runtime, gate_auth_credentials)
+    response = gate_http_request(
+        runtime,
+        f"/api/kill-session?{urlencode({'session': target})}",
+        method="POST",
+        headers={"Cookie": cookie, "Connection": "close"},
+    )
+
+    assert response.status == HTTPStatus.OK, response.body.decode("utf-8", errors="replace")
+    assert response.json()["killed"] is True
+    assert run_isolated_tmux(
+        tmux_runtime, "has-session", "-t", exact_target, timeout=5, declared_socket=True,
+    ).returncode != 0
+    assert run_isolated_tmux(
+        tmux_runtime, "has-session", "-t", exact_sibling, timeout=5, declared_socket=True,
+    ).returncode == 0
+    assert session_names() == (sibling,)
+    # `gate_tmux` owns teardown: it inventories this remaining pane by PID/start identity, kills
+    # this exact private server, waits for process exit, and removes the socket directory.
+    assert tmux_runtime.socket_path.exists()

@@ -15,6 +15,7 @@ _CURRENT_MODULES = (
     "materializer.py",
     "migration.py",
     "pricing.py",
+    "process_memory.py",
     "protocol.py",
     "resolution.py",
     "revision.py",

@@ -158,7 +158,7 @@ function tabIsEvictableForCap(item, keepItem) {
   const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
   if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
-    const state = fileState.get(fileItemPath(item));
+    const state = fileEditorTabState(item);
     if (state && state.dirty) return false;
   }
   return true;
@@ -275,8 +275,9 @@ function canPaneExpand(item, slots = layoutSlots) {
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
+  const returnItem = historicalFileReturnItem(item);
   if (narrowPaneFrameActionTargetsTab(item)) {
-    removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
+    removeSessionFromLayout(item, {focusSession: returnItem || nextNarrowPaneFrameItem(item)});
     return;
   }
   if (narrowSingleColumnMode()) return;
@@ -287,23 +288,37 @@ function minimizePaneFromLayout(item) {
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
   if (!targetSlot || !sourceTabs.length) {
+    if (returnItem) {
+      if (sourceTabs.includes(returnItem)) activatePaneTab(sourceSlot, returnItem, {userInitiated: true});
+      else applyLayoutSlots(
+        layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)}),
+        {focusSession: returnItem},
+      );
+      return;
+    }
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
+  const keepItems = returnItem ? Array.from(new Set([...sourceTabs, returnItem])) : sourceTabs;
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems});
   if (!capacity.ok) {
     showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
     return;
   }
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive || capacity.finalTabs[0], next);
+  const returnSlot = returnItem ? slotForItem(returnItem, next) : null;
+  if (returnSlot) {
+    next[returnSlot] = paneStateWithTabsForSlot(returnSlot, paneTabs(returnSlot, next), returnItem, next);
+  }
+  const nextActive = returnSlot ? returnItem : targetActive || capacity.finalTabs[0];
   const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
   if (capacity.evicted.length) {
     messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
   }
   applyLayoutSlots(next, {
-    focusSession: targetActive || capacity.finalTabs[0],
+    focusSession: nextActive,
     prune: false,
     message: messages.filter(Boolean).join('; '),
   });

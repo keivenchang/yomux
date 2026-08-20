@@ -34,7 +34,63 @@ const {
   finishSuite,
 } = require('./browser_helpers/layout_test_helper');
 
+function layoutItemsAfterQueryRoundTrip(api, slots) {
+  return [...api.layoutTabStatesFromParam(new URLSearchParams(`tabs=${api.layoutTabsParamValue(slots)}`).get('tabs')).values()].flatMap(state => state.tabs);
+}
+
 async function runLayoutRestoreSuite() {
+  test('dynamic Git history tabs clean runtime state on close and restore from encoded URL items', () => {
+    const api = loadYolomux('', ['1']), item = api.gitDiffItemFor('/repo/src');
+    assert.equal(api.resolveLayoutItem(item), item, 'encoded gitdiff URL items register through the dynamic descriptor');
+    api.setGitDiffTabStateForTest(item, {path: '/repo/src', head: 'a'.repeat(40), commits: [{sha: 'a'.repeat(40)}]});
+    const opened = api.layoutWithItems(api.emptyLayoutSlots(), [item]);
+    assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, opened), [item], 'the real query decoder and per-tab decoder preserve the canonical encoded item exactly');
+    api.applyLayoutSlotsForTest(opened, {focusSession: item, prune: false});
+    assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)?.head], [true, 'a'.repeat(40)], 'URL restoration registers the item and preserves its history state');
+    api.applyLayoutSlotsForTest(api.layoutWithoutItem(item), {prune: false});
+    assert.deepStrictEqual([api.dynamicVirtualLayoutItemsForTest().includes(item), api.gitDiffTabStateForTest(item)], [false, null], 'closing the last layout owner disposes the item and retained history state');
+    assert.equal(api.resolveLayoutItem(item), item, 'Back or URL restore can recreate a disposed encoded item');
+  });
+
+  test('historical Editor URL state reconstructs immutable tuple state without touching the working-tree file state', () => {
+    const api = loadYolomux('', ['1']);
+    const path = '/repo/src/app.js', fromRef = '1'.repeat(40), toRef = '2'.repeat(40);
+    const item = api.historicalFileEditorItemFor(path, fromRef, toRef);
+    const returnToItem = api.gitDiffItemFor('/repo');
+    assert.equal(api.resolveLayoutItem(item), item);
+    assert.deepStrictEqual(layoutItemsAfterQueryRoundTrip(api, api.layoutWithItems(api.emptyLayoutSlots(), [item])), [item], 'historical Editor tuple IDs survive both URL decoding layers');
+    api.setOpenFileStateForTest(path, {kind: 'text', content: 'working', original: 'working', dirty: true});
+    const restored = api.applyLayoutUrlEditorModeEntryForTest({path, item, mode: 'diff', diffFromRef: fromRef, diffToRef: toRef, historicalComparisonKind: 'merge-first-parent', returnToItem});
+    assert.deepStrictEqual(canonical(restored), {path, item, mode: 'diff'});
+    const historical = api.fileEditorStateForItemForTest(path, item);
+    assert.deepStrictEqual([historical.historical, historical.diffPinnedFromRef, historical.diffPinnedToRef, historical.historicalComparisonKind], [true, fromRef, toRef, 'merge-first-parent']);
+    assert.equal(historical.closeReturnToItem, returnToItem, 'historical URL restoration retains its originating Diff repo tab');
+    api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [returnToItem, item]), {focusSession: item, prune: false});
+    const snapshotMode = api.layoutUrlStateSnapshotForTest().editor.modes.find(mode => mode.item === item);
+    assert.equal(snapshotMode.returnToItem, returnToItem, 'historical URL serialization retains its originating Diff repo tab');
+    assert.equal(api.openFileStateForTest(path).content, 'working', 'historical URL restoration cannot overwrite unsaved working-tree content');
+  });
+
+  test('layout URL state restores the frozen Git history identity and disclosure focus', () => {
+    const api = loadYolomux('', ['1']);
+    const item = api.gitDiffItemFor('/repo/src');
+    const sha = 'a'.repeat(40), head = 'f'.repeat(40);
+    const state = api.setGitDiffTabStateForTest(item, {path: '/repo/src', head, snapshotCursor: 'opaque-zero', focusedSha: sha, loaded: true, loadAttempted: true});
+    state.expanded.add(sha);
+    state.detailCollapsedDirectories.set(sha, new Set(['/repo/src/lib']));
+    api.resolveLayoutItem(item);
+    api.applyLayoutSlotsForTest(api.layoutWithItems(api.emptyLayoutSlots(), [item]), {focusSession: item, prune: false});
+    const snapshot = api.layoutUrlStateSnapshotForTest();
+    assert.ok(snapshot.gitDiff, 'the shared layout state carries Git history tab identity');
+    const restored = loadYolomux('', ['1']);
+    restored.applyLayoutUrlStateSeedForTest(snapshot);
+    restored.resolveLayoutItem(item);
+    const restoredState = restored.gitDiffTabStateForTest(item);
+    assert.deepStrictEqual([restoredState.head, restoredState.snapshotCursor, restoredState.focusedSha], [head, 'opaque-zero', sha]);
+    assert.deepStrictEqual([...restoredState.expanded], [sha]);
+    assert.deepStrictEqual([...restoredState.detailCollapsedDirectories.get(sha)], ['/repo/src/lib']);
+  });
+
   test('server-projected agent auth availability preserves the client tri-state decision', () => {
     const cases = [
       {loggedIn: true, available: true, disabled: false, detail: ''},
@@ -1452,10 +1508,10 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/events.jsonl').id, 'json-lines-table', 'JSONL table dispatch comes from the shared renderer registry');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.jsonl', 'text'), 'preview', 'JSONL opens in table Preview by default');
     assert.equal(api.defaultFileEditorViewModeForPath('/repo/events.ndjson', 'text'), 'preview', 'NDJSON opens in table Preview by default');
-    assert.equal(api.previewPathIsPreviewable('/repo/app.py'), false, 'generic code/text renderer is not a distinct Preview affordance');
-    assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), false, 'plain text renderer is not a distinct Preview affordance');
+    assert.equal(api.previewPathIsPreviewable('/repo/app.py'), true, 'generic code uses the shared syntax-highlighted Preview mode');
+    assert.equal(api.previewPathIsPreviewable('/repo/notes.txt'), true, 'plain text uses the shared syntax-highlighted Preview mode');
     assert.equal(api.previewPathIsPreviewable('/repo/config.json'), true, 'structured JSON preview stays available because it differs from the editor');
-    assert.equal(api.previewRendererForPath('/repo/notes.txt').previewable, false, 'text preview availability is owned by the renderer registry flag');
+    assert.equal(api.previewRendererForPath('/repo/notes.txt').previewable, true, 'text Preview availability is owned by the renderer registry flag');
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
@@ -1771,8 +1827,8 @@ async function runLayoutRestoreSuite() {
     const api = loadYolomux('', ['1']);
     assert.equal(api.editorPreviewModeAvailable('/home/test/README.md'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/index.html'), true);
-    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), false);
-    assert.equal(api.editorPreviewModeAvailable('/home/test/notes.txt'), false);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/app.py'), true);
+    assert.equal(api.editorPreviewModeAvailable('/home/test/notes.txt'), true);
     assert.equal(api.editorPreviewModeAvailable('/home/test/config.json'), true);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     assert.ok(source.includes('function sanitizeMarkdownPreviewHtml'), 'Markdown previews pass through a sanitizer');
@@ -1850,7 +1906,7 @@ async function runLayoutRestoreSuite() {
     api.renderEditorPreviewPane(pdfPreview, pdfPath, '');
     assert.notEqual(pdfPreview.querySelector('.file-editor-pdf-preview'), pdfFrame, 'a changed PDF version replaces the retained iframe');
     api.setFileEditorViewMode('/home/test/app.py', 'split');
-    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'edit');
+    assert.equal(api.editorViewModeFor('/home/test/app.py'), 'split', 'generic code shares Preview and Split through the current Editor renderer');
     api.setFileEditorViewMode('/home/test/README.md', 'split');
     assert.equal(api.editorViewModeFor('/home/test/README.md'), 'split');
     const changedPath = '/repo/app/README.md';
@@ -2137,7 +2193,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(activePreferenceBody.includes('[data-preferences-reset-confirm]'), 'global reset confirmation button is preserved through focusout');
     assert.equal(source.includes('let sessionFilesRequestId = 0;'), false, 'standalone Changes request id is removed');
     assert.ok(/const fileExplorerSessionFilesState = \{[\s\S]*guard: makeGenerationGuard\(\)/.test(source), 'Finder diff payload, signature, loading, and stale-response guard share one record');
-    assert.ok(source.includes('const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();'), 'Finder diff fetches reject stale responses through the shared guard');
+    assert.ok(source.includes('const requestIsCurrent = state.guard.begin();'), 'Finder and Differ fetches reject stale responses through their destination record guard');
     assert.ok(source.includes('function activeChangesControl'), 'Finder diff renders can detect active controls');
     assert.ok(source.includes('!activeChangesControl(panel)'), 'background Changes renders preserve active selects and ref controls');
     assert.ok(source.includes('function sessionFilesRenderOptions'), 'modified-file fetch rendering distinguishes silent polls from explicit user refreshes');
@@ -2664,7 +2720,7 @@ async function runLayoutRestoreSuite() {
 	    assert.ok(/\.topbar-activity-sep\s*\{[\s\S]*margin-inline:\s*calc\(-1 \* var\(--space-1\)\)/.test(css), 'topbar activity separator adds no extra horizontal padding');
 	    assert.ok(/\.topbar-activity-ball\.agent-window-activity\s*\{[\s\S]*--agent-status-ball-size:\s*var\(--agent-status-ball-size-base\)[\s\S]*width:\s*var\(--agent-status-ball-size\)/.test(css), 'topbar activity balls reuse the shared status-ball size parent');
 	    assert.ok(/\.topbar-activity--mobile-count-balls \.topbar-activity-count:not\(\.active\),[\s\S]*?\.topbar-activity-idle,[\s\S]*?\.topbar-activity-sep\s*\{[\s\S]*display:\s*none/.test(css), 'compact activity hides zero tones and the idle label through the measured packing state');
-	    assert.ok(/\.topbar-activity\.has-attention/.test(css), 'the activity line highlights when a session needs the user');
+	    assert.equal(/\.topbar-activity\.has-attention\s*\{/.test(css), false, 'the informational activity summary stays neutral while its state dots retain their colors');
   });
 
   test('session teardown distinguishes confirmed removals', () => {
@@ -3093,8 +3149,10 @@ async function runLayoutRestoreSuite() {
     const detachedHeadParts = api.fileTreeDisplayParts('/repo/detached-head', {kind: 'dir', is_repo: true, name: 'detached-head'});
     assert.equal(detachedHeadParts.text, 'detached-head [detached]', 'a positively identified detached HEAD keeps its Finder badge');
     // Rich hover popover (replaces the native title tooltip) carries branch / upstream / stat / path.
-    const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3});
+    const headSha = '0123456789abcdef0123456789abcdef01234567';
+    const pop = api.repoInfoPopoverHtml({root: '/repo/app', name: 'app', branch: 'feature/x', upstream: 'origin/feature/x', ahead: 2, behind: 1, dirty_count: 3, head_sha: headSha});
     assert.ok(pop.includes('feature/x') && pop.includes('2 ahead') && pop.includes('1 behind') && pop.includes('3 dirty'), 'repo popover shows branch + ahead/behind/dirty');
+    assert.ok(pop.includes(`SHA: ${headSha}`), 'repo popover shows the repository HEAD SHA');
     assert.ok(pop.includes('/repo/app'), 'repo popover shows the repo root path');
     assert.equal(api.repoInfoPopoverHtml({}), '', 'no popover html without a repo root');
     assert.ok(/\.file-tree-repo-popover\s*\{[^}]*position:\s*fixed/.test(css), 'the repo hover popover is a styled floating element');

@@ -13,6 +13,7 @@ from typing import TypeAlias
 
 from ..polling_policy import quiet_poll_interval
 from . import browser_family
+from .process_memory import MAX_PROCESS_BINARY_LENGTH, MAX_PROCESS_CPU_SERIES, MAX_PROCESS_MEMORY_PAYLOAD_SERIES, normalize_process_binary
 
 
 class FamilyValidationError(ValueError):
@@ -35,6 +36,7 @@ NULLABLE_NUMBER: ValueKind = "nullable_number"
 STRING: ValueKind = "string"
 BOOLEAN: ValueKind = "boolean"
 AGENT_STATES: ValueKind = "agent_states"
+PROCESS_MEMORY_BYTES, PROCESS_CPU_PERCENT = "process_memory_bytes", "process_cpu_percent"
 
 AGENT_STATE_VALUES = frozenset({"ask", "run", "transition", "idle"})
 @dataclass(frozen=True, slots=True)
@@ -134,16 +136,37 @@ def _validate_value(value: object, kind: ValueKind, path: str) -> None:
                     f"{path}.{source_id} must be one of: {', '.join(sorted(AGENT_STATE_VALUES))}"
                 )
         return
+    if kind in {PROCESS_MEMORY_BYTES, PROCESS_CPU_PERCENT}:
+        if not isinstance(value, Mapping):
+            raise FamilyValidationError(f"{path} must be an object")
+        maximum = MAX_PROCESS_CPU_SERIES if kind == PROCESS_CPU_PERCENT else MAX_PROCESS_MEMORY_PAYLOAD_SERIES
+        if len(value) > maximum:
+            raise FamilyValidationError(
+                f"{path} must contain at most {maximum} binaries"
+            )
+        for binary, metric_value in value.items():
+            if (
+                not isinstance(binary, str)
+                or not binary
+                or len(binary) > MAX_PROCESS_BINARY_LENGTH
+                or normalize_process_binary(binary) != binary
+            ):
+                raise FamilyValidationError(f"{path} binary keys must be normalized")
+            _validate_value(metric_value, NUMBER, f"{path}.{binary}")
+            if kind == PROCESS_CPU_PERCENT and float(metric_value) > 100:
+                raise FamilyValidationError(f"{path}.{binary} must be at most 100")
+        return
     raise RuntimeError(f"unknown payload value kind {kind!r}")
 
 
 CURRENT_FAMILIES = (
     FamilySpec(
         "cpu", "cpu", 1, 1, FoldKind.AVERAGE,
-        (_field("process_percent", NUMBER), _field("system_percent", NUMBER)),
+        (_field("process_percent", NUMBER), _field("system_percent", NUMBER),
+         _field("process_cpu_percent", PROCESS_CPU_PERCENT, required=False)),
         (
             "system_cpu_percent", "system_cpu_min_percent", "system_cpu_max_percent",
-            "process_cpu_percent", "process_cpu_min_percent", "process_cpu_max_percent",
+            "process_cpu_percent", "process_cpu_min_percent", "process_cpu_max_percent", "process_cpu_percent_by_binary",
         ), True,
     ),
     FamilySpec(
@@ -181,6 +204,7 @@ CURRENT_FAMILIES = (
             _field("mac_app_memory_bytes", NUMBER, required=False), _field("mac_wired_memory_bytes", NUMBER, required=False),
             _field("mac_compressed_memory_bytes", NUMBER, required=False), _field("mac_pressure_percent", NUMBER, required=False),
             _field("mac_pressure_level", NUMBER, required=False),
+            _field("process_memory_bytes", PROCESS_MEMORY_BYTES, required=False),
             # A reverted pre-v6 Mac experiment persisted this key. Keep it
             # readable so one retired observation cannot block statsd startup;
             # the materializer deliberately does not publish it.
@@ -190,6 +214,7 @@ CURRENT_FAMILIES = (
             "system_memory_used_bytes", "system_memory_capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes",
             "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes",
             "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level",
+            "process_memory_bytes",
         ), True,
     ),
     # Usage atoms are event-derived. The transcript scan cadence controls when

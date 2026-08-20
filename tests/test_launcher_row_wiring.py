@@ -105,15 +105,14 @@ def test_launcher_macos_carries_the_plan_through_the_shared_launcher() -> None:
 
 
 def test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise() -> None:
-    """The one shared macOS launcher routes through the exec plan when a row plan is
-    present (the supported launcher) and keeps the historical direct exec for a
-    caller that sets none (boot.sh), so the two paths never drift into two copies."""
+    """The shared macOS launcher never reads roots or a plan path from tmux's
+    retained environment; both launch paths pass one plan as an argument."""
     text = STARTUP_COMMON.read_text(encoding="utf-8")
 
-    assert 'if [ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]; then' in text
-    assert 'instance_isolation.py" exec --plan-file "$YOLOMUX_ROW_PLAN_FILE" --' in text
-    # Direct path (no plan file) keeps exporting the primary and running the server.
-    assert 'export YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port"; exec "$python_bin" -u "$script"' in text
+    assert 'plan_json=$8; shift 8' in text
+    assert 'instance_isolation.py" exec --plan-json "$plan_json" --' in text
+    assert 'instance_isolation.py" plan-direct --port "$port"' in text
+    assert 'YOLOMUX_ROW_PLAN_FILE:-' not in text.split("yolomux_macos_server_launcher()", 1)[1].split("yolomux_submit_macos_server()", 1)[0]
 
 
 @pytest.mark.socket

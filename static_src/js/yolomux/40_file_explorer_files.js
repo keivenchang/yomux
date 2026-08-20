@@ -1061,6 +1061,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     detached: repo.detached === true,
+    head_sha: repo.head_sha == null ? null : String(repo.head_sha).trim(),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -1368,7 +1369,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -1639,7 +1640,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesRepoRoots(payload = fileExplorerFinderSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -1657,7 +1658,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesAffectedDirs(payload = fileExplorerFinderSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -1758,7 +1759,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -1975,7 +1976,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -2155,6 +2156,7 @@ function repoInfoPopoverHtml(repo) {
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
   const branch = repoBranchDisplayText(repo);
   if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
+  if (repo.head_sha) rows.push(`<div class="file-tree-repo-popover-sha">${esc(t('menu.help.about.sha', {sha: repo.head_sha}))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
@@ -2201,7 +2203,7 @@ async function showRepoRowHoverPopover(row, path) {
   const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
   showFileTreeRepoPopover(row, cached);
-  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (cached && cached.head_sha !== null && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
@@ -2858,7 +2860,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+  const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -2872,7 +2874,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -2940,12 +2942,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
+  const repos = Array.isArray(fileExplorerFinderSessionFilesState.payload?.repos) ? fileExplorerFinderSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+    const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
@@ -3416,7 +3418,7 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     : entry.kind === 'file'
     ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const displayName = differMode ? {text: entry.display_name || entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const directoryDiffParts = entry.kind === 'dir'
     ? (differMode
       ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
@@ -3618,7 +3620,7 @@ function bindFinderRowHandlers(row, state) {
     event.preventDefault();
     event.stopPropagation();
     closeFileImagePreview();
-    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
   row.ondragstart = event => {
     row.__fileTreeDragging = true;
@@ -3746,7 +3748,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  bindFinderRowHandlers(row, rowState);
+  if (typeof options.rowBinding === 'function') options.rowBinding(row, rowState);
+  else bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
 
@@ -4141,38 +4144,41 @@ function sharedTreeChildRow(rows, row) {
 
 function sharedTreeSelectionApi(controller, state, options = {}) {
   return {
-    selectedIds() {
+    selectedIds(panel = null) {
       if (typeof options.selectedIds === 'function') {
-        const selected = options.selectedIds();
+        const selected = options.selectedIds(panel);
         if (selected instanceof Set) return selected;
         if (Array.isArray(selected)) return new Set(selected.map(String));
       }
       return state.selectedIds;
     },
-    leadId() {
-      return typeof options.getLeadId === 'function' ? String(options.getLeadId() || '') : state.leadId;
+    leadId(panel = null) {
+      return typeof options.getLeadId === 'function' ? String(options.getLeadId(panel) || '') : state.leadId;
     },
-    setLeadId(id) {
+    setLeadId(id, panel = null) {
       const value = String(id || '');
       state.leadId = value;
-      if (typeof options.setLeadId === 'function') options.setLeadId(value);
+      if (typeof options.setLeadId === 'function') options.setLeadId(value, panel);
     },
-    currentId() {
-      return typeof options.currentRowId === 'function' ? String(options.currentRowId() || '') : '';
+    currentId(panel = null) {
+      return typeof options.currentRowId === 'function' ? String(options.currentRowId(panel) || '') : '';
     },
-    rowIsCurrent(row) {
+    rowIsCurrent(row, panel = null) {
       const id = sharedTreeRowId(row);
-      return Boolean(id && id === controller.currentId());
+      return Boolean(id && id === controller.currentId(panel));
     },
     applyState(panel, stateOptions = {}) {
       let currentRow = null;
-      const selectedIds = controller.selectedIds();
-      for (const row of controller.rows(panel)) {
+      const rows = controller.rows(panel);
+      const selectedIds = controller.selectedIds(panel);
+      const lead = controller.leadRow(panel);
+      for (const row of rows) {
         const id = sharedTreeRowId(row);
         const selected = selectedIds.has(id);
-        const current = controller.rowIsCurrent(row);
+        const current = controller.rowIsCurrent(row, panel);
         row.classList.toggle(CLS.selected, selected);
         row.setAttribute('aria-selected', selected ? 'true' : 'false');
+        if (options.rovingFocus === true) row.tabIndex = row === lead ? 0 : -1;
         if (options.applyCurrentClasses !== false) {
           row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
           row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
@@ -4182,32 +4188,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
         if (current) currentRow = row;
       }
       if (stateOptions.scrollCurrent === true && currentRow) sharedTreeScrollRowIntoView(panel, currentRow, options);
+      if (stateOptions.focusLead === true && lead) lead.focus?.({preventScroll: true});
     },
     selectRow(panel, row, event = null, selectOptions = {}) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRow === 'function') {
-        options.selectRow(row, id, event, selectOptions);
+        options.selectRow(row, id, event, selectOptions, panel);
       } else {
-        const selectedIds = controller.selectedIds();
+        const selectedIds = controller.selectedIds(panel);
         selectedIds.clear();
         selectedIds.add(id);
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectRange(panel, row, event = null) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRange === 'function') {
-        options.selectRange(row, id, event);
+        options.selectRange(row, id, event, panel);
       } else {
         const rows = controller.rows(panel);
-        const selectedIds = controller.selectedIds();
-        const anchorId = selectedIds.values().next().value || controller.leadId() || id;
+        const selectedIds = controller.selectedIds(panel);
+        const anchorId = selectedIds.values().next().value || controller.leadId(panel) || id;
         const anchorIndex = rows.findIndex(item => sharedTreeRowId(item) === anchorId);
         const targetIndex = rows.indexOf(row);
         selectedIds.clear();
@@ -4219,33 +4226,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
           selectedIds.add(id);
         }
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectFromClick(panel, row, event) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       const selectionOnly = typeof options.selectFromClick === 'function'
-        ? options.selectFromClick(row, id, event)
+        ? options.selectFromClick(row, id, event, panel)
         : (controller.selectRow(panel, row, event), false);
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       return selectionOnly === true;
     },
     leadRow(panel) {
       const rows = controller.rows(panel);
-      const leadId = controller.leadId();
+      const leadId = controller.leadId(panel);
       return rows.find(row => sharedTreeRowId(row) === leadId)
-        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
-        || rows.find(row => controller.rowIsCurrent(row))
+        || rows.find(row => controller.selectedIds(panel).has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row, panel))
         || rows[0]
         || null;
     },
     syncCurrent(panel, syncOptions = {}) {
-      const currentId = controller.currentId();
+      const currentId = controller.currentId(panel);
       if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
-      controller.setLeadId(currentId || controller.leadId());
+      controller.setLeadId(currentId || controller.leadId(panel), panel);
       controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
       return Boolean(currentId);
     },
@@ -4254,13 +4261,13 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
 
 function sharedTreeExpansionApi(controller, options = {}) {
   return {
-    isExpanded(row) {
-      if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
+    isExpanded(row, panel = null) {
+      if (typeof options.isExpanded === 'function') return options.isExpanded(row, panel) === true;
       return row?.getAttribute?.('aria-expanded') === 'true';
     },
     setExpanded(panel, row, expanded) {
       if (typeof options.setExpanded === 'function') {
-        options.setExpanded(row, expanded === true);
+        options.setExpanded(row, expanded === true, panel);
         return true;
       }
       return false;
@@ -4282,7 +4289,7 @@ function sharedTreeClickHandler(controller, options = {}) {
     consumeSharedTreeEvent(event);
     const selectionOnly = controller.selectFromClick(panel, row, event);
     if (row.dataset.kind === 'dir' && onDisclosure) {
-      controller.setExpanded(panel, row, !controller.isExpanded(row));
+      controller.setExpanded(panel, row, !controller.isExpanded(row, panel));
       return true;
     }
     if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
@@ -4303,10 +4310,10 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
       consumeSharedTreeEvent(event);
-      const selectedIds = controller.selectedIds();
+      const selectedIds = controller.selectedIds(panel);
       selectedIds.clear();
       for (const row of rows) selectedIds.add(sharedTreeRowId(row));
-      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]), panel);
       if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
       controller.applyState(panel);
       return true;
@@ -4321,7 +4328,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     if (intent === 'expand' || intent === 'collapse') {
       if (!lead) return false;
       consumeSharedTreeEvent(event);
-      const expanded = controller.isExpanded(lead);
+      const expanded = controller.isExpanded(lead, panel);
       if (intent === 'expand') {
         if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
         else {
@@ -4364,7 +4371,7 @@ function createSharedTreeInteractionController(options = {}) {
     },
     activateRow(panel, row, event = null) {
       if (typeof options.activateRow === 'function') {
-        options.activateRow(row, event);
+        options.activateRow(row, event, panel);
         controller.applyState(panel);
         return true;
       }
@@ -5909,7 +5916,7 @@ function bindTabberPanel(panel) {
     if (!row || !panel.contains(row) || !abs) return;
     event.preventDefault();
     event.stopPropagation();
-    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY, {surface: 'tabber'});
   });
   });
 }

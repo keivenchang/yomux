@@ -432,6 +432,12 @@ const jsDebugGraphProcessCpuColors = Object.freeze({
   current: jsDebugGraphSeriesPalette.currentProcessCpu,
   peers: Object.freeze([jsDebugGraphSeriesPalette.turquoise, jsDebugGraphSeriesPalette.magenta, jsDebugGraphSeriesPalette.beige]),
 });
+const jsDebugGraphCpuProcessAreaColors = Object.freeze([
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.turquoise,
+]);
 const jsDebugGraphGpuDeviceColors = Object.freeze([
   jsDebugGraphSeriesPalette.cyan,
   jsDebugGraphSeriesPalette.orange,
@@ -488,7 +494,7 @@ const jsDebugStatsFamilyManifest = Object.freeze({
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', hostMetric: 'cpu'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', kind: 'area', stacked: true, hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},

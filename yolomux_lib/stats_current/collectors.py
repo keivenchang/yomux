@@ -60,9 +60,16 @@ def cpu_success(
     *, epoch_id: str, epoch_started_at: float, observed_at: float,
     cadence_seconds: float, owner_generation: int, source_id: str,
     process_percent: float, system_percent: float,
+    process_cpu_percent: Mapping[str, float] | None = None,
 ) -> CollectorFacts:
+    payload: dict[str, object] = {
+        "process_percent": process_percent,
+        "system_percent": system_percent,
+    }
+    if process_cpu_percent is not None:
+        payload["process_cpu_percent"] = dict(process_cpu_percent)
     return _single(
-        "cpu", source_id, {"process_percent": process_percent, "system_percent": system_percent},
+        "cpu", source_id, payload,
         epoch_id, epoch_started_at, observed_at, cadence_seconds, owner_generation,
     )
 
@@ -125,11 +132,14 @@ def system_memory_success(
     *, epoch_id: str, epoch_started_at: float, observed_at: float,
     cadence_seconds: float, owner_generation: int, source_id: str,
     used_bytes: float, capacity_bytes: float, macos_details: Mapping[str, object] | None = None,
+    process_memory_bytes: Mapping[str, int] | None = None,
 ) -> CollectorFacts:
     payload: dict[str, object] = {"used_bytes": used_bytes, "capacity_bytes": capacity_bytes}
     for key, value in (macos_details or {}).items():
         if value is not None:
             payload[f"mac_{key}"] = value
+    if process_memory_bytes is not None:
+        payload["process_memory_bytes"] = dict(process_memory_bytes)
     return _single(
         "system_memory", source_id, payload,
         epoch_id, epoch_started_at, observed_at, cadence_seconds, owner_generation,

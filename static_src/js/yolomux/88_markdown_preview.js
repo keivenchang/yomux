@@ -621,13 +621,16 @@ function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
 function updateMarkdownTaskFromPreview(container, input) {
   const path = container?.dataset?.mdPath || '';
   const sourceLine = Number(input?.dataset?.sourceLine || 0);
-  const state = fileState.get(path);
+  const panels = fileEditorPanelsForPath(path);
+  const sourcePanel = container.closest?.('.file-editor-panel') || panels.find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (state?.historical === true) return false;
   if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
   const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
   if (next === null || next === state.content) return false;
-  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
   handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
-  for (const panel of fileEditorPanelsForPath(path)) {
+  for (const panel of panels) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
   }
   return true;
@@ -642,9 +645,10 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
     input.dataset.sourceLine = String(task.line);
     input.classList.add('markdown-task-checkbox');
     input.checked = task.checked;
-    if (markdownPath && !readOnlyMode) {
-      input.disabled = false;
-      input.removeAttribute('disabled');
+    if (markdownPath) {
+      input.disabled = readOnlyMode || container._markdownReadOnly === true;
+      if (input.disabled) input.setAttribute('disabled', 'disabled');
+      else input.removeAttribute('disabled');
       input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
@@ -967,6 +971,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     isCurrent: () => container._markdownPreviewGeneration === generation,
     previewContainer: container,
   });
+  container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {

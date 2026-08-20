@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ctypes
+from functools import lru_cache
 import json
 import os
 import plistlib
@@ -15,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..local_services.registry import read_process_cpu_seconds_and_rss
+from . import process_memory
 
 
 def _clamp(value: float) -> float:
@@ -31,16 +32,6 @@ def _linux_system_times() -> tuple[float, float] | None:
     total = sum(values)
     idle = values[3] + (values[4] if len(values) > 4 else 0.0)
     return (total, total - idle) if total > 0 else None
-
-
-def _linux_process_ticks(pid: int) -> tuple[float, int] | None:
-    try:
-        fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
-        ticks = float(fields[11]) + float(fields[12])
-        rss = int(fields[21]) * int(os.sysconf("SC_PAGE_SIZE"))
-    except (IndexError, OSError, ValueError):
-        return None
-    return ticks, max(0, rss)
 
 
 def _darwin_system_times() -> tuple[float, float] | None:
@@ -78,14 +69,60 @@ def _system_times() -> tuple[float, float] | None:
     return _darwin_system_times() if sys.platform == "darwin" else _linux_system_times()
 
 
-def _process_cpu_seconds_and_rss(pid: int) -> tuple[float, int] | None:
-    if sys.platform == "darwin":
-        return read_process_cpu_seconds_and_rss(pid)
-    reading = _linux_process_ticks(pid)
-    if reading is None:
+def _linux_physical_core_count(cpu_root: Path = Path("/sys/devices/system/cpu")) -> int | None:
+    cores: set[tuple[str, str]] = set()
+    online_cpus = 0
+    try:
+        cpu_directories = sorted(
+            path for path in cpu_root.glob("cpu[0-9]*")
+            if re.fullmatch(r"cpu\d+", path.name)
+        )
+        for cpu_directory in cpu_directories:
+            online_path = cpu_directory / "online"
+            if online_path.is_file() and online_path.read_text(encoding="utf-8").strip() == "0":
+                continue
+            package = (cpu_directory / "topology" / "physical_package_id").read_text(encoding="utf-8").strip()
+            core = (cpu_directory / "topology" / "core_id").read_text(encoding="utf-8").strip()
+            if not package or not core:
+                return None
+            online_cpus += 1
+            cores.add((package, core))
+    except OSError:
         return None
-    ticks, rss = reading
-    return ticks / float(os.sysconf("SC_CLK_TCK")), rss
+    return len(cores) if online_cpus > 0 and cores else None
+
+
+def _darwin_cpu_topology() -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.logicalcpu", "hw.physicalcpu"],
+            capture_output=True,
+            text=True,
+            timeout=0.75,
+            check=False,
+        )
+        counts = [int(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if result.returncode != 0 or len(counts) != 2 or min(counts) <= 0:
+        return None
+    return counts[0], counts[1]
+
+
+@lru_cache(maxsize=1)
+def cpu_topology() -> dict[str, int]:
+    logical_cpus = os.cpu_count() or 0
+    physical_cores: int | None = None
+    if sys.platform == "darwin":
+        darwin_counts = _darwin_cpu_topology()
+        if darwin_counts is not None:
+            logical_cpus, physical_cores = darwin_counts
+    elif sys.platform.startswith("linux"):
+        physical_cores = _linux_physical_core_count()
+    topology = {"logical_cpus": logical_cpus} if logical_cpus > 0 else {}
+    if physical_cores is not None and 0 < physical_cores <= logical_cpus:
+        topology["physical_cores"] = physical_cores
+    return topology
 
 
 # The ONE cadence/staleness policy for the web process's own CPU/memory sample.
@@ -122,9 +159,10 @@ class CpuSampler:
 
     def __init__(self) -> None:
         self._previous_system: tuple[float, float] | None = None
-        self._previous_process: tuple[float, float] | None = None
+        self._previous_processes: dict[str, tuple[str, float]] = {}
+        self._previous_process_at: float | None = None
 
-    def sample(self, pid: int) -> dict[str, float | int | None]:
+    def sample(self, pid: int) -> dict[str, object]:
         """Sample this process and the host, reporting absence rather than a fabricated 0.0.
 
         Both percentages are DERIVED from a difference between two readings. On the first call
@@ -149,19 +187,50 @@ class CpuSampler:
 
         now = time.time()
         monotonic = time.monotonic()
-        process = _process_cpu_seconds_and_rss(pid)
+        census = process_memory.process_census()
         system = _system_times()
         process_percent: float | None = None
         system_percent: float | None = None
+        process_cpu_percent: dict[str, float] | None = None
+        process_memory_bytes: dict[str, int] | None = None
         rss = 0
-        if process is not None:
-            cpu_seconds, rss = process
-            if self._previous_process is not None:
-                previous_cpu_seconds, previous_at = self._previous_process
-                elapsed = monotonic - previous_at
-                if elapsed > 0:
-                    process_percent = max(0.0, (cpu_seconds - previous_cpu_seconds) / elapsed * 100.0)
-            self._previous_process = (cpu_seconds, monotonic)
+        if census is not None:
+            current = {row.identity: (row.binary, row.cpu_seconds) for row in census}
+            current_pid = next((row for row in census if row.pid == pid), None)
+            process_memory_bytes = process_memory.aggregate_process_memory_by_binary(
+                (row.binary, row.rss_bytes) for row in census
+            )
+            if current_pid is not None:
+                rss = current_pid.rss_bytes
+            if self._previous_process_at is not None:
+                elapsed = monotonic - self._previous_process_at
+                logical_cpus = os.cpu_count() or 0
+                if elapsed > 0 and logical_cpus > 0:
+                    grouped_rows: list[tuple[str, float]] = []
+                    previous_by_binary: dict[str, dict[str, float]] = {}
+                    current_by_binary: dict[str, dict[str, float]] = {}
+                    for identity, (binary, cpu_seconds) in self._previous_processes.items():
+                        previous_by_binary.setdefault(binary, {})[identity] = cpu_seconds
+                    for row in census:
+                        current_by_binary.setdefault(row.binary, {})[row.identity] = row.cpu_seconds
+                    if current_pid is not None:
+                        previous_current = self._previous_processes.get(current_pid.identity)
+                        if previous_current is not None and current_pid.cpu_seconds >= previous_current[1]:
+                            process_percent = (current_pid.cpu_seconds - previous_current[1]) / elapsed * 100.0
+                    for binary, current_members in current_by_binary.items():
+                        previous_members = previous_by_binary.get(binary, {})
+                        if current_members.keys() != previous_members.keys():
+                            continue
+                        deltas = [
+                            current_members[identity] - previous_members[identity]
+                            for identity in current_members
+                        ]
+                        if any(delta < 0 for delta in deltas):
+                            continue
+                        grouped_rows.append((binary, sum(deltas) / elapsed * 100.0 / logical_cpus))
+                    process_cpu_percent = process_memory.aggregate_process_cpu_by_binary(grouped_rows)
+            self._previous_processes = current
+            self._previous_process_at = monotonic
         if system is not None:
             if self._previous_system is not None:
                 previous_total, previous_busy = self._previous_system
@@ -176,6 +245,8 @@ class CpuSampler:
             "cpu_percent": None if process_percent is None else round(process_percent, 3),
             "system_cpu_percent": None if system_percent is None else round(system_percent, 3),
             "rss_bytes": rss,
+            "process_cpu_percent": process_cpu_percent,
+            "process_memory_bytes": process_memory_bytes,
         }
 
 

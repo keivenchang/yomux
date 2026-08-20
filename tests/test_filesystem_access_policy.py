@@ -52,12 +52,12 @@ def two_policies(monkeypatch, tmp_path):
         paths.invalidate_path_policy_caches()
 
 
-def _descriptor(operation: str, path: Path) -> bytes:
+def _descriptor(operation: str, path: Path, args: dict | None = None) -> bytes:
     """Build the descriptor exactly as the accepting server's HTTP path builds it."""
     payload, _product_key = app_module.filesystem_operation_submission(
         operation,
         str(path),
-        {},
+        args or {},
         scope="local",
         generation="watchd:test:1",
     )
@@ -94,6 +94,26 @@ def test_broad_daemon_must_not_execute_a_narrow_callers_descriptor(monkeypatch, 
     assert refusal.status == 403
     assert refusal.payload.get("user_message", {}).get("key") == "fs.error.outsideRoots"
     assert BLOCKED_SENTINEL not in json.dumps(refusal.payload)
+
+
+@pytest.mark.parametrize(
+    ("operation", "args"),
+    [
+        ("git_history", {"limit": 1, "cursor": ""}),
+        ("git_commit", {"commit": "a" * 40, "head": "b" * 40}),
+    ],
+)
+def test_git_history_operations_keep_the_accepting_servers_access_policy(monkeypatch, two_policies, operation, args):
+    broad, narrow, _secret = two_policies
+    outside = broad / "outside"
+
+    _use_roots(monkeypatch, narrow)
+    descriptor = _descriptor(operation, outside, args)
+
+    _use_roots(monkeypatch, broad)
+    refusal = _refusal_or_leak(descriptor)
+    assert refusal.status == 403
+    assert refusal.payload.get("user_message", {}).get("key") == "fs.error.outsideRoots"
 
 
 def test_narrow_daemon_must_not_deny_a_broad_callers_descriptor(monkeypatch, two_policies):

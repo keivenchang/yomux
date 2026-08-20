@@ -1929,7 +1929,7 @@
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
         const seriesName = groupId === 'agent-tokens'
-          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          ? `agent_tokens_per_minute:${currentStatsCanonicalSessionKey(name.slice('agent_tokens_per_minute:'.length))}`
           : name;
         if (!series.has(seriesName)) series.set(seriesName, []);
         const points = series.get(seriesName);
@@ -2003,7 +2003,7 @@
       {id: 'agent-status', title: 'Agent status', families: ['agent_status']},
       {id: 'gpu', title: 'GPU', families: ['gpu']},
       {id: 'system', title: 'System', families: ['service_load', 'system_memory']},
-      {id: 'agent-tokens', title: 'Agent tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
+      {id: 'agent-tokens', title: 'Session tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-output-tokens', title: 'Model output tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-usage', title: 'Model usage', families: ['agent_tokens']},
       {id: 'cost', title: 'Marginal / at API list prices', families: ['cost'], compact: true},
@@ -2018,7 +2018,7 @@
       {id: 'agent-status', label: 'Agent status', groups: ['agent-status']},
       {id: 'gpu', label: 'GPU', groups: ['gpu']},
       {id: 'system', label: 'System', groups: ['system']},
-      {id: 'agent-tokens', label: 'Agent tokens', groups: ['agent-tokens']},
+      {id: 'agent-tokens', label: 'Session tokens', groups: ['agent-tokens']},
       {id: 'model-tokens', label: 'Model tokens', groups: ['model-output-tokens', 'model-usage']},
       {id: 'cost', label: 'Cost', groups: ['cost'], defaultVisible: false},
       {id: 'browser', label: 'API/SSE', groups: ['browser']},
@@ -2138,22 +2138,30 @@
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
   }
 
-  // Usage series retain a stable pane-level key, while the visible identity is the tmux
-  // session. Cost rows carry that same safe key from the server, so both surfaces call this
-  // one owner instead of independently trimming their agent labels.
+  // Usage series retain a stable pane-level key, while the token-throughput owner is the tmux
+  // session. Keep the exact grouping key separate from display shortening so unrelated private
+  // identities cannot collide merely because their visible labels were bounded.
+  function currentStatsCanonicalSessionKey(value) {
+    const full = String(value || '').trim();
+    if (!full) return '';
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
+  }
+
   function currentStatsCanonicalAgentLabel(value) {
     const full = String(value || '').trim();
     if (!full) return 'Unknown';
+    const sessionKey = currentStatsCanonicalSessionKey(full);
+    if (sessionKey !== full) return sessionKey;
     if (full.startsWith('claude-bg:')) {
       const [, projectValue = '', sessionValue = ''] = full.split(':');
       const projectParts = projectValue.split('-').filter(Boolean);
       const project = projectParts.slice(-2).join('-') || projectValue;
       const session = sessionValue.slice(0, 8);
       return ['claude-bg', project, session].filter(Boolean).join(':');
-    }
-    const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
-      return parts[0] || full;
     }
     return full;
   }
@@ -2750,6 +2758,7 @@
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
     canonicalAgentLabel: currentStatsCanonicalAgentLabel,
+    canonicalSessionKey: currentStatsCanonicalSessionKey,
     createBrowserClient,
     createController,
     mount,

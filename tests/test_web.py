@@ -104,6 +104,14 @@ def test_html_page_bootstraps_authoritative_username():
     assert bootstrap["authUsername"] == "alice"
 
 
+def test_html_page_bootstraps_host_cpu_topology(monkeypatch):
+    monkeypatch.setattr(web, "cpu_topology", lambda: {"logical_cpus": 32, "physical_cores": 24})
+
+    bootstrap = json.loads(_bootstrap_json(web.html_page([])))
+
+    assert bootstrap["cpuTopology"] == {"logical_cpus": 32, "physical_cores": 24}
+
+
 def test_html_page_bootstrap_includes_linear_issue_base_url():
     bootstrap = json.loads(_bootstrap_json(web.html_page([])))
 

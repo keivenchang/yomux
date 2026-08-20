@@ -102,25 +102,43 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
-function sessionFilesRequestQueryString() {
-  return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+function sessionFilesRequestQueryString(destination = 'differ') {
+  return destination === 'finder'
+    ? 'from=HEAD&to=current'
+    : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
-function clientSessionFilesWatchRequests() {
-  const params = new URLSearchParams(sessionFilesRequestQueryString());
+function sessionFilesRequestForDestination(destination, sessionOverride = '') {
+  const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
   let repoRefs = null;
   const refs = params.get('refs');
   if (refs) {
     const parsed = safeJsonParse(refs, null);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
   }
-  return [{
-    session: fileExplorerSessionFilesTargetSession(),
+  return {
+    session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
     hours: 24,
     from_ref: params.get('from') || 'HEAD',
     to_ref: params.get('to') || 'current',
     repo_refs: repoRefs,
-  }];
+  };
+}
+
+function clientSessionFilesWatchRequests() {
+  const candidates = [];
+  if (fileExplorerTreePaneIsVisible()) candidates.push(sessionFilesRequestForDestination('finder'));
+  if (fileExplorerSessionFilesPaneIsVisible()) candidates.push(sessionFilesRequestForDestination('differ'));
+  const requests = [];
+  const seen = new Set();
+  for (const request of candidates) {
+    if (!request.session) continue;
+    const key = sessionFilesRequestKey(request, request.session);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    requests.push(request);
+  }
+  return requests;
 }
 
 function normalizedSessionFilesRepoRefs(repoRefs) {
@@ -155,14 +173,24 @@ function sessionFilesRequestKey(request = {}, sessionFallback = '') {
   return JSON.stringify(normalized);
 }
 
-function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+function sessionFilesRequestMatchesDestination(request = {}, session = '', destination = 'differ') {
   if (!request || typeof request !== 'object') return false;
-  const current = clientSessionFilesWatchRequests()[0] || {};
+  if (destination === 'finder' && !fileExplorerTreePaneIsVisible()) return false;
+  if (destination === 'differ' && !fileExplorerSessionFilesPaneIsVisible()) return false;
+  const current = sessionFilesRequestForDestination(destination);
   return sessionFilesRequestKey(request, session) === sessionFilesRequestKey(current, session);
 }
 
-function sessionFilesCacheKey(session) {
-  return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
+function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+  return ['finder', 'differ'].some(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesDestinationsForRequest(request = {}, session = '') {
+  return ['finder', 'differ'].filter(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesCacheKey(session, destination = 'differ') {
+  return `${String(session || '')}\x1f${sessionFilesRequestQueryString(destination)}`;
 }
 
 function sessionFilesPayloadHasDifferPath(payload, path) {
@@ -721,6 +749,19 @@ function diffRefControlsHtml(options = {}) {
   </span>`;
 }
 
+function historicalDiffRefControlsHtml(state) {
+  const fromRef = String(state?.diffPinnedFromRef || state?.diffFromRef || '');
+  const toRef = String(state?.diffPinnedToRef || state?.diffToRef || '');
+  const comparison = state?.historicalComparisonKind === 'merge-first-parent'
+    ? `<span class="diff-ref-historical-note">${esc(t('gitDiff.firstParent'))}</span>`
+    : '';
+  return `<span class="diff-ref-controls compact historical" data-diff-ref-controls data-diff-ref-historical>
+    <span class="diff-ref-control">${esc(t('diff.ref.from'))} <span class="diff-ref-static-value" title="${esc(fromRef)}">${esc(fromRef.slice(0, 9))}</span></span>
+    <span class="diff-ref-control">${esc(t('diff.ref.to'))} <span class="diff-ref-static-value" title="${esc(toRef)}">${esc(toRef.slice(0, 9))}</span></span>
+    ${comparison}
+  </span>`;
+}
+
 function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
@@ -729,8 +770,12 @@ function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('common.reset'))}</button>`;
 }
 
-function invalidateSessionFilesCaches() {
-  fileExplorerSessionFilesCache.clear();
+function sessionFilesCacheForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesCache : fileExplorerSessionFilesCache;
+}
+
+function invalidateSessionFilesCaches(destination = 'differ') {
+  sessionFilesCacheForDestination(destination).clear();
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -750,7 +795,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     diffRefTo = nextTo;
   }
   writeStoredDiffRefs();
-  invalidateSessionFilesCaches();
+  invalidateSessionFilesCaches('differ');
   for (const state of fileState.values()) {
     if (!state || state.kind !== 'text') continue;
     state.diffLoaded = false;
@@ -759,8 +804,8 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     state.diffPinnedFromRef = '';
     state.diffPinnedToRef = '';
   }
-  renderFileExplorerChangesPanels({force: true});
-  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  renderFileExplorerChangesPanels({force: true, view: 'differ'});
+  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
   return true;
 }
@@ -805,7 +850,7 @@ function fileExplorerFinderTargetSession() {
     fileExplorerFinderSelectedSession = selected;
     return selected;
   }
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
 }
@@ -821,8 +866,9 @@ function fileExplorerSessionFilesTargetSession() {
   return sessions[0] || '';
 }
 
-function emptySessionFilesPayload(session = '', loaded = true) {
-  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
+function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
+  const refs = destination === 'finder' ? {from: 'HEAD', to: 'current'} : {from: diffRefFrom, to: diffRefTo};
+  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: refs.from, to_ref: refs.to, loaded};
 }
 
 function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
@@ -880,9 +926,9 @@ function sessionFilesPanelIsLoading(payload, files = null) {
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
 
-function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
+function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'differ') {
   const session = String(nextPayload?.session || '');
-  const current = sessionFilesPayloadForDestination('finder');
+  const current = sessionFilesPayloadForDestination(destination);
   if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
   if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
@@ -902,22 +948,22 @@ function switchFileExplorerChangesSession(session) {
     scheduleTabberTreeLayoutStateSync();
     return;
   }
-  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
+  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session, 'differ'));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
-    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesPayloadForDestination('differ', cached.payload);
     fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else {
-    const pendingPayload = emptySessionFilesPayload(session, false);
-    setSessionFilesPayloadForDestination('finder', pendingPayload);
+    const pendingPayload = emptySessionFilesPayload(session, false, 'differ');
+    setSessionFilesPayloadForDestination('differ', pendingPayload);
     fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
-  setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
+  setSessionFilesLoadingForDestination('differ', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
   // A cached session switch already has visible last-known-good rows. Let the server decide
   // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
   // that parent and submit a full session-files job for every tab switch.
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
+  fetchSessionFiles({destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
 }
 
 function switchFileExplorerFinderSession(session) {
@@ -926,6 +972,13 @@ function switchFileExplorerFinderSession(session) {
   fileExplorerFinderSelectedSession = session;
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  const cached = fileExplorerFinderSessionFilesCache.get(sessionFilesCacheKey(session, 'finder'));
+  const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
+  if (cachedPayloadIsLoaded) {
+    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesSignatureForDestination('finder', cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload));
+  }
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   return true;
 }
 
@@ -947,7 +1000,11 @@ function noteFileExplorerChangesSessionInteraction(session) {
 }
 
 function sessionFilesPayloadForDestination(destination) {
-  return fileExplorerSessionFilesState.payload;
+  return sessionFilesStateForDestination(destination).payload;
+}
+
+function sessionFilesStateForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesState : fileExplorerSessionFilesState;
 }
 
 const sessionFilesProducerDeadlineMs = 5000;
@@ -968,18 +1025,18 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(nextPayload.session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(nextPayload.session, destination), {payload: nextPayload, signature});
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }, sessionFilesProducerDeadlineMs);
 }
 
-function retireSessionFilesRequest(reason = 'session-files request superseded') {
-  fileExplorerSessionFilesState.guard.invalidate();
-  const controller = fileExplorerSessionFilesState.abortController;
-  fileExplorerSessionFilesState.abortController = null;
+function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+  const state = sessionFilesStateForDestination(destination);
+  state.guard.invalidate();
+  const controller = state.abortController;
+  state.abortController = null;
   if (!controller || controller.signal.aborted) return;
   const error = new Error(reason);
   error.name = 'AbortError';
@@ -987,8 +1044,9 @@ function retireSessionFilesRequest(reason = 'session-files request superseded') 
 }
 
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
-  if (options.invalidateRequest !== false) retireSessionFilesRequest(options.retirementReason);
-  fileExplorerSessionFilesState.payload = payload;
+  const state = sessionFilesStateForDestination(destination);
+  if (options.invalidateRequest !== false) retireSessionFilesRequest(destination, options.retirementReason);
+  state.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
   if (
@@ -1046,19 +1104,19 @@ function sessionFilesPayloadSignatureForPayload(payload) {
 }
 
 function sessionFilesSignatureForDestination(destination) {
-  return fileExplorerSessionFilesState.signature;
+  return sessionFilesStateForDestination(destination).signature;
 }
 
 function setSessionFilesSignatureForDestination(destination, signature) {
-  fileExplorerSessionFilesState.signature = signature;
+  sessionFilesStateForDestination(destination).signature = signature;
 }
 
 function sessionFilesLoadingForDestination(destination) {
-  return fileExplorerSessionFilesState.loading;
+  return sessionFilesStateForDestination(destination).loading;
 }
 
 function setSessionFilesLoadingForDestination(destination, loading) {
-  fileExplorerSessionFilesState.loading = loading;
+  sessionFilesStateForDestination(destination).loading = loading;
 }
 
 function sessionFilesRenderOptions(options = {}) {
@@ -1071,26 +1129,33 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
   }
-  renderFileExplorerChangesPanels(options);
+  if (destination === 'finder') {
+    updateFileTreeGitStatusRows();
+  } else {
+    renderFileExplorerChangesPanels({...options, view: 'differ'});
+  }
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = 'finder';
+  const destination = options.destination === 'finder' ? 'finder' : 'differ';
   const forceRefresh = options.force === true;
   const backgroundRefresh = options.background === true;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || fileExplorerSessionFilesTargetSession();
+  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
+  const state = sessionFilesStateForDestination(destination);
   let shouldRender = options.silent !== true;
   if (!session) {
-    const emptyPayload = emptySessionFilesPayload('', true);
+    const emptyPayload = emptySessionFilesPayload('', true, destination);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
@@ -1099,10 +1164,10 @@ async function fetchSessionFiles(options = {}) {
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
-  retireSessionFilesRequest('session-files request replaced');
-  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
+  retireSessionFilesRequest(destination, 'session-files request replaced');
+  const requestIsCurrent = state.guard.begin();
   const requestController = typeof AbortController === 'function' ? new AbortController() : null;
-  fileExplorerSessionFilesState.abortController = requestController;
+  state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
@@ -1110,9 +1175,8 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
-    // does not paint historical diff badges after the repo is clean.
-    const params = new URLSearchParams(sessionFilesRequestQueryString());
+    const request = sessionFilesRequestForDestination(destination, session);
+    const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
@@ -1135,21 +1199,25 @@ async function fetchSessionFiles(options = {}) {
         method: 'GET',
       });
     }
-    const nextPayload = normalizedSessionFilesPayload(payload, {session});
+    const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
-    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
+    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
+    for (const mirrorDestination of sessionFilesDestinationsForRequest(request, session)) {
+      if (mirrorDestination === destination) continue;
+      applySessionFilesPayloadToDestination(mirrorDestination, nextPayload, request, session);
+    }
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
     if (isApiPendingResponse(err)) {
       const nextPayload = {
-        ...emptySessionFilesPayload(session, false),
+        ...emptySessionFilesPayload(session, false, destination),
         refreshing_elsewhere: true,
         pending_key: err.key,
         pending_epoch: err.epoch,
@@ -1164,7 +1232,8 @@ async function fetchSessionFiles(options = {}) {
       return;
     }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
+    const failedRefs = sessionFilesRequestForDestination(destination, session);
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -1174,61 +1243,79 @@ async function fetchSessionFiles(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
-    if (fileExplorerSessionFilesState.abortController === requestController) {
-      fileExplorerSessionFilesState.abortController = null;
+    if (state.abortController === requestController) {
+      state.abortController = null;
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
-    if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
+    if (current && (shouldRender || wasLoading) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
-      if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
       renderSessionButtons();
     }
   }
 }
 
-function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
-  const destination = 'finder';
-  const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
-    if (sessionFilesLoadingForDestination(destination)) setSessionFilesLoadingForDestination(destination, false);
-    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
-    return false;
+async function refreshVisibleSessionFilesSurfaces(options = {}) {
+  const destinations = [];
+  if (fileExplorerTreePaneIsVisible()) destinations.push('finder');
+  if (fileExplorerSessionFilesPaneIsVisible()) destinations.push('differ');
+  const seen = new Set();
+  const requests = [];
+  for (const destination of destinations) {
+    const request = sessionFilesRequestForDestination(destination);
+    const key = sessionFilesRequestKey(request, request.session);
+    if (!request.session || seen.has(key)) continue;
+    seen.add(key);
+    requests.push(fetchSessionFiles({
+      destination,
+      session: request.session,
+      silent: options.silent !== false,
+      force: options.force === true,
+    }));
   }
+  await Promise.all(requests);
+}
+
+function applySessionFilesPayloadToDestination(destination, payload, request, session) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
-  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
+  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
-  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }
   return true;
 }
 
-function applySessionFilesOperationFailure(result = {}, context = {}) {
-  const destination = 'finder';
-  const session = String(context.session || fileExplorerSessionFilesTargetSession() || '');
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(context, session)) return false;
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+  const session = String(payload.session || request.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(request, session);
+  if (!destinations.length) return false;
+  let applied = false;
+  for (const destination of destinations) {
+    applied = applySessionFilesPayloadToDestination(destination, payload, request, session) || applied;
+  }
+  if (applied && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  return applied;
+}
+
+function applySessionFilesOperationFailureToDestination(destination, result, context, session) {
   const error = result.error && typeof result.error === 'object' ? result.error : {};
   const issue = error.message && typeof error.message === 'object'
     ? {...error.message}
     : userMessageSnapshot(result, 'session-files request failed').user_message;
   const nextPayload = {
-    ...emptySessionFilesPayload(session, true),
+    ...emptySessionFilesPayload(session, true, destination),
     refreshing_elsewhere: false,
     errors: [issue],
     operation_error: error,
@@ -1237,11 +1324,21 @@ function applySessionFilesOperationFailure(result = {}, context = {}) {
   setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   renderSessionFilesDestination(destination, {force: true});
-  updateFileTreeGitStatusRows();
   renderPaneTabStrips();
   renderSessionButtons();
+  return true;
+}
+
+function applySessionFilesOperationFailure(result = {}, context = {}) {
+  const session = String(context.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(context, session);
+  if (!destinations.length) return false;
+  for (const destination of destinations) {
+    applySessionFilesOperationFailureToDestination(destination, result, context, session);
+  }
   statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(result, 'session-files request failed')}));
   return true;
 }
@@ -1364,6 +1461,8 @@ function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
 }
 
 function sessionFileDiffText(item) {
+  if (item?.binary === true) return [{kind: 'file-label', text: t('gitDiff.binary')}];
+  if (item?.counts_available === false) return [{kind: 'file-label', text: t('common.notAvailable')}];
   const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
     Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
@@ -1738,7 +1837,15 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
       // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
       // file created and then removed is missing but still displays A.
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, deleted: status === 'D', changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
+      siblings.push({
+        name: fileName,
+        display_name: item.old_path ? `${item.old_path} → ${item.path}` : '',
+        kind: 'file',
+        mtime: item.mtime,
+        size: item.size,
+        deleted: status === 'D',
+        changedFileMissingTime: sessionFileDatePlaceholderNeeded(item),
+      });
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
@@ -2129,8 +2236,9 @@ function activeChangesControl(panel) {
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
+  const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
-    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
+    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -2323,10 +2431,10 @@ function bindChangesPanel(panel) {
     const refresh = event.target.closest('[data-session-files-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      const destination = refresh.closest('[data-file-explorer-changes]') ? 'finder' : 'changes';
+      const destination = fileExplorerViewForItem(panel.dataset.panelItem) === 'finder' ? 'finder' : 'differ';
       fetchSessionFiles({
         destination,
-        session: destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession(),
+        session: destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession(),
       });
       return;
     }
@@ -2864,11 +2972,17 @@ function createFileExplorerPanel(item = finderItemId) {
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
+    }
+  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+    if (clientPushCanSupplyData()) {
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    } else {
+      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
   } else if (view === 'tabber') fetchTabberActivity();
   return panel;
@@ -2970,6 +3084,10 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
+    const session = fileExplorerFinderTargetSession();
+    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
+      fetchSessionFiles({destination: 'finder', session, silent: true});
+    }
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -2979,7 +3097,7 @@ function activateFileExplorerSurface(item) {
   }
   const session = fileExplorerSessionFilesTargetSession();
   if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'finder', session, silent: true});
+    fetchSessionFiles({destination: 'differ', session, silent: true});
   }
   return true;
 }
@@ -3022,8 +3140,8 @@ function bindFileExplorerChangesResizer(panel) {
 }
 
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.kind !== 'text' || state.historical === true) return;
   state.content = String(content ?? '');
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
@@ -3055,7 +3173,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
 }
 
 async function enterFileEditorDiffMode(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return;
   if (!fileStateHasRepo(path, state)) {
     setFileEditorViewMode(path, 'edit', item);
@@ -3067,10 +3185,10 @@ async function enterFileEditorDiffMode(path, panel, item) {
     renderFileEditorPanel(panel, item);
     return;
   }
-  const loadPromise = refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+  const loadPromise = refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
   renderFileEditorPanel(panel, item);
   await loadPromise;
-  const current = fileState.get(path);
+  const current = fileEditorStateForItem(path, item);
   if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
   if (fileStateHasRepo(path, current) && (openFileDiffAvailable(current) || fileStateHasUsefulGitHistory(current))) {
     setFileEditorViewMode(path, 'diff', item);
@@ -3372,7 +3490,10 @@ function createFileEditorPanel(item) {
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   bindActionDispatcher(panel, {
     'editor-save': () => saveFileEditor(path, panel),
-    'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-reload': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return false;
+      return reloadOpenFileFromDisk(path);
+    },
     'editor-upload': () => openFileUploadChooserForEditor(panel, path),
     'editor-mode': (_event, target) => {
       const mode = target?.dataset?.editorMode;
@@ -3391,7 +3512,7 @@ function createFileEditorPanel(item) {
     'editor-toggle-wrap': () => toggleEditorWrap(),
     'editor-find': async () => {
       await toggleEditorFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     },
     'editor-blame': (_event, target) => {
       if (target?.disabled) return;
@@ -3411,6 +3532,7 @@ function createFileEditorPanel(item) {
       toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
     },
     'editor-popout-preview': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return;
       if (openFilePreviewPopout(path, panel)) {
         setFileEditorViewMode(path, 'edit', item);
         renderFileEditorPanel(panel, item);
@@ -3484,14 +3606,14 @@ function createFileEditorPanel(item) {
     }
     if (event.target.closest('[data-preview-find-close]')) {
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     }
   });
   previewFindPanel?.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     } else if (event.key === 'Enter') {
       event.preventDefault();
       const state = previewFindStateForHost(panel, true);

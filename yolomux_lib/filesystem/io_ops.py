@@ -309,7 +309,23 @@ def _delete_directory_contents(
                 os.unlink(entry.name, dir_fd=directory_fd)
 
 
-def delete_path(raw_path: str) -> dict[str, Any]:
+def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
+    """Delete one authorized entry, bounded by default and recursive only when asked.
+
+    ONE function and ONE signature for both classes, because both must keep the same authorization
+    owner (`safe_parent` plus exactly one validated basename), the same configured-root refusal, and
+    the same result shape.  `recursive` selects the COST CLASS, not a second route:
+
+    - non-directory  -> one `unlink`.  Bounded.
+    - directory, `recursive=False` -> one `rmdir` probe.  An empty directory is a terminal delete; a
+      nonempty one returns the typed NON-TERMINAL `{"deleted": False, "pending": "subtree"}` without
+      ever enumerating the subtree, so a bounded request can never pay an input-sized cost.
+    - directory, `recursive=True` -> the descriptor-pinned subtree walk, unchanged.
+
+    `pending` is not a failure and not a delete: it is this delete telling its caller which lane the
+    work actually belongs on.  The caller re-submits with `recursive=True` under the same operation.
+    """
+
     with paths.safe_parent(raw_path, operation="delete_path") as handle:
         path = handle.requested
         paths._ensure_not_configured_root(path, "delete", resolved=handle.resolved_target)
@@ -317,26 +333,34 @@ def delete_path(raw_path: str) -> dict[str, Any]:
             entry_stat = os.stat(handle.name, dir_fd=handle.descriptor, follow_symlinks=False)
         except FileNotFoundError as error:
             raise paths.FilesystemError.path_not_found(path) from error
-        if stat.S_ISDIR(entry_stat.st_mode):
-            with paths.safe_child(
-                handle.descriptor,
+        if not stat.S_ISDIR(entry_stat.st_mode):
+            # Symlinks land here and report `kind: "file"`, matching the pre-split payload.  The
+            # link itself is unlinked; `safe_parent` never follows it.
+            os.unlink(handle.name, dir_fd=handle.descriptor)
+            return {"path": str(path), "deleted": True, "kind": "file"}
+        if not recursive:
+            try:
+                os.rmdir(handle.name, dir_fd=handle.descriptor)
+            except OSError as error:
+                if error.errno not in {errno.ENOTEMPTY, errno.EEXIST}:
+                    raise
+                return {"path": str(path), "deleted": False, "kind": "dir", "pending": "subtree"}
+            return {"path": str(path), "deleted": True, "kind": "dir"}
+        with paths.safe_child(
+            handle.descriptor,
+            path,
+            handle.namespace_target,
+            flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            operation="delete_path",
+            observe_name=False,
+        ) as target:
+            _delete_directory_contents(
+                target.descriptor,
                 path,
                 handle.namespace_target,
-                flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                operation="delete_path",
-                observe_name=False,
-            ) as target:
-                _delete_directory_contents(
-                    target.descriptor,
-                    path,
-                    handle.namespace_target,
-                )
-            os.rmdir(handle.name, dir_fd=handle.descriptor)
-            kind = "dir"
-        else:
-            os.unlink(handle.name, dir_fd=handle.descriptor)
-            kind = "file"
-        return {"path": str(path), "deleted": True, "kind": kind}
+            )
+        os.rmdir(handle.name, dir_fd=handle.descriptor)
+        return {"path": str(path), "deleted": True, "kind": "dir"}
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
@@ -420,13 +444,16 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
         mtime: int | None = None
         mtime_ns: int | None = None
         preview_mime = ""
+        diff_capable = False
         if kind == "file":
             size = int(file_stat.st_size)
             mtime = int(file_stat.st_mtime)
             mtime_ns = int(file_stat.st_mtime_ns)
             with os.fdopen(os.dup(handle.descriptor), "rb") as fh:
-                preview_mime = _sniff_raw_mime(fh.read(512)) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
-        repo_root, _tracked, _history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
+                sample = fh.read(512)
+            preview_mime = _sniff_raw_mime(sample) or IMAGE_EXTENSIONS.get(path.suffix.lower(), "")
+            diff_capable = size <= paths.MAX_READ_BYTES and not preview_mime and not paths._looks_binary(sample)
+        repo_root, tracked, history, relative_path, repo_info = git_ops.pinned_file_git_metadata(
             handle,
             include_repo_info=True,
             operation=operation,
@@ -439,7 +466,10 @@ def _existing_path_info(raw_path: str, *, operation: str) -> dict[str, Any]:
             "mtime": mtime,
             "mtime_ns": mtime_ns,
             "preview_mime": preview_mime,
+            "diff_capable": diff_capable,
             "repo_root": repo_root,
+            "git_tracked": tracked,
+            "git_has_history": bool(history),
             "relative_path": relative_path,
             "repo": repo_info,
             **paths._physical_file_identity(path, resolved=handle.resolved, stat_result=file_stat),
@@ -467,7 +497,10 @@ def path_info(raw_path: str, *, operation: str = "path_info") -> dict[str, Any]:
             "mtime": None,
             "mtime_ns": None,
             "preview_mime": "",
+            "diff_capable": False,
             "repo_root": "",
+            "git_tracked": False,
+            "git_has_history": False,
             "relative_path": "",
             "repo": None,
         }

@@ -4,11 +4,11 @@ Completed work, one file per shipped thing, named `DONE.<desc>.md` after the `DO
 
 This is a historical record, not the current architecture or API contract: a later change can supersede an older entry without rewriting it. Use [`../../README.md`](../../README.md), [`../DEVELOPMENT.md`](../DEVELOPMENT.md), and [`../specs/`](../specs/) for current behavior, and treat entries labeled as audits, plans, or superseded snapshots as historical evidence only.
 
-178 entries, 2026-06-02 to 2026-08-15.
+199 entries, 2026-06-02 to 2026-08-19.
 
 | month | entries |
 | --- | ---: |
-| [2026-08](2026-08/) | 21 |
+| [2026-08](2026-08/) | 42 |
 | [2026-07](2026-07/) | 55 |
 | [2026-06](2026-06/) | 102 |
 
@@ -16,6 +16,9 @@ This is a historical record, not the current architecture or API contract: a lat
 
 | date | what shipped |
 | --- | --- |
+| 2026-08-19 | [v0.7.9 exact tmux session targeting](2026-08/DONE.0-7-9-tmux-exact-session-target.md) |
+| 2026-08-19 | [v0.7.9 unread-body HTTP response framing](2026-08/DONE.0-7-9-request-uri-too-long-attribution.md) |
+| 2026-08-17 | [Finder Git Diff Viewer](2026-08/DONE.git-diff.md) |
 | 2026-08-15 | [v0.7.7 active-queue reconciliation](2026-08/DONE.0-7-7-active-queue-reconciliation.md) |
 | 2026-08-14 | [v0.7.6 performance release](2026-08/DONE.0-7-6-performance-release.md) |
 | 2026-08-14 | [v0.7.5 first-launch agent auth and setup brand](2026-08/DONE.0-7-5-first-launch-auth.md) |

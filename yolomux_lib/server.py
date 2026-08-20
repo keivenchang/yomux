@@ -26,6 +26,10 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from email.errors import FirstHeaderLineIsContinuationDefect
+from email.errors import InvalidHeaderDefect
+from email.errors import MisplacedEnvelopeHeaderDefect
+from email.errors import MissingHeaderBodySeparatorDefect
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -115,9 +119,12 @@ CLIENT_EVENT_DISCONNECT_POLL_SECONDS = 1.0
 TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 MAX_FS_BATCH_REQUESTS = filesystem.MAX_BATCH_REQUESTS
 TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
+HTTP_HEADER_NAME_RE = re.compile(r"[-!#$%&'*+.^_`|~0-9A-Za-z]+")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
 HTTP_REQUEST_LINE_CAPTURE_LIMIT = 1024 * 1024
+HTTP_REQUEST_BODY_INACTIVITY_TIMEOUT_SECONDS = 2.0
+HTTP_MAX_DECLARED_BODY_BYTES = (1 << 63) - 1
 RESPONSE_GZIP_MIN_BYTES = 1024
 STATIC_GZIP_CONTENT_TYPES = {
     "application/javascript",
@@ -427,6 +434,33 @@ class FilesystemHttpAdapter(_HandlerAdapter):
         to_ref = query_one(qs, "to", None)
         self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
 
+    def handle_fs_git_history(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        limit, error = parse_query_int(qs, "limit", 50, max_value=50, clamp_min=True)
+        if error:
+            self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        cursor = str(query_one(qs, "cursor", "") or "")
+        self.submit_filesystem_operation(
+            "GET /api/fs/git-history",
+            "git_history",
+            raw_path,
+            {"limit": limit, "cursor": cursor},
+        )
+
+    def handle_fs_git_commit(self, parsed: Any) -> None:
+        qs = parse_qs(parsed.query)
+        raw_path = str(query_one(qs, "path", "") or "")
+        commit = str(query_one(qs, "commit", "") or "")
+        head = str(query_one(qs, "head", "") or "")
+        self.submit_filesystem_operation(
+            "GET /api/fs/git-commit",
+            "git_commit",
+            raw_path,
+            {"commit": commit, "head": head},
+        )
+
     def handle_blame(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
@@ -536,9 +570,12 @@ class FilesystemHttpAdapter(_HandlerAdapter):
     ) -> tuple[bytes | None, dict[str, Any] | None, HTTPStatus]:
         length_text = self.headers.get("Content-Length", "")
         if not length_text and allow_missing:
+            self.request_body_consumed = True
             return b"", None, HTTPStatus.OK
+        cached_length = getattr(self, "_request_content_length", None)
+        cached_length_present = bool(getattr(self, "_request_content_length_present", False))
         try:
-            length = int(length_text)
+            length = cached_length if cached_length_present and isinstance(cached_length, int) else int(length_text)
         except (TypeError, ValueError):
             missing = not length_text
             status = missing_status if missing else invalid_status
@@ -562,7 +599,33 @@ class FilesystemHttpAdapter(_HandlerAdapter):
                 message_params={"max": max_length},
                 status=too_large_status,
             ), too_large_status
-        return self.rfile.read(length), None, HTTPStatus.OK
+        connection = getattr(self, "connection", None)
+        gettimeout = getattr(connection, "gettimeout", None)
+        settimeout = getattr(connection, "settimeout", None)
+        previous_timeout = gettimeout() if callable(gettimeout) else None
+        try:
+            if callable(settimeout):
+                settimeout(HTTP_REQUEST_BODY_INACTIVITY_TIMEOUT_SECONDS)
+            body = self.rfile.read(length)
+        except TimeoutError:
+            self.close_connection = True
+            return None, error_payload(
+                "request body read timed out",
+                status=HTTPStatus.REQUEST_TIMEOUT,
+            ), HTTPStatus.REQUEST_TIMEOUT
+        finally:
+            if callable(settimeout):
+                settimeout(previous_timeout)
+        if len(body) != length:
+            self.close_connection = True
+            return None, error_payload(
+                "incomplete request body",
+                status=HTTPStatus.BAD_REQUEST,
+            ), HTTPStatus.BAD_REQUEST
+        # This is the only place a declared request body leaves the socket, so it is the only place
+        # that may report the connection re-framed for the next request.
+        self.request_body_consumed = True
+        return body, None, HTTPStatus.OK
 
     def read_json_body(self, max_length: int, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
         body, error, status = Handler.read_request_body(
@@ -1581,6 +1644,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self._http_request_thread_native_id = None
         self._http_request_body_bytes = None
         self._http_request_body_identity_v1 = None
+        self.request_body_consumed = False
+        self._request_content_length = None
+        self._request_content_length_present = False
+        self._request_framing_accepted = False
         self._route_response = None
         self._route_response_written = False
         self._api_request_id = ""
@@ -1621,12 +1688,117 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self._route_response = None
 
     def parse_request(self) -> bool:
-        """Mark BaseHTTPRequestHandler's request-line and header boundary for timing."""
+        """Mark BaseHTTPRequestHandler's request-line and header boundary for timing.
+
+        This is the one place the request line and the header block are both finished, so it is
+        also the only place that can refuse a header block whose framing this parser and its peer
+        would not agree on.
+        """
         self._http_request_line_read_at = time.perf_counter()
         try:
-            return super().parse_request()
+            if not super().parse_request():
+                return False
+            return self.accept_header_framing()
         finally:
             self._http_request_parse_completed_at = time.perf_counter()
+
+    def accept_header_framing(self) -> bool:
+        """Accept one unambiguous request-body framing before route or auth dispatch.
+
+        RFC 7230 3.2.4 deprecated obs-fold -- a header value continued on a line beginning with SP
+        or HTAB -- and allows a server either to reject the message or to replace the fold with
+        spaces before reading the value.  Python's email parser does neither: it unfolds the
+        continuation into the PREVIOUS header's value, raw CRLF and all.  A folded
+        ``Content-Length`` therefore never reaches ``self.headers.get("Content-Length")``, which is
+        the only input ``request_has_unread_body`` has, so the connection is kept alive with the
+        declared body still on the socket and those bytes are read as the next request line.  A peer
+        that unfolds instead frames that same byte range as a body.  Two framings of one socket is a
+        desync, so refuse the message: rejecting is fail-closed, and normalizing would still leave
+        this server and the peer disagreeing about which header the folded bytes belonged to.
+
+        A continuation on the FIRST header line belongs to no header at all; Python drops it and
+        records only a defect, so the request would otherwise be served with bytes nobody parsed.
+        Header-only parsing also reports MIME-body defects for valid multipart requests because it
+        never receives the multipart body. Those are not HTTP syntax defects; only positive evidence
+        that a header line was folded, discarded, or reclassified belongs to this boundary.
+
+        BaseHTTPRequestHandler does not decode Transfer-Encoding, so every such declaration is
+        refused. Content-Length must be singular, decimal, and representable by the bounded body
+        owner. Route-specific size limits remain in ``read_request_body``.
+        """
+        if getattr(self, "_request_framing_accepted", False):
+            return True
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return True
+        raw_items = getattr(headers, "raw_items", None)
+        header_items = list(raw_items()) if callable(raw_items) else list(headers.items())
+        folded = any("\n" in str(value) or "\r" in str(value) for _name, value in header_items)
+        invalid_name = any(HTTP_HEADER_NAME_RE.fullmatch(str(name)) is None for name, _value in header_items)
+        invalid_value = any(
+            any((ord(character) < 32 and character != "\t") or ord(character) == 127 for character in str(value))
+            for _name, value in header_items
+        )
+        get_unixfrom = getattr(headers, "get_unixfrom", None)
+        misplaced_envelope = bool(get_unixfrom()) if callable(get_unixfrom) else False
+        header_framing_defects = (
+            FirstHeaderLineIsContinuationDefect,
+            InvalidHeaderDefect,
+            MisplacedEnvelopeHeaderDefect,
+            MissingHeaderBodySeparatorDefect,
+        )
+        framing_defects = tuple(
+            defect
+            for defect in getattr(headers, "defects", ())
+            if isinstance(defect, header_framing_defects)
+        )
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all):
+            transfer_encoding_values = list(get_all("Transfer-Encoding", []))
+            content_length_values = list(get_all("Content-Length", []))
+        else:
+            transfer_encoding = headers.get("Transfer-Encoding")
+            content_length = headers.get("Content-Length")
+            transfer_encoding_values = [] if transfer_encoding is None else [transfer_encoding]
+            content_length_values = [] if content_length is None else [content_length]
+        invalid_content_length = len(content_length_values) > 1
+        declared_length = 0
+        if len(content_length_values) == 1:
+            length_text = str(content_length_values[0]).strip()
+            normalized_length = length_text.lstrip("0") or "0"
+            invalid_content_length = (
+                re.fullmatch(r"[0-9]+", length_text) is None
+                or len(normalized_length) > len(str(HTTP_MAX_DECLARED_BODY_BYTES))
+                or (
+                    len(normalized_length) == len(str(HTTP_MAX_DECLARED_BODY_BYTES))
+                    and normalized_length > str(HTTP_MAX_DECLARED_BODY_BYTES)
+                )
+            )
+            if not invalid_content_length:
+                declared_length = int(normalized_length)
+        if (
+            not folded
+            and not invalid_name
+            and not invalid_value
+            and not misplaced_envelope
+            and not framing_defects
+            and not transfer_encoding_values
+            and not invalid_content_length
+        ):
+            self._request_content_length = declared_length
+            self._request_content_length_present = bool(content_length_values)
+            self._request_framing_accepted = True
+            return True
+        # The parsed message does not have one framing both peers can safely reuse.
+        self.close_connection = True
+        self.send_error(HTTPStatus.BAD_REQUEST, "Bad request header framing")
+        return False
+
+    def handle_expect_100(self) -> bool:
+        """Validate framing before inviting the peer to send a declared request body."""
+        if not self.accept_header_framing():
+            return False
+        return super().handle_expect_100()
 
     def setup(self) -> None:
         preparer = getattr(self.server, "prepare_request_socket", None)
@@ -1659,10 +1831,13 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         setblocking = getattr(connection, "setblocking", None)
         settimeout = getattr(connection, "settimeout", None)
         timeout = gettimeout() if callable(gettimeout) else None
+        remaining = HTTP_REQUEST_LINE_CAPTURE_LIMIT - len(captured)
         try:
             if callable(setblocking):
                 setblocking(False)
-            buffered = bytes(peek(HTTP_REQUEST_LINE_CAPTURE_LIMIT - len(captured)))
+            # BufferedReader.peek() may return more than requested.  Do not let an oversized-line
+            # diagnostic cross its own evidence bound into a folded header or pipelined request.
+            buffered = bytes(peek(remaining))[:remaining]
         except (BlockingIOError, OSError, ValueError):
             return bytes(captured), False
         finally:
@@ -1713,8 +1888,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def send_response(self, code: int | HTTPStatus, message: str | None = None) -> None:
-        """Mark the response committed for every JSON and non-JSON protocol family."""
+        """Mark the response committed for every JSON and non-JSON protocol family.
+
+        Every response owner reaches this line before it emits a single header, so this is the one
+        place that can decide connection reuse for all of them: 404 for a deleted route, the 500
+        from ``dispatch_route_response``, the auth-setup redirect, the Content-Length rejections in
+        ``read_request_body``, and the POST handlers that answer from the query string alone.  A
+        response committed while the declared body is still on the socket must end the connection,
+        otherwise the leftover bytes become the next request line.
+        """
         self._route_response_written = True
+        self.close_after_unread_body()
         super().send_response(code, message)
 
     def http_endpoint_metric_key(self) -> str:
@@ -1885,6 +2069,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
     def handle_fs_diff(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_fs_diff(self, parsed)
+
+    def handle_fs_git_history(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_git_history(self, parsed)
+
+    def handle_fs_git_commit(self, parsed: Any) -> None:
+        return FilesystemHttpAdapter.handle_fs_git_commit(self, parsed)
 
     def handle_blame(self, parsed: Any) -> None:
         return FilesystemHttpAdapter.handle_blame(self, parsed)

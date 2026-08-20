@@ -60,6 +60,205 @@ def test_browser_paint_probe_resolves_scoped_tokens_from_the_component_owner(bro
     assert paint["root"] in ("rgba(0, 0, 0, 0)", "transparent"), paint
 
 
+def test_light_terminal_preserves_ansi_emphasis_hierarchy(browser, tmp_path):
+    page = tmp_path / "light-terminal-emphasis.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        """
+        <!doctype html>
+        <html>
+          <head>
+            <meta charset="utf-8">
+            <link rel="stylesheet" href="/static/vendor/xterm.css">
+            <link rel="stylesheet" href="/static/yolomux.css">
+            <style>
+              body { margin: 0; background: #ffffff; }
+              .terminal { width: 1000px; height: 320px; background: #ffffff; }
+            </style>
+          </head>
+          <body>
+            <div id="terminal" class="terminal" data-terminal-theme="light"></div>
+            <div id="terminal-unfocused" class="terminal" data-terminal-theme="light"></div>
+            <div id="terminal-theme-cursor" class="terminal" data-terminal-theme="light"></div>
+            <script src="/static/vendor/xterm.js"></script>
+            <script>
+              const terminalOptions = (cursor, cursorAccent = '#ffffff') => ({
+                cols: 100,
+                rows: 12,
+                cursorBlink: false,
+                fontFamily: '"YOLOmux Mono", monospace',
+                fontSize: 20,
+                minimumContrastRatio: 4.5,
+                theme: {
+                  background: '#11151d', foreground: '#dfe6ef',
+                  cursor, cursorAccent,
+                  black: '#0f1115', white: '#e4e8ee',
+                  brightBlack: '#667286', brightWhite: '#ffffff',
+                  cyan: '#7ee9ff', brightCyan: '#a5f3fc',
+                },
+              });
+              const term = new Terminal(terminalOptions('#9a6700'));
+              const unfocusedTerm = new Terminal(terminalOptions('#0f172a'));
+              const themeCursorTerm = new Terminal(terminalOptions('#0f172a', '#ffffff'));
+              term.open(document.getElementById('terminal'));
+              unfocusedTerm.open(document.getElementById('terminal-unfocused'));
+              themeCursorTerm.open(document.getElementById('terminal-theme-cursor'));
+              window.themeCursorTerm = themeCursorTerm;
+              window.terminalProbeReady = Promise.all([
+                new Promise(resolve => term.write([
+                  'normal',
+                  '\\x1b[1mbold\\x1b[0m',
+                  '\\x1b[2mdim\\x1b[0m',
+                  '\\x1b[3mitalic\\x1b[0m',
+                  '\\x1b[37mwhite\\x1b[0m',
+                  '\\x1b[97mbright-white\\x1b[0m',
+                  '\\x1b[38;2;223;230;239mtrue-light\\x1b[0m',
+                  '\\x1b[38;2;160;168;180mtrue-secondary\\x1b[0m',
+                  '\\x1b[36mcyan\\x1b[0m',
+                ].join('\\r\\n'), resolve)),
+                new Promise(resolve => unfocusedTerm.write('idle', resolve)),
+                new Promise(resolve => themeCursorTerm.write('theme', resolve)),
+              ]).then(() => {
+                unfocusedTerm.focus();
+                term.focus();
+              });
+            </script>
+          </body>
+        </html>
+        """,
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.terminalProbeReady.then(() => requestAnimationFrame(() => {
+          const rows = [...document.querySelectorAll('#terminal .xterm-rows > div')];
+          const hierarchy = rows.slice(0, 9).map(row => {
+            const span = row.querySelector('span:not(.xterm-cursor)') || row.querySelector('span');
+            const style = getComputedStyle(span);
+            return {
+              text: row.textContent || '',
+              color: style.color,
+              fontWeight: style.fontWeight,
+              fontStyle: style.fontStyle,
+              opacity: style.opacity,
+              rowFilter: getComputedStyle(row.parentElement).filter,
+            };
+          });
+          const cursorMetric = id => {
+            const cursor = document.querySelector(`#${id} .xterm-cursor`);
+            const style = getComputedStyle(cursor);
+            return {
+              className: cursor.className,
+              background: style.backgroundColor,
+              color: style.color,
+              outlineColor: style.outlineColor,
+              cursorFilter: style.filter,
+              rowFilter: getComputedStyle(cursor.closest('.xterm-rows')).filter,
+            };
+          };
+          const focusedCursor = cursorMetric('terminal');
+          const unfocusedCursor = cursorMetric('terminal-unfocused');
+          window.themeCursorTerm.focus();
+          requestAnimationFrame(() => done({
+            hierarchy,
+            focusedCursor,
+            unfocusedCursor,
+            themeCursor: cursorMetric('terminal-theme-cursor'),
+            paintBackgrounds: [...document.querySelectorAll('#terminal :is(.xterm, .xterm-viewport, .xterm-screen)')]
+              .map(element => getComputedStyle(element).backgroundColor),
+          }));
+        }));
+        """
+    )
+    by_text = {metric["text"]: metric for metric in metrics["hierarchy"]}
+    assert "normal" in by_text, metrics
+    assert by_text["normal"]["fontWeight"] == "400", metrics
+    assert int(by_text["bold"]["fontWeight"]) >= 700, metrics
+    assert by_text["dim"]["color"].startswith("rgba(") and "0.5" in by_text["dim"]["color"], metrics
+    assert by_text["italic"]["fontStyle"] == "italic", metrics
+    assert by_text["white"]["color"] != by_text["bright-white"]["color"], metrics
+    assert by_text["true-light"]["color"] != by_text["true-secondary"]["color"], metrics
+    assert all(metric["rowFilter"] != "none" for metric in metrics["hierarchy"]), metrics
+    assert all(background == "rgb(255, 255, 255)" for background in metrics["paintBackgrounds"]), metrics
+    assert metrics["focusedCursor"]["background"] == "rgb(154, 103, 0)", metrics
+    assert metrics["focusedCursor"]["color"] == "rgb(255, 255, 255)", metrics
+    assert metrics["unfocusedCursor"]["outlineColor"] == "rgb(15, 23, 42)", metrics
+    assert "xterm-cursor-outline" in metrics["unfocusedCursor"]["className"], metrics
+    assert metrics["themeCursor"]["background"] == "rgb(15, 23, 42)", metrics
+    assert metrics["themeCursor"]["color"] == "rgb(255, 255, 255)", metrics
+    assert "xterm-cursor-outline" not in metrics["themeCursor"]["className"], metrics
+    assert metrics["focusedCursor"]["cursorFilter"] != "none", metrics
+    assert metrics["unfocusedCursor"]["cursorFilter"] != "none", metrics
+    assert metrics["themeCursor"]["cursorFilter"] != "none", metrics
+
+
+def test_graph_series_use_vivid_theme_colors_and_light_lines_are_thicker(browser, tmp_path):
+    page = tmp_path / "browser-theme-graph-series.html"
+    palette = ["cyan", "orange", "magenta", "beige", "turquoise", "rose", "violet"]
+    lines = "".join(
+        f'<polyline id="{color}" class="js-debug-line" style="--js-debug-series-color:var(--js-debug-agent-token-{color})" points="0,10 100,1"></polyline>'
+        for color in palette
+    )
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        page_html(
+            f'<div id="graph" class="js-debug-graph-view"><svg>{lines}<polyline id="average" class="js-debug-line js-debug-line--moving-average" points="0,8 100,3"></polyline></svg></div><div id="cost" class="js-yocost-graphs"></div>'
+        ),
+    )
+
+    def metrics(theme):
+        return browser.execute_script(
+            """
+            const [palette, theme] = arguments;
+            document.body.className = theme;
+            const lineMetrics = Object.fromEntries(palette.map(name => {
+              const style = getComputedStyle(document.getElementById(name));
+              return [name, {stroke: style.stroke, width: style.strokeWidth}];
+            }));
+            return {
+              lines: lineMetrics,
+              averageWidth: getComputedStyle(document.getElementById('average')).strokeWidth,
+              graphComparisonOpacity: getComputedStyle(document.getElementById('graph')).getPropertyValue('--js-debug-client-comparison-opacity').trim(),
+              costComparisonOpacity: getComputedStyle(document.getElementById('cost')).getPropertyValue('--js-debug-client-comparison-opacity').trim(),
+            };
+            """,
+            palette,
+            theme,
+        )
+
+    assert metrics("theme-dark") == {
+        "lines": {
+            "cyan": {"stroke": "rgb(0, 168, 255)", "width": "1px"},
+            "orange": {"stroke": "rgb(255, 106, 0)", "width": "1px"},
+            "magenta": {"stroke": "rgb(255, 0, 212)", "width": "1px"},
+            "beige": {"stroke": "rgb(255, 212, 0)", "width": "1px"},
+            "turquoise": {"stroke": "rgb(0, 230, 118)", "width": "1px"},
+            "rose": {"stroke": "rgb(255, 23, 68)", "width": "1px"},
+            "violet": {"stroke": "rgb(139, 92, 246)", "width": "1px"},
+        },
+        "averageWidth": "1.8px",
+        "graphComparisonOpacity": "0.68",
+        "costComparisonOpacity": "0.68",
+    }
+    assert metrics("theme-light") == {
+        "lines": {
+            "cyan": {"stroke": "rgb(0, 109, 255)", "width": "1.6px"},
+            "orange": {"stroke": "rgb(240, 68, 0)", "width": "1.6px"},
+            "magenta": {"stroke": "rgb(208, 0, 184)", "width": "1.6px"},
+            "beige": {"stroke": "rgb(176, 107, 0)", "width": "1.6px"},
+            "turquoise": {"stroke": "rgb(0, 143, 85)", "width": "1.6px"},
+            "rose": {"stroke": "rgb(208, 0, 64)", "width": "1.6px"},
+            "violet": {"stroke": "rgb(109, 40, 217)", "width": "1.6px"},
+        },
+        "averageWidth": "2.2px",
+        "graphComparisonOpacity": "0.9",
+        "costComparisonOpacity": "0.9",
+    }
+
 def test_classified_custom_radii_keep_computed_geometry_in_both_themes(browser, tmp_path):
     page = tmp_path / "browser-custom-radius-parity.html"
     load_static_html_fixture(
@@ -912,12 +1111,40 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "range": True,
         "resolution": True,
         "toggles": 12,
-        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Agent tokens/min", "Model output tokens/min", "Cost summary", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
+        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Session tokens/min", "Model output tokens/min", "Cost summary", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
         "headings": metrics["headings"],
         "semanticCards": True,
+    }
+    session_tokens = browser.execute_script(
+        """
+        const bucket = {
+          durationMs: 60_000,
+          agentTokenRates: new Map([
+            ['yo7771-b|0|codex', {label: 'yo7771-b', samples: 1, total: 100}],
+            ['yo7771-b|1|claude', {label: 'yo7771-b', samples: 1, total: 250}],
+          ]),
+        };
+        const definitions = debugGraphAgentTokenSeriesDefs([bucket]);
+        return {
+          title: t('debug.graph.chart.agentTokens'),
+          count: definitions.length,
+          key: definitions[0]?.agentTokenKey,
+          label: definitions[0]?.label,
+          value: definitions[0]?.value(bucket),
+          samples: definitions[0]?.sampleCount(bucket),
+        };
+        """
+    )
+    assert session_tokens == {
+        "title": "Session tokens/min",
+        "count": 1,
+        "key": "yo7771-b",
+        "label": "yo7771-b",
+        "value": 350,
+        "samples": 2,
     }
     browser.execute_script("document.querySelector('[data-js-debug-subtab=\"events\"]').click();")
     events = WebDriverWait(browser, 8).until(
@@ -1420,6 +1647,50 @@ def test_current_stats_daemons_load_mode_controls_repaint_retained_buckets_and_p
 
     assert len({observed[mode]["points"] for mode in observed}) == 3, observed
 
+    click_service_load_mode("max")
+    WebDriverWait(browser, 5).until(lambda _driver: mode_snapshot()["selected"] == "max")
+    moon_white = browser.execute_script(
+        """
+        const originalBodyClass = document.body.className;
+        const originalRootStyle = document.documentElement.getAttribute('style');
+        const originalBodyStyle = document.body.getAttribute('style');
+        document.body.classList.remove('theme-dark', 'theme-resolved-dark');
+        document.body.classList.add('theme-light', 'theme-resolved-light');
+        applyActiveColor('white');
+        const input = document.querySelector('[data-js-debug-service-load-mode="max"]:checked');
+        const label = input?.nextElementSibling;
+        const style = label ? getComputedStyle(label) : null;
+        const channels = value => (value.match(/[\\d.]+/g) || []).slice(0, 3).map(Number);
+        const luminance = value => {
+          const linear = channels(value).map(channel => {
+            const normalized = channel / 255;
+            return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+          });
+          return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+        };
+        const foreground = style?.color || '';
+        const background = style?.backgroundColor || '';
+        const foregroundLuminance = luminance(foreground);
+        const backgroundLuminance = luminance(background);
+        const result = {
+          text: label?.textContent?.trim() || '',
+          contrast: (Math.max(foregroundLuminance, backgroundLuminance) + 0.05) / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05),
+        };
+        document.body.className = originalBodyClass;
+        if (originalRootStyle === null) document.documentElement.removeAttribute('style');
+        else document.documentElement.setAttribute('style', originalRootStyle);
+        if (originalBodyStyle === null) document.body.removeAttribute('style');
+        else document.body.setAttribute('style', originalBodyStyle);
+        updateBrowserFavicon({force: true});
+        return result;
+        """
+    )
+    assert moon_white["text"] == "Max" and moon_white["contrast"] >= 7, moon_white
+    click_service_load_mode("min")
+    WebDriverWait(browser, 5).until(
+        lambda _driver: mode_snapshot()["selected"] == "min" and mode_snapshot()["storedMode"] == "min"
+    )
+
     browser.refresh()
     WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
@@ -1506,6 +1777,15 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
             const now = Date.now();
             for (let index = 5; index >= 0; index -= 1) {
               debugGraphApplyServerRecord({start: Math.floor((now - index * 60000) / 1000), duration: 60, host_metrics: {
+                system_memory_used_total_bytes: 39.6 * 1024 ** 3, system_memory_capacity_total_bytes: 48 * 1024 ** 3, system_memory_count: 1,
+                memory_processes: {
+                  python: {label: 'python', total_bytes: 9 * 1024 ** 3, samples: 1},
+                  node: {label: 'node', total_bytes: 7 * 1024 ** 3, samples: 1},
+                  chrome: {label: 'chrome', total_bytes: 5 * 1024 ** 3, samples: 1},
+                  java: {label: 'java', total_bytes: 3 * 1024 ** 3, samples: 1},
+                  go: {label: 'go', total_bytes: 2 * 1024 ** 3, samples: 1},
+                  bash: {label: 'bash', total_bytes: 1 * 1024 ** 3, samples: 1},
+                },
                 mac_memory_count: 1, mac_physical_memory_total_bytes: 48 * 1024 ** 3, mac_memory_used_total_bytes: 39.6 * 1024 ** 3,
                 mac_cached_files_total_bytes: 8.3 * 1024 ** 3, mac_swap_used_total_bytes: 6.6 * 1024 ** 3, mac_app_memory_total_bytes: 15.9 * 1024 ** 3,
                 mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: index ? 20 + index : 57,
@@ -1520,7 +1800,7 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
             if (!card || !details) return {ready: true, card: Boolean(card), details: Boolean(details)};
             const cardRect = card.getBoundingClientRect();
             const rows = [...card.querySelectorAll('[data-js-debug-mac-memory-details] > div')].map(row => row.getBoundingClientRect());
-            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), lineColor: card.querySelector('[data-js-debug-series="macMemoryPressure"]')?.style.getPropertyValue('--js-debug-series-color').trim(), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
+            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), lineColor: card.querySelector('[data-js-debug-series="macMemoryPressure"]')?.style.getPropertyValue('--js-debug-series-color').trim(), areas: [...card.querySelectorAll('[data-js-debug-area-series^="memory:"]')].map(node => node.dataset.jsDebugAreaSeries), processLegendBlocks: [...card.querySelectorAll('[data-js-debug-legend^="memory:"] .js-debug-legend-area')].map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height})), pressureLegendWidth: getComputedStyle(card.querySelector('[data-js-debug-legend="macMemoryPressure"] .js-debug-legend-line .js-debug-line')).strokeWidth, facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
         """
     )
     assert result.get("ready", True) and "cards" in result, result
@@ -1528,9 +1808,154 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
     assert result["title"] == "Memory pressure", result
     assert result["unit"] == "percent" and result["axisMax"] == 100, result
     assert result["lineColor"] == "var(--warning-border-strong)", result
+    assert result["areas"] == ["memory:python", "memory:node", "memory:chrome", "memory:java", "memory:go"], result
+    assert result["processLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 5, result
+    assert result["pressureLegendWidth"] == "1.5px", result
     assert result["facts"] == ["Physical Memory", "Memory Used", "Cached Files", "Swap Used", "App Memory", "Wired Memory", "Compressed"], result
     assert len(result["values"]) == 7 and all(result["values"]), result
     assert result["bounds"] and result["pageOverflow"], result
+
+
+def test_current_stats_system_memory_renders_the_top_five_vivid_binary_rss_areas(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
+    result = browser.execute_script(
+        """
+            const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+            if (!graph || typeof debugGraphApplyServerRecord !== 'function') return {ready: false};
+            setDebugGraphChartVisible('memory', true);
+            clearJsDebugGraphData();
+            const entries = Array.from({length: 9}, (_unused, index) => {
+              const key = index === 8 ? 'python' : `binary-${index}`;
+              const bytes = index === 8 ? 900 : 100 + index;
+              return [key, {label: key, total_bytes: bytes, samples: 1}];
+            });
+            debugGraphApplyServerRecord({start: Math.floor(Date.now() / 1000) - 60, duration: 60, host_metrics: {
+              system_memory_used_total_bytes: 40 * 1024 ** 3,
+              system_memory_capacity_total_bytes: 64 * 1024 ** 3,
+              system_memory_count: 1,
+              memory_processes: Object.fromEntries(entries),
+            }});
+            refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+            const card = graph.querySelector('[data-js-debug-chart="memory"]');
+            const area = card?.querySelector('[data-js-debug-area-series^="memory:"]');
+            const originalBodyClass = document.body.className;
+            document.body.classList.remove('theme-dark', 'theme-resolved-dark');
+            document.body.classList.add('theme-light', 'theme-resolved-light');
+            const lightOpacity = area ? getComputedStyle(area).opacity : '';
+            document.body.classList.remove('theme-light', 'theme-resolved-light');
+            document.body.classList.add('theme-dark', 'theme-resolved-dark');
+            const darkOpacity = area ? getComputedStyle(area).opacity : '';
+            const legendBlocks = [...(card?.querySelectorAll('[data-js-debug-legend^="memory:"] .js-debug-legend-area') || [])]
+              .map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height}));
+            const totalLegendWidth = getComputedStyle(card?.querySelector('[data-js-debug-legend="systemMemory"] .js-debug-legend-line .js-debug-line')).strokeWidth;
+            document.body.className = originalBodyClass;
+            return {
+              ready: true,
+              title: card?.querySelector('.js-debug-chart-title')?.textContent.trim(),
+              areas: [...(card?.querySelectorAll('[data-js-debug-area-series^="memory:"]') || [])].map(node => node.dataset.jsDebugAreaSeries),
+              lightOpacity,
+              darkOpacity,
+              legendBlocks,
+              totalLegendWidth,
+            };
+        """
+    )
+    assert result == {
+        "ready": True,
+        "title": "System memory",
+        "areas": [
+            "memory:python",
+            "memory:binary-7",
+            "memory:binary-6",
+            "memory:binary-5",
+            "memory:binary-4",
+        ],
+        "lightOpacity": "0.52",
+        "darkOpacity": "0.52",
+        "legendBlocks": [{"width": "18px", "height": "6px"}] * 5,
+        "totalLegendWidth": "1.5px",
+    }, result
+
+
+def test_current_stats_cpu_renders_areas_below_the_emphasized_yolomux_line(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
+    result = browser.execute_script(
+        """
+            const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+            if (!graph || typeof debugGraphApplyServerRecord !== 'function') return {ready: false};
+            setDebugGraphChartVisible('cpu', true);
+            clearJsDebugGraphData();
+            const entries = [
+              ['python', 40], ['node', 25], ['rustc', 20], ['chromium', 15], ['bash', 10], ['tmux', 5],
+            ];
+            const servingPort = location.port || (location.protocol === 'https:' ? '443' : '80');
+            debugGraphApplyServerRecord({
+              start: Math.floor(Date.now() / 1000) - 1,
+              duration: 1,
+              system_cpu_total_percent: 60,
+              system_cpu_count: 1,
+              servers: {[`port:${servingPort}`]: {label: `port:${servingPort}`, cpu_total_percent: 35, cpu_count: 1}},
+              host_metrics: {cpu_processes: Object.fromEntries(entries.map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}]))},
+            });
+            refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+            const card = graph.querySelector('[data-js-debug-chart="cpu"]');
+            const area = card?.querySelector('[data-js-debug-area-series^="cpuBinary:"]');
+            const originalBodyClass = document.body.className;
+            document.body.classList.remove('theme-dark', 'theme-resolved-dark');
+            document.body.classList.add('theme-light', 'theme-resolved-light');
+            const lightOpacity = area ? getComputedStyle(area).opacity : '';
+            document.body.classList.remove('theme-light', 'theme-resolved-light');
+            document.body.classList.add('theme-dark', 'theme-resolved-dark');
+            const darkOpacity = area ? getComputedStyle(area).opacity : '';
+            const areas = [...(card?.querySelectorAll('[data-js-debug-area-series^="cpuBinary:"]') || [])];
+            const areaLegendBlocks = [...(card?.querySelectorAll('[data-js-debug-legend^="cpuBinary:"] .js-debug-legend-area') || [])].map(node => ({width: getComputedStyle(node).width, height: getComputedStyle(node).height}));
+            const systemLine = card?.querySelector('[data-js-debug-series="systemCpu"]');
+            const yolomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
+            const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
+            const yolomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
+            const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])]
+              .map(node => node.dataset.jsDebugLegend);
+            const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])]
+              .map(node => node.dataset.jsDebugSeries);
+            document.body.className = originalBodyClass;
+            return {
+              ready: true,
+              title: card?.querySelector('.js-debug-chart-title')?.textContent.trim(),
+              kind: card?.dataset.jsDebugChartKind,
+              stacked: card?.dataset.jsDebugChartStacked,
+              areas: areas.map(node => node.dataset.jsDebugAreaSeries),
+              colors: areas.map(node => node.style.getPropertyValue('--js-debug-series-color').trim()),
+              lightOpacity,
+              darkOpacity,
+              areaLegendBlocks,
+              systemLegendWidth: systemLegend ? getComputedStyle(systemLegend).strokeWidth : '',
+              yolomuxLegendWidth: yolomuxLegend ? getComputedStyle(yolomuxLegend).strokeWidth : '',
+              systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
+              yolomuxLineWidth: yolomuxLine ? getComputedStyle(yolomuxLine).strokeWidth : '',
+              yolomuxEmphasized: yolomuxLine?.classList.contains('js-debug-line--current-process') || false,
+              legendOrder,
+              linePaintOrder,
+              systemPattern: systemLine?.dataset.jsDebugLinePattern,
+              yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
+            };
+        """
+    )
+    assert result.get("ready") is True, result
+    assert result["title"] == "CPU (8 logical CPUs / 4 physical cores)", result
+    assert result["kind"] == "area" and result["stacked"] == "true", result
+    assert result["areas"] == ["cpuBinary:python", "cpuBinary:node", "cpuBinary:rustc", "cpuBinary:chromium"], result
+    assert len(set(result["colors"])) == 4 and all(result["colors"]), result
+    assert result["lightOpacity"] == result["darkOpacity"] == "0.52", result
+    assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
+    assert result["systemLegendWidth"] == "1.5px", result
+    assert float(result["yolomuxLegendWidth"].removesuffix("px")) > 1.5, result
+    assert float(result["yolomuxLineWidth"].removesuffix("px")) > float(result["systemLineWidth"].removesuffix("px")), result
+    assert result["yolomuxEmphasized"] is True, result
+    assert result["legendOrder"][0].startswith("cpu:port:"), result
+    assert result["linePaintOrder"][-1].startswith("cpu:port:"), result
+    assert result["systemPattern"] == "dot" and result["yolomuxPattern"] == "solid", result
 
 
 def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path):
@@ -6797,9 +7222,11 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
 
     for theme in ("theme-dark", "theme-light"):
         browser.execute_script("document.body.className = arguments[0]", theme)
+        browser.execute_script("document.activeElement?.blur()")
         fast_pointer_actions(browser).move_to_element(browser.find_element("id", "neutral")).perform()
         owner = read("owner")
         activity = read("activity")
+        attention = read("attention")
         for property_name in ("display", "flex", "alignItems", "height", "fontSize", "cursor", "whiteSpace"):
             assert owner[property_name] == activity[property_name], (theme, property_name, owner, activity)
         assert owner["display"] == "inline-flex"
@@ -6808,6 +7235,7 @@ def test_topbar_status_actions_share_shell_and_pointer_keyboard_paint(browser, t
         assert latency["cursor"] == "auto"
         for property_name in ("background", "border"):
             assert len({owner[property_name], activity[property_name], latency[property_name]}) == 1, (theme, property_name, owner, activity, latency)
+            assert attention[property_name] == activity[property_name], (theme, property_name, attention, activity)
         token_metrics = browser.execute_script(
             """
             const paint = id => {
@@ -12819,6 +13247,58 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
               && document.querySelector('input[data-setting-path="appearance.pane_ring_opacity"]') !== null
             """
         )
+    )
+    browser.execute_script("setGlobalThemeMode('light')")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return document.body.classList.contains('theme-light') && window.__settingsPayload?.settings?.appearance?.theme === 'light'"
+        )
+    )
+    browser.execute_script(
+        """
+        const radio = document.querySelector('input[type="radio"][data-setting-path="appearance.active_color"][value="white"]');
+        radio.checked = true;
+        radio.dispatchEvent(new Event('change', {bubbles: true}));
+        """
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            return document.body.classList.contains('theme-light')
+              && window.__settingsPayload?.settings?.appearance?.active_color === 'white';
+            """
+        )
+    )
+    moon_white = browser.execute_script(
+        """
+        const channels = value => (String(value).match(/[0-9]+(?:[.][0-9]+)?/g) || []).slice(0, 3).map(Number);
+        const delta = (left, right) => Math.max(...channels(left).map((value, index) => Math.abs(value - channels(right)[index])));
+        const active = document.querySelector('.dockview-pane-tab[data-pane-tab="1"].active');
+        const strip = active.closest('.dv-tabs-and-actions-container');
+        const inactive = document.createElement('button');
+        inactive.className = 'pane-tab';
+        inactive.textContent = 'inactive';
+        strip.appendChild(inactive);
+        const activeBg = getComputedStyle(active).backgroundColor;
+        const inactiveBg = getComputedStyle(inactive).backgroundColor;
+        const stripBg = getComputedStyle(strip).backgroundColor;
+        inactive.remove();
+        return {
+          activeBg,
+          inactiveBg,
+          stripBg,
+          activeStripDelta: delta(activeBg, stripBg),
+          inactiveStripDelta: delta(inactiveBg, stripBg),
+        };
+        """
+    )
+    assert moon_white["activeBg"] == "rgb(174, 184, 197)", moon_white
+    assert moon_white["inactiveBg"] == "rgb(211, 219, 230)", moon_white
+    assert moon_white["activeStripDelta"] >= 35, moon_white
+    assert moon_white["inactiveStripDelta"] >= 16, moon_white
+    browser.execute_script("setGlobalThemeMode('dark')")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.body.classList.contains('theme-dark')")
     )
     browser.execute_script(
         """

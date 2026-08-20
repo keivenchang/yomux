@@ -328,8 +328,8 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
   put(resolution, 'cpu_percent:host', 20);
   put(0, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 100);
   put(10, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 900);
-  put(0, 'agent_tokens_per_minute:122_frontend-crates|1|%18|codex', 50);
-  put(10, 'agent_tokens_per_minute:122_frontend-crates|1|%18|codex', 100);
+  put(0, 'agent_tokens_per_minute:122_frontend-crates|1|%18|claude', 50);
+  put(10, 'agent_tokens_per_minute:122_frontend-crates|1|%18|claude', 100);
   put(0, 'model_tokens_per_minute:output:gpt', 80);
   put(10, 'model_tokens_per_minute:output:gpt', 800);
   put(0, 'model_tokens_per_minute:input:gpt', 5000);
@@ -433,6 +433,15 @@ const tests = [];
 function test(name, body) {
   tests.push({name, body});
 }
+
+test('session token identity groups tmux panes without merging background agents', () => {
+  const api = loadNamespace();
+  assert.equal(api.canonicalSessionKey('yo7771-b|0|codex'), 'yo7771-b');
+  assert.equal(api.canonicalSessionKey('yo7771-b|1|claude'), 'yo7771-b');
+  const background = 'claude-bg:project:123456789abc:deadbeef';
+  assert.equal(api.canonicalSessionKey(background), background);
+  assert.equal(api.canonicalAgentLabel('yo7771-b|1|claude'), 'yo7771-b');
+});
 
 test('normalizes saved choices and builds one exact current request', () => {
   const controller = loadController({
@@ -1941,7 +1950,7 @@ test('a snapshot from a newer server that grew a top-level field is reported, no
   // The v0.6.10 -> v0.7.1 upgrade of port 7770: the running server grew the
   // `usage_atom_backfill` snapshot field while an already-open tab kept running the
   // pre-upgrade bundle. Every repair snapshot then failed the exact-field contract, the
-  // rejection was discarded by the repair `catch`, and Agent tokens, Model tokens, and the
+  // rejection was discarded by the repair `catch`, and Session tokens, Model tokens, and the
   // Cost Summary stayed blank for two hours with nothing said anywhere.
   FakeEventSource.instances = [];
   const clock = new FakeClock();
@@ -2617,6 +2626,7 @@ test('mount owns exact capability controls and renders sparse current series wit
   const modelOutput = chartMarkup(html, 'model-output-tokens');
   const modelUsage = chartMarkup(html, 'model-usage');
   assert.ok(cpu && agent && modelOutput && modelUsage);
+  assert.ok(agent.includes('<h3>Session tokens/min</h3>'));
   assert.ok(cpu.includes('data-point-count="2"'));
   assert.match(cpu, /<path d="M[^"]+ L[^"]+"/);
   assert.ok(agent.includes('data-point-count="2"'));
@@ -2628,14 +2638,14 @@ test('mount owns exact capability controls and renders sparse current series wit
   assert.ok(modelUsage.includes('data-y-max="5000"'), 'input/cache dimensions do not distort output parity');
   assert.ok(agent.includes('data-no-data-family="agent_tokens"'));
   assert.ok(agent.includes('data-no-data-source="usage-scan"'));
-  assert.ok(agent.includes('>122_frontend-crates</li>'), 'Agent tokens/min uses the canonical tmux-session label');
+  assert.ok(agent.includes('>122_frontend-crates</li>'), 'Session tokens/min uses the canonical tmux-session label');
   assert.equal((agent.match(/>122_frontend-crates<\/li>/g) || []).length, 1, 'pane-level usage with one visible session name has one legend entry');
   assert.ok(agent.includes('data-point-value="150"'));
   assert.ok(agent.includes('data-point-value="1000"'), 'same-session pane usage is summed per bucket');
   assert.ok(agent.includes('data-axis-seconds="true"'));
   assert.match(agent, />\d{2}:\d{2}:\d{2}<\/text>/);
   const visibility = root.controls.innerHTML;
-  assert.ok(visibility.indexOf('>Agent tokens</button>') < visibility.indexOf('>Model tokens</button>'));
+  assert.ok(visibility.indexOf('>Session tokens</button>') < visibility.indexOf('>Model tokens</button>'));
   assert.ok(visibility.indexOf('>Model tokens</button>') < visibility.indexOf('>Cost</button>'));
   assert.match(visibility, /data-stats-current-visibility="cost" aria-pressed="false">Cost/);
   assert.equal(root.content.innerHTML.includes('data-stats-chart="cost"'), false, 'the Stats cost chart starts off');
@@ -2848,7 +2858,7 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('data-stats-current-cost-modal-close'));
   assert.ok(modal.includes('Cost by Model'));
   assert.ok(modal.includes('gpt-5.6-sol'));
-  assert.ok(modal.includes('122_frontend-crates'), 'Cost by Agent uses the same canonical tmux-session label as Agent tokens/min');
+  assert.ok(modal.includes('122_frontend-crates'), 'Cost by Agent uses the same canonical tmux-session label as Session tokens/min');
   assert.ok(modal.includes('>122_frontend-crates</span>'), 'Cost by Agent does not waste visible space on pane-key suffixes');
   assert.equal((modal.match(/>122_frontend-crates<\/span>/g) || []).length, 1, 'Cost by Agent consolidates pane keys with the same visible session name');
   assert.match(modal, /yo-cost-current-agent[^>]*>122_frontend-crates<\/span><\/th><td>1\.2K<small>/, 'the consolidated agent row sums both pane attributions');

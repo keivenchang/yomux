@@ -40,9 +40,17 @@ async function activateNavItem(item) {
     activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
     return true;
   }
+  if (gitDiffItemPath(item)) {
+    return Boolean(openGitDiffTab(gitDiffItemPath(item), {item, userInitiated: false}));
+  }
   if (isFileEditorItem(item)) {
     const path = fileItemPath(item);
     if (path) {
+      const identity = historicalFileEditorIdentity(item);
+      if (identity) {
+        await openHistoricalFileInEditor(path, identity.fromRef, identity.toRef, {item, userInitiated: false});
+        return true;
+      }
       await openFileInEditor(path, basenameOf(path), {item});
       return true;
     }

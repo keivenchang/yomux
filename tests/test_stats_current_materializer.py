@@ -75,6 +75,73 @@ def test_system_memory_projection_keeps_mac_details_as_exact_server_series():
     assert samples["system_memory_used_bytes"] == 900
 
 
+def test_system_memory_projection_emits_one_dynamic_series_per_binary():
+    observation = Observation("memory-processes-1", "system_memory", "host", 10, "epoch", 1, {
+        "used_bytes": 900,
+        "capacity_bytes": 1000,
+        "process_memory_bytes": {"python": 300, "node": 200},
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert samples["process_memory_bytes:python"] == 300
+    assert samples["process_memory_bytes:node"] == 200
+
+
+def test_system_memory_projection_keeps_the_retained_eight_binary_wire_shape_readable():
+    processes = {f"process-{index}": 100 - index for index in range(8)}
+    observation = Observation("memory-processes-legacy", "system_memory", "host", 10, "epoch", 1, {
+        "used_bytes": 900,
+        "capacity_bytes": 1000,
+        "process_memory_bytes": processes,
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert {name for name in samples if name.startswith("process_memory_bytes:")} == {
+        f"process_memory_bytes:process-{index}" for index in range(8)
+    }
+
+
+def test_cpu_projection_emits_average_min_and_max_series_per_binary():
+    observation = Observation("cpu-processes-1", "cpu", "host", 10, "epoch", 1, {
+        "process_percent": 5,
+        "system_percent": 20,
+        "process_cpu_percent": {"python": 4, "node": 3},
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert samples["process_cpu_percent:python"] == 4
+    assert samples["process_cpu_min_percent:python"] == 4
+    assert samples["process_cpu_max_percent:python"] == 4
+    assert samples["process_cpu_percent:node"] == 3
+
+
+def test_process_memory_gauge_keeps_the_latest_sample_in_a_coarse_bucket():
+    observations = (
+        Observation("memory-processes-1", "system_memory", "host", 11, "epoch", 60, {
+            "used_bytes": 900, "capacity_bytes": 1000,
+            "process_memory_bytes": {"python": 300, "node": 200},
+        }),
+        Observation("memory-processes-2", "system_memory", "host", 12, "epoch", 60, {
+            "used_bytes": 910, "capacity_bytes": 1000,
+            "process_memory_bytes": {"python": 400},
+        }),
+    )
+    generation = _build(_snapshot(observations=observations), until=20)
+    bucket = next(
+        item for item in materializer.slice_generation(
+            generation, 300, 10, private_source_id="client",
+        ).buckets
+        if item.start == 10
+    )
+
+    values = _series(bucket)
+    assert values["process_memory_bytes:python"].value == 400
+    assert values["process_memory_bytes:node"].value == 200
+
+
 def _projection(micro_usd):
     if micro_usd is None:
         return current_pricing.UsagePriceProjection(None, None, None)
@@ -1312,3 +1379,194 @@ def test_randomized_incremental_schedule_matches_full_build_and_deltas_apply_exa
                 merged[(item["start"], item["duration"])] = item
             expected = {(item["start"], item["duration"]): item for item in new_wire["buckets"]}
             assert json.dumps(sorted(merged.items()), sort_keys=True) == json.dumps(sorted(expected.items()), sort_keys=True)
+
+
+def _reference_uncovered_portions(explicit_gaps, start, end):
+    """Brute-force interval subtraction the indexed seek must reproduce exactly."""
+
+    portions = [(start, end)]
+    for existing in explicit_gaps:
+        next_portions = []
+        for piece_start, piece_end in portions:
+            if existing.end <= piece_start or existing.start >= piece_end:
+                next_portions.append((piece_start, piece_end))
+                continue
+            if piece_start < existing.start:
+                next_portions.append((piece_start, existing.start))
+            if existing.end < piece_end:
+                next_portions.append((existing.end, piece_end))
+        portions = next_portions
+    return [(a, b) for a, b in portions if a < b]
+
+
+@pytest.mark.parametrize("intervals", [1, 2, 5, 17, 64])
+def test_uncovered_gap_seek_matches_brute_force_subtraction(intervals):
+    """The bisect seek may never change which portions survive subtraction."""
+
+    explicit = [
+        materializer.NoData("cpu", "host", f"missed:{index}", index * 2 + 1, index * 2 + 2, 1, "x")
+        for index in range(intervals)
+    ]
+    starts = [item.start for item in explicit]
+    for start, end in ((0, intervals * 2 + 2), (1, 2), (0.5, 1.5), (1.5, 4.5), (3, 3), (2, 100)):
+        computed = []
+        materializer._append_uncovered_gap(
+            explicit, starts, computed,
+            materializer.NoData("cpu", "host", "candidate", start, end, 1, "y"),
+        )
+        assert [(item.start, item.end) for item in computed] == _reference_uncovered_portions(
+            explicit, start, end,
+        ), (start, end, intervals)
+        assert all(item.epoch_id == "candidate" and item.reason == "y" for item in computed)
+
+
+class _SeekOnlyGaps:
+    """Explicit-span sequence that forbids whole-list iteration and counts indexing.
+
+    ``_append_uncovered_gap`` may only reach the spans that actually overlap the
+    candidate. Iterating the whole sequence is the exact defect this guards, so
+    ``__iter__`` fails outright instead of returning data, and every
+    ``__getitem__`` is counted. Nothing here depends on wall-clock time, so the
+    gate cannot be moved by host load.
+    """
+
+    def __init__(self, items):
+        self._items = items
+        self.gets = 0
+
+    def __len__(self):
+        return len(self._items)
+
+    def __getitem__(self, index):
+        self.gets += 1
+        return self._items[index]
+
+    def __iter__(self):
+        raise AssertionError(
+            "_append_uncovered_gap iterated the whole explicit-span list; "
+            "it must seek to the overlapping spans instead"
+        )
+
+
+def _seek_accesses(span_count, candidate_start, candidate_end):
+    """Index accesses used to subtract one candidate from ``span_count`` spans."""
+
+    explicit = _SeekOnlyGaps([
+        materializer.NoData("cpu", "host", f"missed:{index}", index * 10, index * 10 + 5, 1, "m")
+        for index in range(span_count)
+    ])
+    starts = [explicit[index].start for index in range(span_count)]
+    explicit.gets = 0  # exclude fixture construction from the measurement
+    computed = []
+    materializer._append_uncovered_gap(
+        explicit, starts, computed,
+        materializer.NoData("cpu", "host", "candidate", candidate_start, candidate_end, 1, "y"),
+    )
+    return explicit.gets, computed
+
+
+def test_uncovered_gap_seeks_instead_of_scanning_every_explicit_span():
+    """Cost of one subtraction must not grow with the retained span count.
+
+    ``_append_uncovered_gap`` used to walk the whole explicit-span list for every
+    coverage epoch, making each build O(coverage epochs x explicit spans). On a
+    live statsd that was 15.6s of CPU in a 40s sampled profile, the largest single
+    owner, and it grew quadratically as the retained 24h window filled. A candidate
+    overlapping a fixed number of spans must cost a fixed number of accesses no
+    matter how much history is retained.
+    """
+
+    # Candidate [12, 28) overlaps exactly two spans ([10,15) and [20,25)) in every
+    # fixture size, so a seeking implementation does identical work in all of them.
+    baseline, expected_portions = _seek_accesses(64, 12, 28)
+    for span_count in (256, 1024, 4096, 16384):
+        accesses, computed = _seek_accesses(span_count, 12, 28)
+        assert accesses == baseline, (
+            f"{accesses} span accesses at {span_count} retained spans vs {baseline} "
+            f"at 64; subtraction cost must not grow with retained history"
+        )
+        assert [(item.start, item.end) for item in computed] == [
+            (item.start, item.end) for item in expected_portions
+        ]
+    # Pin the absolute cost too, so a future rewrite cannot become uniformly linear.
+    assert baseline <= 8, f"expected an O(1) seek, used {baseline} accesses"
+
+
+@pytest.mark.parametrize("span_count", [256, 4096])
+def test_uncovered_gap_full_span_candidate_touches_only_covered_spans(span_count):
+    """A candidate spanning everything must still visit only the spans it overlaps."""
+
+    accesses, computed = _seek_accesses(span_count, 0, 55)
+    # Overlaps spans 0..5; a full scan would cost span_count accesses.
+    assert accesses <= 12, f"used {accesses} accesses for a 6-span candidate"
+    assert computed, "candidate must yield uncovered portions between the spans"
+
+
+@pytest.mark.parametrize(
+    "spans,expected",
+    [
+        # Raw overlapping markers: normalization keeps the earliest marker as the
+        # owner of the overlap and retains only the uncovered portion of the later.
+        ((("a", 10, 30), ("b", 20, 40)),
+         [(10, 30, "collector_missed"), (30, 40, "collector_missed")]),
+        # Exactly touching markers stay separate; the rest is a computed gap.
+        ((("a", 10, 20), ("b", 20, 30)),
+         [(10, 20, "collector_missed"), (20, 30, "collector_missed"), (30, 40, "coverage_gap")]),
+        # Exact duplicates collapse to one marker.
+        ((("a", 10, 20), ("b", 10, 20)),
+         [(10, 20, "collector_missed"), (20, 40, "coverage_gap")]),
+        # A fully contained marker is absorbed by its enclosing owner.
+        ((("a", 10, 40), ("b", 20, 30)), [(10, 40, "collector_missed")]),
+        # Disjoint markers keep a computed gap between them.
+        ((("a", 10, 20), ("b", 30, 40)),
+         [(10, 20, "collector_missed"), (20, 30, "coverage_gap"), (30, 40, "collector_missed")]),
+        # One marker spanning the whole uncovered stretch leaves nothing computed.
+        ((("a", 10, 40),), [(10, 40, "collector_missed")]),
+    ],
+)
+def test_coverage_gap_matrix_survives_raw_overlapping_unavailable_markers(spans, expected):
+    """Public no-data contract across overlap, touching, duplicate and nesting.
+
+    These go through ``_coverage_gaps`` rather than the subtraction helper so the
+    matrix stays valid whatever the helper's signature is, and so it exercises the
+    normalization the helper's ordering invariant depends on.
+    """
+
+    coverage = (
+        CoverageEpoch("cpu", "host", "before", 0, 10, 1, 42),
+        CoverageEpoch("cpu", "host", "after", 40, 50, 1, 42),
+    )
+    unavailable = tuple(
+        UnavailableSpan("cpu", "host", epoch_id, start, end, 1, "collector_missed", 42)
+        for epoch_id, start, end in spans
+    )
+    gaps = materializer._coverage_gaps(
+        _snapshot(coverage=coverage, unavailable=unavailable), 0, 50,
+    )
+    assert [(gap.start, gap.end, gap.reason) for gap in gaps] == expected
+    # Whatever the marker shape, the uncovered stretch is fully accounted for.
+    assert gaps[0].start == 10 and gaps[-1].end == 40
+    assert all(a.end == b.start for a, b in zip(gaps, gaps[1:]))
+
+
+@pytest.mark.parametrize(
+    "candidate_start,candidate_end",
+    [(0, 100), (20, 30), (19, 31), (20, 25), (25, 30), (0, 20), (30, 100), (25, 25), (5, 10)],
+)
+def test_uncovered_gap_candidate_boundaries_match_brute_force(candidate_start, candidate_end):
+    """Candidate exactly on, inside, before, after and empty against a span set."""
+
+    explicit = [
+        materializer.NoData("cpu", "host", "m1", 20, 30, 1, "collector_missed"),
+        materializer.NoData("cpu", "host", "m2", 40, 50, 1, "collector_missed"),
+        materializer.NoData("cpu", "host", "m3", 50, 60, 1, "collector_missed"),
+    ]
+    starts = [item.start for item in explicit]
+    computed = []
+    materializer._append_uncovered_gap(
+        explicit, starts, computed,
+        materializer.NoData("cpu", "host", "candidate", candidate_start, candidate_end, 1, "y"),
+    )
+    assert [(item.start, item.end) for item in computed] == _reference_uncovered_portions(
+        explicit, candidate_start, candidate_end,
+    )

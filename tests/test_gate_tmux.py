@@ -135,11 +135,16 @@ def test_gate_d6_destructive_default_server_policy_is_explicit(monkeypatch):
     monkeypatch.delenv("YOLOMUX_TMUX_SOCKET", raising=False)
     monkeypatch.delenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", raising=False)
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
-        tmux_utils.tmux_command(["kill-session", "-t", "yt-gate:"])
+        tmux_utils.tmux_command(["kill-session", "-t", tmux_utils.tmux_session_target("yt-gate")])
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(["kill-server"])
     monkeypatch.setenv("YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER", "1")
-    assert tmux_utils.tmux_command(["kill-session", "-t", "yt-gate:"]) == ["tmux", "kill-session", "-t", "yt-gate:"]
+    exact = tmux_utils.tmux_session_target("yt-gate")
+    assert exact == "=yt-gate:"
+    assert tmux_utils.tmux_command(["kill-session", "-t", exact]) == ["tmux", "kill-session", "-t", exact]
+    # The opt-in buys a session kill on the shared default server, never a prefix-resolvable one.
+    with pytest.raises(tmux_utils.TmuxSocketTargetError):
+        tmux_utils.tmux_command(["kill-session", "-t", "yt-gate:"])
     with pytest.raises(tmux_utils.TmuxSocketTargetError):
         tmux_utils.tmux_command(["kill-server"])
 

@@ -334,7 +334,7 @@ function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
 
 function syncFilePreviewPopoutsFromPanel(panel, source) {
   const path = fileEditorPanelPath(panel);
-  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
+  if (!path || fileEditorPanelState(panel)?.historical === true || !fileEditorSourceCanDrive(panel, source)) return false;
   let synced = false;
   for (const record of filePreviewPopoutsForPath(path)) {
     synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
@@ -355,6 +355,7 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
   }
   let synced = false;
   for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     setFileEditorScrollSyncGuard(panel);
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
@@ -1169,6 +1170,7 @@ function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
 }
 
 function openFilePreviewPopout(path, panel = null) {
+  if (panel && fileEditorPanelState(panel)?.historical === true) return false;
   if (!path || !editorPreviewModeAvailable(path)) return false;
   const initialState = fileState.get(path);
   if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);

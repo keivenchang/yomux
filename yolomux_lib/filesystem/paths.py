@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import contextvars
-import fcntl
 import hashlib
 import json
 import os
 import stat
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -24,8 +22,16 @@ MAX_READ_BYTES = 20 * 1024 * 1024  # 20 MB cap on file read
 BINARY_SNIFF_BYTES = 8 * 1024  # bytes inspected for NUL when classifying
 FS_ROOTS_ENV = "YOLOMUX_FS_ROOTS"
 DEFAULT_FS_ROOTS = ("/",)
+# `F_GETPATH` (darwin) answers "what pathname does this descriptor currently have", which is a
+# RE-RESOLUTION, not a pin: the consumer that receives it opens the name again.  It is retained only
+# for descriptor introspection in diagnostics/tests and must never become an authorization path.
 DARWIN_F_GETPATH = 50
 DARWIN_PATH_BUFFER_BYTES = 1024
+# The only pathnames `descriptor_path()` may hand a consumer.  Both are magic per-descriptor entries
+# (`/proc/self/fd/N` on Linux, devfs `/dev/fd/N` elsewhere): reopening one reaches THIS descriptor's
+# object, so a rename or namespace replacement between authorization and consumption cannot redirect
+# it.  Anything else -- including an `F_GETPATH` pathname -- is name-bound and is refused.
+DESCRIPTOR_PATH_ROOTS: tuple[Path, ...] = (Path("/proc/self/fd"), Path("/dev/fd"))
 SECRET_DIR_COMPONENTS = frozenset({
     ".ssh",
     ".gnupg",
@@ -551,15 +557,16 @@ class SafePathHandle:
         os.close(self.descriptor)
 
     def descriptor_path(self) -> Path:
-        if sys.platform == "darwin":
-            try:
-                raw_path = fcntl.fcntl(self.descriptor, DARWIN_F_GETPATH, b"\0" * DARWIN_PATH_BUFFER_BYTES)
-                decoded_path = raw_path.split(b"\0", 1)[0].decode("utf-8")
-            except (OSError, UnicodeDecodeError):
-                decoded_path = ""
-            if decoded_path:
-                return Path(decoded_path)
-        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
+        """Return a pathname that names THIS descriptor generation, or fail closed.
+
+        Every consumer of this value (`git -C`, the count/zip walkers, the multi-repo scan) opens
+        the returned name AGAIN, so a name that the kernel re-resolves would reintroduce exactly the
+        check/use race the descriptor pin exists to close.  Only the magic per-descriptor roots
+        qualify.  Darwin previously preferred the `F_GETPATH` pathname here, which is a genuine
+        re-resolution -- that branch is gone; darwin now takes `/dev/fd/N` like every other
+        non-Linux platform, and refuses when even that is unavailable.
+        """
+        for root in DESCRIPTOR_PATH_ROOTS:
             candidate = root / str(self.descriptor)
             if candidate.exists():
                 return candidate

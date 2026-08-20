@@ -396,6 +396,22 @@
   --terminal-file-link-underline: rgb(3 105 161 / 0.48);
   --terminal-file-link-underline-hover: rgb(3 105 161 / 0.58);
 }
+/* xterm's minimum contrast correction collapses dark-tuned 24-bit grays when it compares them to a
+   white background. Light terminals retain the dark render palette/contrast reference, then this
+   involutive transform converts the painted rows to dark-on-white while preserving source spacing.
+   Keep the xterm paint layers explicitly white: filtering a transparent row stack composites the
+   dark render background into the result even when the outer terminal container is already white.
+   A cursor receives the transform twice so its light display colors and bad-connection X stay
+   unchanged instead of inheriting the row conversion. */
+.terminal[data-terminal-theme="light"] :is(.xterm, .xterm-viewport, .xterm-screen) {
+  background-color: var(--paint-white) !important;
+}
+.terminal[data-terminal-theme="light"] .xterm-rows {
+  filter: invert(1) hue-rotate(180deg);
+}
+.terminal[data-terminal-theme="light"] .xterm-rows .xterm-cursor {
+  filter: invert(1) hue-rotate(180deg);
+}
 .terminal-file-link-underlines {
   position: absolute;
   inset: 0;
@@ -3763,6 +3779,11 @@ body.app-vw-lte-980 .tabs {
 .file-tree-repo-popover-branch {
   font-family: var(--mono-font);
   color: var(--text);
+}
+.file-tree-repo-popover-sha {
+  font-family: var(--mono-font);
+  color: var(--muted);
+  word-break: break-all;
 }
 .file-tree-repo-popover-stat {
   color: var(--muted);

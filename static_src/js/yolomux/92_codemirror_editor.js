@@ -158,7 +158,7 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   if (!view) return;
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
-  if (options.cleanOnly && fileState.get(options.path)?.dirty) return;
+  if (options.cleanOnly && (options.state || fileState.get(options.path))?.dirty) return;
   const selection = view.state.selection;
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
@@ -843,15 +843,17 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     if (panel._cmGeneration !== generation) return null;
   } else if (!state.diffLoaded && !state.diffUnavailable) {
     setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
-    await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+    await refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;
   }
   if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
       const msg = t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')});
       setFileEditorPanelStatus(panel, msg, 'warn');
+      if (state.historical === true) return false;
       return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
     }
+    if (state.historical === true) return false;
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
@@ -866,16 +868,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     const expandUnchanged = fileEditorDiffExpandUnchangedForItem(item);
     const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
     const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
-    const diffEditsAllowed = diffTargetIsCurrent;
+    const diffEditsAllowed = diffTargetIsCurrent && state.historical !== true;
     const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: expandUnchanged});
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
       if (layout === 'side') {
         syncCodeMirrorDocument(panel._cmMergeView?.a, original);
-        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path, state});
       } else {
-        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path, state});
       }
       updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
       scheduleDiffOverviewSettledRebuild(panel);
@@ -1098,7 +1100,8 @@ function renderFileEditorRawPane(rawPane, path, content) {
 // ARBITRARY refs. Force-exiting on an empty default diff (the old behavior) hid the picker entirely on
 // clean files — the recurring "press DIFF, no FROM/TO menu" bug.
 function diffModeShouldFallBackToEdit(path, state, item = null) {
-  return state?.kind === 'text'
+  return state?.historical !== true
+    && state?.kind === 'text'
     && editorViewModeFor(path, item) === 'diff'
     && (!fileStateHasRepo(path, state)
       || (state.diffLoaded === true
@@ -1217,6 +1220,16 @@ function syncEditorDiffRefPanel(path, state, item, parts, mode) {
   const diffRefPanel = parts.diffRefPanel;
   if (!diffRefPanel) return;
   diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+  if (state.historical === true) {
+    const historySignature = JSON.stringify([state.diffPinnedFromRef, state.diffPinnedToRef, state.historicalComparisonKind]);
+    if (!diffRefPanel.hidden && diffRefPanel.dataset.diffRefHistoryRendered !== historySignature) {
+      diffRefPanel.innerHTML = historicalDiffRefControlsHtml(state);
+      diffRefPanel.dataset.diffRefRepoRendered = state.gitRoot || state.diffRepo || '';
+      diffRefPanel.dataset.diffRefPathRendered = path;
+      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
+    }
+    return;
+  }
   // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
   // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
   const diffRepo = fileRepoForPath(path);
@@ -1259,7 +1272,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
   updateFileEditorDiffButton(parts.diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable;
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true;
   syncEditorDiffRefPanel(path, state, item, parts, mode);
   updateFileEditorToolbarSeparators(panel);
   return {previewable};
@@ -1363,7 +1376,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   updateFileEditorPanelChrome(panel, path);
   const parts = editorPanelParts(panel);
   updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
@@ -1399,8 +1412,29 @@ function renderFileEditorPanel(panel, item, options = {}) {
 }
 
 function loadFileEditorState(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.loadingPromise) return;
+  if (state.historical === true) {
+    const identity = historicalFileEditorIdentity(item);
+    if (!identity) return;
+    const loadingPromise = refreshOpenFileDiff(path, {
+      item,
+      state,
+      fromRef: identity.fromRef,
+      toRef: identity.toRef,
+      silent: true,
+      renderOnComplete: false,
+      updateControlsOnComplete: false,
+    }).finally(() => {
+      state.loading = false;
+      if (state.loadingPromise === loadingPromise) delete state.loadingPromise;
+      if (panel) renderFileEditorPanel(panel, item);
+      renderSessionButtons();
+      renderPaneTabStrips();
+    });
+    state.loadingPromise = loadingPromise;
+    return;
+  }
   const loadingPromise = (async () => {
     const kind = openFileKindForPreviewPath(basenameOf(path));
     if (kind === 'image' || kind === 'media') {
@@ -1479,9 +1513,9 @@ function loadFileEditorState(path, panel, item) {
 }
 
 function updateFileEditorPanelChrome(panel, path) {
-  const state = fileState.get(path);
   const item = panel?.dataset?.layoutItem || '';
-  const previewOnly = false;
+  const state = fileEditorStateForItem(path, item);
+  const previewOnly = state?.historical === true;
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -2125,6 +2159,12 @@ function fileEditorPanelPath(panel) {
   return panel?.dataset?.filePath || '';
 }
 
+function fileEditorPanelState(panel) {
+  const path = fileEditorPanelPath(panel);
+  const item = fileEditorPanelItem(panel) || fileEditorItemFor(path);
+  return fileEditorStateForItem(path, item);
+}
+
 function fileEditorPanelMode(panel) {
   const path = fileEditorPanelPath(panel);
   return editorViewModeFor(path, fileEditorPanelItem(panel));
@@ -2194,7 +2234,9 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    const state = fileEditorPanelState(panel);
+    const panelContent = state?.kind === 'text' ? state.content : content;
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -2280,10 +2322,10 @@ function refreshEditorPreviews() {
   for (const [item, panel] of panelNodes.entries()) {
     if (!isFileEditorItem(item)) continue;
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
-      updateFilePreviewPopout(path, state.content || '');
+      if (state.historical !== true) updateFilePreviewPopout(path, state.content || '');
     }
   }
 }
@@ -2306,6 +2348,8 @@ function normalizeFileEditorSaveContent(content, options = fileEditorSaveHygiene
 
 function syncFileEditorNormalizedContentToPanels(path, content) {
   for (const openPanel of fileEditorPanelsForPath(path)) {
+    const panelState = fileEditorPanelState(openPanel);
+    if (panelState?.historical === true) continue;
     if (openPanel?._cmView) syncCodeMirrorDocument(openPanel._cmView, content, {path});
     const rawCode = openPanel?.querySelector?.('.file-editor-raw-panel code');
     if (rawCode) rawCode.textContent = content;
@@ -2313,7 +2357,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (mode === 'preview' || mode === 'split') {
       renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
-    const status = openFileStatus(fileState.get(path));
+    const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
   }
   renderLinkedFilePreviewPanels(null, path, content);
@@ -2333,8 +2377,9 @@ function applyFileEditorSaveHygiene(path) {
 
 async function saveFileEditor(path, panel, options = {}) {
   if (readOnlyMode) return false;
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return false;
   syncOpenFileContentFromPanels(path, panel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});

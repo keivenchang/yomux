@@ -7476,8 +7476,11 @@ def test_dockview_moving_finder_resumes_newly_visible_differ(browser, tmp_path):
           requests.push(String(url));
           return {session: '1', loaded: true, files: [], repos: [], refs_by_repo: {}, errors: [], warnings: []};
         };
-        setSessionFilesPayloadForDestination('finder', emptySessionFilesPayload('1', false));
-        setSessionFilesLoadingForDestination('finder', false);
+        // Differ owns its own session-files record, so unloading Finder no longer unloads
+        // Differ. Seed the surface under test: a newly visible Differ with no payload must
+        // fetch its own.
+        setSessionFilesPayloadForDestination('differ', emptySessionFilesPayload('1', false));
+        setSessionFilesLoadingForDestination('differ', false);
         renderFileExplorerChangesPanel(panelNodes.get(differItemId), {force: true});
         splitSessionAtLayoutBoundary(finderItemId, 'right', slotForItem(finderItemId)).then(moved => {
           const deadline = performance.now() + 4000;

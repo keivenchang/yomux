@@ -791,14 +791,14 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
     assert "application/zip" in metrics["archive"]["text"], metrics
     assert "external viewer" in metrics["parquet"]["title"], metrics
     assert "application/vnd.apache.parquet" in metrics["parquet"]["text"], metrics
-    assert metrics["code"]["mode"] == "edit", metrics
-    assert metrics["code"]["previewPaneHidden"] is True, metrics
-    assert metrics["code"]["modeControlHidden"] is True, metrics
-    assert metrics["code"]["popoutHidden"] is True, metrics
-    assert metrics["text"]["mode"] == "edit", metrics
-    assert metrics["text"]["previewPaneHidden"] is True, metrics
-    assert metrics["text"]["modeControlHidden"] is True, metrics
-    assert metrics["text"]["popoutHidden"] is True, metrics
+    assert metrics["code"]["mode"] == "preview", metrics
+    assert metrics["code"]["previewPaneHidden"] is False, metrics
+    assert metrics["code"]["modeControlHidden"] is False, metrics
+    assert metrics["code"]["popoutHidden"] is False, metrics
+    assert metrics["text"]["mode"] == "preview", metrics
+    assert metrics["text"]["previewPaneHidden"] is False, metrics
+    assert metrics["text"]["modeControlHidden"] is False, metrics
+    assert metrics["text"]["popoutHidden"] is False, metrics
     assert metrics["unsupported"]["modeControlHidden"] is True, metrics
     assert "File is too large to preview" in metrics["unsupported"]["text"], metrics
     assert "binary preview blocked" in metrics["unsupported"]["text"], metrics

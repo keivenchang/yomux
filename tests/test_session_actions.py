@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import json
 import os
+import threading
 from http import HTTPStatus
+from http.client import HTTPConnection
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
 
+from tests.gate_harness import gate_runtime_paths  # noqa: F401 - fixture import
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
 import yolomux_lib.app as app_module
 import yolomux_lib.sessions as sessions_module
 from yolomux_lib.app import tmux_session_name_error
 from yolomux_lib.app import tmux_session_name_sanitize
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
+from yolomux_lib.server import TmuxWebtermHTTPServer
 
 
 class FakeTmuxResult:
@@ -89,7 +98,73 @@ def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch, make_a
     assert payload["renamed"] is True
     assert payload["new_session"] == "agent"
     assert payload["sessions"] == ["agent", "ant"]
-    assert calls == [["rename-session", "-t", "1:", "agent"]]
+    assert calls == [["rename-session", "-t", "=1:", "agent"]]
+
+
+def test_rename_session_http_exact_target_refuses_stale_prefix_without_renaming_sibling(
+    monkeypatch,
+    gate_runtime_paths,
+    make_app,
+    no_control_socket,
+    isolated_yoagent_conversation_state,
+):
+    del no_control_socket, isolated_yoagent_conversation_state
+
+    def post_rename(app, new_name: str) -> tuple[int, dict]:
+        server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        try:
+            query = urlencode({"session": "1", "new_name": new_name})
+            connection.request("POST", f"/api/rename-session?{query}")
+            response = connection.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def run_arm(name: str, *, legacy: bool) -> tuple[int, dict, dict[str, bool]]:
+        root = gate_runtime_paths.root / name
+        root.mkdir()
+        with monkeypatch.context() as arm_patch:
+            arm_patch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+            runtime = start_isolated_tmux_runtime(
+                arm_patch,
+                root,
+                session_commands={"12": "sleep 300"},
+            )
+            assert os.environ["YOLOMUX_ROOT"] == str(gate_runtime_paths.root)
+            assert os.environ["YOLOMUX_TMUX_SOCKET"] == str(runtime.socket_path)
+            if legacy:
+                arm_patch.setattr(app_module, "tmux_session_target", lambda session: f"{session}:")
+            try:
+                app = make_app(["1", "12"])
+                status, body = post_rename(app, f"{name}-renamed")
+                sessions = {
+                    "sibling": run_isolated_tmux(runtime, "has-session", "-t", "=12:").returncode == 0,
+                    "renamed": run_isolated_tmux(runtime, "has-session", "-t", f"={name}-renamed:").returncode == 0,
+                }
+                return status, body, sessions
+            finally:
+                stop_isolated_tmux_runtime(runtime)
+                assert not runtime.socket_dir.exists()
+
+    legacy_status, legacy_body, legacy_sessions = run_arm("legacy", legacy=True)
+    assert legacy_status == HTTPStatus.OK
+    assert legacy_body["state"] == "ready"
+    assert legacy_body["data"]["new_session"] == "legacy-renamed"
+    assert legacy_sessions == {"sibling": False, "renamed": True}
+
+    current_status, current_body, current_sessions = run_arm("current", legacy=False)
+    assert current_status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert current_body["state"] == "failed"
+    assert current_body["error"]["code"] == "request_failed"
+    assert current_body["user_message"]["key"] == "status.sessionRenameFailed"
+    assert "can't find session: 1" in current_body["legacy_error"]
+    assert current_sessions == {"sibling": True, "renamed": False}
 
 
 def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch, make_app):
@@ -125,7 +200,7 @@ def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch, mak
     assert status == HTTPStatus.OK
     assert payload["renamed"] is True
     assert payload["new_session"] == "dynamo-utils_dev"
-    assert calls == [["rename-session", "-t", "1:", "dynamo-utils_dev"]]
+    assert calls == [["rename-session", "-t", "=1:", "dynamo-utils_dev"]]
 
 
 def test_rename_session_detects_collision_after_sanitizing(monkeypatch, make_app):
@@ -165,7 +240,7 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     assert status == HTTPStatus.OK
     assert payload["killed"] is True
     assert payload["sessions"] == ["ant"]
-    assert calls == [["kill-session", "-t", "1:"], ["join-retirement", retirement_identity]]
+    assert calls == [["kill-session", "-t", "=1:"], ["join-retirement", retirement_identity]]
 
 
 def test_kill_session_refuses_success_when_an_exact_process_birth_survives(monkeypatch, make_app):
@@ -216,7 +291,7 @@ def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeyp
     assert payload == {"session": "1", "window": "3", "ok": True}
     assert invalid_status == HTTPStatus.BAD_REQUEST
     assert "window" in invalid_payload["error"]
-    assert calls == [["select-window", "-t", "1:3"]]
+    assert calls == [["select-window", "-t", "=1:3"]]
     assert not any(args and args[0] == "switch-client" for args in calls)
 
 
@@ -314,7 +389,7 @@ def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch, make_app)
             return FakeTmuxResult(stdout="1\n")
         if args[:3] == ["display-message", "-p", "-t"] and args[-1] == "#{buffer_created}:#{buffer_size}:#{buffer_sample}":
             return FakeTmuxResult(stdout="100:3:old\n")
-        if args[:3] == ["send-keys", "-t", "1:"]:
+        if args[:3] == ["send-keys", "-t", "=1:"]:
             return FakeTmuxResult()
         if args == ["save-buffer", "-"]:
             raise AssertionError("must not read a stale buffer when copy did not create one")
@@ -328,4 +403,4 @@ def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch, make_app)
     assert payload["copied"] is False
     assert payload["text"] == ""
     assert payload["error"] == "no tmux selection copied"
-    assert calls[-1] == ["send-keys", "-t", "1:", "-X", "cancel"]
+    assert calls[-1] == ["send-keys", "-t", "=1:", "-X", "cancel"]
