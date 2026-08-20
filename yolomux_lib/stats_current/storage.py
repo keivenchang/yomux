@@ -33,9 +33,10 @@ from . import resolution as stats_resolution
 APPLICATION_ID = 0x594F5354
 SCHEMA_VERSION = 7
 MIN_WRITER_PROTOCOL = 24
-# Build 4 moves recurring CPU/GPU host sampling into statsd.  An older daemon
-# must be retired rather than silently accepting context it cannot collect.
-MIN_WRITER_BUILD = 4
+# Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
+# strict process-memory payload. Build 6 makes the same census the sole owner of
+# grouped CPU and RSS, so an older elected writer must yield before publishing.
+MIN_WRITER_BUILD = 6
 # How long original facts stay on disk. Retention and the GUI's longest display
 # window (stats_resolution.MAX_RANGE_SECONDS) are two independent knobs that used
 # to be spelled with the same literal, which invited the assumption that moving

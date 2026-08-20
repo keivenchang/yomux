@@ -17,6 +17,7 @@ def test_daemon_revision_covers_every_module_loaded_by_the_writer_process():
         "materializer.py",
         "migration.py",
         "pricing.py",
+        "process_memory.py",
         "protocol.py",
         "resolution.py",
         "revision.py",

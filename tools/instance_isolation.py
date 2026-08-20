@@ -323,6 +323,7 @@ _INHERITED_INSTANCE_KEYS = (
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
     "XDG_RUNTIME_DIR",
+    "YOLOMUX_ROW_PLAN_FILE",
 )
 
 
@@ -369,6 +370,37 @@ def resolve_row_plan(port: int | None, base_environ: Mapping[str, str], *, platf
     return RowPlan(unset=_INHERITED_INSTANCE_KEYS, assign=dict(resolution.environment))
 
 
+def _apply_instance_resolution(port: int | None, target: dict[str, str], *, platform: str, tempdir: Path | None = None) -> InstanceResolution:
+    """Apply the early root/identity resolution to one mutable environment."""
+    resolution = resolve_instance_environment(port, target, platform=platform, tempdir=tempdir)
+    if resolution.error:
+        raise RuntimeError(resolution.error)
+    if resolution.environment.get(YOLOMUX_ROOT_ENV):
+        for key in AUTO_ROOT_IGNORED_AMBIENT_KEYS:
+            target.pop(key, None)
+    elif target.get(YOLOMUX_ROOT_ENV):
+        for key in ROOTED_IGNORED_AMBIENT_KEYS:
+            target.pop(key, None)
+    target.update(resolution.environment)
+    return resolution
+
+
+def resolve_direct_launch_plan(port: int | None, base_environ: Mapping[str, str], *, platform: str | None = None, tempdir: Path | None = None) -> RowPlan:
+    """Capture direct-launch root semantics without trusting a service daemon's
+    retained environment. Explicit caller roots survive; stale instance identity
+    and background-owner authority do not."""
+    platform_name = platform or os.uname().sysname
+    values = dict(base_environ)
+    has_explicit_root = bool(values.get(YOLOMUX_ROOT_ENV) or any(values.get(key) for key in ROOT_KEYS))
+    if port is not None and port != default_port(platform_name) and not has_explicit_root:
+        return resolve_row_plan(port, values, platform=platform_name, tempdir=tempdir)
+    for key in (INSTANCE_ENV, EARLY_PORT_ENV, MANAGED_INSTANCE_PORT_ENV, "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", "YOLOMUX_ROW_PLAN_FILE"):
+        values.pop(key, None)
+    _apply_instance_resolution(port, values, platform=platform_name, tempdir=tempdir)
+    assign = {key: values[key] for key in _INHERITED_INSTANCE_KEYS if values.get(key)}
+    return RowPlan(unset=_INHERITED_INSTANCE_KEYS, assign=assign)
+
+
 def apply_row_plan(plan: RowPlan, base_environ: Mapping[str, str]) -> dict[str, str]:
     """Apply a resolved plan to a COPY of an environment: strip the plan's unset
     keys, overlay its assign keys. The parent `base_environ` is never mutated."""
@@ -386,16 +418,7 @@ def clean_row_environment(port: int | None, base_environ: Mapping[str, str], *, 
 
 def apply_early_instance_environment(argv: list[str], environ: dict[str, str] | None = None) -> int | None:
     target = os.environ if environ is None else environ
-    resolution = resolve_instance_environment(scan_port(argv), target, platform=os.uname().sysname)
-    if resolution.error:
-        raise RuntimeError(resolution.error)
-    if resolution.environment.get(YOLOMUX_ROOT_ENV):
-        for key in AUTO_ROOT_IGNORED_AMBIENT_KEYS:
-            target.pop(key, None)
-    elif target.get(YOLOMUX_ROOT_ENV):
-        for key in ROOTED_IGNORED_AMBIENT_KEYS:
-            target.pop(key, None)
-    target.update(resolution.environment)
+    resolution = _apply_instance_resolution(scan_port(argv), target, platform=os.uname().sysname)
     return resolution.port
 
 
@@ -416,12 +439,13 @@ def is_managed_instance_port(port: int, environ: Mapping[str, str] | None = None
 
 
 def _exec_row(argv: list[str]) -> int:
-    """`exec --plan-file <path> -- <command...>`: apply an already-resolved row
+    """`exec --plan-file <path> -- <command...>` or `exec --plan-json <json> --
+    <command...>`: apply an already-resolved row
     plan to a copy of the current environment and exec the command. The env is
     applied before the target interpreter imports yolomux_lib; no eval, no
     inherited environment or secrets in argv, and the parent shell is unchanged."""
-    if len(argv) < 2 or argv[0] != "--plan-file":
-        print("usage: exec --plan-file <path> -- <command...>", file=sys.stderr)
+    if len(argv) < 2 or argv[0] not in {"--plan-file", "--plan-json"}:
+        print("usage: exec (--plan-file <path> | --plan-json <json>) -- <command...>", file=sys.stderr)
         return 2
     rest = argv[2:]
     if not rest or rest[0] != "--" or len(rest) < 2:
@@ -429,7 +453,8 @@ def _exec_row(argv: list[str]) -> int:
         return 2
     command = rest[1:]
     try:
-        plan = RowPlan.from_json(Path(argv[1]).read_text(encoding="utf-8"))
+        plan_text = Path(argv[1]).read_text(encoding="utf-8") if argv[0] == "--plan-file" else argv[1]
+        plan = RowPlan.from_json(plan_text)
     except (OSError, ValueError) as error:
         print(f"ERROR: invalid row plan: {error}", file=sys.stderr)
         return 2
@@ -442,6 +467,18 @@ def _plan_row(argv: list[str]) -> int:
     ONCE per row and reuses the exact same plan for the server launch and every
     authenticated probe of that row, so the server and both probes see one root."""
     plan = resolve_row_plan(scan_port(argv), os.environ)
+    print(plan.to_json())
+    return 0
+
+
+def _plan_direct(argv: list[str]) -> int:
+    """`plan-direct --port P`: capture the validated direct-launch environment
+    as a bounded plan that can cross a retained service-daemon boundary."""
+    try:
+        plan = resolve_direct_launch_plan(scan_port(argv), os.environ)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
     print(plan.to_json())
     return 0
 
@@ -482,6 +519,8 @@ def main(argv: list[str]) -> int:
         return _exec_row(argv[1:])
     if argv and argv[0] == "plan":
         return _plan_row(argv[1:])
+    if argv and argv[0] == "plan-direct":
+        return _plan_direct(argv[1:])
     port = scan_port(argv)
     resolution = resolve_instance_environment(port, os.environ, platform=os.uname().sysname)
     if resolution.error:

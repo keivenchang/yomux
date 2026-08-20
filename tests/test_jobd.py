@@ -235,6 +235,29 @@ def test_filesystem_operation_task_reads_in_jobd(tmp_path):
     assert result["content"] == "jobd owns this read\n"
 
 
+def test_filesystem_operation_task_dispatches_git_history_and_commit(tmp_path):
+    repo = tmp_path / "history"
+    _init_repo_with_commit(repo)
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    history = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps(_fs_descriptor(
+        op="git_history",
+        path=str(repo),
+        args={"limit": 1, "cursor": ""},
+    )).encode("utf-8")))
+    detail = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps(_fs_descriptor(
+        op="git_commit",
+        path=str(repo),
+        args={"commit": head, "head": head},
+    )).encode("utf-8")))
+
+    assert history["head"] == head
+    assert [item["sha"] for item in history["commits"]] == [head]
+    assert detail["sha"] == head
+    assert detail["from_ref"]
+    assert [item["path"] for item in detail["files"]] == ["one.py"]
+
+
 def test_filesystem_operation_task_preserves_raw_bytes(tmp_path):
     path = tmp_path / "payload.bin"
     body = b"\x00raw\xff"

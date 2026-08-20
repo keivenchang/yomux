@@ -12,24 +12,31 @@ import time
 from collections.abc import Sequence
 from typing import Any
 
-from ..cache import TtlCache
 
 YOLOMUX_TMUX_SOCKET_ENV = "YOLOMUX_TMUX_SOCKET"
 YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV = "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"
 TMUX_CONTROL_MODE_FLAG = "-C"
 TMUX_CLIENT_ATTACH_VERB = "attach-session"
+TMUX_KILL_SESSION_VERB = "kill-session"
+TMUX_KILL_SERVER_VERB = "kill-server"
+TMUX_TARGET_FLAG = "-t"
+# tmux resolves a bare `name:` target by exact name, then prefix, then fnmatch. `=name`
+# forces the exact match only, so a kill can never walk from a dead `1` onto a live `12`.
+TMUX_EXACT_TARGET_PREFIX = "="
+# kill-session -a kills every session EXCEPT the target; it can never be a scoped kill.
+TMUX_KILL_ALL_BUT_TARGET_FLAG = "-a"
 
 
 class TmuxSocketTargetError(RuntimeError):
-    """A tmux command would otherwise target an implicit server."""
+    """A tmux command would otherwise target an implicit server or an inexact session."""
 
-    def __init__(self, verb: str, argv: Sequence[str]) -> None:
+    IMPLICIT_SERVER_REASON = "no tmux server was explicitly chosen"
+
+    def __init__(self, verb: str, argv: Sequence[str], reason: str = IMPLICIT_SERVER_REASON) -> None:
         self.verb = str(verb)
         self.argv = [str(item) for item in argv]
-        super().__init__(
-            f"refusing tmux {self.verb}: no tmux server was explicitly chosen; "
-            f"refused argv: {self.argv}"
-        )
+        self.reason = str(reason)
+        super().__init__(f"refusing tmux {self.verb}: {self.reason}; refused argv: {self.argv}")
 
 
 def tmux_explicit_socket_argument(args: Sequence[str]) -> str:
@@ -54,31 +61,65 @@ def tmux_readonly_control_attach(args: Sequence[str]) -> bool:
     )
 
 
-def tmux_guarded_verb(args: Sequence[str]) -> str:
-    """Return a default-server command that policy must refuse.
+def tmux_target_values(args: Sequence[str]) -> list[str]:
+    """Every ``-t`` value in argv, in order."""
 
-    A server kill has no default-server opt-in. A session kill is allowed only
-    when the deployment deliberately sets the exact D6 opt-in value; every
-    missing, malformed, or false-ish value stays denied.
+    values = [str(item) for item in args]
+    return [values[index + 1] for index, value in enumerate(values[:-1]) if value == TMUX_TARGET_FLAG]
 
-    A read-only control-mode attach is observational, so it remains available
-    on the shared default server for the normal watcher configuration. A
-    writable control-mode attach can mutate through tmux commands and remains
-    guarded.
+
+def tmux_exact_session_target(target: str) -> bool:
+    """Whether `target` names exactly one session and cannot be prefix- or glob-resolved."""
+
+    text = str(target)
+    if not text.startswith(TMUX_EXACT_TARGET_PREFIX):
+        return False
+    session = text[len(TMUX_EXACT_TARGET_PREFIX):].split(":", 1)[0]
+    return bool(session) and session == session.strip()
+
+
+def tmux_guarded_refusal(args: Sequence[str], *, server_is_explicit: bool) -> tuple[str, str]:
+    """The (verb, reason) a tmux command must be refused for, or ``("", "")`` when it is allowed.
+
+    One owner, two independent authorities:
+
+    * Target precision, on EVERY server: a session kill must name exactly one session in the
+      exact ``=name:`` form. tmux otherwise resolves ``1:`` by prefix onto ``12``, and
+      ``kill-session -a`` kills every session except the target.
+    * Server choice, on the default server only: a server kill has no opt-in at all. A session
+      kill is allowed only when the deployment sets the exact D6 opt-in value; every missing,
+      malformed, or false-ish value stays denied.
+
+    A read-only control-mode attach is observational, so it remains available on the shared
+    default server for the normal watcher configuration. A writable control-mode attach can
+    mutate through tmux commands and remains guarded.
     """
 
     values = [str(item) for item in args]
-    if "kill-server" in values:
-        return "kill-server"
-    if "kill-session" in values and os.environ.get(YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV) != "1":
-        return "kill-session"
+    if TMUX_KILL_SESSION_VERB in values:
+        if TMUX_KILL_ALL_BUT_TARGET_FLAG in values:
+            return TMUX_KILL_SESSION_VERB, f"{TMUX_KILL_SESSION_VERB} {TMUX_KILL_ALL_BUT_TARGET_FLAG} kills every other session"
+        targets = tmux_target_values(values)
+        if len(targets) != 1:
+            return TMUX_KILL_SESSION_VERB, f"{TMUX_KILL_SESSION_VERB} needs exactly one {TMUX_TARGET_FLAG} target, found {len(targets)}"
+        if not tmux_exact_session_target(targets[0]):
+            return TMUX_KILL_SESSION_VERB, (
+                f"{TMUX_KILL_SESSION_VERB} target {targets[0]!r} is prefix-resolvable; "
+                f"it must be the exact '{TMUX_EXACT_TARGET_PREFIX}session:' form"
+            )
+    if server_is_explicit:
+        return "", ""
+    if TMUX_KILL_SERVER_VERB in values:
+        return TMUX_KILL_SERVER_VERB, TmuxSocketTargetError.IMPLICIT_SERVER_REASON
+    if TMUX_KILL_SESSION_VERB in values and os.environ.get(YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV) != "1":
+        return TMUX_KILL_SESSION_VERB, TmuxSocketTargetError.IMPLICIT_SERVER_REASON
     if (
         TMUX_CONTROL_MODE_FLAG in values
         and TMUX_CLIENT_ATTACH_VERB in values
         and not tmux_readonly_control_attach(values)
     ):
-        return f"{TMUX_CONTROL_MODE_FLAG} {TMUX_CLIENT_ATTACH_VERB}"
-    return ""
+        return f"{TMUX_CONTROL_MODE_FLAG} {TMUX_CLIENT_ATTACH_VERB}", TmuxSocketTargetError.IMPLICIT_SERVER_REASON
+    return "", ""
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -91,10 +132,10 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
 def tmux_command(args: list[str] | tuple[str, ...]) -> list[str]:
     values = [str(arg) for arg in args]
     socket_path = os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip()
-    if not socket_path and not tmux_explicit_socket_argument(values):
-        verb = tmux_guarded_verb(values)
-        if verb:
-            raise TmuxSocketTargetError(verb, values)
+    server_is_explicit = bool(socket_path or tmux_explicit_socket_argument(values))
+    verb, reason = tmux_guarded_refusal(values, server_is_explicit=server_is_explicit)
+    if verb:
+        raise TmuxSocketTargetError(verb, values, reason)
     command = ["tmux"]
     if socket_path:
         command.extend(["-S", socket_path])
@@ -122,7 +163,12 @@ def tmux_run(*args: str, check: bool = True, timeout: float = 5.0) -> subprocess
 
 
 def tmux_session_target(session: str) -> str:
-    return f"{session}:"
+    """The exact-match tmux target for `session`.
+
+    Sessions are named `1`, `2`, `12`, so the bare `1:` form lets tmux prefix-resolve a target
+    aimed at `1` onto `12` whenever `1` is gone or renamed. `=` accepts the exact name only.
+    """
+    return f"{TMUX_EXACT_TARGET_PREFIX}{session}:"
 
 
 def tmux_session_client_rows(session: str) -> list[dict[str, Any]]:
@@ -210,36 +256,35 @@ def tmux_has_session(session: str) -> bool:
     return session in tmux_session_names()
 
 
-def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
-    """Return a tmux target that cannot confuse a numeric session with a window."""
-    if not target or target.startswith("%"):
-        return target
-    if target in sessions:
-        return f"{target}:"
-    return target
-
-
-# tmux_exact_target ran `tmux list-sessions` on EVERY capture, so the inline N×2-3 captures
-# in prompt_and_screen_status each paid a list-sessions subprocess (a +3s hang point if tmux wedged).
-# Cache the session-name resolution for a short window so a poll's captures reuse one resolution.
-_SESSION_NAMES_TTL = 1.0
-_session_names_cache = TtlCache(_SESSION_NAMES_TTL, max_entries=1)
-
-
-def cached_session_names() -> list[str]:
-    cached = _session_names_cache.get("names")
-    if cached is not None:
-        return list(cached)
-    names = tmux_session_names()
-    _session_names_cache.set("names", names)
-    return names
-
-
 def tmux_exact_target(target: str) -> str:
-    # Skip the list-sessions resolution entirely for unambiguous targets (pane ids / already-qualified).
-    if not target or target.startswith("%") or ":" in target:
+    """Pin `target`'s session to the exact `=name:` form tmux cannot prefix- or glob-resolve.
+
+    tmux resolves `1:` by exact name, then prefix, then fnmatch, so a capture or send-keys aimed
+    at a dead `1` silently lands on the live `12`. Sessions here are literally named `1`, `2`,
+    `12`. Pinning does not depend on the session existing, so an unknown name fails closed
+    instead of walking onto a neighbour -- there is nothing to look up and no session list to read.
+
+    Pane ids (`%3`), the current-session target (`:`) and the empty target carry no session name.
+    """
+    if not target or target.startswith("%") or target.startswith(TMUX_EXACT_TARGET_PREFIX):
         return target
-    return tmux_exact_target_from_sessions(target, cached_session_names())
+    session, separator, rest = target.partition(":")
+    if not session:
+        return target
+    # tmux_session_target is the one owner of the exact form; `rest` keeps any window/pane suffix.
+    return f"{tmux_session_target(session)}{rest}" if separator else tmux_session_target(session)
+
+
+def tmux_exact_target_from_sessions(target: str, sessions: list[str]) -> str:
+    """Back-compat entry point for the auto-approve CLI; `sessions` is no longer consulted.
+
+    Pinning used to append a bare `:` only for names present in `sessions` and let every other
+    name through unpinned. The exact form is correct for a live session and fails closed for a
+    dead one, so the session list decides nothing. Kept only because tools/auto_approve_tmux.py
+    re-exports this name.
+    """
+    del sessions
+    return tmux_exact_target(target)
 
 
 def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:

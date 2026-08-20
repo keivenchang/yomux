@@ -198,7 +198,7 @@ def _open_differ(gate_browser_runtime, target):
         (async () => {
           try {
             await openFileSurface(differItemId);
-            await fetchSessionFiles({destination: 'finder', session, force: true, silent: true});
+            await fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
             renderFileExplorerChangesPanels({force: true, view: 'differ'});
             const row = await window.__yolomuxTestWaitFor(
               () => document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`),
@@ -1426,7 +1426,7 @@ def test_c5_diff_list_generation_precedes_file_open_without_retry(gate_browser_r
         const done = arguments[arguments.length - 1];
         (async () => {
           try {
-            await fetchSessionFiles({destination: 'finder', session, force: true, silent: true});
+            await fetchSessionFiles({destination: 'differ', session, force: true, silent: true});
             renderFileExplorerChangesPanels({force: true, view: 'differ'});
             const row = await window.__yolomuxTestWaitFor(
               () => document.querySelector(`#panel-__differ__ [data-open-change-file="${CSS.escape(path)}"]`),

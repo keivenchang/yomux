@@ -5150,7 +5150,8 @@ function startTerminal(session) {
   }
   container.innerHTML = '';
   const size = estimateTerminalSize(container);
-  const baseTheme = terminalThemeForGlobalTheme();
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
@@ -5162,7 +5163,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForSession(session, baseTheme),
+    theme: terminalThemeForSession(session, renderTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
     allowProposedApi: true,
@@ -5174,7 +5175,7 @@ function startTerminal(session) {
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
-  applyTerminalContainerTheme(container, baseTheme);
+  applyTerminalContainerTheme(container, displayTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);

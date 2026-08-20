@@ -56,11 +56,11 @@ async function runTabberSuite() {
     assert.equal(html.includes('No path'), false, 'the missing-path placeholder is not rendered when tmux supplies the working directory');
   });
 
-  test('shared tree controller is the Finder, Tabber, and Differ interaction parent', () => {
+  test('shared tree controller is the Finder, Tabber, Differ, and Git history interaction parent', () => {
     const source = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
     const api = loadYolomux('', ['1']);
-    assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'tabber'], 'Finder, Tabber, and Differ register through the shared tree interaction controller');
+    assert.deepStrictEqual(canonical(api.sharedTreeControllerNamesForTest()), ['differ', 'finder', 'git-diff-commits', 'git-diff-files', 'tabber'], 'Finder, Tabber, Differ, and both Git history trees register through the shared interaction controller');
     // Source ownership is enforced once by static_build's shared-ui ownership lint. This node
     // shard keeps the observable controller registration and keyboard behavior contract.
     assert.ok(/handleFileExplorerArrowNav = event =>[\s\S]*fileExplorerViewForItem\(panel\?\.dataset\?\.panelItem\)[\s\S]*view === 'tabber'[\s\S]*tabberTreeInteractionController\.handleKeydown[\s\S]*view === 'differ'[\s\S]*differTreeInteractionController\.handleKeydown[\s\S]*originalFileExplorerArrowNavForSharedTree/.test(source), 'per-panel key dispatch routes fixed Tabber/Differ views through the shared parent before Finder fallback');
@@ -671,7 +671,7 @@ async function runTabberSuite() {
     const dragCss = fs.readFileSync('static/yolomux.css', 'utf8');
     assert.ok(dragSrc.includes('minimumContrastRatio: terminalMinimumContrastRatio()'), '#32: terminal creation sets minimumContrastRatio');
     assert.ok(dragSrc.includes('item.term.options.minimumContrastRatio = minContrast'), '#32: live terminals re-apply minimumContrastRatio');
-    assert.ok(/applyTerminalContainerTheme\(item\.container, theme\)/.test(dragSrc), '#32: all terminal containers share one theme background');
+    assert.ok(/applyTerminalContainerTheme\(item\.container, displayTheme\)/.test(dragSrc), '#32: all terminal containers share the display theme background');
     assert.ok(/\.topbar-search\s*\{[^}]*background:\s*var\(--topbar-control-surface\)/.test(dragCss) && /body\.theme-light\s*\{[\s\S]*--topbar-control-surface:\s*var\(--paint-overlay-slate-05\)/.test(dragCss), '#33: the topbar search blends in light mode through the centralized surface token');
     // The topbar is neutral at rest and switches to the green tab-strip color only on hover/focus.
     assert.ok(/\.topbar\s*\{[^}]*background:\s*var\(--panel2\)/.test(dragCss), 'topbar bg is neutral at rest');

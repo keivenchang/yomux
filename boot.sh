@@ -455,6 +455,28 @@ launch_server() {
   disown 2>/dev/null || true
 }
 
+# Single owner of the log-sink writability precondition, called from both the
+# pre-ramp preflight and the in-lock repeat inside restart_port.
+ensure_log_sink_writable() {
+  local log_path="$1"
+  mkdir -p "$log_dir" && : >> "$log_path"
+}
+
+# Prove every requested port's log sink resolves and is writable BEFORE the
+# startup lock and the slow-ramp load gate. This check is cheap, deterministic
+# and idempotent (mkdir -p plus an append); the load gate is expensive and
+# host-dependent, so running the gate first lets host load mask an unwritable
+# log directory behind a "system load did not recover" timeout. It runs before
+# any existing listener is stopped, so a bad log sink can never cost the
+# operator a running server.
+preflight_log_sinks() {
+  local port log_path
+  for port in "${ports[@]}"; do
+    log_path="$(log_path_for "$port")"
+    ensure_log_sink_writable "$log_path" || die "log path is not writable: $log_path"
+  done
+}
+
 restart_port() {
   local port="$1"
   local log_path
@@ -463,7 +485,10 @@ restart_port() {
   fi
   log_path="$(log_path_for "$port")"
   acquire_port_restart_lock "$port"
-  if ! mkdir -p "$log_dir" || ! : >> "$log_path"; then
+  # Repeat under the restart lock: the load gate between the preflight and here
+  # can block for minutes, and the sink can be removed or made read-only in that
+  # window. Still before stop_port_listener, so the listener survives either way.
+  if ! ensure_log_sink_writable "$log_path"; then
     release_port_restart_lock "$port"
     die "log path is not writable: $log_path"
   fi
@@ -524,6 +549,7 @@ if [[ "$print_command" -eq 1 ]]; then
   exit 0
 fi
 
+preflight_log_sinks
 yolomux_acquire_start_lock || die "startup lock unavailable"
 trap yolomux_release_start_lock EXIT
 yolomux_wait_for_system_capacity "$python_bin"

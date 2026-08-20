@@ -964,7 +964,9 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .popover-value a,
 .branch-link,
 .meta a,
-.summary-context a {
+.summary-context a,
+.git-diff-commit-sha,
+.git-diff-change-link {
   color: var(--link-soft);
   text-decoration: none;
 }
@@ -973,7 +975,9 @@ body :is(
   .branch-link,
   .meta a,
   .summary-context a,
-  .info-tree-group-label-action
+  .info-tree-group-label-action,
+  .git-diff-commit-sha,
+  .git-diff-change-link
 ):is(:hover, :focus-visible) {
   color: var(--link-soft-hover);
   text-decoration: underline;

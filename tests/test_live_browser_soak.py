@@ -471,7 +471,6 @@ def clean_settle(sample):
     "current",
     (
         clean_stats_stream(2, 2, 2, "delta", source_generation=1, delta_revision=2),
-        clean_stats_stream(2, 2, 2, "delta", source_generation=2, delta_revision=1),
         clean_stats_stream(2, 2, 1, "delta", source_generation=2, delta_revision=2),
         clean_stats_stream(2, 2, 2, "delta", source_generation=2, delta_revision=2, painted_generation_key="painted-2"),
     ),
@@ -1144,9 +1143,9 @@ def test_negative_probe_uses_real_yolo_rules_failure_and_rendered_logs_path():
     assert "refreshYoloRulesStatus({silent: true})" in driver.script
     assert "yoloRules: typeof yoloRulesPayload" in driver.script
     assert "refreshActivitySummary" not in driver.script and "activitySummaryState" not in driver.script
-    assert "selectSession(debugPaneItemId" in driver.script
-    assert "setDebugSubTab('logs')" in driver.script
-    assert "pollDebugLogs({force: true})" in driver.script
+    assert "await selectSession(debugPaneItemId" in driver.script
+    assert "await setDebugSubTab('logs')" in driver.script
+    assert "await pollDebugLogs({force: true})" not in driver.script
     assert "article[data-js-debug-log-entry]" in driver.script
     assert "recordApiDebugEvent" not in driver.script and "recordJsDebugEvent" not in driver.script
     assert handle["requestId"] == event["requestId"]
@@ -3098,7 +3097,8 @@ def complete_success_artifact(monkeypatch, *, driver=None, previous_js=0):
 
 def test_success_artifact_requires_complete_atomic_retirement_proof(monkeypatch):
     artifact = complete_success_artifact(monkeypatch)
-
+    artifact["baseline"]["statsStreamEvidence"]["stream"].update(deltaRevision=51)
+    artifact["finalBoundary"]["evidence"]["statsStreamEvidence"]["stream"].update(deltaRevision=0)
     soak.validate_success_artifact(artifact)
 
 

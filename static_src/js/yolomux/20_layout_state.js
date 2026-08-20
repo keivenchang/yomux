@@ -1031,7 +1031,8 @@ function layoutTabStatesFromParam(raw) {
 }
 
 function readableItemParam(item) {
-  return readableParamComponent(itemParam(item));
+  // Protect canonical item percent escapes because URLSearchParams and the per-tab parser each decode once.
+  return readableParamComponent(String(itemParam(item)).replaceAll('%', '%25'));
 }
 
 function readableParamComponent(value) {
@@ -1165,8 +1166,8 @@ function layoutUrlEditorModesSnapshot() {
     if (seen.has(key)) return;
     seen.add(key);
     const entry = {path: cleanPath, item: cleanItem, mode: cleanMode};
-    const state = fileState.get(cleanPath);
     const itemKey = cleanItem || fileEditorItemFor(cleanPath);
+    const state = fileEditorStateForItem(cleanPath, itemKey);
     const viewState = fileEditorViewState.get(itemKey);
     if (viewState) {
       entry.viewState = {
@@ -1182,6 +1183,8 @@ function layoutUrlEditorModesSnapshot() {
       entry.diffFromRef = cleanDiffRef(state?.diffPinnedFromRef || state?.diffFromRef || refs.from || 'HEAD', 'HEAD');
       entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
       entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
+      if (state?.historicalComparisonKind) entry.historicalComparisonKind = state.historicalComparisonKind;
+      if (state?.historical === true && gitDiffItemPath(state.closeReturnToItem)) entry.returnToItem = state.closeReturnToItem;
     }
     modes.push(entry);
   };
@@ -1233,10 +1236,12 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
     if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
   }
   if (mode === 'diff') {
-    const state = fileState.get(path) || (cleanItem ? ensureFileState(path) : null);
+    const state = fileEditorStateForItem(path, cleanItem || null, Boolean(cleanItem));
     if (state) {
       state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
       state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
+      if (state.historical === true && ['parent', 'root-empty-tree', 'merge-first-parent'].includes(entry.historicalComparisonKind)) state.historicalComparisonKind = entry.historicalComparisonKind;
+      if (state.historical === true && gitDiffItemPath(entry.returnToItem)) state.closeReturnToItem = entry.returnToItem;
     }
     if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
   }
@@ -1498,6 +1503,7 @@ function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
   applyEditorStateFields(state.editor || {}, {applyModeEntry: applyLayoutUrlEditorModeEntry});
+  applyLayoutUrlGitDiffState(state.gitDiff);
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;
@@ -1522,6 +1528,8 @@ function layoutUrlStateSnapshot() {
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
   if (editor.modes.length) state.editor = editor;
+  const gitDiff = layoutUrlGitDiffStateSnapshot();
+  if (gitDiff.length) state.gitDiff = gitDiff;
   if (paneItems(layoutSlots).includes(prefsItemId)) state.preferences = layoutUrlPreferencesStateSnapshot();
   const scroll = layoutUrlScrollStateSnapshot();
   if (scroll.length) state.scroll = scroll;
@@ -2399,6 +2407,18 @@ function registerFileEditorLayoutItem(path, options = {}) {
   const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
   const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+    syncFileLayoutItems();
+    return item;
+  }
   if (fileState.get(path)?.loading !== true && fileState.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
@@ -2454,6 +2474,7 @@ function resolveLayoutItem(value) {
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
+  if (type?.prefix === gitDiffItemPrefix) return gitDiffItemPath(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -6764,7 +6785,7 @@ function updateSessionList(nextSessions, options = {}) {
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
-  const previousActive = activeSessions.slice();
+  const previousActive = activeSessions.slice(), previousItems = new Set(paneItems(layoutSlots));
   const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
   runtimeState.consumePendingLayoutMutation(completionGeneration);
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
@@ -6778,6 +6799,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     preserveMissingSidePane: options.preserveMissingSidePane === true,
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
+  cleanupRemovedDynamicLayoutItems(previousItems, new Set(paneItems(layoutSlots)));
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -6816,6 +6838,19 @@ function applyLayoutSlots(nextSlots, options = {}) {
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
+  for (const item of previousItems || []) {
+    if (!dynamicVirtualLayoutItems.has(item) || nextItems?.has(item)) continue;
+    const panel = panelNodes.get(item);
+    if (panel) removePanelForItem(item);
+    else tabTypeForItem(item)?.cleanup?.(item, null);
+    dynamicVirtualLayoutItems.delete(item);
+    paneViewState.delete(item);
+    tabLastActivatedAt.delete(item);
+  }
+  syncFileLayoutItems();
 }
 
 function layoutRenderRequest(request = {}) {

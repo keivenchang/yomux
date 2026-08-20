@@ -2225,7 +2225,7 @@ function createDockviewTabRenderer() {
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
-    if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+    if (isHistoricalFileEditorItem(item) || event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
@@ -2258,7 +2258,7 @@ function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
-  tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
+  tab.classList.toggle('file-missing', isFileEditorItem(item) && fileEditorTabIsMissing(item));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
   applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMetadataState.payload.sessions?.[item]));
   tab.setAttribute('aria-label', dockviewTabAriaLabel(item));

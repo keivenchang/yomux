@@ -61,6 +61,19 @@ function sourceFunction(name, nextName) {
   return source.slice(start, end);
 }
 
+test('CPU chart title distinguishes logical CPUs from physical cores', () => {
+  const context = {
+    cpuTopology: {logicalCpus: 32, physicalCores: 24},
+    debugGraphLocalizedLabel: () => 'CPU',
+    result: null,
+  };
+  vm.runInNewContext(`
+    ${sourceFunction('debugGraphChartLabel', 'debugGraphChartShellHtml')}
+    result = debugGraphChartLabel({key: 'cpu'});
+  `, context);
+  assert.equal(context.result, 'CPU (32 logical CPUs / 24 physical cores)');
+});
+
 // A bounded region between two literal needles, for the constants a sliced function depends on.
 function slice(text, startNeedle, endNeedle) {
   const start = text.indexOf(startNeedle);
@@ -318,6 +331,7 @@ test('CPU keeps the exact serving port as the only solid series and shows a gap,
   assert.equal(solid[0].key, 'cpu:port:9001');
   assert.equal(solid[0].color, 'green');
   assert.equal(solid[0].labelParams.process, 'yolomux.py (web)');
+  assert.equal(solid[0].currentProcessCpu, true);
   // The serving port had no sample in this bucket, so it is an honest gap, not a value.
   vm.runInNewContext(`${helpers}\nresult = debugGraphProcessCpuBucketHasData(${bucket}, 'port:9001');`, context);
   assert.equal(context.result, false);
@@ -345,7 +359,28 @@ test('CPU serving-port series stands alone on the default port with no aggregate
   assert.equal(context.result.length, 1);
   assert.equal(context.result[0].key, 'cpu:port:80');
   assert.equal(context.result[0].linePattern, 'solid');
+  assert.equal(context.result[0].currentProcessCpu, true);
   assert.equal(context.result.some(series => series.key === 'cpu'), false);
+});
+
+test('CPU serving-port series leads the legend and paints after every other line', () => {
+  const orderingSource = sourceFunction('debugGraphCurrentProcessCpuOrdered', 'debugGraphLegendSeriesItems');
+  const chartSource = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
+  const context = {result: null};
+  vm.runInNewContext(`
+    ${orderingSource}
+    const area = {key: 'cpuBinary:python'};
+    const system = {key: 'systemCpu'};
+    const peer = {key: 'cpu:port:7001', processCpu: true};
+    const current = {key: 'cpu:port:7442', processCpu: true, currentProcessCpu: true};
+    result = {
+      legend: debugGraphCurrentProcessCpuOrdered([area, system, peer, current], true).map(series => series.key),
+      paint: debugGraphCurrentProcessCpuOrdered([system, current, peer]).map(series => series.key),
+    };
+  `, context);
+  assert.deepEqual([...context.result.legend], ['cpu:port:7442', 'cpuBinary:python', 'systemCpu', 'cpu:port:7001']);
+  assert.deepEqual([...context.result.paint], ['systemCpu', 'cpu:port:7001', 'cpu:port:7442']);
+  assert.match(chartSource, /const lineSeries = debugGraphCurrentProcessCpuOrdered\(/);
 });
 
 test('CPU reserves red dotted for System and violet solid for yolomux.py under the red accent', () => {
@@ -371,9 +406,10 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   vm.runInNewContext(`
     ${paletteSource}
     ${renderSource}
+    ${sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml')}
     ${sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues')}
     const system = {key: 'systemCpu', label: 'system avg CPU %', linePattern: 'dot', color: jsDebugGraphSeriesPalette.systemCpu, values: [47.5], times: [1], durations: [1000]};
-    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
+    const current = {key: 'cpu:port:7442', label: 'yolomux.py (web) CPU %', processCpu: true, currentProcessCpu: true, linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current, values: [32], times: [1], durations: [1000]};
     result = {
       colors: [debugGraphSeriesDisplayColor(system), debugGraphSeriesDisplayColor(current)],
       lines: [debugGraphPolylineHtml(system, 100, {}, false), debugGraphPolylineHtml(current, 100, {}, false)],
@@ -384,11 +420,13 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   assert.match(context.result.lines[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
   assert.match(context.result.lines[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.lines[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+  assert.match(context.result.lines[1], /js-debug-line--current-process/);
   assert.match(context.result.lines[0], /<title>system avg CPU %<\/title>/);
   assert.match(context.result.lines[1], /<title>yolomux\.py \(web\) CPU %<\/title>/);
   assert.match(context.result.legends[0], /--js-debug-series-color: var\(--js-debug-agent-token-rose\)/);
   assert.match(context.result.legends[0], /js-debug-line--pattern-dot/);
   assert.match(context.result.legends[1], /--js-debug-series-color: var\(--js-debug-agent-token-violet\)/);
+  assert.match(context.result.legends[1], /js-debug-line--current-process/);
 
   const presetSource = slice(editorSettingsSource, 'const UI_COLOR_CHOICES =', '\nfunction normalizeEditorCursorColor(');
   const presetContext = {result: null, Object};
@@ -406,6 +444,18 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
   };
   const rgb = value => [1, 3, 5].map(index => parseInt(value.slice(index, index + 2), 16));
   const distance = (left, right) => Math.hypot(...rgb(left).map((value, index) => value - rgb(right)[index]));
+  const lab = value => {
+    const [red, green, blue] = rgb(value).map(channel => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    const x = (red * 0.4124 + green * 0.3576 + blue * 0.1805) / 0.95047;
+    const y = red * 0.2126 + green * 0.7152 + blue * 0.0722;
+    const z = (red * 0.0193 + green * 0.1192 + blue * 0.9505) / 1.08883;
+    const pivot = channel => channel > 0.008856 ? channel ** (1 / 3) : 7.787 * channel + 16 / 116;
+    return [116 * pivot(y) - 16, 500 * (pivot(x) - pivot(y)), 200 * (pivot(y) - pivot(z))];
+  };
+  const perceptualDistance = (left, right) => Math.hypot(...lab(left).map((value, index) => value - lab(right)[index]));
   const systemColors = themeTokenValues('js-debug-agent-token-rose');
   const currentColors = themeTokenValues('js-debug-agent-token-violet');
   for (const theme of ['dark', 'light']) {
@@ -413,6 +463,57 @@ test('CPU reserves red dotted for System and violet solid for yolomux.py under t
     assert.ok(distance(systemColors[theme], currentColors[theme]) >= 70, `${theme}: red System and violet web series stay separated`);
     assert.ok(distance(currentColors[theme], redAccent) >= 120, `${theme}: current web CPU stays separated from red selection chrome`);
   }
+  const lightPrimaryPalette = [
+    'js-debug-agent-token-cyan',
+    'js-debug-agent-token-orange',
+    'js-debug-agent-token-magenta',
+    'js-debug-agent-token-beige',
+    'js-debug-agent-token-turquoise',
+    'js-debug-agent-token-rose',
+    'js-debug-agent-token-violet',
+  ].map(semanticName => themeTokenValues(semanticName).light);
+  assert.deepEqual(lightPrimaryPalette, ['#006dff', '#f04400', '#d000b8', '#b06b00', '#008f55', '#d00040', '#6d28d9']);
+  const darkPrimaryPalette = [
+    'js-debug-agent-token-cyan',
+    'js-debug-agent-token-orange',
+    'js-debug-agent-token-magenta',
+    'js-debug-agent-token-beige',
+    'js-debug-agent-token-turquoise',
+    'js-debug-agent-token-rose',
+    'js-debug-agent-token-violet',
+  ].map(semanticName => themeTokenValues(semanticName).dark);
+  assert.deepEqual(darkPrimaryPalette, ['#00a8ff', '#ff6a00', '#ff00d4', '#ffd400', '#00e676', '#ff1744', '#8b5cf6']);
+  for (let left = 0; left < lightPrimaryPalette.length; left += 1) {
+    for (let right = left + 1; right < lightPrimaryPalette.length; right += 1) {
+      assert.ok(distance(lightPrimaryPalette[left], lightPrimaryPalette[right]) >= 70, `light graph colors ${left} and ${right} separate in raw RGB channels`);
+      assert.ok(perceptualDistance(lightPrimaryPalette[left], lightPrimaryPalette[right]) >= 32, `light graph colors ${left} and ${right} remain perceptually separated in CIE Lab`);
+    }
+  }
+  assert.match(css, /body\.theme-light \.js-debug-line\s*\{[^}]*stroke-width:\s*1\.6/);
+  assert.match(css, /\.js-debug-line--current-process\s*\{[^}]*stroke-width:\s*2\.4/);
+  assert.match(css, /\.js-debug-legend-line \.js-debug-line--current-process\s*\{[^}]*stroke-width:\s*2\.5/);
+  assert.match(css, /body\.theme-light :is\(\.js-debug-graph-view, \.js-yocost-graphs\)\s*\{[^}]*--js-debug-client-comparison-opacity:\s*0\.9/);
+});
+
+test('chart legends distinguish filled area keys from thin line keys', () => {
+  const areaSource = sourceFunction('debugGraphSeriesUsesArea', 'debugGraphLegendSwatchHtml');
+  const swatchSource = sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues');
+  const context = {
+    result: null,
+    esc: value => String(value),
+    debugGraphAgentTokenLegendSwatchHtml: () => '',
+    debugGraphSeriesLinePattern: series => series.linePattern || '',
+    debugGraphSeriesLineClassName: () => 'js-debug-line',
+    debugGraphSeriesLinePatternAttrs: () => '',
+    debugGraphSeriesStyleAttr: () => '',
+    debugGraphSeriesClassKey: series => series.key,
+  };
+  vm.runInNewContext(`${areaSource}\n${swatchSource}\nresult = [debugGraphLegendSwatchHtml({key: 'memory', hostMetric: 'memory', hostProcessId: 'python'}, 'area'), debugGraphLegendSwatchHtml({key: 'latency', clientMetric: true}, 'line')];`, context);
+  assert.match(context.result[0], /<span class="js-debug-legend-area"/);
+  assert.doesNotMatch(context.result[0], /<svg/);
+  assert.match(context.result[1], /<svg class="js-debug-legend-line"/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphLegendHtml\(renderedLegendSeries, \{kind: group\.kind\}\)/);
+  assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
 });
 
 test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall time, and survives an epoch reset', () => {
@@ -556,6 +657,7 @@ test('chart popup uses the full localized chart titles', () => {
 
 test('model output chart is fixed to generated output without a dimension picker', () => {
   const english = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+  assert.equal(english['debug.graph.chart.agentTokens'], 'Session tokens/min');
   assert.equal(english['debug.graph.chart.modelTokens'], 'Model output tokens/min');
   assert.match(source, /key: 'modelTokens'[\s\S]*dynamicTokenDimension: 'model'/);
   assert.doesNotMatch(source, /data-js-debug-model-token-dimension-select/);
@@ -564,16 +666,61 @@ test('model output chart is fixed to generated output without a dimension picker
   assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
 });
 
+test('token chart groups different agent windows from one tmux session into one summed series', () => {
+  assert.match(
+    sourceFunction('debugGraphSessionTokenKey', 'debugGraphCostModelAgentKind'),
+    /YOLOmuxStatsCurrent\?\.canonicalSessionKey\?\.\(full\)/,
+  );
+  const context = {
+    result: null,
+    Map,
+    Set,
+    jsDebugGraphAgentTokenSeriesPrefix: 'agentToken:',
+    jsDebugGraphModelTokenSeriesPrefix: 'modelToken:',
+    debugGraphSessionTokenKey: value => String(value).split('|')[0],
+    debugGraphAgentDisplayLabel: value => String(value).split('|')[0],
+    debugGraphDisplayedTokenVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    debugGraphAgentTokenBucketValue: (_bucket, item) => Number(item.rate || 0),
+  };
+  vm.runInNewContext(`
+    ${sourceFunction('debugGraphTokenSeriesDefs', 'debugGraphAgentTokenSeriesDefs')}
+    const bucket = {agentTokenRates: new Map([
+      ['yo7771-b|0|codex', {label: 'yo7771-b', samples: 1, rate: 100}],
+      ['yo7771-b|1|claude', {label: 'yo7771-b', samples: 1, rate: 250}],
+    ])};
+    const definitions = debugGraphTokenSeriesDefs([bucket], 'agent');
+    result = {
+      count: definitions.length,
+      key: definitions[0]?.agentTokenKey,
+      label: definitions[0]?.label,
+      value: definitions[0]?.value(bucket),
+      samples: definitions[0]?.sampleCount(bucket),
+    };
+  `, context);
+  assert.deepEqual({...context.result}, {
+    count: 1,
+    key: 'yo7771-b',
+    label: 'yo7771-b',
+    value: 350,
+    samples: 2,
+  });
+});
+
 test('macOS keeps Activity Monitor memory facts and pressure in one card', () => {
   const resolver = sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml');
+  const groupSeries = sourceFunction('debugGraphGroupSeriesItems', 'debugGraphMacMemoryCardAvailable');
+  const processPlot = sourceFunction('debugGraphMacMemoryProcessPlotSeries', 'debugGraphVisibleChartGroups');
   const details = sourceFunction('debugGraphMacMemoryDetailsHtml', 'debugGraphLegendSeriesItems');
   const chart = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
   const pressureColor = sourceFunction('debugGraphMacMemoryPressureColor', 'debugGraphSeriesStyleAttr');
   assert.match(resolver, /key !== 'memory'/);
   assert.match(resolver, /series: \['macMemoryPressure'\]/);
   assert.match(resolver, /fixedMax: 100/);
+  assert.match(groupSeries, /group\.macMemoryCard === true[\s\S]*series\.key === 'macMemoryPressure'[\s\S]*series\.hostMetric === 'memory' && series\.hostProcessId/);
+  assert.match(processPlot, /plotValues[\s\S]*macPhysicalMemoryTotalBytes[\s\S]*\* 100/);
   for (const label of ['Physical Memory', 'Memory Used', 'Cached Files', 'Swap Used', 'App Memory', 'Wired Memory', 'Compressed']) assert.match(details, new RegExp(label));
   assert.match(chart, /debugGraphMacMemoryDetailsHtml\(buckets\)/);
+  assert.match(chart, /selectedGroupSeries\.map\(series => debugGraphMacMemoryProcessPlotSeries\(series, buckets\)\)/);
   assert.match(css, /\.js-debug-mac-memory-details/);
   assert.match(css, /@container \(max-width: 20rem\)/);
   assert.doesNotMatch(pressureColor, /pressure </);
@@ -585,6 +732,160 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   assert.deepEqual([...context.result], ['var(--good)', 'var(--warning-border-strong)', 'var(--bad)', 'var(--muted)']);
   assert.match(sourceFunction('debugGraphSeriesStyleAttr', 'debugGraphSeriesClientAttrs'), /debugGraphSeriesDisplayColor\(series\)/);
   assert.match(sourceFunction('debugGraphSeriesDisplayColor', 'debugGraphSeriesStyleAttr'), /series\?\.colorValues/);
+});
+
+test('System memory renders only the range top five cumulative binary RSS series', () => {
+  const processSeries = slice(
+    source,
+    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+    '\nfunction normalizedDebugGraphServiceLoadMode(',
+  );
+  const context = {
+    result: null,
+    Map,
+    Set,
+    Number,
+    String,
+    jsDebugGraphAgentTokenPatternCount: 7,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange', 'magenta', 'gold', 'green', 'red', 'violet'],
+    jsDebugGraphCpuProcessAreaColors: ['cyan', 'orange', 'magenta', 'turquoise'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 120000},
+    debugGraphStablePaletteIndex: (_key, count) => count - 1,
+    debugGraphHostMetricBucketValue: (_bucket, series) => Number(series.hostProcessId === 'python' ? 400 : 100),
+    debugGraphHostMetricBucketHasData: () => true,
+  };
+  const entries = Array.from({length: 9}, (_unused, index) => [
+    index === 8 ? 'python' : `binary-${index}`,
+    {label: index === 8 ? 'python' : `binary-${index}`, totalBytes: index === 8 ? 400 : 100 + index, samples: 1},
+  ]);
+  vm.runInNewContext(`
+    ${processSeries}
+    const definitions = debugGraphMemoryProcessSeriesDefs([{hostMetrics: {memoryProcesses: new Map(${JSON.stringify(entries)})}}]);
+    result = definitions.map(item => ({key: item.hostProcessId, metric: item.hostMetric}));
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), [
+    {key: 'python', metric: 'memory'},
+    {key: 'binary-7', metric: 'memory'},
+    {key: 'binary-6', metric: 'memory'},
+    {key: 'binary-5', metric: 'memory'},
+    {key: 'binary-4', metric: 'memory'},
+  ]);
+});
+
+test('CPU renders only the range top four grouped binary areas with distinct stable colors', () => {
+  const processSeries = slice(
+    source,
+    'const jsDebugGraphHostProcessVisualAssignments = Object.freeze({',
+    '\nfunction normalizedDebugGraphServiceLoadMode(',
+  );
+  const entries = Array.from({length: 6}, (_unused, index) => [
+    index === 5 ? 'python' : `binary-${index}`,
+    {label: index === 5 ? 'python' : `binary-${index}`, totalPercent: index === 5 ? 40 : 10 + index, samples: 1},
+  ]);
+  const context = {
+    result: null, Map, Set, Number, String,
+    jsDebugGraphAgentTokenPatternCount: 7,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange', 'magenta', 'gold', 'green', 'red', 'violet'],
+    jsDebugGraphCpuProcessAreaColors: ['cyan', 'orange', 'magenta', 'turquoise'],
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'],
+    jsDebugGraphDisplayHoldExpiryMs: {minuteGauge: 120000},
+    debugGraphStablePaletteIndex: key => key.length % 4,
+    debugGraphHostMetricBucketValue: () => 1,
+    debugGraphHostMetricBucketHasData: () => true,
+  };
+  vm.runInNewContext(`
+    ${processSeries}
+    const summarize = definitions => definitions.map(item => ({key: item.key, binary: item.hostProcessId, metric: item.hostMetric, color: item.color}));
+    const first = debugGraphCpuProcessSeriesDefs([{systemCpuCount: 1, hostMetrics: {cpuProcesses: new Map(${JSON.stringify(entries)})}}]);
+    const shiftedEntries = ${JSON.stringify(entries.slice(0, 5))};
+    shiftedEntries.push(['new-binary', {label: 'new-binary', totalPercent: 50, samples: 1}]);
+    const shifted = debugGraphCpuProcessSeriesDefs([{systemCpuCount: 1, hostMetrics: {cpuProcesses: new Map(shiftedEntries)}}]);
+    const oldOnly = debugGraphCpuProcessSeriesDefs([{systemCpuCount: 1, hostMetrics: {cpuProcesses: new Map([
+      ['old-a', {label: 'old-a', totalPercent: 20, samples: 1}],
+      ['old-b', {label: 'old-b', totalPercent: 10, samples: 1}],
+    ])}}]);
+    const churned = debugGraphCpuProcessSeriesDefs([{systemCpuCount: 1, hostMetrics: {cpuProcesses: new Map([
+      ['new-a', {label: 'new-a', totalPercent: 40, samples: 1}],
+      ['new-b', {label: 'new-b', totalPercent: 30, samples: 1}],
+      ['new-c', {label: 'new-c', totalPercent: 20, samples: 1}],
+      ['new-d', {label: 'new-d', totalPercent: 10, samples: 1}],
+    ])}}]);
+    result = {first: summarize(first), shifted: summarize(shifted), oldOnly: summarize(oldOnly), churned: summarize(churned)};
+  `, context);
+  assert.deepEqual([...context.result.first.map(item => item.binary)], ['python', 'binary-4', 'binary-3', 'binary-2']);
+  assert.equal(new Set(context.result.first.map(item => item.color)).size, 4);
+  assert.equal(context.result.first.every(item => item.key.startsWith('cpuBinary:') && item.metric === 'cpu'), true);
+  const firstColors = Object.fromEntries(context.result.first.map(item => [item.binary, item.color]));
+  for (const item of context.result.shifted) {
+    if (firstColors[item.binary]) assert.equal(item.color, firstColors[item.binary], `${item.binary} keeps its page-lifetime color`);
+  }
+  assert.equal(new Set(context.result.churned.map(item => item.color)).size, 4, 'four replacements reclaim both inactive assignments');
+});
+
+test('CPU hover resolves both binary areas and the existing line identities directly', () => {
+  const direct = sourceFunction('debugGraphDirectHoverSeriesKey', 'debugGraphNearestHoverSeriesAtTime');
+  const detail = sourceFunction('debugGraphHoverDetailAtTime', 'debugGraphHoverValueAtTime');
+  assert.match(direct, /\[data-js-debug-series\], \[data-js-debug-area-series\]/);
+  assert.match(direct, /jsDebugAreaSeries/);
+  assert.match(detail, /data\?\.group\?\.key === 'cpu'/);
+  assert.match(detail, /series\.values\?\.\[index\]/);
+  assert.match(detail, /seriesKey: series\.key/);
+});
+
+test('CPU hover chooses binary, System, yolomux, and nearest grid series without summing them', () => {
+  const hoverSource = slice(source, 'function debugGraphHoverBucketIndex(', '\nfunction debugGraphHoverValueAtTime(');
+  const series = [
+    {key: 'cpuBinary:python', label: 'python', values: [30], plotValues: [30], stackBaseValues: [0], times: [100], hasDataValues: [true]},
+    {key: 'cpuBinary:node', label: 'node', values: [20], plotValues: [50], stackBaseValues: [30], times: [100], hasDataValues: [true]},
+    {key: 'cpuBinary:rustc', label: 'rustc', values: [10], plotValues: [60], stackBaseValues: [50], times: [100], hasDataValues: [true]},
+    {key: 'cpuBinary:chromium', label: 'chromium', values: [5], plotValues: [65], stackBaseValues: [60], times: [100], hasDataValues: [true]},
+    {key: 'systemCpu', label: 'System', values: [70], times: [100], hasDataValues: [true]},
+    {key: 'cpu:port:7442', label: 'yolomux', values: [50], times: [100], hasDataValues: [true]},
+  ];
+  const directEvent = key => ({target: {closest: () => ({dataset: key.startsWith('cpuBinary:') ? {jsDebugAreaSeries: key} : {jsDebugSeries: key}})}});
+  const context = {
+    result: null, Map, Array, Number, String, Math,
+    jsDebugGraphGeometry: {height: 100},
+    jsDebugGraphHoverChartData: new Map([['cpu', {group: {key: 'cpu', unit: 'percent'}, buckets: [{startMs: 100, durationMs: 100}], groupSeries: series, hoverSeries: series}]]),
+    debugGraphPlotYForValue: value => value,
+    debugGraphValueText: value => `${value}%`,
+    directEvent,
+  };
+  vm.runInNewContext(`
+    ${hoverSource}
+    const chart = {
+      dataset: {jsDebugChart: 'cpu', jsDebugChartAxisMax: '100', jsDebugChartScale: 'linear'},
+      querySelector: () => ({getBoundingClientRect: () => ({top: 0, height: 100})}),
+    };
+    result = {
+      binary: debugGraphHoverDetailAtTime(chart, 100, directEvent('cpuBinary:python')),
+      system: debugGraphHoverDetailAtTime(chart, 100, directEvent('systemCpu')),
+      yolomux: debugGraphHoverDetailAtTime(chart, 100, directEvent('cpu:port:7442')),
+      gridPython: debugGraphHoverDetailAtTime(chart, 100, {target: {closest: () => null}, clientY: 15}),
+      gridNode: debugGraphHoverDetailAtTime(chart, 100, {target: {closest: () => null}, clientY: 40}),
+      gridRustc: debugGraphHoverDetailAtTime(chart, 100, {target: {closest: () => null}, clientY: 55}),
+      gridChromium: debugGraphHoverDetailAtTime(chart, 100, {target: {closest: () => null}, clientY: 62}),
+    };
+  `, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result)), {
+    binary: {text: 'python: 30%', seriesKey: 'cpuBinary:python'},
+    system: {text: 'System: 70%', seriesKey: 'systemCpu'},
+    yolomux: {text: 'yolomux: 50%', seriesKey: 'cpu:port:7442'},
+    gridPython: {text: 'python: 30%', seriesKey: 'cpuBinary:python'},
+    gridNode: {text: 'node: 20%', seriesKey: 'cpuBinary:node'},
+    gridRustc: {text: 'rustc: 10%', seriesKey: 'cpuBinary:rustc'},
+    gridChromium: {text: 'chromium: 5%', seriesKey: 'cpuBinary:chromium'},
+  });
+});
+
+test('both themes render CPU and System memory with saturated areas and block area keys', () => {
+  assert.match(css, /--js-debug-process-area-opacity:\s*0\.52/);
+  assert.match(css, /body\.theme-light :is\(\.js-debug-graph-view, \.js-yocost-graphs\)\s*\{[^}]*--js-debug-process-area-opacity:\s*0\.52/);
+  assert.match(css, /:is\(\.js-debug-chart\[data-js-debug-chart="cpu"\], \.js-debug-chart\[data-js-debug-chart="memory"\]\) \.js-debug-area\s*\{[^}]*opacity:\s*var\(--js-debug-process-area-opacity\)/);
+  assert.match(css, /\.js-debug-legend-area\s*\{[^}]*width:\s*18px[^}]*height:\s*6px/);
+  assert.match(sourceFunction('debugGraphLegendSwatchHtml', 'debugGraphIntegerAxisValues'), /debugGraphSeriesUsesArea\(series, kind\)/);
+  assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /debugGraphSeriesUsesArea\(series, group\.kind\)/);
 });
 
 test('Agents keeps per-session revision joins and semantic paint', () => {
@@ -3165,6 +3466,38 @@ test('the current snapshot adapter merges both GPU dimensions into one device', 
   assert.equal(device.memory_used_total_bytes, 1234567890);
 });
 
+test('the current snapshot adapter maps binary RSS series into memory processes', () => {
+  const projectionText = sourceFunction('jsDebugCurrentCpuProjectionValue', 'jsDebugCurrentServiceLoadItem');
+  const functionText = source.slice(
+    source.indexOf('function jsDebugCurrentBucketRecord('),
+    source.indexOf('\nfunction jsDebugCurrentBucketHasFamilyData('),
+  );
+  const context = {
+    result: null,
+    jsDebugCurrentSeriesValue: (series, name) => Number(series[name]?.value),
+    jsDebugCurrentModelComponent: () => ({}),
+    jsDebugCurrentCostSummary: () => ({components: []}),
+  };
+  vm.runInNewContext(`${projectionText}\n${functionText}\nresult = jsDebugCurrentBucketRecord({
+    start: 100,
+    duration: 60,
+    series: {
+      'process_cpu_percent:python': {value: 12},
+      'process_cpu_max_percent:python': {value: 47},
+      system_memory_used_bytes: {value: 900},
+      'process_memory_bytes:python': {value: 300},
+      'process_memory_bytes:node': {value: 200},
+    },
+  });`, context);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.host_metrics.memory_processes)), {
+    python: {label: 'python', total_bytes: 300, samples: 1},
+    node: {label: 'node', total_bytes: 200, samples: 1},
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.host_metrics.cpu_processes)), {
+    python: {label: 'python', total_percent: 47, samples: 1},
+  });
+});
+
 test('the current snapshot adapter retains marginal cost, API-list cost, and usage-token series', () => {
   const functionText = source.slice(
     source.indexOf('function jsDebugCurrentBucketRecord('),
@@ -3388,7 +3721,7 @@ test('debug subviews share one complete lifecycle descriptor registry', () => {
   assert.match(sourceFunction('debugPanelHtml', 'relocalizeDebugPanelChrome'), /debugSubview\(id\)\.html\(\)/);
   assert.match(sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl'), /view\.render\(panel, options\)/);
   assert.match(source.slice(source.indexOf('function bindDebugPanel(')), /view\.bind\(panel\)/);
-  assert.match(sourceFunction('setDebugSubTab', 'requestJsDebugHistoryForCurrentDomain'), /syncDebugSubviewActivation\(\{pollNow: true\}\)/);
+  assert.match(sourceFunction('syncDebugLogsPolling', 'requestJsDebugHistoryForCurrentDomain'), /return pollDebugLogs\(\{force: true\}\)[\s\S]*return debugSubview\(debugRuntimeState\.subTab\)\.activate\(\{pollNow\}\)[\s\S]*return syncDebugSubviewActivation\(\{pollNow: true\}\)/);
   assert.match(sourceFunction('relocalizeDebugPanelChrome', 'yoCostPanelHtml'), /view\.relocalize\(panel\)/);
 });
 
@@ -3529,6 +3862,40 @@ test('Daemons chart mirrors the server continuous one-second service-load cadenc
   assert.match(manifestSource, /serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest\.service_load\.cadenceSeconds/, 'the Daemons chart buckets from the mirrored family cadence');
 });
 
+test('Daemons keep unique stable color and line-pattern identities beyond nine services', () => {
+  const visualSource = sourceFunction('debugGraphStablePaletteIndex', 'debugGraphSelectedModelTokenBucketValue');
+  const seriesSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
+  const serviceKeys = ['approvald', 'indexd', 'jobd', 'statsd', 'statusd', 'watchd', 'storaged', 'eventd', 'costd', 'schedulerd'];
+  const context = {
+    Number,
+    String,
+    Map,
+    Set,
+    result: null,
+    jsDebugGraphAgentTokenColors: ['blue', 'orange', 'magenta', 'gold', 'green', 'red', 'violet'],
+    jsDebugGraphAgentTokenPatternCount: 7,
+    jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
+    debugGraphServiceLoadEffectiveMode: () => 'avg',
+    debugGraphServiceLoadValue: () => 1,
+    debugGraphVisibleServiceLoadItems: buckets => [...(buckets[0]?.services || [])].map(key => [key, {label: key, cpuSamples: 1}]),
+  };
+  vm.runInNewContext(`
+    ${visualSource}
+    ${seriesSource}
+    const identities = defs => Object.fromEntries(defs.map(series => [series.label, series.color + '|' + series.linePattern]));
+    const full = debugGraphServiceLoadSeriesDefs([{services: ${JSON.stringify(serviceKeys)}}]);
+    const withoutFirst = debugGraphServiceLoadSeriesDefs([{services: ${JSON.stringify(serviceKeys.slice(1))}}]);
+    result = {full: identities(full), withoutFirst: identities(withoutFirst)};
+  `, context);
+  const fullIdentities = {...context.result.full};
+  const withoutFirstIdentities = {...context.result.withoutFirst};
+  assert.equal(new Set(Object.values(fullIdentities)).size, serviceKeys.length, 'ten visible daemons never reuse an exact color and line-pattern pair');
+  assert.equal(new Set(Object.values(fullIdentities).slice(0, 7).map(identity => identity.split('|')[0])).size, 7, 'the first seven visible daemons each receive a different primary color');
+  for (const key of serviceKeys.slice(1)) {
+    assert.equal(withoutFirstIdentities[key], fullIdentities[key], `${key} keeps its identity when another daemon disappears`);
+  }
+});
+
 test('retained service-load apply and merge share one bucket-item initializer', () => {
   const serviceLoadBucketItemSource = sourceFunction('debugGraphNewServiceLoadItem', 'debugGraphNewClientBucket');
   assert.match(serviceLoadBucketItemSource, /cpuTotalPercent: 0,[\s\S]*cpuRangeAvailable: false,[\s\S]*rssMaxBytes: 0/);
@@ -3549,7 +3916,8 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
     Map,
     result: null,
     debugRuntimeState: {serviceLoadMode: 'avg'},
-    debugGraphDisplayedTokenVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    debugGraphStableServiceLoadVisuals: items => items.map((_item, index) => ({color: `color-${index}`, patternIndex: index})),
+    jsDebugGraphServiceLoadLinePatterns: ['solid', 'dash', 'dot'],
     jsDebugGraphDisplayHoldExpiryMs: {tenSecondGauge: 10000},
   };
   context.bucket = {
@@ -3589,6 +3957,14 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
   assert.match(unavailableControls, /data-js-debug-service-load-mode="avg"[^>]*checked[^>]*aria-checked="true"/);
   assert.match(unavailableControls, /data-js-debug-service-load-mode="max"[^>]*disabled[^>]*aria-disabled="true"/);
   assert.match(unavailableControls, /data-js-debug-service-load-mode="min"[^>]*disabled[^>]*aria-disabled="true"/);
+  const selectedModeSelector = '.js-debug-service-load-mode-control input:checked + span';
+  const selectedModeStart = tokenCss.indexOf(selectedModeSelector);
+  const selectedModeEnd = tokenCss.indexOf('}', selectedModeStart);
+  assert.notEqual(selectedModeStart, -1, 'the selected Daemons mode joins the shared active-control selector group');
+  const selectedModeRule = tokenCss.slice(selectedModeStart, selectedModeEnd + 1);
+  assert.match(selectedModeRule, /color:\s*var\(--active-control-text\)/, 'Moon White and other bright accents use their contrast foreground');
+  assert.match(selectedModeRule, /background:\s*var\(--active-control-bg\)/, 'the selected mode uses the shared active-control fill');
+  assert.match(selectedModeRule, /border-color:\s*var\(--active-control-border\)/, 'the selected mode uses the shared active-control border');
   assert.match(sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale'), /group\.key === 'serversLoad' \? debugGraphServiceLoadModeControlsHtml\(buckets\) : displayedSummaryHtml/);
   assert.match(valueSource, /debugGraphVisibleServiceLoadItems\(buckets\)/, 'range availability shares the renderer visible-service classifier');
   assert.match(seriesSource, /for \(const \[key, item\] of debugGraphVisibleServiceLoadItems\(buckets\)\)/, 'the renderer consumes the shared visible-service classifier');

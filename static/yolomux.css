@@ -703,13 +703,13 @@
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: var(--accent-gold);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00b7ff;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff7a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #f000d5;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #f4d08a;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #31dca0;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff4f70;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #9b6cff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00a8ff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff6a00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #ff00d4;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #ffd400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #00e676;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff1744;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #8b5cf6;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-white);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 255 255 255;
   --30-preferences-changes-preferences-setting-control-bg-14: #10151d;
@@ -1231,13 +1231,13 @@ body.theme-light {
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: #cf1625;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: #17813a;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: #bf6a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #0074a4;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: var(--icon-archive);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #b0009f;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #805b1c;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #087c5b;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #c21f45;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #5b21d1;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #006dff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #f04400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #d000b8;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #b06b00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #008f55;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #d00040;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #6d28d9;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-black);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 0 0 0;
   --30-preferences-changes-preferences-setting-control-bg-14: var(--paint-white);
@@ -1469,6 +1469,7 @@ body.editor-theme-light {
 .modal pre,
 .drop-action-result pre,
 .file-editor-conflict-compare pre,
+.git-diff-commit-message,
 .js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1541,6 +1542,7 @@ body.editor-theme-light {
   color: var(--text);
 }
 :where(button),
+.diff-ref-static-value,
 .diff-ref-suggestion-popover,
 .yoagent-message,
 .conversation-message,
@@ -1736,6 +1738,7 @@ body.editor-theme-light {
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
 .file-explorer-date-toggle.active,
+.js-debug-service-load-mode-control input:checked + span,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
 .js-debug-log-level[aria-pressed="true"],
@@ -1779,6 +1782,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .terminal-drop-suggestion-label,
 .js-debug-system-kv dd,
 .backend-health-indicator-text,
+.git-diff-path,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;
@@ -2301,16 +2305,7 @@ button.topbar-status-surface:focus-visible {
   gap: var(--space-4);
   padding: 0 var(--space-6);
 }
-.topbar-activity.has-attention {
-  border-color: color-mix(in srgb, var(--danger-strong) 72%, var(--line));
-  background: color-mix(in srgb, var(--danger-strong) 12%, var(--panel2));
-  color: var(--text);
-}
-.topbar-activity.has-attention:hover,
-.topbar-activity.has-attention:focus-visible {
-  border-color: var(--danger-strong);
-  background: color-mix(in srgb, var(--danger-strong) 18%, var(--panel2));
-}
+/* Per-state dots carry activity meaning; the aggregate summary is not an error surface. */
 .topbar-activity-count {
   display: inline-flex;
   align-items: center;
@@ -4046,7 +4041,9 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 .popover-value a,
 .branch-link,
 .meta a,
-.summary-context a {
+.summary-context a,
+.git-diff-commit-sha,
+.git-diff-change-link {
   color: var(--link-soft);
   text-decoration: none;
 }
@@ -4055,7 +4052,9 @@ body :is(
   .branch-link,
   .meta a,
   .summary-context a,
-  .info-tree-group-label-action
+  .info-tree-group-label-action,
+  .git-diff-commit-sha,
+  .git-diff-change-link
 ):is(:hover, :focus-visible) {
   color: var(--link-soft-hover);
   text-decoration: underline;
@@ -4981,6 +4980,7 @@ body :is(
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
+  --js-debug-process-area-opacity: 0.52;
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
   --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
@@ -5433,11 +5433,6 @@ body :is(
   padding: var(--space-3) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-}
-.js-debug-service-load-mode-control input:checked + span {
-  border-color: var(--active-accent-bright);
-  color: var(--active-accent-bright);
-  background: var(--active-accent-soft);
 }
 .js-debug-service-load-mode-control input:focus-visible + span {
   box-shadow: var(--active-control-focus-shadow-compact);
@@ -6226,6 +6221,16 @@ body :is(
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+body.theme-light :is(.js-debug-graph-view, .js-yocost-graphs) {
+  --js-debug-client-comparison-opacity: 0.9;
+  --js-debug-process-area-opacity: 0.52;
+}
+body.theme-light .js-debug-line {
+  stroke-width: 1.6;
+}
+body.theme-light .js-debug-line--moving-average {
+  stroke-width: 2.2;
+}
 .js-debug-live-pulse.heartbeat-pulse {
   fill: rgb(var(--active-accent-rgb) / 0.14);
   pointer-events: none;
@@ -6269,6 +6274,9 @@ body :is(
 .js-debug-area {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
   opacity: 0.18;
+}
+:is(.js-debug-chart[data-js-debug-chart="cpu"], .js-debug-chart[data-js-debug-chart="memory"]) .js-debug-area {
+  opacity: var(--js-debug-process-area-opacity);
 }
 .js-debug-bar {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
@@ -6339,6 +6347,9 @@ body :is(
 .js-debug-line--systemCpu {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-rose));
 }
+.js-debug-line--current-process {
+  stroke-width: 2.4;
+}
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);
 }
@@ -6364,6 +6375,18 @@ body :is(
 }
 .js-debug-line--pattern-dash {
   --js-debug-line-dash: 6 4;
+}
+.js-debug-line--pattern-dash-dot {
+  --js-debug-line-dash: 7 3 1 3;
+}
+.js-debug-line--pattern-long-dash {
+  --js-debug-line-dash: 11 4;
+}
+.js-debug-line--pattern-dense-dot {
+  --js-debug-line-dash: 1 2;
+}
+.js-debug-line--pattern-long-short {
+  --js-debug-line-dash: 10 3 3 3;
 }
 .js-debug-legend {
   display: flex;
@@ -6393,6 +6416,17 @@ body :is(
 }
 .js-debug-legend-line .js-debug-line {
   stroke-width: 1.5;
+}
+.js-debug-legend-line .js-debug-line--current-process {
+  stroke-width: 2.5;
+}
+.js-debug-legend-area {
+  width: 18px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 1px;
+  background: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.68;
 }
 .js-debug-legend-swatch--api {
   color: var(--js-debug-api-series);
@@ -7729,6 +7763,210 @@ body .file-explorer-changes-panel {
   --changes-indent-line: var(--changes-tree-indent-line);
   --changes-path-text: var(--30-preferences-changes-file-explorer-changes-panel-changes-path-text-31);
   --changes-icon-text: var(--changes-tree-icon-text);
+}
+.diff-ref-controls.historical {
+  align-items: center;
+}
+.diff-ref-static-value {
+  display: inline-flex;
+  align-items: center;
+  min-width: 9ch;
+  height: 20px;
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-sm);
+  font: var(--ui-font-size-xs)/1 var(--mono-font);
+}
+.diff-ref-historical-note {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--ui-font-size-2xs);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.file-editor-diff-ref-panel .diff-ref-controls.historical .diff-ref-control {
+  font-size: var(--ui-font-size-2xs);
+}
+.git-diff-panel {
+  --git-diff-row-separator: color-mix(in srgb, var(--line) 76%, transparent);
+  --git-diff-secondary-text: var(--text-muted-cool);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  color: var(--text);
+  background: var(--panel);
+  container: git-diff-panel / inline-size;
+}
+body.theme-light .git-diff-panel {
+  --git-diff-row-separator: #aeb9c8;
+  --git-diff-secondary-text: #465468;
+}
+.git-diff-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-10) var(--space-4);
+}
+.git-diff-heading {
+  font-weight: 700;
+}
+.git-diff-path {
+  color: var(--text-muted-cool);
+}
+.git-diff-refresh,
+.git-diff-load-older {
+  min-height: 26px;
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-control);
+}
+.git-diff-refresh:hover:not(:disabled),
+.git-diff-load-older:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.git-diff-meta {
+  padding: 0 var(--space-10) var(--space-8);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.git-diff-panel-body {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-6) var(--space-8) var(--space-12);
+}
+.git-diff-commits {
+  display: grid;
+  grid-template-columns: 14px max-content max-content max-content minmax(5rem, max-content) minmax(6rem, 1fr);
+  gap: 0 var(--space-8);
+}
+.git-diff-commit {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  column-gap: var(--space-8);
+  min-width: 0;
+  box-shadow: inset 0 -1px var(--git-diff-row-separator);
+}
+.git-diff-commit-row {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  align-items: center;
+  column-gap: var(--space-8);
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  padding: var(--space-2) var(--space-6);
+  border: 0;
+  border-radius: var(--radius-control);
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: start;
+  white-space: nowrap;
+}
+.git-diff-commit-row:hover,
+.git-diff-commit-row:focus-visible {
+  background: var(--changes-tree-row-hover-bg);
+}
+.git-diff-commit-caret {
+  color: var(--changes-tree-icon-text);
+}
+.git-diff-commit-sha,
+.git-diff-commit-refs {
+  font-family: var(--mono-font);
+}
+.git-diff-commit-description {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+.git-diff-commit-date,
+.git-diff-commit-changes,
+.git-diff-commit-author {
+  color: var(--git-diff-secondary-text);
+}
+.git-diff-commit-added {
+  color: var(--git-staged);
+}
+.git-diff-commit-removed {
+  color: var(--git-deleted);
+}
+.git-diff-commit-detail {
+  grid-column: 1 / -1;
+  margin: 0 0 var(--space-8);
+  margin-inline-start: 22px;
+  padding: var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel2);
+}
+.git-diff-commit-refs {
+  margin-bottom: var(--space-6);
+  color: var(--muted);
+  font-size: var(--ui-font-size-xs);
+}
+.git-diff-commit-message {
+  max-height: 12rem;
+  margin: 0 0 var(--space-8);
+  overflow: auto;
+  color: var(--text);
+  font: inherit;
+}
+.git-diff-file-tree {
+  min-width: 0;
+}
+.git-diff-state,
+.git-diff-truncated {
+  margin: var(--space-6) 0;
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+  color: var(--muted);
+  background: var(--panel2);
+}
+.git-diff-state-error {
+  border-color: var(--danger-border-soft);
+  color: var(--danger-text-soft);
+}
+.git-diff-load-older {
+  display: block;
+  margin: var(--space-10) auto 0;
+}
+
+@container git-diff-panel (max-width: 62rem) {
+  .git-diff-commit-author {
+    display: none;
+  }
+  .git-diff-commits {
+    grid-template-columns: 14px max-content max-content max-content minmax(6rem, 1fr);
+  }
+}
+@container git-diff-panel (max-width: 48rem) {
+  .git-diff-commit-date {
+    display: none;
+  }
+  .git-diff-commits {
+    grid-template-columns: 14px max-content max-content minmax(6rem, 1fr);
+  }
+}
+@container git-diff-panel (max-width: 34rem) {
+  .git-diff-commit-changes {
+    display: none;
+  }
+  .git-diff-commits {
+    grid-template-columns: 14px max-content minmax(6rem, 1fr);
+  }
+  .git-diff-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .git-diff-heading {
+    display: none;
+  }
 }
 .grid {
   position: relative;
@@ -10284,6 +10522,22 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .terminal[data-terminal-theme="light"] {
   --terminal-file-link-underline: rgb(3 105 161 / 0.48);
   --terminal-file-link-underline-hover: rgb(3 105 161 / 0.58);
+}
+/* xterm's minimum contrast correction collapses dark-tuned 24-bit grays when it compares them to a
+   white background. Light terminals retain the dark render palette/contrast reference, then this
+   involutive transform converts the painted rows to dark-on-white while preserving source spacing.
+   Keep the xterm paint layers explicitly white: filtering a transparent row stack composites the
+   dark render background into the result even when the outer terminal container is already white.
+   A cursor receives the transform twice so its light display colors and bad-connection X stay
+   unchanged instead of inheriting the row conversion. */
+.terminal[data-terminal-theme="light"] :is(.xterm, .xterm-viewport, .xterm-screen) {
+  background-color: var(--paint-white) !important;
+}
+.terminal[data-terminal-theme="light"] .xterm-rows {
+  filter: invert(1) hue-rotate(180deg);
+}
+.terminal[data-terminal-theme="light"] .xterm-rows .xterm-cursor {
+  filter: invert(1) hue-rotate(180deg);
 }
 .terminal-file-link-underlines {
   position: absolute;
@@ -13652,6 +13906,11 @@ body.app-vw-lte-980 .tabs {
 .file-tree-repo-popover-branch {
   font-family: var(--mono-font);
   color: var(--text);
+}
+.file-tree-repo-popover-sha {
+  font-family: var(--mono-font);
+  color: var(--muted);
+  word-break: break-all;
 }
 .file-tree-repo-popover-stat {
   color: var(--muted);

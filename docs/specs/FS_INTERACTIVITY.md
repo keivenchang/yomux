@@ -31,7 +31,7 @@ The queue entry is one bounded typed record with at least `root`, `directory`, `
 For one dequeued directory, the worker must:
 
 1. Revalidate that the root is still configured, the generation is current, the canonical directory remains beneath the root, and the shared exclusion/symlink policy permits background traversal.
-2. List only that directory with the existing path policy, partial descriptor protections, and configured entry/file limits. The current implementation does not yet retain an authorized descriptor generation through every listing/index metadata consumer; that security gap belongs to [`DOIT.p0.e5.filesystem-descriptor-authorization.md`](../../queues/backlog/DOIT.p0.e5.filesystem-descriptor-authorization.md).
+2. List only that directory with the shared descriptor-bound path policy and configured entry/file limits. Listing and index metadata consumers read the descriptor generation that passed authorization: children are opened relative to the pinned parent descriptor, and `SafePathHandle.descriptor_path()` returns only a per-descriptor magic path (`/proc/self/fd/N` or `/dev/fd/N`) or fails closed, so no consumer re-resolves an authorized name.
 3. Publish file rows and directory metadata for that directory in one bounded transaction; publish removals or renames from the previous directory snapshot in the same generation.
 4. Enqueue eligible child directories at `depth + 1` without opening them.
 5. Check cancellation and yield to higher-priority work before taking another frontier item.
@@ -75,7 +75,7 @@ Persisted state must distinguish configuration/policy signature, active generati
 
 ## Bounds and path policy
 
-- Preserve the existing single-writer database fence, per-root build lock, tombstone behavior, current path policy and partial descriptor protections, exclusion signature, `index_max_files`, persistence byte/file limits, and network-filesystem rejection. Do not claim full descriptor-generation authorization until the P0 consumer matrix passes.
+- Preserve the existing single-writer database fence, per-root build lock, tombstone behavior, the shared descriptor-bound path policy, exclusion signature, `index_max_files`, persistence byte/file limits, and network-filesystem rejection. Authorization stays with the one owner in `filesystem/paths.py`; do not add a route-specific path check.
 - Bound frontier entries, retries, per-directory entries, transaction rows/bytes, total indexed entries, and concurrent directory scans. Report truncation explicitly instead of presenting incomplete coverage as full.
 - Apply one shared exclusion and symlink predicate to startup, hot repair, breadth expansion, and safety refresh. A symlink root covers only its resolved subtree; discovered links cannot escape the configured root or create cycles.
 - Treat permission failures, disappearing paths, rename races, and transient I/O errors as per-directory outcomes. They must not discard the last-known-good root snapshot or wedge later frontier work.

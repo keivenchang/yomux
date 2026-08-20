@@ -10,14 +10,8 @@ import subprocess
 
 
 @dataclass(frozen=True)
-class MockGitRepository:
+class GitRepositoryFixture:
     root: Path
-    modified: Path
-    untracked: Path
-    deleted: Path
-    renamed_from: Path
-    renamed_to: Path
-    large_diff: Path
 
     def git(self, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -26,6 +20,16 @@ class MockGitRepository:
             capture_output=True,
             text=True,
         )
+
+
+@dataclass(frozen=True)
+class MockGitRepository(GitRepositoryFixture):
+    modified: Path
+    untracked: Path
+    deleted: Path
+    renamed_from: Path
+    renamed_to: Path
+    large_diff: Path
 
     def status_lines(self) -> tuple[str, ...]:
         return tuple(self.git("status", "--short").stdout.splitlines())
@@ -102,3 +106,101 @@ def create_mock_git_repository(root: Path) -> MockGitRepository:
     assert any(line.startswith(" M large-diff.txt") for line in statuses), statuses
     assert int(repo.git("rev-list", "--count", "HEAD").stdout.strip()) == 2
     return repo
+
+
+@dataclass(frozen=True)
+class GitHistoryRepository(GitRepositoryFixture):
+    scope: Path
+    root_sha: str
+    outside_sha: str
+    changes_sha: str
+    feature_sha: str
+    main_sha: str
+    merge_sha: str
+    deleted: Path
+    renamed_from: Path
+    renamed_to: Path
+    copy_source: Path
+    copy_target: Path
+    binary: Path
+    mode_only: Path
+    hostile: Path
+
+
+def create_git_history_repository(root: Path) -> GitHistoryRepository:
+    """Create root, scoped, merge, binary, rename, copy, mode, and hostile-name history."""
+    root.mkdir(parents=True)
+    fixture = GitRepositoryFixture(root=root)
+    fixture.git("init", "-q")
+    fixture.git("config", "user.name", "History Fixture")
+    fixture.git("config", "user.email", "history@example.invalid")
+    scope = root / "scope"
+    scope.mkdir()
+    deleted = scope / "deleted.txt"
+    renamed_from = scope / "renamed-before.txt"
+    renamed_to = scope / "renamed-after.txt"
+    copy_source = scope / "copy-source.txt"
+    copy_target = scope / "copy-target.txt"
+    binary = scope / "binary.dat"
+    mode_only = scope / "mode-only.sh"
+    hostile = scope / "tab\tline\nユニコード.txt"
+    (root / "root.txt").write_text("root\n", encoding="utf-8")
+    (scope / "kept.txt").write_text("before\n", encoding="utf-8")
+    deleted.write_text("delete me\n", encoding="utf-8")
+    renamed_from.write_text("rename me\n", encoding="utf-8")
+    copy_source.write_text("copy me\n", encoding="utf-8")
+    binary.write_bytes(b"\x00before\n")
+    mode_only.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fixture.git("add", "--", ".")
+    fixture.git("commit", "-q", "-m", "root commit")
+    root_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+
+    (root / "outside.txt").write_text("outside scope\n", encoding="utf-8")
+    fixture.git("add", "--", "outside.txt")
+    fixture.git("commit", "-q", "-m", "outside scope")
+    outside_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+
+    (scope / "kept.txt").write_text("after\nextra\n", encoding="utf-8")
+    deleted.unlink()
+    fixture.git("mv", "--", str(renamed_from.relative_to(root)), str(renamed_to.relative_to(root)))
+    copy_target.write_text(copy_source.read_text(encoding="utf-8"), encoding="utf-8")
+    binary.write_bytes(b"\x00after\n")
+    mode_only.chmod(0o755)
+    hostile.write_text("hostile path\n", encoding="utf-8")
+    fixture.git("add", "--", ".")
+    fixture.git("commit", "-q", "-m", "scoped history changes", "-m", "Preserve every path and count.")
+    changes_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+
+    main_branch = fixture.git("branch", "--show-current").stdout.strip()
+    fixture.git("checkout", "-q", "-b", "history-feature")
+    (scope / "feature.txt").write_text("feature\n", encoding="utf-8")
+    fixture.git("add", "--", "scope/feature.txt")
+    fixture.git("commit", "-q", "-m", "feature side")
+    feature_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+
+    fixture.git("checkout", "-q", main_branch)
+    (scope / "main.txt").write_text("main\n", encoding="utf-8")
+    fixture.git("add", "--", "scope/main.txt")
+    fixture.git("commit", "-q", "-m", "main side")
+    main_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+    fixture.git("merge", "-q", "--no-ff", "history-feature", "-m", "merge feature")
+    merge_sha = fixture.git("rev-parse", "HEAD").stdout.strip()
+
+    return GitHistoryRepository(
+        root=root,
+        scope=scope,
+        root_sha=root_sha,
+        outside_sha=outside_sha,
+        changes_sha=changes_sha,
+        feature_sha=feature_sha,
+        main_sha=main_sha,
+        merge_sha=merge_sha,
+        deleted=deleted,
+        renamed_from=renamed_from,
+        renamed_to=renamed_to,
+        copy_source=copy_source,
+        copy_target=copy_target,
+        binary=binary,
+        mode_only=mode_only,
+        hostile=hostile,
+    )

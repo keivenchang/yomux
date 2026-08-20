@@ -143,6 +143,7 @@ def parse_query_int(
     *,
     min_value: int = 1,
     max_value: int | None = None,
+    clamp_min: bool = False,
 ) -> tuple[int | None, str]:
     raw = qs.get(name, [str(default)])[0]
     try:
@@ -154,12 +155,15 @@ def parse_query_int(
             field=name,
         )
     if value < min_value:
-        return None, RequestValidationError(
-            f"{name} must be at least {min_value}",
-            "request.error.minimum",
-            field=name,
-            min=min_value,
-        )
+        if clamp_min:
+            value = min_value
+        else:
+            return None, RequestValidationError(
+                f"{name} must be at least {min_value}",
+                "request.error.minimum",
+                field=name,
+                min=min_value,
+            )
     if max_value is not None:
         value = min(value, max_value)
     return value, ""
@@ -1074,6 +1078,16 @@ def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
     request.handle_fs_diff(parsed)
 
 
+def get_fs_git_history(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_git_history(parsed)
+
+
+def get_fs_git_commit(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.handle_fs_git_commit(parsed)
+
+
 def get_fs_watch_diff(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
@@ -1550,6 +1564,8 @@ FILESYSTEM_ROUTES = (
     Route("GET", "/api/fs/read", "readonly", get_fs_read, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/diff", "readonly", get_fs_diff, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/git-history", "readonly", get_fs_git_history, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/git-commit", "readonly", get_fs_git_commit, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/blame", "readonly", get_blame, protocol=RESPONSE_JSON, group="filesystem"),
     Route("GET", "/api/fs/raw", "readonly", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem"),

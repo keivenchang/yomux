@@ -185,6 +185,57 @@ def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
         ).collect()
 
 
+def test_system_memory_adapter_reuses_the_fresh_statsd_process_census(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "current_darwin_system_memory_snapshot", lambda: None)
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1000, 600))
+    webapp.latest_stats_sample = lambda: {
+        "time": app_module.time.time(),
+        "process_memory_bytes": {"python": 300, "node": 200},
+    }
+
+    facts = webapp.collect_current_stats_system_memory(attempt("system_memory", 60))
+
+    assert facts.observations[0].payload == {
+        "used_bytes": 600.0,
+        "capacity_bytes": 1000.0,
+        "process_memory_bytes": {"python": 300, "node": 200},
+    }
+
+
+def test_system_memory_adapter_uses_the_memory_timestamp_when_cpu_is_unavailable(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "current_darwin_system_memory_snapshot", lambda: None)
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1000, 600))
+    webapp.latest_stats_sample = lambda: {
+        "process_memory_time": app_module.time.time(),
+        "cpu_percent": None,
+        "system_cpu_percent": None,
+        "process_memory_bytes": {"python": 300, "node": 200},
+    }
+
+    facts = webapp.collect_current_stats_system_memory(attempt("system_memory", 60))
+
+    assert facts.observations[0].payload["process_memory_bytes"] == {"python": 300, "node": 200}
+
+
+def test_system_memory_adapter_omits_process_rows_when_the_pushed_census_is_stale(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "current_darwin_system_memory_snapshot", lambda: None)
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1000, 600))
+    webapp.latest_stats_sample = lambda: {
+        "time": 1.0,
+        "process_memory_bytes": {"python": 300},
+    }
+
+    facts = webapp.collect_current_stats_system_memory(attempt("system_memory", 60))
+
+    assert facts.observations[0].payload == {
+        "used_bytes": 600.0,
+        "capacity_bytes": 1000.0,
+    }
+
+
 def test_token_adapter_uses_incremental_structured_atoms_and_keeps_dimensions(tmp_path):
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text(

@@ -1154,14 +1154,19 @@ class StatsCurrentService:
         # The web process's CPU/memory sample is pushed from here on a 1.0s cadence and it is the
         # ONLY writer of that metric. Every skip used to be silent -- no counter, no reason, and
         # `failures` stayed 0 because a skipped push never raised -- so a web row that read
-        # "never measured" for the life of the process carried no evidence of why. These four
-        # make the delivery path observable: attempted vs delivered is the rate, and the typed
-        # reason says which gate stopped it.
-        self._host_cpu_push_attempts = 0
-        self._host_cpu_push_delivered = 0
-        self._host_cpu_push_last_reason = ""
-        self._host_cpu_push_last_reason_at = 0.0
-        self._host_cpu_push_last_delivered_at = 0.0
+        # "never measured" for the life of the process carried no evidence of why. These shared
+        # records make both delivery paths observable: attempted vs delivered is the rate, and
+        # the typed reason says which gate stopped it.
+        self._host_push_status: dict[str, dict[str, int | float | str]] = {
+            kind: {
+                "attempted": 0,
+                "delivered": 0,
+                "last_reason": "",
+                "last_reason_at": 0.0,
+                "last_delivered_at": 0.0,
+            }
+            for kind in ("cpu", "memory")
+        }
         self.worker: threading.Thread | None = None
         self.leases: dict[str, object] = {}
         self.started_at, self.last_client_at = self.clock(), self.monotonic()
@@ -1849,17 +1854,26 @@ class StatsCurrentService:
             return None, "web_owner_no_control_socket"
         return {"control_socket": self.collector_control_socket}, ""
 
-    def _record_host_cpu_push(self, reason: str) -> None:
-        """One recorder for the outcome of every attempted CPU-sample push."""
+    def _record_host_push(self, kind: str, reason: str) -> None:
+        """One recorder for every CPU or process-memory delivery outcome."""
 
+        status = self._host_push_status[kind]
+        status["attempted"] = int(status["attempted"]) + 1
         if not reason:
-            self._host_cpu_push_delivered += 1
-            self._host_cpu_push_last_delivered_at = self.clock()
-            self._host_cpu_push_last_reason = ""
-            self._host_cpu_push_last_reason_at = 0.0
+            status["delivered"] = int(status["delivered"]) + 1
+            status["last_delivered_at"] = self.clock()
+            status["last_reason"] = ""
+            status["last_reason_at"] = 0.0
             return
-        self._host_cpu_push_last_reason = reason[:120]
-        self._host_cpu_push_last_reason_at = self.clock()
+        status["last_reason"] = reason[:120]
+        status["last_reason_at"] = self.clock()
+
+    def _host_push_status_payload(self, kind: str) -> dict[str, int | float | str]:
+        status = self._host_push_status[kind]
+        return {
+            **status,
+            "skipped": max(0, int(status["attempted"]) - int(status["delivered"])),
+        }
 
     def _host_coverage_epoch(
         self,
@@ -1923,8 +1937,33 @@ class StatsCurrentService:
                 # The skip is still counted with its reason, because a skipped push that leaves no
                 # evidence is the defect this gate was built for.
                 if sample["cpu_percent"] is None or sample["system_cpu_percent"] is None:
-                    self._host_cpu_push_attempts += 1
-                    self._record_host_cpu_push("cpu_sample_no_baseline")
+                    self._record_host_push("cpu", "cpu_sample_no_baseline")
+                    # RSS is an absolute census and does not depend on either CPU baseline.
+                    # Deliver it independently so a missing /proc/stat or Mach CPU reading
+                    # cannot make the System memory process areas disappear.
+                    if isinstance(sample.get("process_memory_bytes"), Mapping):
+                        owner, push_reason = self._web_push_target()
+                        if owner is None:
+                            self._record_host_push("memory", push_reason)
+                        else:
+                            response = send_yolomux_control_request(
+                                owner,
+                                {
+                                    "action": "stats_process_memory_sample",
+                                    "sample": {
+                                        "time": sample["time"],
+                                        "pid": sample["pid"],
+                                        "process_memory_bytes": sample["process_memory_bytes"],
+                                    },
+                                },
+                                timeout=0.25,
+                            )
+                            accepted = isinstance(response, dict) and response.get("ok") is True
+                            error = str(response.get("error") or "") if isinstance(response, dict) else "invalid control response"
+                            self._record_host_push(
+                                "memory",
+                                "" if accepted else f"push_rejected: {error or 'unknown error'}",
+                            )
                 else:
                     epoch_id, epoch_started_at = self._host_coverage_epoch(
                         publisher,
@@ -1943,6 +1982,11 @@ class StatsCurrentService:
                         source_id=source_id,
                         process_percent=float(sample["cpu_percent"]),
                         system_percent=float(sample["system_cpu_percent"]),
+                        process_cpu_percent=(
+                            sample.get("process_cpu_percent")
+                            if isinstance(sample.get("process_cpu_percent"), Mapping)
+                            else None
+                        ),
                     )
                     self._append_host_facts(publisher, facts)
                     # The sole producer of the web process's own CPU/memory metric. It is
@@ -1950,16 +1994,15 @@ class StatsCurrentService:
                     # cadence), but fire-and-forget must still mean OBSERVED-and-forget: the
                     # outcome of every attempt is counted and the failing gate is named.
                     owner, push_reason = self._web_push_target()
-                    self._host_cpu_push_attempts += 1
                     if owner is None:
-                        self._record_host_cpu_push(push_reason)
+                        self._record_host_push("cpu", push_reason)
                     else:
                         response = send_yolomux_control_request(
                             owner, {"action": "stats_cpu_sample", "sample": sample}, timeout=0.25,
                         )
                         accepted = isinstance(response, dict) and response.get("ok") is True
                         error = str(response.get("error") or "") if isinstance(response, dict) else "invalid control response"
-                        self._record_host_cpu_push("" if accepted else f"push_rejected: {error or 'unknown error'}")
+                        self._record_host_push("cpu", "" if accepted else f"push_rejected: {error or 'unknown error'}")
             if now_monotonic >= self._next_host_gpu_at:
                 self._next_host_gpu_at = now_monotonic + HOST_GPU_CADENCE_SECONDS
                 if self._host_gpu_roster_owner_generation != context["owner_generation"]:
@@ -4426,14 +4469,8 @@ class StatsStatusProjector:
                 # Delivery of the web process's own CPU/memory sample needs its own evidence:
                 # `attempted` without `delivered` is exactly the state that renders the Daemons
                 # web row "never measured", and `last_reason` names the gate that stopped it.
-                "cpu_push": {
-                    "attempted": self._host_cpu_push_attempts,
-                    "delivered": self._host_cpu_push_delivered,
-                    "skipped": max(0, self._host_cpu_push_attempts - self._host_cpu_push_delivered),
-                    "last_reason": self._host_cpu_push_last_reason,
-                    "last_reason_at": self._host_cpu_push_last_reason_at,
-                    "last_delivered_at": self._host_cpu_push_last_delivered_at,
-                },
+                "cpu_push": self._host_push_status_payload("cpu"),
+                "memory_push": self._host_push_status_payload("memory"),
             },
         }
 

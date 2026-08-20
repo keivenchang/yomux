@@ -610,21 +610,39 @@ def wait_for_hidden_stats_stream(driver: Any) -> dict[str, Any]:
     return evidence
 
 
+def hidden_stats_delta_revision_regressed(stream: Mapping[str, Any], prior_stream: Mapping[str, Any]) -> bool:
+    return stream["cacheGeneration"] == int(prior_stream.get("cacheGeneration") or 0) and stream["deltaRevision"] < int(prior_stream.get("deltaRevision") or 0)
+
+
+def hidden_stats_ready_snapshot_repair(stream: Mapping[str, Any], prior_stream: Mapping[str, Any]) -> bool:
+    return (
+        stream["lastDeliveryKind"] == "ready"
+        and stream["streamEpoch"] > int(prior_stream.get("streamEpoch") or 0)
+        and stream["deliverySequence"] > int(prior_stream.get("deliverySequence") or 0)
+        and stream["cacheGeneration"] > int(prior_stream.get("cacheGeneration") or 0)
+        and stream["sourceGeneration"] > int(prior_stream.get("sourceGeneration") or 0)
+        and stream["deltaRevision"] == 0
+    )
+
+
 def classify_hidden_stats_stream(current: dict[str, Any] | None, previous: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     if current is None:
         return current, ["hidden YO!stats stream is unavailable, visible, stale, or unready"]
     prior_stream = previous.get("stream") if isinstance(previous.get("stream"), Mapping) else {}
     stream = current["stream"]
     integrity: list[str] = []
-    for field in ("streamEpoch", "deliverySequence", "acceptedDeltaSequence", "sourceGeneration", "cacheGeneration", "deltaRevision"):
+    for field in ("streamEpoch", "deliverySequence", "acceptedDeltaSequence", "sourceGeneration", "cacheGeneration"):
         if stream[field] < int(prior_stream.get(field) or 0):
             integrity.append(f"hidden YO!stats {field} regressed")
+    if hidden_stats_delta_revision_regressed(stream, prior_stream):
+        integrity.append("hidden YO!stats deltaRevision regressed within cache generation")
     if (stream["rangeSeconds"], stream["resolutionSeconds"]) != (prior_stream.get("rangeSeconds"), prior_stream.get("resolutionSeconds")):
         integrity.append("hidden YO!stats selection changed")
-    coherent_fields = ("acceptedDeltaSequence", "cacheGeneration", "sourceGeneration", "deltaRevision")
+    coherent_fields = ("acceptedDeltaSequence", "cacheGeneration", "sourceGeneration")
     advanced = [stream[field] > int(prior_stream.get(field) or 0) for field in coherent_fields]
-    if any(advanced) and not all(advanced):
-        integrity.append("hidden YO!stats delta, cache, source generation, and revision did not advance coherently")
+    snapshot_repair = advanced == [False, True, True] and hidden_stats_ready_snapshot_repair(stream, prior_stream)
+    if any(advanced) and not all(advanced) and not snapshot_repair:
+        integrity.append("hidden YO!stats accepted delta, cache, and source generation did not advance coherently")
     previous_painted = str(previous.get("paintedGenerationKey") or "")
     current_painted = str(current.get("paintedGenerationKey") or "")
     if current_painted and current_painted != previous_painted:
@@ -2017,11 +2035,13 @@ def validate_success_artifact(artifact: Mapping[str, Any]) -> None:
         raise ArtifactIntegrityError("success artifact is missing hidden YO!stats stream evidence")
     baseline_stream = baseline_stats.get("stream") if isinstance(baseline_stats.get("stream"), Mapping) else {}
     final_stream = final_stats.get("stream") if isinstance(final_stats.get("stream"), Mapping) else {}
+    if hidden_stats_delta_revision_regressed(final_stream, baseline_stream):
+        raise ArtifactIntegrityError("success artifact hidden YO!stats deltaRevision regressed within cache generation")
     if int(final_stream.get("deliverySequence") or 0) <= int(baseline_stream.get("deliverySequence") or 0):
         raise ArtifactIntegrityError("success artifact has no post-baseline hidden YO!stats delivery")
-    coherent_fields = ("acceptedDeltaSequence", "cacheGeneration", "sourceGeneration", "deltaRevision")
+    coherent_fields = ("acceptedDeltaSequence", "cacheGeneration", "sourceGeneration")
     if not all(int(final_stream.get(field) or 0) > int(baseline_stream.get(field) or 0) for field in coherent_fields):
-        raise ArtifactIntegrityError("success artifact lacks coherent accepted delta, cache, source generation, and revision advancement")
+        raise ArtifactIntegrityError("success artifact lacks coherent accepted delta, cache, and source generation advancement")
     baseline_painted = str(baseline_stats.get("paintedGenerationKey") or "")
     final_painted = str(final_stats.get("paintedGenerationKey") or "")
     if final_painted and final_painted != baseline_painted:
@@ -2072,9 +2092,8 @@ def produce_negative_browser_failure(driver: Any) -> dict[str, Any]:
           if (typeof flushJsDebugCurrentObservations !== 'function') throw new Error('observation uploader is unavailable');
           await flushJsDebugCurrentObservations();
           const projection = jsDebugCurrentObservationReceiptProjection();
-          selectSession(debugPaneItemId, {userInitiated: true});
-          setDebugSubTab('logs');
-          await pollDebugLogs({force: true});
+          await selectSession(debugPaneItemId, {userInitiated: true});
+          await setDebugSubTab('logs');
           if (typeof refreshDebugLogsViews === 'function') refreshDebugLogsViews();
           await Promise.resolve();
           const rows = [...document.querySelectorAll('article[data-js-debug-log-entry]')].filter(row =>

@@ -67,6 +67,10 @@ let yolomuxFontsReadyPromise = null;
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
+const cpuTopology = Object.freeze({
+  logicalCpus: Math.max(0, Number(bootstrap.cpuTopology?.logical_cpus) || 0),
+  physicalCores: Math.max(0, Number(bootstrap.cpuTopology?.physical_cores) || 0),
+});
 const appRoot = document.getElementById('appRoot') || document.body;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -331,9 +335,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
   }}),
-  // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
-  // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
+  // Finder exposes Edit, Preview, and Diff as modes of one file tab, so generic text/code files need
+  // the existing syntax-highlighted Preview surface too; commit snapshots reuse this same renderer.
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -416,10 +420,13 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
 const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame/identity/open-promise state
+const historicalFileState = new Map();  // exact filehistory item -> immutable commit-side editor state
+const gitDiffTabState = new Map();  // exact gitdiff item -> frozen history snapshot, disclosures, and requests
 const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerFinderSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
@@ -533,8 +540,17 @@ const tabberActivityState = {
 const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
+// Differ owns arbitrary selected refs. Finder has a separate fixed HEAD/current record below so a
+// historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+  abortController: null,
+};
+const fileExplorerFinderSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
@@ -877,6 +893,9 @@ const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
+const historicalFileEditorItemPrefix = 'filehistory:';
+const gitDiffItemPrefix = 'gitdiff:';
+const gitDiffHistoryPageSize = 50;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -1087,6 +1106,37 @@ function makeGenerationGuard() {
   });
 }
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function gitDiffItemFor(path) {
+  const normalized = normalizeDirectoryPath(String(path || ''));
+  return normalized ? `${gitDiffItemPrefix}${encodeURIComponent(normalized)}` : '';
+}
+function gitDiffItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(gitDiffItemPrefix)) return null;
+  const path = safeDecodeURIComponent(text.slice(gitDiffItemPrefix.length));
+  return path.startsWith('/') ? normalizeDirectoryPath(path) : null;
+}
+function historicalFileEditorItemFor(path, fromRef, toRef) {
+  const normalizedPath = String(path || '').trim();
+  const normalizedFrom = String(fromRef || '').trim();
+  const normalizedTo = String(toRef || '').trim();
+  if (!normalizedPath.startsWith('/') || !normalizedFrom || !normalizedTo) return '';
+  return `${historicalFileEditorItemPrefix}${encodeURIComponent(JSON.stringify([normalizedPath, normalizedFrom, normalizedTo]))}`;
+}
+function historicalFileEditorIdentity(item) {
+  const text = String(item || '');
+  if (!text.startsWith(historicalFileEditorItemPrefix)) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(text.slice(historicalFileEditorItemPrefix.length)));
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [path, fromRef, toRef] = parsed.map(value => String(value || '').trim());
+    if (!path.startsWith('/') || !fromRef || !toRef) return null;
+    return {path, fromRef, toRef};
+  } catch (_error) {
+    return null;
+  }
+}
+function isHistoricalFileEditorItem(item) { return historicalFileEditorIdentity(item) !== null; }
 function fileEditorDiffPreviewItemFor(path) { return fileEditorDiffPreviewItemPrefix + path; }
 function isFileEditorDiffPreviewItem(item) {
   return typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix);
@@ -1120,6 +1170,16 @@ function virtualPanelTabType(spec) {
     terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
     popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
 }
+function diffFileTabLabel(item, path) {
+  if (!isHistoricalFileEditorItem(item) && editorViewModeFor(path, item) !== 'diff') return basenameOf(path);
+  const state = fileEditorTabState(item);
+  const repo = normalizeDirectoryPath(state?.gitRoot || state?.diffRepo || '');
+  const relativePath = repo && pathIsInsideDirectory(path, repo) ? pathRelativeToDirectory(path, repo) : '';
+  const parent = relativePath.includes('/') ? dirnameOf(relativePath) : '';
+  const scope = repo ? [basenameOf(repo), parent].filter(Boolean).join('/') : compactHomePath(dirnameOf(path));
+  return `Δ${basenameOf(path)}${scope ? `;${scope}` : ''}`;
+}
+
 function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
   const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return virtualPanelTabType({
@@ -1127,7 +1187,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     prefix,
     prefixes: itemPrefixes,
     match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
-    label: item => basenameOf(fileItemPath(item)),
+    label: item => diffFileTabLabel(item, fileItemPath(item)),
     shortLabel,
     terminalTitle,
     sortRank,
@@ -1137,13 +1197,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     createPanel: item => createFileEditorPanel(item),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
-      return Boolean(path && editorPreviewModeAvailable(path, fileState.get(path)));
+      return Boolean(path && editorPreviewModeAvailable(path, fileEditorStateForItem(path, item)));
     },
-    popoutDisabledReason: item => t(fileItemPath(item)
-      ? 'pane.popout.filePreviewRequired'
-      : 'pane.popout.filePathRequired'),
+    popoutDisabledReason: item => t(isHistoricalFileEditorItem(item)
+      ? 'editor.historicalReadOnly'
+      : fileItemPath(item)
+        ? 'pane.popout.filePreviewRequired'
+        : 'pane.popout.filePathRequired'),
     openPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
@@ -1338,6 +1402,23 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
+  virtualPanelTabType({
+    key: 'git-diff',
+    prefix: gitDiffItemPrefix,
+    label: item => gitDiffTabLabel(item),
+    shortLabel: () => t('contextmenu.showDiff'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('contextmenu.showDiff')}),
+    sortRank: 0.73,
+    param: item => item,
+    detail: item => compactHomePath(gitDiffItemPath(item) || ''),
+    createPanel: item => createGitDiffPanel(item),
+    renderAttached: item => renderGitDiffPanel(item),
+    cleanup: item => cleanupGitDiffTab(item),
+    relocalize: (item, panel) => relocalizeGitDiffPanel(item, panel),
+    className: () => 'git-diff-item',
+    icon: 'changes',
+    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1349,7 +1430,7 @@ const TAB_TYPES = [
   filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
-    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
+    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix, historicalFileEditorItemPrefix],
     shortLabel: () => t('common.edit'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
@@ -1396,6 +1477,7 @@ function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
   if (typeof item === 'string' && item.startsWith(fileEditorCopyItemPrefix)) return fileEditorCopyItemPath(item);
   if (typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix)) return fileEditorDiffPreviewItemPath(item);
+  if (typeof item === 'string' && item.startsWith(historicalFileEditorItemPrefix)) return historicalFileEditorIdentity(item)?.path || null;
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {

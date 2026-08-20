@@ -1247,14 +1247,14 @@ function mermaidPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
 }
 
-function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+function renderMarkdownPreviewStrategy({container, path, text, state, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
   if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true});
   return true;
 }
 
@@ -1402,7 +1402,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const scrollOwner = createPassiveDeferredElementScrollOwner(container);
-  const state = fileState.get(path) || null;
+  const state = options.state || fileState.get(path) || null;
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));

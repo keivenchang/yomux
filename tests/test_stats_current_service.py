@@ -2033,12 +2033,22 @@ def test_the_first_cpu_sample_reports_absence_because_it_had_no_baseline():
 
 
 def test_darwin_cpu_sampler_uses_platform_readers(monkeypatch):
-    process_readings = iter([(10.0, 4096), (10.25, 8192)])
+    process_readings = iter([
+        (
+            host_collectors.process_memory.ProcessCensusRow(123, "123:start", "python", 10.0, 4096),
+            host_collectors.process_memory.ProcessCensusRow(456, "456:start", "node", 20.0, 2048),
+        ),
+        (
+            host_collectors.process_memory.ProcessCensusRow(123, "123:start", "python", 10.25, 8192),
+            host_collectors.process_memory.ProcessCensusRow(456, "456:start", "node", 20.4, 4096),
+        ),
+    ])
     system_readings = iter([(1000.0, 250.0), (1100.0, 280.0)])
     monotonic_readings = iter([20.0, 21.0])
-    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
-    monkeypatch.setattr(host_collectors, "read_process_cpu_seconds_and_rss", lambda _pid: next(process_readings))
+    monkeypatch.setattr(host_collectors.process_memory, "process_census", lambda: next(process_readings))
     monkeypatch.setattr(host_collectors, "_darwin_system_times", lambda: next(system_readings))
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors.os, "cpu_count", lambda: 4)
     monkeypatch.setattr(host_collectors, "time", SimpleNamespace(time=time.time, monotonic=lambda: next(monotonic_readings)))
     sampler = host_collectors.CpuSampler()
 
@@ -2051,6 +2061,48 @@ def test_darwin_cpu_sampler_uses_platform_readers(monkeypatch):
     assert second["cpu_percent"] == 25.0
     assert second["system_cpu_percent"] == 30.0
     assert second["rss_bytes"] == 8192
+    assert second["process_cpu_percent"] == {"node": 10.0, "python": 6.25}
+    assert second["process_memory_bytes"] == {"python": 8192, "node": 4096}
+
+
+def test_cpu_sampler_omits_new_and_reused_pid_deltas(monkeypatch):
+    readings = iter([
+        (
+            host_collectors.process_memory.ProcessCensusRow(1, "1:old", "python", 10.0, 100),
+            host_collectors.process_memory.ProcessCensusRow(4, "4:stable", "python", 8.0, 80),
+            host_collectors.process_memory.ProcessCensusRow(2, "2:stable", "node", 20.0, 200),
+            host_collectors.process_memory.ProcessCensusRow(99, "99:web", "yolomux", 5.0, 50),
+        ),
+        (
+            host_collectors.process_memory.ProcessCensusRow(1, "1:new", "python", 50.0, 150),
+            host_collectors.process_memory.ProcessCensusRow(4, "4:stable", "python", 8.4, 90),
+            host_collectors.process_memory.ProcessCensusRow(2, "2:stable", "node", 20.4, 250),
+            host_collectors.process_memory.ProcessCensusRow(3, "3:new", "rustc", 30.0, 300),
+            host_collectors.process_memory.ProcessCensusRow(99, "99:web", "yolomux", 5.2, 60),
+        ),
+        (
+            host_collectors.process_memory.ProcessCensusRow(4, "4:stable", "python", 8.8, 95),
+            host_collectors.process_memory.ProcessCensusRow(2, "2:stable", "node", 20.8, 260),
+            host_collectors.process_memory.ProcessCensusRow(3, "3:new", "rustc", 30.4, 320),
+            host_collectors.process_memory.ProcessCensusRow(99, "99:web", "yolomux", 5.4, 70),
+        ),
+    ])
+    monkeypatch.setattr(host_collectors.process_memory, "process_census", lambda: next(readings))
+    monkeypatch.setattr(host_collectors, "_system_times", lambda: (100.0, 20.0))
+    monkeypatch.setattr(host_collectors.os, "cpu_count", lambda: 4)
+    monotonic = iter([10.0, 11.0, 12.0])
+    monkeypatch.setattr(host_collectors, "time", SimpleNamespace(time=time.time, monotonic=lambda: next(monotonic)))
+    sampler = host_collectors.CpuSampler()
+
+    sampler.sample(99)
+    second = sampler.sample(99)
+
+    assert second["process_cpu_percent"] == {"node": 10.0, "yolomux": 5.0}
+    assert "python" not in second["process_cpu_percent"]
+    assert "rustc" not in second["process_cpu_percent"]
+    third = sampler.sample(99)
+    assert third["process_cpu_percent"] == {"node": 10.0, "rustc": 10.0, "yolomux": 5.0}
+    assert "python" not in third["process_cpu_percent"]
 
 
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="CpuSampler differences /proc readings")
@@ -2073,9 +2125,14 @@ def test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing(tmp_path, m
     # `latest_stats_sample` already renders as `cpu_sample_not_pushed`.
     assert publisher.appends == 0
     assert publisher.last_append == {}
-    # And no push. Sending `None` would be worse than sending nothing: the receiver does
-    # `float(sample["cpu_percent"])` and would count a self-inflicted "invalid stats CPU sample".
-    assert pushed == []
+    # CPU remains absent, but the absolute process-memory census is delivered independently.
+    assert len(pushed) == 1
+    assert pushed[0]["action"] == "stats_process_memory_sample"
+    assert pushed[0]["sample"]["pid"] == os.getpid()
+    assert pushed[0]["sample"]["time"] > 0.0
+    assert pushed[0]["sample"]["process_memory_bytes"]
+    memory_push = service._status()["host_collectors"]["memory_push"]
+    assert (memory_push["attempted"], memory_push["delivered"], memory_push["skipped"]) == (1, 1, 0)
     # A skipped push still leaves evidence that it was skipped -- the rule this branch already set.
     push = service._status()["host_collectors"]["cpu_push"]
     assert push["attempted"] == 1
@@ -2092,14 +2149,53 @@ def test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing(tmp_path, m
     observation = publisher.last_append["observations"][0]
     assert observation.family == "cpu"
     assert observation.source_id == "port:7443"
-    assert set(observation.payload) == {"process_percent", "system_percent"}
-    assert len(pushed) == 1
-    assert pushed[0]["action"] == "stats_cpu_sample"
-    assert isinstance(pushed[0]["sample"]["cpu_percent"], float)
+    assert set(observation.payload) == {"process_percent", "system_percent", "process_cpu_percent"}
+    assert len(pushed) == 2
+    assert pushed[1]["action"] == "stats_cpu_sample"
+    assert isinstance(pushed[1]["sample"]["cpu_percent"], float)
     push = service._status()["host_collectors"]["cpu_push"]
     assert push["attempted"] == 2
     assert push["delivered"] == 1
     assert push["last_reason"] == ""
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_reason"),
+    [
+        ({"ok": False, "error": "stats process memory sample PID mismatch"}, "push_rejected: stats process memory sample PID mismatch"),
+        (None, "push_rejected: invalid control response"),
+    ],
+)
+def test_a_rejected_process_memory_push_is_counted_separately_from_cpu_absence(
+    tmp_path, monkeypatch, response, expected_reason,
+):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            return {
+                "time": 100.0,
+                "pid": pid,
+                "cpu_percent": None,
+                "system_cpu_percent": None,
+                "rss_bytes": 99,
+                "process_memory_bytes": {"python": 400},
+            }
+
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: response)
+
+    service._collect_host_facts_if_due(publisher)
+
+    memory_push = service._status()["host_collectors"]["memory_push"]
+    assert (memory_push["attempted"], memory_push["delivered"], memory_push["skipped"]) == (1, 0, 1)
+    assert memory_push["last_reason"] == expected_reason
+    assert service._status()["host_collectors"]["cpu_push"]["last_reason"] == "cpu_sample_no_baseline"
 
 
 # -- the CPU-sample push must be OBSERVED-and-forget, not fire-and-forget ------------------------

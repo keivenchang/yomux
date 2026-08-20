@@ -1051,7 +1051,7 @@ function pathBasename(path) {
 
 function filePopoverHtml(item) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
+  const state = fileEditorTabState(item) || {};
   const rows = filePopoverRows(path, state);
   return `<div class="session-popover file-popover" role="tooltip">
     <div class="popover-head">

@@ -1,8 +1,10 @@
+import base64
 import fcntl
 import inspect
 import itertools
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -23,6 +25,7 @@ from yolomux_lib.search import bfs_index
 from yolomux_lib.workspace import metadata
 
 from _git_helpers import git, init_repo
+from mock_git_repo import create_git_history_repository
 
 
 def _open_descriptors_beneath(root: Path) -> dict[str, str]:
@@ -581,6 +584,106 @@ def test_search_files_consumes_the_authorized_directory_handle(monkeypatch, tmp_
     assert [item["name"] for item in payload["files"]] == ["safe.txt"]
 
 
+def test_descriptor_path_never_re_resolves_a_pathname_on_darwin(monkeypatch, tmp_path):
+    """`descriptor_path()` feeds `git -C`, the count/zip walkers and the multi-repo scan.
+
+    Whatever it returns is opened AGAIN by that consumer, so it must name this descriptor
+    generation and nothing else.  `F_GETPATH` returns a pathname the kernel re-resolves on the
+    consumer's next open: a rename or namespace replacement between the call and the consumer hands
+    the consumer a different object.  Darwin cannot run here, so this proves the branch is gone --
+    with the platform forced to darwin, `F_GETPATH` must not be consulted at all.
+    """
+    target = tmp_path / "repo"
+    target.mkdir()
+    refusals = []
+
+    def refuse_fcntl(*args, **kwargs):
+        refusals.append(args)
+        raise AssertionError("descriptor_path() re-resolved a pathname through F_GETPATH")
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(fcntl, "fcntl", refuse_fcntl)
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        handle = filesystem_paths.SafePathHandle(target, target, descriptor)
+        descriptor_path = handle.descriptor_path()
+        assert refusals == []
+        assert descriptor_path.parent in set(filesystem_paths.DESCRIPTOR_PATH_ROOTS)
+        # Generation-bound, not name-bound: renaming the directory out from under the pathname must
+        # not change which object that pathname names.
+        target.rename(tmp_path / "moved")
+        assert os.stat(descriptor_path).st_ino == os.fstat(descriptor).st_ino
+    finally:
+        os.close(descriptor)
+
+
+def test_descriptor_path_fails_closed_without_a_descriptor_bound_root(monkeypatch, tmp_path):
+    """No descriptor-bound root means no authorized pathname: refuse instead of substituting one."""
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(filesystem_paths, "DESCRIPTOR_PATH_ROOTS", ())
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        handle = filesystem_paths.SafePathHandle(target, target, descriptor)
+        with pytest.raises(FilesystemError) as error:
+            handle.descriptor_path()
+        assert error.value.status == 500
+    finally:
+        os.close(descriptor)
+
+
+def test_multi_repo_scan_authorizes_every_child_through_the_shared_owner(monkeypatch, tmp_path):
+    """The non-recursive multi-repo scan used to `os.listdir()` then `os.open()` an absolute child
+    path and wrap the raw descriptor in a bare `SafePathHandle`, so that child never passed
+    `_ensure_path_allowed` and never opened relative to the pinned scan-root descriptor."""
+    root = tmp_path / "workspaces"
+    repo = root / "alpha"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "needle.txt").write_text("needle", encoding="utf-8")
+    authorized: list[Path] = []
+    original_ensure = filesystem_paths._ensure_path_allowed
+
+    def record_authorization(path, *, resolved=None):
+        authorized.append(Path(path))
+        return original_ensure(path, resolved=resolved)
+
+    monkeypatch.setattr(filesystem_paths, "_ensure_path_allowed", record_authorization)
+
+    payload = filesystem_search.search_files(str(root), query="needle", recursive=False)
+
+    assert [item["name"] for item in payload["files"]] == ["needle.txt"]
+    assert repo in authorized, "multi-repo scan child never passed the shared authorization owner"
+
+
+def test_multi_repo_scan_refuses_a_child_the_policy_blocks(monkeypatch, tmp_path):
+    """A blocked child must be refused by the one policy owner, not by a name-only prefilter."""
+    root = tmp_path / "workspaces"
+    repo = root / "alpha"
+    repo.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "needle.txt").write_text("needle", encoding="utf-8")
+    original_ensure = filesystem_paths._ensure_path_allowed
+
+    def block_the_repo(path, *, resolved=None):
+        if Path(path) == repo:
+            raise FilesystemError(
+                "path is blocked because it may contain credentials: BLOCKED_SENTINEL_DO_NOT_EXPOSE",
+                status=403,
+                message_key="fs.error.credentialBlocked",
+            )
+        return original_ensure(path, resolved=resolved)
+
+    monkeypatch.setattr(filesystem_paths, "_ensure_path_allowed", block_the_repo)
+
+    payload = filesystem_search.search_files(str(root), query="needle", recursive=False)
+
+    assert payload["files"] == []
+
+
 def test_recursive_search_never_follows_a_repointed_descendant(monkeypatch, tmp_path):
     indexed = tmp_path / "indexed"
     nested = indexed / "nested"
@@ -812,6 +915,7 @@ def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
         filesystem_search.index_status,
         filesystem_search.unindex_root,
         filesystem_search.reindex_roots_for_paths,
+        git_ops._pinned_git_history_scope,
         git_ops.diff_file,
         git_ops.blame_file,
     }
@@ -1123,6 +1227,7 @@ def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path,
 
     assert detached["branch"] == ""
     assert detached["detached"] is True
+    assert detached["head_sha"] == git(repo, "rev-parse", "HEAD").stdout.strip()
 
     def failed_git(args, cwd, timeout):
         return subprocess.CompletedProcess(args, 128, "", "Git metadata unavailable")
@@ -1135,6 +1240,7 @@ def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path,
 
     assert unknown["branch"] == ""
     assert unknown["detached"] is False
+    assert unknown["head_sha"] == ""
 
 
 def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
@@ -1181,12 +1287,12 @@ def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation
     first["branch"] = "mutated"
     second = git_ops.git_repo_info(repo, include_status=False)
     assert second["branch"] == "main"
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     assert metadata.invalidate_git_metadata_paths([repo / "tracked.txt"]) == set()
     third = git_ops.git_repo_info(repo, include_status=False)
     assert third["branch"] == "main"
-    assert len(calls) == 4, "watcher-owned invalidation must make Finder recompute"
+    assert len(calls) == 6, "watcher-owned invalidation must make Finder recompute"
 
 
 def _reset_repository_generation(root):
@@ -1326,15 +1432,15 @@ def test_git_repo_info_cache_applies_each_repo_ttl_independently(tmp_path, monke
 
     git_ops.git_repo_info(repo_short, include_status=False)
     git_ops.git_repo_info(repo_long, include_status=False)
-    assert len(calls) == 4
+    assert len(calls) == 6
 
     now[0] = 115.0
     git_ops.git_repo_info(repo_short, include_status=False)
     git_ops.git_repo_info(repo_long, include_status=False)
-    assert len(calls) == 6, "only the short-TTL repository should revalidate"
+    assert len(calls) == 9, "only the short-TTL repository should revalidate"
 
 
-@pytest.mark.parametrize(("timeout", "expected_call_count"), [(0.001, 0), (1.0, 3)])
+@pytest.mark.parametrize(("timeout", "expected_call_count"), [(0.001, 0), (1.0, 4)])
 def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, monkeypatch, timeout, expected_call_count):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1355,6 +1461,7 @@ def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, mon
     assert len(calls) == expected_call_count
     assert info["branch"] == ""
     assert info["detached"] is False
+    assert info["head_sha"] == ""
     assert info["upstream"] == ""
     assert info["ahead"] == 0
     assert info["behind"] == 0
@@ -1654,6 +1761,7 @@ def test_path_info_returns_sniffed_preview_mime_for_misleading_extension(tmp_pat
 
     assert result["size"] == target.stat().st_size
     assert result["preview_mime"] == "image/png"
+    assert result["diff_capable"] is False
 
 
 def test_package_path_info_normalizes_required_stat_permission_failure(monkeypatch):
@@ -2281,11 +2389,186 @@ def test_delete_path_removes_directory_tree(tmp_path):
     (target / "nested").mkdir(parents=True)
     (target / "nested" / "file.txt").write_text("hello", encoding="utf-8")
 
-    result = filesystem.delete_path(str(target))
+    result = filesystem.delete_path(str(target), recursive=True)
 
     assert result["deleted"] is True
     assert result["kind"] == "dir"
+    assert "pending" not in result
     assert not target.exists()
+
+
+DELETE_ENTRY_CASES = ("file", "symlink", "empty_dir", "nonempty_dir", "missing")
+
+
+def _make_delete_target(tmp_path: Path, case: str) -> Path:
+    target = tmp_path / f"delete-{case}"
+    if case == "file":
+        target.write_text("payload", encoding="utf-8")
+    elif case == "symlink":
+        source = tmp_path / "symlink-source.txt"
+        source.write_text("payload", encoding="utf-8")
+        target.symlink_to(source)
+    elif case == "empty_dir":
+        target.mkdir()
+    elif case == "nonempty_dir":
+        (target / "child").mkdir(parents=True)
+        (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    return target
+
+
+@pytest.mark.parametrize("case", DELETE_ENTRY_CASES)
+def test_non_recursive_delete_has_one_typed_result_per_entry_class(tmp_path, case):
+    """One signature, one terminal result shape, and exactly one non-terminal probe result.
+
+    `symlink` reports `kind: "file"`: today's payload calls every non-directory a file, and the
+    browser reads that field.  Recorded here rather than changed, because adding `kind: "symlink"`
+    is a UI-visible payload change that belongs to whoever owns the Finder row rendering.
+    """
+    target = _make_delete_target(tmp_path, case)
+
+    if case == "missing":
+        with pytest.raises(FilesystemError) as error:
+            filesystem_io.delete_path(str(target))
+        assert error.value.status == 404
+        return
+
+    result = filesystem_io.delete_path(str(target))
+
+    if case == "nonempty_dir":
+        assert result == {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+        assert target.is_dir()
+        assert (target / "child" / "leaf.txt").read_text(encoding="utf-8") == "payload"
+    elif case == "empty_dir":
+        assert result == {"path": str(target), "deleted": True, "kind": "dir"}
+        assert not target.exists()
+    else:
+        assert result == {"path": str(target), "deleted": True, "kind": "file"}
+        assert not target.is_symlink() and not target.exists()
+        if case == "symlink":
+            assert (tmp_path / "symlink-source.txt").exists(), "unlink followed the link"
+
+
+def test_non_recursive_delete_of_a_nonempty_directory_never_scans_the_subtree(tmp_path, monkeypatch):
+    """The bound proof.  A bounded unlink is bounded because it performs a FIXED number of
+    destructive syscalls.  Before the split, one `delete` of a 20,000-entry tree performed 20,401
+    of them under the same request, which is what disqualified `delete` from the mutation lane.
+    Counting elapsed time would not prove the bound; refusing to enumerate does.
+    """
+    target = tmp_path / "tree"
+    target.mkdir()
+    for index in range(20_000):
+        (target / f"entry-{index:05d}.txt").write_text("x", encoding="utf-8")
+    scandir_calls = []
+    unlink_calls = []
+    rmdir_calls = []
+    real_scandir, real_unlink, real_rmdir = os.scandir, os.unlink, os.rmdir
+
+    def record_scandir(*args, **kwargs):
+        scandir_calls.append(args)
+        return real_scandir(*args, **kwargs)
+
+    def record_unlink(*args, **kwargs):
+        unlink_calls.append(args)
+        return real_unlink(*args, **kwargs)
+
+    def record_rmdir(*args, **kwargs):
+        rmdir_calls.append(args)
+        return real_rmdir(*args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", record_scandir)
+    monkeypatch.setattr(os, "unlink", record_unlink)
+    monkeypatch.setattr(os, "rmdir", record_rmdir)
+
+    result = filesystem_io.delete_path(str(target))
+
+    assert result["pending"] == "subtree"
+    assert result["deleted"] is False
+    assert scandir_calls == [], f"non-recursive delete enumerated the subtree {len(scandir_calls)} times"
+    assert unlink_calls == [], f"non-recursive delete unlinked {len(unlink_calls)} entries"
+    assert len(rmdir_calls) == 1, "the bounded probe is exactly one rmdir"
+
+
+def test_recursive_delete_still_removes_the_whole_subtree(tmp_path):
+    target = tmp_path / "tree"
+    (target / "a" / "b").mkdir(parents=True)
+    (target / "a" / "b" / "leaf.txt").write_text("payload", encoding="utf-8")
+    (target / "a" / "sibling.txt").write_text("payload", encoding="utf-8")
+
+    result = filesystem_io.delete_path(str(target), recursive=True)
+
+    assert result == {"path": str(target), "deleted": True, "kind": "dir"}
+    assert not target.exists()
+
+
+def test_pending_delete_probe_invalidates_nothing_and_reindexes_nothing(tmp_path, monkeypatch):
+    """A probe that deleted nothing must not be reported as a mutation.
+
+    `invalidate_path_policy_caches()` and the reindex fan-out are TERMINAL-result side effects; a
+    pending probe firing them would publish a filesystem change that never happened.
+    """
+    target = tmp_path / "tree"
+    (target / "child").mkdir(parents=True)
+    (target / "child" / "leaf.txt").write_text("payload", encoding="utf-8")
+    invalidations = []
+    reindexes = []
+    monkeypatch.setattr(filesystem_paths, "invalidate_path_policy_caches", lambda: invalidations.append(1))
+    monkeypatch.setattr(filesystem, "_reindex_after_mutation", lambda candidates, reason="": reindexes.append(reason) or [])
+
+    pending = filesystem.delete_path(str(target))
+
+    assert pending == {"path": str(target), "deleted": False, "kind": "dir", "pending": "subtree"}
+    assert "reindex_roots" not in pending
+    assert invalidations == []
+    assert reindexes == []
+
+    terminal = filesystem.delete_path(str(target), recursive=True)
+
+    assert terminal["deleted"] is True
+    assert "pending" not in terminal
+    assert invalidations == [1]
+    assert reindexes == ["fs-delete"]
+
+
+def test_delete_path_refuses_a_blocked_target_before_any_destructive_syscall(tmp_path, monkeypatch):
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    target = blocked / "id_rsa"
+    target.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    unlink_calls = []
+    real_unlink = os.unlink
+    monkeypatch.setattr(os, "unlink", lambda *args, **kwargs: unlink_calls.append(args) or real_unlink(*args, **kwargs))
+
+    for recursive in (False, True):
+        with pytest.raises(FilesystemError) as error:
+            filesystem_io.delete_path(str(target), recursive=recursive)
+        assert error.value.status == 403
+    assert unlink_calls == []
+    assert target.read_text(encoding="utf-8") == "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
+
+
+@pytest.mark.parametrize("recursive", [False, True])
+def test_delete_path_consumes_the_authorized_parent_across_a_namespace_replacement(monkeypatch, tmp_path, recursive):
+    """Both delete lanes keep ONE authorization owner: swapping the parent after authorization must
+    not redirect either the bounded probe or the recursive walk at a blocked directory."""
+    safe_parent = tmp_path / "safe"
+    safe_parent.mkdir()
+    (safe_parent / "item").mkdir()
+    (safe_parent / "item" / "leaf.txt").write_text("safe", encoding="utf-8")
+    blocked_parent = tmp_path / ".ssh"
+    blocked_parent.mkdir()
+    (blocked_parent / "item").mkdir()
+    (blocked_parent / "item" / "leaf.txt").write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    alias = tmp_path / "alias"
+    alias.symlink_to(safe_parent, target_is_directory=True)
+    state = _swap_path_after_authorization(monkeypatch, alias / "item", alias, blocked_parent)
+
+    try:
+        filesystem_io.delete_path(str(alias / "item"), recursive=recursive)
+    except FilesystemError:
+        pass
+
+    assert state["swapped"] is True
+    assert (blocked_parent / "item" / "leaf.txt").read_text(encoding="utf-8") == "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
 
 
 def test_count_directory_files_counts_recursive_regular_files(tmp_path):
@@ -2304,6 +2587,35 @@ def test_count_directory_files_counts_recursive_regular_files(tmp_path):
     assert result == {"path": str(target), "kind": "dir", "files": 2, "recursive": True}
 
 
+def test_path_info_ignores_incomplete_git_marker_directory(tmp_path):
+    root = tmp_path / "home"
+    target = root / "dev" / "2025"
+    target.mkdir(parents=True)
+    marker = root / ".git"
+    marker.mkdir()
+    (marker / "config").write_text("[core]\n", encoding="utf-8")
+    (marker / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == ""
+    assert result["relative_path"] == ""
+    assert result["repo"] is None
+
+
+def test_path_info_ignores_invalid_git_marker_file(tmp_path):
+    root = tmp_path / "home"
+    target = root / "dev" / "2025"
+    target.mkdir(parents=True)
+    (root / ".git").write_text(f"gitdir: {tmp_path / 'missing-git-dir'}\n", encoding="utf-8")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == ""
+    assert result["relative_path"] == ""
+    assert result["repo"] is None
+
+
 def test_path_info_returns_git_relative_path(tmp_path):
     git(tmp_path, "init")
     target = tmp_path / "src" / "main.py"
@@ -2315,6 +2627,20 @@ def test_path_info_returns_git_relative_path(tmp_path):
     assert result["repo_root"] == str(tmp_path)
     assert result["relative_path"] == "src/main.py"
     assert result["kind"] == "file"
+    assert result["diff_capable"] is True
+    assert result["git_tracked"] is False
+    assert result["git_has_history"] is False
+
+
+def test_path_info_marks_binary_content_not_diff_capable(tmp_path):
+    git(tmp_path, "init")
+    target = tmp_path / "looks-like-text.txt"
+    target.write_bytes(b"text-prefix\x00binary")
+
+    result = filesystem.path_info(str(target))
+
+    assert result["repo_root"] == str(tmp_path)
+    assert result["diff_capable"] is False
 
 
 def test_file_identity_payloads_follow_symlinks_and_hardlinks(tmp_path):
@@ -2447,6 +2773,1656 @@ def test_diff_file_falls_back_when_requested_ref_order_is_invalid(tmp_path):
     assert result["to_ref"] == "current"
     assert "-two" in result["diff"]
     assert "+three" in result["diff"]
+
+
+def test_git_history_page_freezes_head_scope_and_constant_git_calls(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    expected = repo.git("rev-list", "--topo-order", repo.merge_sha).stdout.splitlines()
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    first = filesystem.git_history(str(repo.root), limit=2)
+    root_call_count = len(calls)
+    calls.clear()
+    scoped = filesystem.git_history(str(repo.scope), limit=50)
+    scoped_call_count = len(calls)
+
+    assert first["path"] == str(repo.root)
+    assert first["repo"] == str(repo.root)
+    assert first["relative_path"] == ""
+    assert first["head"] == repo.merge_sha
+    assert [item["sha"] for item in first["commits"]] == expected[:2]
+    assert first["snapshot_cursor"]
+    assert first["next_cursor"]
+    assert first["truncated"] is False
+    assert all(
+        {"sha", "short", "parents", "subject", "author", "authored_at", "files", "added", "removed", "binary_files"}
+        <= item.keys()
+        for item in first["commits"]
+    )
+    assert repo.outside_sha not in {item["sha"] for item in scoped["commits"]}
+    assert scoped["relative_path"] == "scope"
+    assert next(item for item in scoped["commits"] if item["sha"] == repo.root_sha)["files"] > 0
+    assert root_call_count == scoped_call_count
+    assert root_call_count <= 4
+
+    (repo.root / "new-head.txt").write_text("new head\n", encoding="utf-8")
+    repo.git("add", "--", "new-head.txt")
+    repo.git("commit", "-q", "-m", "new head after cursor")
+    new_head = repo.git("rev-parse", "HEAD").stdout.strip()
+    older = filesystem.git_history(str(repo.root), limit=2, cursor=first["next_cursor"])
+
+    assert older["head"] == repo.merge_sha
+    assert new_head not in {item["sha"] for item in older["commits"]}
+    assert [item["sha"] for item in older["commits"]] == expected[2:4]
+
+
+def test_git_history_snapshot_cursor_reloads_the_frozen_first_page(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=2)
+    (repo.root / "new-head.txt").write_text("new head\n", encoding="utf-8")
+    repo.git("add", "--", "new-head.txt")
+    repo.git("commit", "-q", "-m", "new head after snapshot")
+
+    restored = filesystem.git_history(str(repo.root), limit=2, cursor=first["snapshot_cursor"])
+
+    assert restored["head"] == first["head"]
+    assert restored["snapshot_cursor"] == first["snapshot_cursor"]
+    assert [item["sha"] for item in restored["commits"]] == [item["sha"] for item in first["commits"]]
+    assert restored["next_cursor"] == first["next_cursor"]
+
+
+@pytest.mark.parametrize(
+    ("remote_url", "expected"),
+    [
+        ("git@github.com:owner/project.git", {"provider": "github", "base_url": "https://github.com/owner/project"}),
+        ("ssh://git@gitlab.example.com/group/subgroup/project.git", {"provider": "gitlab", "base_url": "https://gitlab.example.com/group/subgroup/project"}),
+        ("ssh://git@gitlab.example.com:2222/group/project.git", {"provider": "gitlab", "base_url": "https://gitlab.example.com/group/project"}),
+        ("https://example.com/owner/project.git", None),
+        ("https://token@github.com/owner/project.git", None),
+        ("https://github.com/owner/project.git?token=secret", None),
+    ],
+)
+def test_git_history_exposes_only_safe_supported_hosted_origin(tmp_path, remote_url, expected):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("remote", "add", "origin", remote_url)
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["hosted_remote"] == expected
+
+
+def test_git_commit_detail_preserves_root_merge_rename_copy_binary_mode_and_hostile_paths(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    calls = []
+    original_git = git_ops._git_with_pinned_repo
+
+    def counted_git(repo_handle, args, **kwargs):
+        calls.append(tuple(args))
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", counted_git)
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+    change_call_count = len(calls)
+    files = {(item["status"], item["path"]): item for item in detail["files"]}
+
+    assert detail["repo"] == str(repo.root)
+    assert detail["scope_path"] == "scope"
+    assert detail["sha"] == repo.changes_sha
+    assert detail["message"] == "scoped history changes\n\nPreserve every path and count."
+    renamed = files[("R", repo.renamed_to.relative_to(repo.root).as_posix())]
+    assert renamed["old_path"] == repo.renamed_from.relative_to(repo.root).as_posix()
+    copied = files[("C", repo.copy_target.relative_to(repo.root).as_posix())]
+    assert copied["old_path"] == repo.copy_source.relative_to(repo.root).as_posix()
+    assert files[("D", repo.deleted.relative_to(repo.root).as_posix())]["removed"] == 1
+    binary = files[("M", repo.binary.relative_to(repo.root).as_posix())]
+    assert binary["binary"] is True
+    assert binary["added"] is None
+    assert binary["removed"] is None
+    mode_only = files[("M", repo.mode_only.relative_to(repo.root).as_posix())]
+    assert mode_only["added"] == 0
+    assert mode_only["removed"] == 0
+    assert files[("A", repo.hostile.relative_to(repo.root).as_posix())]["added"] == 1
+    assert detail["truncated"] is False
+
+    calls.clear()
+    root = filesystem.git_commit(str(repo.root), commit=repo.root_sha, head=repo.merge_sha)
+    root_call_count = len(calls)
+    assert root["parents"] == []
+    empty_tree = subprocess.run(
+        ["git", "-C", str(repo.root), "hash-object", "-t", "tree", "--stdin"],
+        input="",
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout.strip()
+    assert root["from_ref"] == empty_tree
+    assert root["to_ref"] == repo.root_sha
+
+    calls.clear()
+    merge = filesystem.git_commit(str(repo.scope), commit=repo.merge_sha, head=repo.merge_sha)
+    merge_call_count = len(calls)
+    assert len(merge["parents"]) == 2
+    assert merge["from_ref"] == merge["parents"][0] == repo.main_sha
+    assert merge["to_ref"] == repo.merge_sha
+    assert any(item["path"] == "scope/feature.txt" for item in merge["files"])
+    assert change_call_count == root_call_count == merge_call_count
+    assert change_call_count == 9
+
+
+def test_git_history_rejects_stale_cursor_rewritten_repo_repoint_and_bounds(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=1)
+
+    with pytest.raises(FilesystemError) as malformed:
+        filesystem.git_history(str(repo.root), cursor="not-a-history-cursor")
+    assert malformed.value.message_key == "fs.error.gitHistoryCursor"
+    with pytest.raises(FilesystemError) as cross_scope:
+        filesystem.git_history(str(repo.scope), cursor=first["next_cursor"])
+    assert cross_scope.value.message_key == "fs.error.gitHistoryCursor"
+    with pytest.raises(FilesystemError) as unknown:
+        filesystem.git_commit(str(repo.root), commit="f" * 40, head=repo.merge_sha)
+    assert unknown.value.message_key == "fs.error.gitCommitUnknown"
+    with pytest.raises(FilesystemError) as file_path:
+        filesystem.git_history(str(repo.scope / "kept.txt"))
+    assert file_path.value.message_key == "fs.error.gitHistoryDirectoryRequired"
+
+    limited = filesystem.git_history(str(repo.root), limit=999)
+    clamped = filesystem.git_history(str(repo.root), limit=0)
+    assert len(limited["commits"]) <= 50
+    assert len(clamped["commits"]) == 1
+
+    monkeypatch.setattr(git_ops, "GIT_HISTORY_MAX_PAYLOAD_BYTES", 1400)
+    history_bounded = filesystem.git_history(str(repo.root), limit=50)
+    assert len(json.dumps(history_bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1400
+    assert history_bounded["truncated"] is True
+    assert history_bounded["next_cursor"]
+
+    monkeypatch.setattr(git_ops, "GIT_COMMIT_MAX_MESSAGE_BYTES", 16)
+    monkeypatch.setattr(git_ops, "GIT_COMMIT_MAX_FILES", 1000)
+    monkeypatch.setattr(git_ops, "GIT_COMMIT_MAX_PAYLOAD_BYTES", 1000)
+    bounded = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+    assert len(bounded["message"].encode("utf-8")) <= 16
+    assert bounded["message_truncated"] is True
+    assert len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= 1000
+    assert len(bounded["files"]) < 8
+    assert bounded["files_truncated"] is True
+    assert bounded["truncated"] is True
+
+    repo.git("reset", "-q", "--hard", repo.root_sha)
+    with pytest.raises(FilesystemError) as stale:
+        filesystem.git_history(str(repo.root), cursor=first["next_cursor"])
+    assert stale.value.message_key == "fs.error.gitHistoryStale"
+
+
+def test_git_history_reports_blocked_permission_timeout_and_repo_replacement(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    blocked = repo.root / ".ssh"
+    blocked.mkdir()
+    blocked_alias = repo.root / "blocked-link"
+    blocked_alias.symlink_to(blocked, target_is_directory=True)
+    with pytest.raises(FilesystemError) as blocked_path:
+        filesystem.git_history(str(blocked))
+    assert blocked_path.value.status == 403
+    with pytest.raises(FilesystemError) as blocked_symlink:
+        filesystem.git_history(str(blocked_alias))
+    assert blocked_symlink.value.status == 403
+
+    original_git = git_ops._git_with_pinned_repo
+
+    def permission_denied(repo_handle, args, **kwargs):
+        if "log" in args:
+            return subprocess.CompletedProcess(args, 128, stdout=b"" if kwargs.get("binary") else "", stderr="permission denied")
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", permission_denied)
+    with pytest.raises(FilesystemError) as permission:
+        filesystem.git_history(str(repo.root))
+    assert permission.value.status == 403
+    assert permission.value.message_key == "fs.error.gitHistoryPermission"
+
+    def timed_out(repo_handle, args, **kwargs):
+        if "log" in args:
+            raise subprocess.TimeoutExpired(["git", *args], kwargs["timeout"])
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", timed_out)
+    with pytest.raises(FilesystemError) as timeout:
+        filesystem.git_history(str(repo.root))
+    assert timeout.value.status == 504
+    assert timeout.value.message_key == "fs.error.gitHistoryTimeout"
+
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    original_root = repo.root
+    authorized_root = tmp_path / "authorized-old"
+    original_pinned_repo_root = git_ops._pinned_repo_root
+    replaced = False
+
+    def replace_after_authorization(handle, *, deadline=None, operation=""):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            original_root.rename(authorized_root)
+            replacement.root.rename(original_root)
+        return original_pinned_repo_root(handle, deadline=deadline, operation=operation)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", original_git)
+    monkeypatch.setattr(git_ops, "_pinned_repo_root", replace_after_authorization)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(original_root))
+    assert replaced is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_bounded_pinned_git_runner_terminates_at_output_cap(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    large = repo.root / "large.txt"
+    large.write_text("x" * (256 * 1024), encoding="utf-8")
+    repo.git("add", "--", "large.txt")
+    repo.git("commit", "-q", "-m", "large blob")
+    head = repo.git("rev-parse", "HEAD").stdout.strip()
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+
+    with filesystem_paths.safe_path(str(repo.root), flags=directory_flags) as repo_handle:
+        result = git_ops._git_with_pinned_repo(
+            repo_handle,
+            ["show", f"{head}:large.txt"],
+            timeout=3.0,
+            binary=True,
+            max_output_bytes=128,
+        )
+
+    assert isinstance(result, git_ops.PinnedGitResult)
+    assert result.stdout_truncated is True
+    assert len(result.stdout) == 128
+    assert result.returncode != 0
+
+
+def test_git_commit_marks_counts_unavailable_when_numstat_is_truncated(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def truncate_numstat(repo_handle, args, **kwargs):
+        if "diff-tree" in args and "--numstat" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=-9,
+                stdout=b"",
+                stderr=b"",
+                stdout_truncated=True,
+                killed_for_cap=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", truncate_numstat)
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert detail["files_truncated"] is True
+    assert detail["truncated"] is True
+    assert detail["files"]
+    assert all(item["counts_available"] is False for item in detail["files"])
+    assert all(item["added"] is None and item["removed"] is None for item in detail["files"])
+
+
+@pytest.mark.parametrize(
+    "status_output",
+    [b"M\0scope/incomplete", b"M\0", b"R100\0scope/old.txt\0"],
+)
+def test_git_commit_rejects_status_truncated_before_first_complete_file(tmp_path, monkeypatch, status_output):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def truncate_status(repo_handle, args, **kwargs):
+        if "diff-tree" in args and "--name-status" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=-9,
+                stdout=status_output,
+                stderr=b"",
+                stdout_truncated=True,
+                killed_for_cap=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", truncate_status)
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitCommitTooLarge"
+
+
+def test_git_commit_drops_exact_boundary_truncated_numstat_rename(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def truncate_numstat_rename(repo_handle, args, **kwargs):
+        if "diff-tree" in args and "--numstat" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=-9,
+                stdout=b"1\t2\t\0scope/old.txt\0",
+                stderr=b"",
+                stdout_truncated=True,
+                killed_for_cap=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", truncate_numstat_rename)
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert detail["files_truncated"] is True
+    assert all(item["counts_available"] is False for item in detail["files"])
+
+
+def test_git_history_drops_in_progress_commit_when_output_is_truncated(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def truncate_second_commit(repo_handle, args, **kwargs):
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" not in args:
+            return result
+        assert isinstance(result, git_ops.PinnedGitResult)
+        raw = result.stdout
+        assert isinstance(raw, bytes)
+        second = raw.find(b"\0commit\0")
+        assert second > 0
+        return git_ops.PinnedGitResult(
+            args=result.args,
+            returncode=-9,
+            stdout=raw[:second + len(b"\0commit\0") + 8],
+            stderr=result.stderr,
+            stdout_truncated=True,
+            killed_for_cap=True,
+        )
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", truncate_second_commit)
+    history = filesystem.git_history(str(repo.root), limit=50)
+
+    assert [item["sha"] for item in history["commits"]] == [repo.merge_sha]
+    assert history["truncated"] is True
+    assert "output_bytes" in history["truncation_reason"]
+    assert history["next_cursor"]
+
+    older = filesystem.git_history(str(repo.root), limit=50, cursor=history["next_cursor"])
+    assert older["commits"]
+    assert older["commits"][0]["sha"] != repo.merge_sha
+
+
+@pytest.mark.parametrize("replacement_target", ["scope", "repo"])
+def test_git_history_rejects_post_read_namespace_replacement(tmp_path, monkeypatch, replacement_target):
+    repo = create_git_history_repository(tmp_path / "history")
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    original_git = git_ops._git_with_pinned_repo
+    replaced = False
+
+    def replace_namespace_after_read(repo_handle, args, **kwargs):
+        nonlocal replaced
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" not in args or replaced:
+            return result
+        replaced = True
+        if replacement_target == "scope":
+            repo.scope.rename(repo.root / "scope-authorized")
+            (repo.root / "scope").mkdir()
+        else:
+            repo.root.rename(tmp_path / "history-authorized")
+            replacement.root.rename(repo.root)
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", replace_namespace_after_read)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.scope if replacement_target == "scope" else repo.root))
+
+    assert replaced is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+@pytest.mark.parametrize("pointer_name", ["gitdir", "commondir"])
+def test_git_history_rejects_in_place_git_control_pointer_rewrite(tmp_path, monkeypatch, pointer_name):
+    repo = create_git_history_repository(tmp_path / "history")
+    worktree = tmp_path / "linked"
+    repo.git("worktree", "add", "-q", "-b", "linked-history", str(worktree))
+    marker = worktree / ".git"
+    git_dir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    pointer = marker if pointer_name == "gitdir" else git_dir / "commondir"
+    original_git = git_ops._git_with_pinned_repo
+    rewritten = False
+
+    def rewrite_pointer_after_read(repo_handle, args, **kwargs):
+        nonlocal rewritten
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args and not rewritten:
+            rewritten = True
+            pointer.write_text("gitdir: /invalid\n" if pointer_name == "gitdir" else "/invalid\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", rewrite_pointer_after_read)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(worktree))
+
+    assert rewritten is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+@pytest.mark.parametrize("target_name", ["git_dir", "commondir_file", "common_dir"])
+def test_git_history_rejects_linked_control_target_replacement(tmp_path, monkeypatch, target_name):
+    repo = create_git_history_repository(tmp_path / "history")
+    worktree = tmp_path / "linked"
+    repo.git("worktree", "add", "-q", "-b", "linked-target", str(worktree))
+    marker = worktree / ".git"
+    git_dir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    common_file = git_dir / "commondir"
+    common_dir = (git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+    original_git = git_ops._git_with_pinned_repo
+    replaced = False
+
+    def replace_target_after_read(repo_handle, args, **kwargs):
+        nonlocal replaced
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" not in args or replaced:
+            return result
+        replaced = True
+        if target_name == "git_dir":
+            git_dir.rename(git_dir.with_name(f"{git_dir.name}-authorized"))
+            git_dir.mkdir()
+        elif target_name == "commondir_file":
+            content = common_file.read_bytes()
+            common_file.rename(common_file.with_name("commondir-authorized"))
+            common_file.write_bytes(content)
+        else:
+            common_dir.rename(common_dir.with_name(f"{common_dir.name}-authorized"))
+            common_dir.mkdir()
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", replace_target_after_read)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(worktree))
+
+    assert replaced is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+@pytest.mark.parametrize("pointer_name", ["gitdir", "commondir"])
+@pytest.mark.parametrize("repoint_kind", ["replacement", "loop"])
+def test_git_history_rejects_linked_control_symlink_repoint(tmp_path, monkeypatch, pointer_name, repoint_kind):
+    repo = create_git_history_repository(tmp_path / "history")
+    worktree = tmp_path / "linked"
+    repo.git("worktree", "add", "-q", "-b", "linked-alias", str(worktree))
+    marker = worktree / ".git"
+    git_dir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    common_file = git_dir / "commondir"
+    common_dir = (git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+    alias = tmp_path / f"{pointer_name}-alias"
+    replacement = tmp_path / f"{pointer_name}-replacement"
+    replacement.mkdir()
+    if pointer_name == "gitdir":
+        alias.symlink_to(git_dir, target_is_directory=True)
+        marker.write_text(f"gitdir: {alias}\n", encoding="utf-8")
+    else:
+        alias.symlink_to(common_dir, target_is_directory=True)
+        common_file.write_text(f"{alias}\n", encoding="utf-8")
+    original_git = git_ops._git_with_pinned_repo
+    repointed = False
+
+    def repoint_after_read(repo_handle, args, **kwargs):
+        nonlocal repointed
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args and not repointed:
+            repointed = True
+            alias.unlink()
+            alias.symlink_to(alias if repoint_kind == "loop" else replacement, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", repoint_after_read)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(worktree))
+
+    assert repointed is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_and_commit_reject_non_utf8_repository_path(tmp_path):
+    invalid_root = tmp_path / os.fsdecode(b"history-\xff")
+    repo = create_git_history_repository(invalid_root)
+
+    for operation in (
+        lambda: filesystem.git_history(str(repo.root)),
+        lambda: filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha),
+    ):
+        with pytest.raises(FilesystemError) as invalid:
+            operation()
+        assert invalid.value.status == 422
+        assert invalid.value.message_key == "fs.error.gitPathEncoding"
+
+
+def test_git_history_stops_before_issuing_an_unusable_cursor(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=1)
+    padding = "=" * (-len(first["next_cursor"]) % 4)
+    cursor_payload = json.loads(base64.urlsafe_b64decode(first["next_cursor"] + padding))
+    cursor_payload["offset"] = git_ops.GIT_HISTORY_MAX_CURSOR_OFFSET
+    ceiling_cursor = base64.urlsafe_b64encode(
+        json.dumps(cursor_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    original_git = git_ops._git_with_pinned_repo
+
+    def ignore_skip(repo_handle, args, **kwargs):
+        if "log" in args:
+            args = ["--skip=0" if arg.startswith("--skip=") else arg for arg in args]
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", ignore_skip)
+    history = filesystem.git_history(str(repo.root), limit=1, cursor=ceiling_cursor)
+
+    assert history["commits"]
+    assert history["next_cursor"] == ""
+    assert history["truncated"] is True
+    assert "cursor_limit" in history["truncation_reason"]
+
+
+def test_git_history_stops_before_issuing_a_cursor_over_the_decoder_limit(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    monkeypatch.setattr(git_ops, "GIT_HISTORY_CURSOR_MAX_BYTES", 64)
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["commits"]
+    assert history["next_cursor"] == ""
+    assert history["truncated"] is True
+    assert "cursor_limit" in history["truncation_reason"]
+
+
+def test_git_history_distinguishes_unborn_repo_from_failed_head_probe(tmp_path, monkeypatch):
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    init_repo(unborn)
+    empty = filesystem.git_history(str(unborn))
+
+    assert empty["head"] == ""
+    assert empty["commits"] == []
+    assert empty["next_cursor"] == ""
+
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def capped_head(repo_handle, args, **kwargs):
+        if "rev-parse" in args and "HEAD" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=-9,
+                stdout=b"x" * kwargs["max_output_bytes"],
+                stderr=b"",
+                stdout_truncated=True,
+                killed_for_cap=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", capped_head)
+    for operation, expected_key in (
+        (lambda: filesystem.git_history(str(repo.root)), "fs.error.gitHistoryFailed"),
+        (
+            lambda: filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha),
+            "fs.error.gitCommitFailed",
+        ),
+    ):
+        with pytest.raises(FilesystemError) as failed:
+            operation()
+        assert failed.value.status == 500
+        assert failed.value.message_key == expected_key
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stdout_truncated"),
+    [(b"unexpected", False), (b"", True)],
+)
+def test_git_commit_does_not_misclassify_failed_oid_probe_as_missing(
+    tmp_path,
+    monkeypatch,
+    stdout,
+    stdout_truncated,
+):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def failed_probe(repo_handle, args, **kwargs):
+        if "rev-parse" in args and f"{repo.merge_sha}^{{commit}}" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=1,
+                stdout=stdout,
+                stderr=b"",
+                stdout_truncated=stdout_truncated,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", failed_probe)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_history_and_commit_ignore_ambient_graph_overrides(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    expected = repo.git("--no-replace-objects", "rev-list", "--topo-order", repo.merge_sha).stdout.splitlines()
+    external_objects = tmp_path / "external-objects"
+    external_objects.mkdir()
+    shallow_file = tmp_path / "ambient-shallow"
+    shallow_file.write_text(f"{repo.merge_sha}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(external_objects))
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(repo.root / ".git" / "objects"))
+    monkeypatch.setenv("GIT_SHALLOW_FILE", str(shallow_file))
+
+    history = filesystem.git_history(str(repo.root), limit=50)
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert [item["sha"] for item in history["commits"]] == expected
+    assert detail["sha"] == repo.changes_sha
+    assert detail["to_ref"] == repo.changes_sha
+
+
+def test_git_history_rejects_repository_declared_alternate_object_stores(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    external = create_git_history_repository(tmp_path / "external")
+    alternates = repo.root / ".git" / "objects" / "info" / "alternates"
+    alternates.write_text(f"{external.root / '.git' / 'objects'}\n", encoding="utf-8")
+
+    with pytest.raises(FilesystemError) as unsupported:
+        filesystem.git_history(str(repo.root))
+
+    assert unsupported.value.status == 422
+    assert unsupported.value.message_key == "fs.error.gitAlternateObjects"
+
+
+def test_git_history_rejects_symlinked_object_directory_outside_allowed_roots(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    repo = create_git_history_repository(allowed / "history")
+    external_objects = tmp_path / "external-objects"
+    (repo.root / ".git" / "objects").rename(external_objects)
+    (repo.root / ".git" / "objects").symlink_to(external_objects, target_is_directory=True)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_rejects_symlinked_loose_object_outside_allowed_roots(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    repo = create_git_history_repository(allowed / "history")
+    head_object = repo.root / ".git" / "objects" / repo.merge_sha[:2] / repo.merge_sha[2:]
+    external_object = tmp_path / "external-object"
+    head_object.rename(external_object)
+    head_object.symlink_to(external_object)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_rejects_symlinked_pack_file_outside_allowed_roots(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    repo = create_git_history_repository(allowed / "history")
+    repo.git("gc", "--quiet")
+    pack_file = next((repo.root / ".git" / "objects" / "pack").glob("*.pack"))
+    external_pack = tmp_path / pack_file.name
+    pack_file.rename(external_pack)
+    pack_file.symlink_to(external_pack)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_rejects_in_place_pack_rewrite_during_read(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("gc", "--quiet")
+    pack_file = next((repo.root / ".git" / "objects" / "pack").glob("*.pack"))
+    pack_file.chmod(0o644)
+    original_pack = pack_file.read_bytes()
+    original_git = git_ops._git_with_pinned_repo
+    rewritten = False
+
+    def rewrite_pack_after_log(repo_handle, args, **kwargs):
+        nonlocal rewritten
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args and not rewritten:
+            rewritten = True
+            pack_file.write_bytes(bytes([original_pack[0] ^ 1]) + original_pack[1:])
+            pack_file.write_bytes(original_pack)
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", rewrite_pack_after_log)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert rewritten is True
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_rejects_symlinked_ref_outside_allowed_roots(tmp_path, monkeypatch):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    repo = create_git_history_repository(allowed / "history")
+    branch = repo.git("symbolic-ref", "HEAD").stdout.strip()
+    branch_ref = repo.root / ".git" / branch
+    external_ref = tmp_path / "external-ref"
+    branch_ref.rename(external_ref)
+    branch_ref.symlink_to(external_ref)
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
+
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_probes_only_finite_object_directory_names(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+
+    def reject_listdir(_path):
+        raise AssertionError("Git object discovery must not materialize a directory listing")
+
+    monkeypatch.setattr(git_ops.os, "listdir", reject_listdir)
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["commits"][0]["sha"] == repo.merge_sha
+
+
+def test_git_history_checks_snapshot_deadline_before_each_loose_prefix_probe(tmp_path, monkeypatch):
+    repo = tmp_path / "empty-history"
+    repo.mkdir()
+    init_repo(repo)
+    original_check = git_ops.GitViewBudget.check
+    original_stat = git_ops.os.stat
+    check_calls = 0
+    prefix_calls = 0
+
+    def counted_check(budget):
+        nonlocal check_calls
+        check_calls += 1
+        return original_check(budget)
+
+    def require_check_before_prefix(path, *args, **kwargs):
+        nonlocal prefix_calls
+        if isinstance(path, str) and re.fullmatch(r"[0-9a-f]{2}", path):
+            prefix_calls += 1
+            assert check_calls >= prefix_calls
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(git_ops.GitViewBudget, "check", counted_check)
+    monkeypatch.setattr(git_ops.os, "stat", require_check_before_prefix)
+
+    history = filesystem.git_history(str(repo))
+
+    assert history["commits"] == []
+    assert prefix_calls == 256
+
+
+def test_git_history_snapshot_deadline_starts_before_control_resolution(tmp_path, monkeypatch):
+    repo = tmp_path / "empty-history"
+    repo.mkdir()
+    init_repo(repo)
+    original_stat = git_ops.os.stat
+    marker_probed = False
+
+    def observe_control_probe(path, *args, **kwargs):
+        nonlocal marker_probed
+        result = original_stat(path, *args, **kwargs)
+        if (
+            path == ".git"
+            and kwargs.get("dir_fd") is not None
+            and any(frame.function == "_pinned_git_control" for frame in inspect.stack())
+        ):
+            marker_probed = True
+        return result
+
+    monkeypatch.setattr(git_ops.os, "stat", observe_control_probe)
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: 11.0 if marker_probed else 0.0)
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_history(str(repo))
+
+    assert marker_probed is True
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
+
+
+def test_git_history_rechecks_build_deadline_after_final_marker_validation(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    current_time = 0.0
+    original_marker_check = git_ops._ensure_git_marker_unchanged
+    marker_checked = False
+
+    def expire_after_marker_check(*args, **kwargs):
+        nonlocal current_time, marker_checked
+        original_marker_check(*args, **kwargs)
+        if not marker_checked:
+            marker_checked = True
+            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
+    monkeypatch.setattr(git_ops, "_ensure_git_marker_unchanged", expire_after_marker_check)
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_history(str(repo.root), limit=1)
+
+    assert marker_checked is True
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
+
+
+def test_git_history_snapshot_deadline_starts_before_repo_discovery(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    current_time = 0.0
+    original_repo_root = git_ops._pinned_repo_root
+
+    def delayed_repo_root(*args, **kwargs):
+        nonlocal current_time
+        result = original_repo_root(*args, **kwargs)
+        current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+        return result
+
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
+    monkeypatch.setattr(git_ops, "_pinned_repo_root", delayed_repo_root)
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_history(str(repo.root), limit=1)
+
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
+
+
+def test_git_history_checks_deadline_before_each_repo_ancestor_probe(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    nested = repo.root / "one" / "two" / "three"
+    nested.mkdir(parents=True)
+    original_deadline_check = git_ops._ensure_git_view_deadline
+    original_safe_path = git_ops.paths.safe_path
+    deadline_checks = 0
+    ancestor_probes = 0
+    previous_probe_checks = 0
+
+    def counted_deadline_check(deadline):
+        nonlocal deadline_checks
+        deadline_checks += 1
+        return original_deadline_check(deadline)
+
+    def require_check_before_ancestor(*args, **kwargs):
+        nonlocal ancestor_probes, previous_probe_checks
+        if any(frame.function == "_pinned_repo_root" for frame in inspect.stack()):
+            ancestor_probes += 1
+            assert deadline_checks > previous_probe_checks
+            previous_probe_checks = deadline_checks
+        return original_safe_path(*args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_ensure_git_view_deadline", counted_deadline_check)
+    monkeypatch.setattr(git_ops.paths, "safe_path", require_check_before_ancestor)
+
+    history = filesystem.git_history(str(nested), limit=1)
+
+    assert history["head"] == repo.merge_sha
+    assert ancestor_probes >= 4
+
+
+def test_git_history_uses_a_fresh_deadline_for_retirement_validation(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    current_time = 0.0
+    original_git = git_ops._git_with_pinned_repo
+
+    def controlled_monotonic():
+        return current_time
+
+    def advance_after_log(repo_handle, args, **kwargs):
+        nonlocal current_time
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args:
+            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+        return result
+
+    monkeypatch.setattr(git_ops.time, "monotonic", controlled_monotonic)
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
+
+    history = filesystem.git_history(str(repo.root), limit=1)
+
+    assert history["commits"][0]["sha"] == repo.merge_sha
+
+
+def test_git_history_bounds_scope_retirement_with_the_shared_deadline(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    current_time = 0.0
+    original_git = git_ops._git_with_pinned_repo
+    original_namespace_check = git_ops._ensure_pinned_namespace_unchanged
+    scope_check_expired = False
+
+    def advance_after_log(repo_handle, args, **kwargs):
+        nonlocal current_time
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args:
+            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+        return result
+
+    def expire_during_scope_retirement(handle):
+        nonlocal current_time, scope_check_expired
+        original_namespace_check(handle)
+        if (
+            current_time > git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS
+            and not scope_check_expired
+            and any(frame.function == "_pinned_git_history_scope" for frame in inspect.stack())
+        ):
+            scope_check_expired = True
+            current_time += git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: current_time)
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
+    monkeypatch.setattr(git_ops, "_ensure_pinned_namespace_unchanged", expire_during_scope_retirement)
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_history(str(repo.root), limit=1)
+
+    assert scope_check_expired is True
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
+
+
+def test_git_history_bounds_pack_retirement_with_the_shared_deadline(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("gc", "--quiet")
+    current_time = 0.0
+    original_git = git_ops._git_with_pinned_repo
+    original_pack_check = git_ops._ensure_pinned_regular_file_unchanged
+    pack_checked = False
+
+    def controlled_monotonic():
+        return current_time
+
+    def advance_after_log(repo_handle, args, **kwargs):
+        nonlocal current_time
+        result = original_git(repo_handle, args, **kwargs)
+        if "log" in args:
+            current_time = git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+        return result
+
+    def expire_during_pack_check(handle):
+        nonlocal current_time, pack_checked
+        original_pack_check(handle)
+        if not pack_checked:
+            pack_checked = True
+            current_time += git_ops.GIT_VIEW_BUILD_TIMEOUT_SECONDS + 1.0
+
+    monkeypatch.setattr(git_ops.time, "monotonic", controlled_monotonic)
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", advance_after_log)
+    monkeypatch.setattr(git_ops, "_ensure_pinned_regular_file_unchanged", expire_during_pack_check)
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_history(str(repo.root), limit=1)
+
+    assert pack_checked is True
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitHistoryTooLarge"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [("extensions.refStorage", "reftable"), ("extensions.unknownRequired", "true")],
+)
+def test_git_history_rejects_unsupported_repository_extensions(tmp_path, key, value):
+    repo = create_git_history_repository(tmp_path / "history")
+    repo.git("config", "core.repositoryformatversion", "1")
+    repo.git("config", key, value)
+
+    with pytest.raises(FilesystemError) as unsupported:
+        filesystem.git_history(str(repo.root))
+
+    assert unsupported.value.status == 422
+    assert unsupported.value.message_key == "fs.error.gitRepositoryUnsupported"
+
+
+def test_git_history_rejects_repository_config_include(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    included = tmp_path / "included-git-config"
+    included.write_text(
+        "[core]\n\trepositoryformatversion = 1\n[extensions]\n\trefstorage = reftable\n",
+        encoding="utf-8",
+    )
+    with (repo.root / ".git" / "config").open("a", encoding="utf-8") as config:
+        config.write(f"\n[include]\n\tpath = {included}\n")
+
+    with pytest.raises(FilesystemError) as unsupported:
+        filesystem.git_history(str(repo.root))
+
+    assert unsupported.value.status == 422
+    assert unsupported.value.message_key == "fs.error.gitRepositoryUnsupported"
+
+
+def test_git_history_rejects_object_directory_replacement_during_read(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    objects = repo.root / ".git" / "objects"
+    authorized_objects = repo.root / ".git" / "objects-authorized"
+    replacement_objects = replacement.root / ".git" / "objects"
+    original_git = git_ops._git_with_pinned_repo
+    replaced = False
+
+    def replace_objects_after_head(repo_handle, args, **kwargs):
+        nonlocal replaced
+        result = original_git(repo_handle, args, **kwargs)
+        if "rev-parse" in args and "HEAD" in args and not replaced:
+            replaced = True
+            objects.rename(authorized_objects)
+            replacement_objects.rename(objects)
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", replace_objects_after_head)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert replaced is True
+    assert changed.value.status == 409
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_history_cannot_consume_transient_alternate_object_store(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    external = create_git_history_repository(tmp_path / "external")
+    (external.root / "external-only.txt").write_text("outside\n", encoding="utf-8")
+    external.git("add", "--", "external-only.txt")
+    external.git("commit", "-q", "-m", "external only")
+    external_head = external.git("rev-parse", "HEAD").stdout.strip()
+    branch = repo.git("symbolic-ref", "HEAD").stdout.strip()
+    (repo.root / ".git" / branch).write_text(f"{external_head}\n", encoding="ascii")
+    alternates = repo.root / ".git" / "objects" / "info" / "alternates"
+    original_git = git_ops._git_with_pinned_repo
+    injected = 0
+
+    def transient_alternate(repo_handle, args, **kwargs):
+        nonlocal injected
+        alternates.write_text(f"{external.root / '.git' / 'objects'}\n", encoding="utf-8")
+        injected += 1
+        try:
+            return original_git(repo_handle, args, **kwargs)
+        finally:
+            alternates.unlink()
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", transient_alternate)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_history(str(repo.root))
+
+    assert injected >= 1
+    assert failed.value.message_key == "fs.error.gitHistoryFailed"
+
+
+def test_git_history_rejects_alternate_object_store_added_during_read(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    external = create_git_history_repository(tmp_path / "external")
+    alternates = repo.root / ".git" / "objects" / "info" / "alternates"
+    original_git = git_ops._git_with_pinned_repo
+    added = False
+
+    def add_alternate_after_head(repo_handle, args, **kwargs):
+        nonlocal added
+        result = original_git(repo_handle, args, **kwargs)
+        if "rev-parse" in args and "HEAD" in args and not added:
+            added = True
+            alternates.write_text(f"{external.root / '.git' / 'objects'}\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", add_alternate_after_head)
+    with pytest.raises(FilesystemError) as unsupported:
+        filesystem.git_history(str(repo.root))
+
+    assert added is True
+    assert unsupported.value.status == 422
+    assert unsupported.value.message_key == "fs.error.gitAlternateObjects"
+
+
+def test_git_history_disables_lazy_fetch_and_uses_a_pinned_shallow_snapshot(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    expected = repo.git("--no-replace-objects", "rev-list", "--topo-order", repo.merge_sha).stdout.splitlines()
+    shallow_path = repo.root / ".git" / "shallow"
+    original_popen = git_ops.subprocess.Popen
+    git_environments = []
+
+    def capture_git_environment(*args, **kwargs):
+        if args and args[0] and args[0][0] == "git":
+            git_environments.append(dict(kwargs["env"]))
+        return original_popen(*args, **kwargs)
+
+    original_git = git_ops._git_with_pinned_repo
+
+    def shallow_aba(repo_handle, args, **kwargs):
+        if "log" not in args:
+            return original_git(repo_handle, args, **kwargs)
+        shallow_path.write_text(f"{repo.merge_sha}\n", encoding="utf-8")
+        try:
+            return original_git(repo_handle, args, **kwargs)
+        finally:
+            shallow_path.unlink()
+
+    monkeypatch.setattr(git_ops.subprocess, "Popen", capture_git_environment)
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", shallow_aba)
+    history = filesystem.git_history(str(repo.root), limit=50)
+
+    assert [item["sha"] for item in history["commits"]] == expected
+    assert git_environments
+    assert all(environment["GIT_NO_LAZY_FETCH"] == "1" for environment in git_environments)
+    assert all(environment["GIT_SHALLOW_FILE"] for environment in git_environments)
+    assert all(environment["LC_ALL"] == "C" for environment in git_environments)
+
+
+def test_git_history_and_commit_reject_malformed_timestamps(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+    parent = repo.git("show", "--no-patch", "--format=%P", repo.changes_sha).stdout.strip()
+
+    def malformed_timestamp(repo_handle, args, **kwargs):
+        if "log" in args:
+            raw = b"\0".join(
+                [
+                    b"commit",
+                    repo.merge_sha.encode(),
+                    repo.merge_sha[:9].encode(),
+                    repo.main_sha.encode(),
+                    b"History Fixture",
+                    b"not-a-timestamp",
+                    b"malformed history timestamp",
+                    b"\n1\t0\tscope/file.txt",
+                ]
+            )
+            return git_ops.PinnedGitResult(args=list(args), returncode=0, stdout=raw, stderr=b"")
+        if "show" in args and "--no-patch" in args:
+            raw = b"\0".join(
+                [
+                    repo.changes_sha.encode(),
+                    parent.encode(),
+                    b"History Fixture",
+                    b"not-a-timestamp",
+                    b"malformed commit timestamp",
+                    b"message",
+                    b"",
+                ]
+            )
+            return git_ops.PinnedGitResult(args=list(args), returncode=0, stdout=raw, stderr=b"")
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", malformed_timestamp)
+    for operation, expected_key in (
+        (lambda: filesystem.git_history(str(repo.root)), "fs.error.gitHistoryFailed"),
+        (
+            lambda: filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha),
+            "fs.error.gitCommitFailed",
+        ),
+    ):
+        with pytest.raises(FilesystemError) as failed:
+            operation()
+        assert failed.value.status == 500
+        assert failed.value.message_key == expected_key
+
+
+def test_git_history_rejects_changed_shallow_boundary_for_frozen_cursor(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=1)
+    (repo.root / ".git" / "shallow").write_text(f"{repo.merge_sha}\n", encoding="utf-8")
+
+    with pytest.raises(FilesystemError) as stale:
+        filesystem.git_history(str(repo.root), limit=1, cursor=first["next_cursor"])
+
+    assert stale.value.status == 409
+    assert stale.value.message_key == "fs.error.gitHistoryStale"
+
+
+def test_git_history_reports_missing_cursor_head_as_stale(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=1)
+    padding = "=" * (-len(first["next_cursor"]) % 4)
+    cursor_payload = json.loads(base64.urlsafe_b64decode(first["next_cursor"] + padding))
+    cursor_payload["head"] = "f" * 40
+    missing_cursor = base64.urlsafe_b64encode(
+        json.dumps(cursor_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+
+    with pytest.raises(FilesystemError) as stale:
+        filesystem.git_history(str(repo.root), cursor=missing_cursor)
+
+    assert stale.value.status == 409
+    assert stale.value.message_key == "fs.error.gitHistoryStale"
+
+
+def test_git_history_does_not_mask_fatal_stderr_after_output_cap(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def fatal_after_cap(repo_handle, args, **kwargs):
+        if "log" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=-9,
+                stdout=b"commit\0" + repo.merge_sha.encode(),
+                stderr=b"fatal: corrupt object",
+                stdout_truncated=True,
+                killed_for_cap=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", fatal_after_cap)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_history(str(repo.root))
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitHistoryFailed"
+
+
+@pytest.mark.parametrize(
+    ("parser", "raw", "expected_key"),
+    [
+        (git_ops._parse_history_numstat, b"commit\0deadbeef", "fs.error.gitHistoryFailed"),
+        (
+            git_ops._parse_history_numstat,
+            b"\0".join(
+                [
+                    b"commit",
+                    b"a" * 40,
+                    b"a" * 9,
+                    b"",
+                    b"author",
+                    b"1",
+                    b"subject",
+                    b"\n1\t2\t",
+                    b"old",
+                ]
+            ),
+            "fs.error.gitHistoryFailed",
+        ),
+        (git_ops._parse_name_status, b"R100\0old", "fs.error.gitCommitFailed"),
+        (git_ops._parse_detail_numstat, b"1\t2\t\0old", "fs.error.gitCommitFailed"),
+    ],
+)
+def test_git_history_parsers_reject_incomplete_nontruncated_output(parser, raw, expected_key):
+    with pytest.raises(FilesystemError) as failed:
+        parser(raw, output_truncated=False)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == expected_key
+
+
+@pytest.mark.parametrize(
+    ("parser", "raw", "expected_key"),
+    [
+        (
+            git_ops._parse_history_numstat,
+            b"\0".join(
+                [
+                    b"commit",
+                    b"a" * 40,
+                    b"a" * 9,
+                    b"",
+                    b"author",
+                    b"1",
+                    b"subject",
+                    b"\n1\t2\tscope/file.txt",
+                ]
+            ),
+            "fs.error.gitHistoryFailed",
+        ),
+        (
+            git_ops._parse_commit_metadata,
+            b"\0".join([b"a" * 40, b"", b"author", b"1", b"subject", b"message"]),
+            "fs.error.gitCommitFailed",
+        ),
+        (git_ops._parse_name_status, b"M\0scope/file.txt", "fs.error.gitCommitFailed"),
+        (git_ops._parse_detail_numstat, b"1\t2\tscope/file.txt", "fs.error.gitCommitFailed"),
+    ],
+)
+def test_git_history_parsers_reject_missing_nontruncated_terminator(parser, raw, expected_key):
+    with pytest.raises(FilesystemError) as failed:
+        parser(raw, output_truncated=False)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == expected_key
+
+
+@pytest.mark.parametrize(
+    ("parser", "raw"),
+    [
+        (git_ops._parse_name_status, b"M\0scope/file.txt\0M\0scope/file.txt\0"),
+        (git_ops._parse_detail_numstat, b"1\t2\tscope/file.txt\0" * 2),
+    ],
+)
+def test_git_commit_parsers_reject_duplicate_file_identities(parser, raw):
+    with pytest.raises(FilesystemError) as failed:
+        parser(raw, output_truncated=False)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_history_numstat_rejects_empty_rename_endpoints():
+    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
+
+    for rename in (b"\n1\t2\t\0\0scope/new.txt\0", b"\n1\t2\t\0scope/old.txt\0\0"):
+        with pytest.raises(FilesystemError) as failed:
+            git_ops._parse_history_numstat(prefix + b"\0" + rename, output_truncated=False)
+
+        assert failed.value.status == 500
+        assert failed.value.message_key == "fs.error.gitHistoryFailed"
+
+
+def test_git_numstat_parsers_reject_mixed_binary_markers():
+    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
+    cases = (
+        (git_ops._parse_history_numstat, prefix + b"\0\n-\t2\tscope/file.bin\0", "fs.error.gitHistoryFailed"),
+        (git_ops._parse_history_numstat, prefix + b"\0\n2\t-\tscope/file.bin\0", "fs.error.gitHistoryFailed"),
+        (git_ops._parse_detail_numstat, b"-\t2\tscope/file.bin\0", "fs.error.gitCommitFailed"),
+        (git_ops._parse_detail_numstat, b"2\t-\tscope/file.bin\0", "fs.error.gitCommitFailed"),
+    )
+
+    for parser, raw, expected_key in cases:
+        with pytest.raises(FilesystemError) as failed:
+            parser(raw, output_truncated=False)
+
+        assert failed.value.status == 500
+        assert failed.value.message_key == expected_key
+
+
+def test_git_numstat_parsers_reject_negative_counts():
+    prefix = b"\0".join([b"commit", b"a" * 40, b"a" * 9, b"", b"author", b"1", b"subject"])
+    cases = (
+        (git_ops._parse_history_numstat, prefix + b"\0\n-1\t2\tscope/file.txt\0", "fs.error.gitHistoryFailed"),
+        (git_ops._parse_history_numstat, prefix + b"\0\n2\t-1\tscope/file.txt\0", "fs.error.gitHistoryFailed"),
+        (git_ops._parse_detail_numstat, b"-1\t2\tscope/file.txt\0", "fs.error.gitCommitFailed"),
+        (git_ops._parse_detail_numstat, b"2\t-1\tscope/file.txt\0", "fs.error.gitCommitFailed"),
+    )
+
+    for parser, raw, expected_key in cases:
+        with pytest.raises(FilesystemError) as failed:
+            parser(raw, output_truncated=False)
+
+        assert failed.value.status == 500
+        assert failed.value.message_key == expected_key
+
+
+def test_git_commit_reports_missing_frozen_head_as_stale(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+
+    with pytest.raises(FilesystemError) as stale:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head="f" * 40)
+
+    assert stale.value.status == 409
+    assert stale.value.message_key == "fs.error.gitHistoryStale"
+
+
+def test_git_commit_rejects_complete_status_numstat_disagreement(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def missing_numstat(repo_handle, args, **kwargs):
+        if "diff-tree" in args and "--numstat" in args:
+            return git_ops.PinnedGitResult(args=list(args), returncode=0, stdout=b"", stderr=b"")
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", missing_numstat)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_history_rejects_invalid_direct_limit(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+
+    with pytest.raises(FilesystemError) as invalid:
+        filesystem.git_history(str(repo.root), limit="many")
+
+    assert invalid.value.status == 422
+    assert invalid.value.message_key == "fs.error.gitHistoryLimit"
+
+
+def test_git_history_does_not_treat_real_failure_as_cap_termination(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def corrupt_history(repo_handle, args, **kwargs):
+        if "log" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=128,
+                stdout=b"x" * kwargs["max_output_bytes"],
+                stderr=b"fatal: corrupt object",
+                stdout_truncated=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", corrupt_history)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_history(str(repo.root))
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitHistoryFailed"
+
+
+def test_git_commit_does_not_treat_real_metadata_failure_as_cap_termination(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+    parent = repo.git("show", "--no-patch", "--format=%P", repo.changes_sha).stdout.strip()
+
+    def corrupt_metadata(repo_handle, args, **kwargs):
+        if "show" in args and "--no-patch" in args:
+            raw = b"\0".join(
+                [
+                    repo.changes_sha.encode(),
+                    parent.encode(),
+                    b"History Fixture",
+                    b"1",
+                    b"corrupt metadata",
+                    b"x" * kwargs["max_output_bytes"],
+                ]
+            )
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=128,
+                stdout=raw[:kwargs["max_output_bytes"]],
+                stderr=b"fatal: corrupt object",
+                stdout_truncated=True,
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", corrupt_metadata)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_commit_reports_nontruncated_metadata_failure_as_operational(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+
+    def corrupt_metadata(repo_handle, args, **kwargs):
+        if "show" in args and "--no-patch" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=128,
+                stdout=b"",
+                stderr=b"fatal: corrupt object",
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", corrupt_metadata)
+    with pytest.raises(FilesystemError) as failed:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert failed.value.status == 500
+    assert failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_history_and_commit_distinguish_merge_base_failure_from_not_ancestor(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    first = filesystem.git_history(str(repo.root), limit=1)
+    original_git = git_ops._git_with_pinned_repo
+
+    def failed_relation(repo_handle, args, **kwargs):
+        if "merge-base" in args:
+            return git_ops.PinnedGitResult(
+                args=list(args),
+                returncode=128,
+                stdout=b"",
+                stderr=b"fatal: corrupt relation",
+            )
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", failed_relation)
+    with pytest.raises(FilesystemError) as history_failed:
+        filesystem.git_history(str(repo.root), cursor=first["next_cursor"])
+    with pytest.raises(FilesystemError) as commit_failed:
+        filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert history_failed.value.status == 500
+    assert history_failed.value.message_key == "fs.error.gitHistoryFailed"
+    assert commit_failed.value.status == 500
+    assert commit_failed.value.message_key == "fs.error.gitCommitFailed"
+
+
+def test_git_commit_bounds_status_and_numstat_rows_before_payload_construction(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    original_git = git_ops._git_with_pinned_repo
+    row_count = git_ops.GIT_COMMIT_MAX_FILES + 200
+    status = b"".join(f"M\0scope/file-{index:04d}.txt\0".encode() for index in range(row_count))
+    numstat = b"".join(f"1\t1\tscope/file-{index:04d}.txt\0".encode() for index in range(row_count))
+    parsed_status, status_truncated = git_ops._parse_name_status(status, output_truncated=False)
+    parsed_counts, counts_truncated = git_ops._parse_detail_numstat(numstat, output_truncated=False)
+
+    assert len(parsed_status) == git_ops.GIT_COMMIT_MAX_FILES
+    assert len(parsed_counts) == git_ops.GIT_COMMIT_MAX_FILES
+    assert status_truncated is True
+    assert counts_truncated is True
+
+    def oversized_file_list(repo_handle, args, **kwargs):
+        if "diff-tree" in args and "--name-status" in args:
+            return git_ops.PinnedGitResult(args=list(args), returncode=0, stdout=status, stderr=b"")
+        if "diff-tree" in args and "--numstat" in args:
+            return git_ops.PinnedGitResult(args=list(args), returncode=0, stdout=numstat, stderr=b"")
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", oversized_file_list)
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.changes_sha, head=repo.merge_sha)
+
+    assert len(detail["files"]) == git_ops.GIT_COMMIT_MAX_FILES
+    assert detail["files_truncated"] is True
+    assert detail["truncated"] is True
+
+
+def test_git_commit_reports_oversized_message_as_truncated_not_unknown(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    (repo.scope / "kept.txt").write_text("oversized message commit\n", encoding="utf-8")
+    repo.git("add", "--", "scope/kept.txt")
+    message_path = tmp_path / "message.txt"
+    message_path.write_text("oversized commit\n\n" + ("x" * (256 * 1024)), encoding="utf-8")
+    repo.git("-c", "commit.cleanup=verbatim", "commit", "-q", "-F", str(message_path))
+    head = repo.git("rev-parse", "HEAD").stdout.strip()
+
+    detail = filesystem.git_commit(str(repo.scope), commit=head, head=head)
+
+    assert detail["sha"] == head
+    assert detail["subject"] == "oversized commit"
+    assert detail["message_truncated"] is True
+    assert len(detail["message"].encode("utf-8")) <= git_ops.GIT_COMMIT_MAX_MESSAGE_BYTES
+
+
+def test_git_commit_reports_oversized_subject_as_typed_too_large(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    (repo.scope / "kept.txt").write_text("oversized subject commit\n", encoding="utf-8")
+    repo.git("add", "--", "scope/kept.txt")
+    message_path = tmp_path / "subject.txt"
+    message_path.write_text("s" * (256 * 1024), encoding="utf-8")
+    repo.git("-c", "commit.cleanup=verbatim", "commit", "-q", "-F", str(message_path))
+    head = repo.git("rev-parse", "HEAD").stdout.strip()
+
+    with pytest.raises(FilesystemError) as too_large:
+        filesystem.git_commit(str(repo.scope), commit=head, head=head)
+
+    assert too_large.value.status == 413
+    assert too_large.value.message_key == "fs.error.gitCommitTooLarge"
+
+
+@pytest.mark.parametrize("graph_override", ["replace", "graft"])
+def test_git_history_and_detail_ignore_mutable_graph_overrides(tmp_path, graph_override):
+    repo = create_git_history_repository(tmp_path / "history")
+    expected = repo.git("--no-replace-objects", "rev-list", "--topo-order", repo.merge_sha).stdout.splitlines()
+    parent = repo.git("--no-replace-objects", "show", "--no-patch", "--format=%P", repo.main_sha).stdout.split()[0]
+    first = filesystem.git_history(str(repo.root), limit=1)
+
+    if graph_override == "replace":
+        repo.git("replace", repo.main_sha, repo.root_sha)
+    else:
+        grafts = repo.root / ".git" / "info" / "grafts"
+        grafts.write_text(f"{repo.main_sha} {repo.root_sha}\n", encoding="utf-8")
+
+    older = filesystem.git_history(str(repo.root), limit=2, cursor=first["next_cursor"])
+    detail = filesystem.git_commit(str(repo.scope), commit=repo.main_sha, head=repo.merge_sha)
+
+    assert [item["sha"] for item in older["commits"]] == expected[1:3]
+    assert detail["from_ref"] == parent
+
+
+def test_git_history_rejects_git_control_replacement(tmp_path, monkeypatch):
+    repo = create_git_history_repository(tmp_path / "history")
+    replacement = create_git_history_repository(tmp_path / "replacement")
+    original_git = git_ops._git_with_pinned_repo
+    replaced = False
+
+    def replace_control_after_pin(repo_handle, args, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            (repo.root / ".git").rename(repo.root / ".git-authorized")
+            (replacement.root / ".git").rename(repo.root / ".git")
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", replace_control_after_pin)
+    with pytest.raises(FilesystemError) as changed:
+        filesystem.git_history(str(repo.root))
+
+    assert replaced is True
+    assert changed.value.message_key == "fs.error.gitRepositoryChanged"
+
+
+def test_git_commit_rejects_non_utf8_historical_path(tmp_path):
+    repo = create_git_history_repository(tmp_path / "history")
+    invalid_name = os.fsdecode(b"invalid-\xff.txt")
+    invalid_path = repo.scope / invalid_name
+    invalid_path.write_text("invalid path bytes\n", encoding="utf-8")
+    repo.git("add", "--", f"scope/{invalid_name}")
+    repo.git("commit", "-q", "-m", "invalid filename bytes")
+    head = repo.git("rev-parse", "HEAD").stdout.strip()
+
+    with pytest.raises(FilesystemError) as unsupported:
+        filesystem.git_commit(str(repo.scope), commit=head, head=head)
+
+    assert unsupported.value.status == 422
+    assert unsupported.value.message_key == "fs.error.gitPathEncoding"
 
 
 def test_create_directory_rejects_existing_target(tmp_path):

@@ -611,12 +611,8 @@ def host_storage_probe_path(evidence_root: Path | None = None) -> Path:
     return _latency_evidence_root(evidence_root) / "host-storage-probe.sqlite3"
 
 
-def _storage_work_samples_ms(probe_path: Path) -> list[float]:
-    """One fixed warm-cache storage work unit on the filesystem the certification units use.
-
-    Built once and re-read, so a later sample reports whether those pages are still served from
-    the page cache. A host churning large files evicts them and this rises toward device latency.
-    """
+def _initialize_storage_probe(probe_path: Path) -> None:
+    """Build the fixed storage probe once, outside every measured host window."""
 
     probe_path.parent.mkdir(parents=True, exist_ok=True)
     if not probe_path.exists():
@@ -628,6 +624,16 @@ def _storage_work_samples_ms(probe_path: Path) -> list[float]:
         )
         connection.commit()
         connection.close()
+
+
+def _storage_work_samples_ms(probe_path: Path) -> list[float]:
+    """One fixed warm-cache storage work unit on the filesystem the certification units use.
+
+    Built once and re-read, so a later sample reports whether those pages are still served from
+    the page cache. A host churning large files evicts them and this rises toward device latency.
+    """
+
+    _initialize_storage_probe(probe_path)
     samples: list[float] = []
     for round_index in range(HOST_STORAGE_WORK_SAMPLES):
         first = (round_index * 137) % (HOST_STORAGE_PROBE_ROWS - HOST_STORAGE_WORK_SPAN_ROWS)
@@ -676,6 +682,10 @@ def measure_host_resources(*, evidence_root: Path | None = None, sample_seconds:
     """Measure this host once. Windowed deltas and instantaneous reads only, never decaying averages."""
 
     probe_path = host_storage_probe_path(evidence_root)
+    # Creating and committing the 9 MiB probe is fixture setup, not ambient host load. Keep the
+    # warm-cache reads below inside the window, but finish first-use initialization before either
+    # the pressure or disk-counter baseline can observe it.
+    _initialize_storage_probe(probe_path)
     pressure_before = _read_pressure_totals()
     disk_before = _read_disk_counters()
     started_monotonic = time.monotonic()

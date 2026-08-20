@@ -322,7 +322,7 @@ function closePanePopout(item) {
 
 function closePopoutsForLayoutItem(item) {
   let closed = closePanePopout(item);
-  if (isFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
+  if (isFileEditorItem(item) && !isHistoricalFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
     closed = closeFilePreviewPopout(fileItemPath(item)) || closed;
   }
   return closed;

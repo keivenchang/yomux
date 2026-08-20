@@ -527,6 +527,7 @@ def test_preformatted_text_wrapping_has_one_shared_selector_owner():
         ".modal pre",
         ".drop-action-result pre",
         ".file-editor-conflict-compare pre",
+        ".git-diff-commit-message",
         ".js-debug-log-message",
     )
     selector_group = ",\n".join(selectors[:-1]) + ",\n" + selectors[-1]

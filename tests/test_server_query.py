@@ -1015,7 +1015,7 @@ def test_configure_session_tmux_options_uses_active_surface_authority(monkeypatc
     server_module.configure_session_tmux_options("3")
 
     assert ["set-option", "-s", "set-clipboard", "on"] in calls
-    assert ["set-option", "-t", "3:", "window-size", "largest"] in calls
+    assert ["set-option", "-t", "=3:", "window-size", "largest"] in calls
     assert ["set-option", "-wg", "aggressive-resize", "on"] in calls
     assert server_module.tmux_attach_command(readonly=False) == ["tmux", "attach-session", "-f", "ignore-size"]
     assert server_module.tmux_attach_command(readonly=True) == ["tmux", "attach-session", "-r", "-f", "ignore-size"]
@@ -2029,6 +2029,54 @@ def test_handle_fs_list_preserves_legacy_jobd_request_without_repo_opt_out():
     Handler.handle_fs_list(handler, urlparse("/api/fs/list?path=%2Frepo"))
 
     assert calls == [("GET /api/fs/list", "list", "/repo")]
+
+
+def test_handle_fs_git_history_and_commit_validate_and_submit_retained_reads():
+    calls = []
+    writes = []
+    handler = object.__new__(Handler)
+    handler.submit_filesystem_operation = lambda *args: calls.append(args)
+    handler.write_json = lambda payload, status: writes.append((status, payload))
+
+    Handler.handle_fs_git_history(
+        handler,
+        urlparse("/api/fs/git-history?path=%2Frepo%2Fsrc&limit=12&cursor=opaque-cursor"),
+    )
+    Handler.handle_fs_git_commit(
+        handler,
+        urlparse(f"/api/fs/git-commit?path=%2Frepo%2Fsrc&commit={'a' * 40}&head={'b' * 40}"),
+    )
+
+    assert calls == [
+        ("GET /api/fs/git-history", "git_history", "/repo/src", {"limit": 12, "cursor": "opaque-cursor"}),
+        ("GET /api/fs/git-commit", "git_commit", "/repo/src", {"commit": "a" * 40, "head": "b" * 40}),
+    ]
+    assert writes == []
+
+    for raw_limit in ("0", "-999"):
+        Handler.handle_fs_git_history(
+            handler,
+            urlparse(f"/api/fs/git-history?path=%2Frepo&limit={raw_limit}"),
+        )
+        assert calls[-1] == ("GET /api/fs/git-history", "git_history", "/repo", {"limit": 1, "cursor": ""})
+
+    Handler.handle_fs_git_history(handler, urlparse("/api/fs/git-history?path=%2Frepo&limit=many"))
+    assert len(writes) == 1
+    assert writes[0][0] == HTTPStatus.BAD_REQUEST
+    assert len(calls) == 4
+
+
+def test_git_history_routes_are_registered_as_readonly_json():
+    routes = {(route.method, route.path): route for route in http_routes.ALL_ROUTES}
+
+    for path, handler_name in (
+        ("/api/fs/git-history", "get_fs_git_history"),
+        ("/api/fs/git-commit", "get_fs_git_commit"),
+    ):
+        route = routes[("GET", path)]
+        assert route.role == "readonly"
+        assert route.protocol == http_routes.RESPONSE_JSON
+        assert route.handler.__name__ == handler_name
 
 
 @pytest.mark.parametrize(

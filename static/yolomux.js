@@ -68,6 +68,10 @@ let yolomuxFontsReadyPromise = null;
 const homePath = bootstrap.homePath;
 const repoRoot = bootstrap.repoRoot || '';
 const serverHostname = bootstrap.serverHostname;
+const cpuTopology = Object.freeze({
+  logicalCpus: Math.max(0, Number(bootstrap.cpuTopology?.logical_cpus) || 0),
+  physicalCores: Math.max(0, Number(bootstrap.cpuTopology?.physical_cores) || 0),
+});
 const appRoot = document.getElementById('appRoot') || document.body;
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -332,9 +336,9 @@ const PREVIEW_RENDERERS = Object.freeze([
     '.ogv': 'video/ogg',
     '.3gp': 'video/3gpp',
   }}),
-  // Generic text/code preview is the same syntax-highlighted text the editor already shows. Keep the
-  // renderer for language/fallback routing, but do not expose Preview until a distinct renderer exists.
-  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: false, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
+  // Finder exposes Edit, Preview, and Diff as modes of one file tab, so generic text/code files need
+  // the existing syntax-highlighted Preview surface too; commit snapshots reuse this same renderer.
+  previewRendererStrategy({id: 'text', kind: 'text', extensions: ['.txt', '.log', '.trace', '.out', '.rst', '.adoc', '.asciidoc', '.diff', '.patch', '.dot', '.gv', '.puml', '.plantuml', '.srt', '.vtt'], textBacked: true, previewable: true, defaultMode: 'edit', surfaceClasses: ['code-preview-body'], render: renderCodePreviewStrategy, languageByExtension: {
     '.txt': 'text',
     '.log': 'text',
     '.trace': 'text',
@@ -417,10 +421,13 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
 const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame/identity/open-promise state
+const historicalFileState = new Map();  // exact filehistory item -> immutable commit-side editor state
+const gitDiffTabState = new Map();  // exact gitdiff item -> frozen history snapshot, disclosures, and requests
 const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
 const fileExplorerSessionFilesCache = new Map();
+const fileExplorerFinderSessionFilesCache = new Map();
 const terminalFileReferenceTargetCache = new Map();
 const fileExplorerMemoryCacheLimit = 512;
 const fileExplorerRefreshIdleMs = 1501;
@@ -534,8 +541,17 @@ const tabberActivityState = {
 const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
+// Differ owns arbitrary selected refs. Finder has a separate fixed HEAD/current record below so a
+// historical comparison can never repaint live working-tree annotations.
 const fileExplorerSessionFilesState = {
   payload: {session: '', files: [], repos: [], errors: []},
+  signature: '',
+  loading: false,
+  guard: makeGenerationGuard(),
+  abortController: null,
+};
+const fileExplorerFinderSessionFilesState = {
+  payload: {session: '', files: [], repos: [], errors: [], from_ref: 'HEAD', to_ref: 'current'},
   signature: '',
   loading: false,
   guard: makeGenerationGuard(),
@@ -878,6 +894,9 @@ const intentionalEmptyPaneParam = '__empty_pane_v2__';
 const fileEditorItemPrefix = 'file:';
 const fileEditorCopyItemPrefix = 'filecopy:';
 const fileEditorDiffPreviewItemPrefix = 'filediff:';
+const historicalFileEditorItemPrefix = 'filehistory:';
+const gitDiffItemPrefix = 'gitdiff:';
+const gitDiffHistoryPageSize = 50;
 const imageViewerItemPrefix = 'image:';
 const chatMediaItemPrefix = 'chat-media:';
 let fileEditorCopyItemSeq = 0;
@@ -1088,6 +1107,37 @@ function makeGenerationGuard() {
   });
 }
 function fileEditorItemFor(path) { return fileEditorItemPrefix + path; }
+function gitDiffItemFor(path) {
+  const normalized = normalizeDirectoryPath(String(path || ''));
+  return normalized ? `${gitDiffItemPrefix}${encodeURIComponent(normalized)}` : '';
+}
+function gitDiffItemPath(item) {
+  const text = String(item || '');
+  if (!text.startsWith(gitDiffItemPrefix)) return null;
+  const path = safeDecodeURIComponent(text.slice(gitDiffItemPrefix.length));
+  return path.startsWith('/') ? normalizeDirectoryPath(path) : null;
+}
+function historicalFileEditorItemFor(path, fromRef, toRef) {
+  const normalizedPath = String(path || '').trim();
+  const normalizedFrom = String(fromRef || '').trim();
+  const normalizedTo = String(toRef || '').trim();
+  if (!normalizedPath.startsWith('/') || !normalizedFrom || !normalizedTo) return '';
+  return `${historicalFileEditorItemPrefix}${encodeURIComponent(JSON.stringify([normalizedPath, normalizedFrom, normalizedTo]))}`;
+}
+function historicalFileEditorIdentity(item) {
+  const text = String(item || '');
+  if (!text.startsWith(historicalFileEditorItemPrefix)) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(text.slice(historicalFileEditorItemPrefix.length)));
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [path, fromRef, toRef] = parsed.map(value => String(value || '').trim());
+    if (!path.startsWith('/') || !fromRef || !toRef) return null;
+    return {path, fromRef, toRef};
+  } catch (_error) {
+    return null;
+  }
+}
+function isHistoricalFileEditorItem(item) { return historicalFileEditorIdentity(item) !== null; }
 function fileEditorDiffPreviewItemFor(path) { return fileEditorDiffPreviewItemPrefix + path; }
 function isFileEditorDiffPreviewItem(item) {
   return typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix);
@@ -1121,6 +1171,16 @@ function virtualPanelTabType(spec) {
     terminalTitle: spec.terminalTitle || (() => t('tab.unavailableFor', {name: label()})), param: spec.param || (() => spec.key),
     popoutDisabledReason: spec.popoutDisabledReason || (() => t('pane.popout.interactiveDisabled', {name: label()})), className: spec.className || (() => spec.key)};
 }
+function diffFileTabLabel(item, path) {
+  if (!isHistoricalFileEditorItem(item) && editorViewModeFor(path, item) !== 'diff') return basenameOf(path);
+  const state = fileEditorTabState(item);
+  const repo = normalizeDirectoryPath(state?.gitRoot || state?.diffRepo || '');
+  const relativePath = repo && pathIsInsideDirectory(path, repo) ? pathRelativeToDirectory(path, repo) : '';
+  const parent = relativePath.includes('/') ? dirnameOf(relativePath) : '';
+  const scope = repo ? [basenameOf(repo), parent].filter(Boolean).join('/') : compactHomePath(dirnameOf(path));
+  return `Δ${basenameOf(path)}${scope ? `;${scope}` : ''}`;
+}
+
 function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTitle, className, sortRank, focusSearch = null}) {
   const itemPrefixes = Array.isArray(prefixes) && prefixes.length ? prefixes : [prefix];
   return virtualPanelTabType({
@@ -1128,7 +1188,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     prefix,
     prefixes: itemPrefixes,
     match: item => typeof item === 'string' && itemPrefixes.some(itemPrefix => item.startsWith(itemPrefix)),
-    label: item => basenameOf(fileItemPath(item)),
+    label: item => diffFileTabLabel(item, fileItemPath(item)),
     shortLabel,
     terminalTitle,
     sortRank,
@@ -1138,13 +1198,17 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     createPanel: item => createFileEditorPanel(item),
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
-      return Boolean(path && editorPreviewModeAvailable(path, fileState.get(path)));
+      return Boolean(path && editorPreviewModeAvailable(path, fileEditorStateForItem(path, item)));
     },
-    popoutDisabledReason: item => t(fileItemPath(item)
-      ? 'pane.popout.filePreviewRequired'
-      : 'pane.popout.filePathRequired'),
+    popoutDisabledReason: item => t(isHistoricalFileEditorItem(item)
+      ? 'editor.historicalReadOnly'
+      : fileItemPath(item)
+        ? 'pane.popout.filePreviewRequired'
+        : 'pane.popout.filePathRequired'),
     openPopout: item => {
+      if (isHistoricalFileEditorItem(item)) return false;
       const path = fileItemPath(item);
       return Boolean(path && openFilePreviewPopout(path, document.getElementById(panelDomId(item))));
     },
@@ -1339,6 +1403,23 @@ const TAB_TYPES = [
     panePlacement: panePlacementSideAllowed,
     minWidth: () => rootCssLengthPx('--preferences-pane-min-inline-size') || minSplitPaneWidthPx(),
   }),
+  virtualPanelTabType({
+    key: 'git-diff',
+    prefix: gitDiffItemPrefix,
+    label: item => gitDiffTabLabel(item),
+    shortLabel: () => t('contextmenu.showDiff'),
+    terminalTitle: () => t('tab.unavailableFor', {name: t('contextmenu.showDiff')}),
+    sortRank: 0.73,
+    param: item => item,
+    detail: item => compactHomePath(gitDiffItemPath(item) || ''),
+    createPanel: item => createGitDiffPanel(item),
+    renderAttached: item => renderGitDiffPanel(item),
+    cleanup: item => cleanupGitDiffTab(item),
+    relocalize: (item, panel) => relocalizeGitDiffPanel(item, panel),
+    className: () => 'git-diff-item',
+    icon: 'changes',
+    minWidth: () => rootCssLengthPx('--changes-pane-min-inline-size') || minSplitPaneWidthPx(),
+  }),
   filePanelTabType({
     key: 'image-viewer',
     prefix: imageViewerItemPrefix,
@@ -1350,7 +1431,7 @@ const TAB_TYPES = [
   filePanelTabType({
     key: 'file-editor',
     prefix: fileEditorItemPrefix,
-    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix],
+    prefixes: [fileEditorItemPrefix, fileEditorCopyItemPrefix, fileEditorDiffPreviewItemPrefix, historicalFileEditorItemPrefix],
     shortLabel: () => t('common.edit'),
     terminalTitle: () => t('tab.unavailableFor', {name: t('popover.kind.text')}),
     sortRank: 0.75,
@@ -1397,6 +1478,7 @@ function fileItemPath(item) {
   if (isImageViewerItem(item)) return item.slice(imageViewerItemPrefix.length);
   if (typeof item === 'string' && item.startsWith(fileEditorCopyItemPrefix)) return fileEditorCopyItemPath(item);
   if (typeof item === 'string' && item.startsWith(fileEditorDiffPreviewItemPrefix)) return fileEditorDiffPreviewItemPath(item);
+  if (typeof item === 'string' && item.startsWith(historicalFileEditorItemPrefix)) return historicalFileEditorIdentity(item)?.path || null;
   return tabTypeForItem(item)?.key === 'file-editor' ? item.slice(fileEditorItemPrefix.length) : null;
 }
 function normalizedImageOpenMode(mode = fileExplorerImageOpenMode) {
@@ -5074,6 +5156,51 @@ function fileStateFor(path) {
   return state ? normalizeFileStateRecord(state) : null;
 }
 
+function ensureHistoricalFileState(item, defaults = null) {
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity) return null;
+  let state = historicalFileState.get(item);
+  if (!state) {
+    state = defaults && typeof defaults === 'object' ? defaults : {};
+    historicalFileState.set(item, state);
+  }
+  Object.assign(state, {
+    historical: true,
+    immutable: true,
+    readOnly: true,
+    path: identity.path,
+    diffPinnedFromRef: identity.fromRef,
+    diffPinnedToRef: identity.toRef,
+  });
+  return normalizeFileStateRecord(state);
+}
+
+function fileEditorStateForItem(path, item = null, create = false) {
+  if (isHistoricalFileEditorItem(item)) {
+    return create ? ensureHistoricalFileState(item) : (historicalFileState.has(item) ? ensureHistoricalFileState(item) : null);
+  }
+  return create ? ensureFileState(path) : fileStateFor(path);
+}
+
+function fileEditorTabState(item, create = false) {
+  const path = fileItemPath(item);
+  return path ? fileEditorStateForItem(path, item, create) : null;
+}
+
+function fileEditorTabIsMissing(item) {
+  return fileEditorTabState(item)?.externalMissing === true;
+}
+
+function setHistoricalFileState(item, state) {
+  if (!historicalFileEditorIdentity(item) || !state || typeof state !== 'object') return null;
+  historicalFileState.set(item, state);
+  return ensureHistoricalFileState(item);
+}
+
+function deleteHistoricalFileState(item) {
+  return historicalFileState.delete(item);
+}
+
 function setFileState(path, state) {
   if (!path) return null;
   const previous = fileStateFor(path);
@@ -5914,9 +6041,19 @@ function terminalThemeForGlobalTheme(mode = globalThemeMode) {
   return {...theme};
 }
 
-// on a WHITE (light) terminal, agents emit 24-bit truecolor escapes tuned for a dark
-// terminal that render faint on white. xterm's minimumContrastRatio auto-darkens ANY text color
-// (including app 24-bit colors) against the bg.
+// xterm's contrast correction moves every light-on-white truecolor toward the same 4.5:1 gray.
+// Paint light terminals from the dark palette instead; CSS performs one lightness inversion on the
+// rendered rows while the container keeps the requested white background. The original ANSI/24-bit
+// distances then survive, including output from agents that chose colors for a dark terminal.
+function terminalRenderThemeForGlobalTheme(mode = globalThemeMode) {
+  const resolved = resolvedTerminalThemeMode(terminalThemeMode, mode);
+  const theme = resolved === 'light' ? TERMINAL_THEMES.dark : TERMINAL_THEMES[resolved];
+  return {...(theme || TERMINAL_THEMES.dark)};
+}
+
+// On a light terminal, agents emit 24-bit truecolor escapes tuned for a dark terminal. The light
+// renderer deliberately keeps a dark contrast reference before CSS converts the painted rows;
+// otherwise xterm maps every light source color toward one uniform gray against white.
 // the DARK terminal used to keep 1 (no adjustment), which left low-contrast cells alone — so
 // an agent composer that draws light text on an ANSI-white box (Codex's input, ~contrast 1) was
 // white-on-white. Use a moderate 3 for dark: enough to force that composer to a readable foreground,
@@ -10730,7 +10867,8 @@ function layoutTabStatesFromParam(raw) {
 }
 
 function readableItemParam(item) {
-  return readableParamComponent(itemParam(item));
+  // Protect canonical item percent escapes because URLSearchParams and the per-tab parser each decode once.
+  return readableParamComponent(String(itemParam(item)).replaceAll('%', '%25'));
 }
 
 function readableParamComponent(value) {
@@ -10864,8 +11002,8 @@ function layoutUrlEditorModesSnapshot() {
     if (seen.has(key)) return;
     seen.add(key);
     const entry = {path: cleanPath, item: cleanItem, mode: cleanMode};
-    const state = fileState.get(cleanPath);
     const itemKey = cleanItem || fileEditorItemFor(cleanPath);
+    const state = fileEditorStateForItem(cleanPath, itemKey);
     const viewState = fileEditorViewState.get(itemKey);
     if (viewState) {
       entry.viewState = {
@@ -10881,6 +11019,8 @@ function layoutUrlEditorModesSnapshot() {
       entry.diffFromRef = cleanDiffRef(state?.diffPinnedFromRef || state?.diffFromRef || refs.from || 'HEAD', 'HEAD');
       entry.diffToRef = cleanDiffRef(state?.diffPinnedToRef || state?.diffToRef || refs.to || 'current', 'current');
       entry.diffExpandUnchanged = fileEditorDiffExpandUnchangedForItem(itemKey);
+      if (state?.historicalComparisonKind) entry.historicalComparisonKind = state.historicalComparisonKind;
+      if (state?.historical === true && gitDiffItemPath(state.closeReturnToItem)) entry.returnToItem = state.closeReturnToItem;
     }
     modes.push(entry);
   };
@@ -10932,10 +11072,12 @@ function applyLayoutUrlEditorModeEntry(entry = {}) {
     if (line > 0 && typeof requestFileEditorLineTarget === 'function') requestFileEditorLineTarget(key, line);
   }
   if (mode === 'diff') {
-    const state = fileState.get(path) || (cleanItem ? ensureFileState(path) : null);
+    const state = fileEditorStateForItem(path, cleanItem || null, Boolean(cleanItem));
     if (state) {
       state.diffPinnedFromRef = cleanDiffRef(entry.diffFromRef || state.diffPinnedFromRef || state.diffFromRef || 'HEAD', 'HEAD');
       state.diffPinnedToRef = cleanDiffRef(entry.diffToRef || state.diffPinnedToRef || state.diffToRef || 'current', 'current');
+      if (state.historical === true && ['parent', 'root-empty-tree', 'merge-first-parent'].includes(entry.historicalComparisonKind)) state.historicalComparisonKind = entry.historicalComparisonKind;
+      if (state.historical === true && gitDiffItemPath(entry.returnToItem)) state.closeReturnToItem = entry.returnToItem;
     }
     if ('diffExpandUnchanged' in entry && cleanItem) fileEditorDiffExpandOverrides.set(cleanItem, entry.diffExpandUnchanged === true);
   }
@@ -11197,6 +11339,7 @@ function applyLayoutUrlStateSeed(state) {
   if (!state || typeof state !== 'object') return false;
   applyLayoutUrlFinderSeed(state.finder || {});
   applyEditorStateFields(state.editor || {}, {applyModeEntry: applyLayoutUrlEditorModeEntry});
+  applyLayoutUrlGitDiffState(state.gitDiff);
   applyLayoutUrlPreferencesSeed(state.preferences || {});
   layoutUrlState.pending = state;
   layoutUrlState.applied = false;
@@ -11221,6 +11364,8 @@ function layoutUrlStateSnapshot() {
   if (paneItems(layoutSlots).some(isFileExplorerItem)) state.finder = layoutUrlFinderStateSnapshot();
   const editor = layoutUrlEditorStateSnapshot();
   if (editor.modes.length) state.editor = editor;
+  const gitDiff = layoutUrlGitDiffStateSnapshot();
+  if (gitDiff.length) state.gitDiff = gitDiff;
   if (paneItems(layoutSlots).includes(prefsItemId)) state.preferences = layoutUrlPreferencesStateSnapshot();
   const scroll = layoutUrlScrollStateSnapshot();
   if (scroll.length) state.scroll = scroll;
@@ -12098,6 +12243,18 @@ function registerFileEditorLayoutItem(path, options = {}) {
   const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
   const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+    syncFileLayoutItems();
+    return item;
+  }
   if (fileState.get(path)?.loading !== true && fileState.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
@@ -12153,6 +12310,7 @@ function resolveLayoutItem(value) {
   const type = tabTypeForParam(text);
   if (type?.prefix === imageViewerItemPrefix) return registerImageViewerLayoutItem(text.slice(imageViewerItemPrefix.length)) || text;
   if (type?.prefix === chatMediaItemPrefix) return chatMediaUrlForItem(text) ? registerDynamicVirtualLayoutItem(text) : null;
+  if (type?.prefix === gitDiffItemPrefix) return gitDiffItemPath(text) ? registerDynamicVirtualLayoutItem(text) : null;
   if (type?.key === 'file-editor') {
     const path = fileItemPath(text);
     return (path && registerFileEditorLayoutItem(path, {item: text})) || text;
@@ -16463,7 +16621,7 @@ function updateSessionList(nextSessions, options = {}) {
 }
 
 function applyLayoutSlots(nextSlots, options = {}) {
-  const previousActive = activeSessions.slice();
+  const previousActive = activeSessions.slice(), previousItems = new Set(paneItems(layoutSlots));
   const completionGeneration = Number(options.completionGeneration || runtimeState.layoutMutationSnapshot().pending) || 0;
   runtimeState.consumePendingLayoutMutation(completionGeneration);
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
@@ -16477,6 +16635,7 @@ function applyLayoutSlots(nextSlots, options = {}) {
     preserveMissingSidePane: options.preserveMissingSidePane === true,
     preservePlaceholderSlots: options.preservePlaceholderSlots === true,
   });
+  cleanupRemovedDynamicLayoutItems(previousItems, new Set(paneItems(layoutSlots)));
   activeSessions = sessionsFromLayout();
   clearFocusForInactiveLayout();
   updateActiveSessionParam();
@@ -16515,6 +16674,19 @@ function applyLayoutSlots(nextSlots, options = {}) {
     updateStatus();
   }
   if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+function cleanupRemovedDynamicLayoutItems(previousItems, nextItems) {
+  for (const item of previousItems || []) {
+    if (!dynamicVirtualLayoutItems.has(item) || nextItems?.has(item)) continue;
+    const panel = panelNodes.get(item);
+    if (panel) removePanelForItem(item);
+    else tabTypeForItem(item)?.cleanup?.(item, null);
+    dynamicVirtualLayoutItems.delete(item);
+    paneViewState.delete(item);
+    tabLastActivatedAt.delete(item);
+  }
+  syncFileLayoutItems();
 }
 
 function layoutRenderRequest(request = {}) {
@@ -21174,6 +21346,7 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
     name: String(repo.name || basenameOf(root) || ''),
     branch: String(repo.branch || ''),
     detached: repo.detached === true,
+    head_sha: repo.head_sha == null ? null : String(repo.head_sha).trim(),
     dirty_count: Number.isFinite(dirtyCount) ? dirtyCount : null,
     upstream: String(repo.upstream || ''),
     ahead: Number.isFinite(ahead) ? ahead : 0,
@@ -21481,7 +21654,7 @@ function fileExplorerExplicitSyncSessionTarget() {
 function fileExplorerSyncCommandSessionTarget() {
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   if (explicitSession) return explicitSession;
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (isTmuxSession(payloadSession) && activeSessions.includes(payloadSession)) return payloadSession;
   return activeTmuxSessionForFinder();
 }
@@ -21752,7 +21925,7 @@ function setFileExplorerVisibleSyncTarget(session, root) {
   fileExplorerVisibleSyncRoot = normalizeDirectoryPath(root || '');
 }
 
-function sessionFilesRepoRoots(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesRepoRoots(payload = fileExplorerFinderSessionFilesState.payload) {
   return Array.from(new Set((Array.isArray(payload?.repos) ? payload.repos : [])
     .map(repo => normalizeDirectoryPath(repo?.repo || repo?.root || ''))
     .filter(path => path && path.startsWith('/'))));
@@ -21770,7 +21943,7 @@ function sessionFileDirectory(file) {
   return path ? normalizeDirectoryPath(dirnameOf(path)) : '';
 }
 
-function sessionFilesAffectedDirs(payload = fileExplorerSessionFilesState.payload) {
+function sessionFilesAffectedDirs(payload = fileExplorerFinderSessionFilesState.payload) {
   const dirs = new Set(sessionFilesRepoRoots(payload));
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
     const dir = sessionFileDirectory(file);
@@ -21871,7 +22044,7 @@ function fileExplorerSyncPlan(preferredItem = null) {
   if (!session) return {session: '', root: normalizeDirectoryPath(homePath || '/'), expandPaths: [], affectedDirs: []};
   const focusedDir = tmuxDirectoryForItem(session);
   const focusedGitRoot = tmuxGitRootForItem(session);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   const payloadUsable = (!session || !payload?.session || String(payload.session) === String(session))
     && sessionFilesPayloadOverlapsFocusedRoot(payload, focusedGitRoot);
   const affectedDirs = payloadUsable ? sessionFilesAffectedDirs(payload) : [];
@@ -22088,7 +22261,7 @@ function fileExplorerSessionHighlightSets(preferredItem = null) {
   const targetSession = isTmuxSession(preferredItem) ? preferredItem : fileExplorerExplicitSyncSessionTarget();
   if (!targetSession) return emptyFileExplorerSessionHighlightSets();
   const focusedGitRoot = tmuxGitRootForItem(targetSession);
-  const payload = fileExplorerSessionFilesState.payload;
+  const payload = fileExplorerFinderSessionFilesState.payload;
   if (
     !payload?.session
     || (targetSession && String(payload.session) !== String(targetSession))
@@ -22268,6 +22441,7 @@ function repoInfoPopoverHtml(repo) {
   const rows = [`<div class="file-tree-repo-popover-title">${esc(repo.name || basenameOf(repo.root))}</div>`];
   const branch = repoBranchDisplayText(repo);
   if (branch) rows.push(`<div class="file-tree-repo-popover-branch">⎇ ${esc(branch)}</div>`);
+  if (repo.head_sha) rows.push(`<div class="file-tree-repo-popover-sha">${esc(t('menu.help.about.sha', {sha: repo.head_sha}))}</div>`);
   if (repo.upstream) rows.push(`<div class="meta-muted">↗ ${esc(repo.upstream)}</div>`);
   const stat = [];
   if (Number(repo.ahead) > 0) stat.push(t('git.ahead', {count: Number(repo.ahead)}));
@@ -22314,7 +22488,7 @@ async function showRepoRowHoverPopover(row, path) {
   const normalized = normalizeDirectoryPath(path), cached = fileExplorerRepoInfoCache.get(normalized);
   // Show immediately from cache (branch/ahead/behind), then lazily fetch full status (incl dirty).
   showFileTreeRepoPopover(row, cached);
-  if (cached && Number.isFinite(Number(cached.dirty_count))) return;
+  if (cached && cached.head_sha !== null && Number.isFinite(Number(cached.dirty_count))) return;
   if (row.dataset.repoTitleLoaded === 'true') return;
   row.dataset.repoTitleLoaded = 'true';
   try {
@@ -22971,7 +23145,7 @@ function fileTreeDirectRows(container) {
 }
 
 function fileTreeChangedFile(path) {
-  const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+  const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
   return files.find(item => item?.abs_path === path) || null;
 }
 
@@ -22985,7 +23159,7 @@ function sessionFileAgentKinds(item) {
     .sort((a, b) => (order[a] ?? 2) - (order[b] ?? 2) || a.localeCompare(b));
 }
 
-function fileTreeChangedAncestorStats(payload = fileExplorerSessionFilesState.payload) {
+function fileTreeChangedAncestorStats(payload = fileExplorerFinderSessionFilesState.payload) {
   const stats = new Map();
   const seen = new Set();
   for (const file of Array.isArray(payload?.files) ? payload.files : []) {
@@ -23053,12 +23227,12 @@ function fileTreeRepoSyncMeta(path) {
 
 function fileTreeRepoDiffParts(path) {
   const normalized = normalizeDirectoryPath(path);
-  const repos = Array.isArray(fileExplorerSessionFilesState.payload?.repos) ? fileExplorerSessionFilesState.payload.repos : [];
+  const repos = Array.isArray(fileExplorerFinderSessionFilesState.payload?.repos) ? fileExplorerFinderSessionFilesState.payload.repos : [];
   const repo = repos.find(item => normalizeDirectoryPath(item?.repo || '') === normalized);
   let added = Number(repo?.added);
   let removed = Number(repo?.removed);
   if (!Number.isFinite(added) || !Number.isFinite(removed)) {
-    const files = Array.isArray(fileExplorerSessionFilesState.payload?.files) ? fileExplorerSessionFilesState.payload.files : [];
+    const files = Array.isArray(fileExplorerFinderSessionFilesState.payload?.files) ? fileExplorerFinderSessionFilesState.payload.files : [];
     const repoFiles = files.filter(item => normalizeDirectoryPath(item?.repo || '') === normalized);
     added = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.added)) ? Number(item.added) : 0), 0);
     removed = repoFiles.reduce((sum, item) => sum + (Number.isFinite(Number(item.removed)) ? Number(item.removed) : 0), 0);
@@ -23529,7 +23703,7 @@ function fileTreeRowDerivedState(fullPath, entry, options = {}) {
     : entry.kind === 'file'
     ? (options.sessionFilesMap ? changedFileStatus : fileTreeGitStatus(fullPath))
     : (differMode ? '' : fileExplorerIndexBadgeText(fullPath));
-  const displayName = differMode ? {text: entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
+  const displayName = differMode ? {text: entry.display_name || entry.name, html: null} : fileTreeDisplayParts(fullPath, entry);
   const directoryDiffParts = entry.kind === 'dir'
     ? (differMode
       ? sessionFileStatusCountParts(options.directoryStatusCounts?.get(fullPath) || {})
@@ -23731,7 +23905,7 @@ function bindFinderRowHandlers(row, state) {
     event.preventDefault();
     event.stopPropagation();
     closeFileImagePreview();
-    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
   row.ondragstart = event => {
     row.__fileTreeDragging = true;
@@ -23859,7 +24033,8 @@ function updateFileTreeRow(row, parentPath, entry, depth, options = {}) {
   const rowState = buildFileTreeRowState(fullPath, entry, depth, options);
   patchTreeRow(row, fileTreeRowViewModel(rowState));
   applyFileExplorerSessionHighlightRow(row, options.sessionHighlightSets || fileExplorerSessionHighlightSets());
-  bindFinderRowHandlers(row, rowState);
+  if (typeof options.rowBinding === 'function') options.rowBinding(row, rowState);
+  else bindFinderRowHandlers(row, rowState);
   return fullPath;
 }
 
@@ -24254,38 +24429,41 @@ function sharedTreeChildRow(rows, row) {
 
 function sharedTreeSelectionApi(controller, state, options = {}) {
   return {
-    selectedIds() {
+    selectedIds(panel = null) {
       if (typeof options.selectedIds === 'function') {
-        const selected = options.selectedIds();
+        const selected = options.selectedIds(panel);
         if (selected instanceof Set) return selected;
         if (Array.isArray(selected)) return new Set(selected.map(String));
       }
       return state.selectedIds;
     },
-    leadId() {
-      return typeof options.getLeadId === 'function' ? String(options.getLeadId() || '') : state.leadId;
+    leadId(panel = null) {
+      return typeof options.getLeadId === 'function' ? String(options.getLeadId(panel) || '') : state.leadId;
     },
-    setLeadId(id) {
+    setLeadId(id, panel = null) {
       const value = String(id || '');
       state.leadId = value;
-      if (typeof options.setLeadId === 'function') options.setLeadId(value);
+      if (typeof options.setLeadId === 'function') options.setLeadId(value, panel);
     },
-    currentId() {
-      return typeof options.currentRowId === 'function' ? String(options.currentRowId() || '') : '';
+    currentId(panel = null) {
+      return typeof options.currentRowId === 'function' ? String(options.currentRowId(panel) || '') : '';
     },
-    rowIsCurrent(row) {
+    rowIsCurrent(row, panel = null) {
       const id = sharedTreeRowId(row);
-      return Boolean(id && id === controller.currentId());
+      return Boolean(id && id === controller.currentId(panel));
     },
     applyState(panel, stateOptions = {}) {
       let currentRow = null;
-      const selectedIds = controller.selectedIds();
-      for (const row of controller.rows(panel)) {
+      const rows = controller.rows(panel);
+      const selectedIds = controller.selectedIds(panel);
+      const lead = controller.leadRow(panel);
+      for (const row of rows) {
         const id = sharedTreeRowId(row);
         const selected = selectedIds.has(id);
-        const current = controller.rowIsCurrent(row);
+        const current = controller.rowIsCurrent(row, panel);
         row.classList.toggle(CLS.selected, selected);
         row.setAttribute('aria-selected', selected ? 'true' : 'false');
+        if (options.rovingFocus === true) row.tabIndex = row === lead ? 0 : -1;
         if (options.applyCurrentClasses !== false) {
           row.classList.toggle('current-file', current && row.dataset.kind !== 'dir');
           row.classList.toggle('current-directory', current && row.dataset.kind === 'dir');
@@ -24295,32 +24473,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
         if (current) currentRow = row;
       }
       if (stateOptions.scrollCurrent === true && currentRow) sharedTreeScrollRowIntoView(panel, currentRow, options);
+      if (stateOptions.focusLead === true && lead) lead.focus?.({preventScroll: true});
     },
     selectRow(panel, row, event = null, selectOptions = {}) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRow === 'function') {
-        options.selectRow(row, id, event, selectOptions);
+        options.selectRow(row, id, event, selectOptions, panel);
       } else {
-        const selectedIds = controller.selectedIds();
+        const selectedIds = controller.selectedIds(panel);
         selectedIds.clear();
         selectedIds.add(id);
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectRange(panel, row, event = null) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       if (typeof options.selectRange === 'function') {
-        options.selectRange(row, id, event);
+        options.selectRange(row, id, event, panel);
       } else {
         const rows = controller.rows(panel);
-        const selectedIds = controller.selectedIds();
-        const anchorId = selectedIds.values().next().value || controller.leadId() || id;
+        const selectedIds = controller.selectedIds(panel);
+        const anchorId = selectedIds.values().next().value || controller.leadId(panel) || id;
         const anchorIndex = rows.findIndex(item => sharedTreeRowId(item) === anchorId);
         const targetIndex = rows.indexOf(row);
         selectedIds.clear();
@@ -24332,33 +24511,33 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
           selectedIds.add(id);
         }
       }
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       sharedTreeScrollRowIntoView(panel, row, options);
       return true;
     },
     selectFromClick(panel, row, event) {
       const id = sharedTreeRowId(row);
       if (!id) return false;
-      controller.setLeadId(id);
+      controller.setLeadId(id, panel);
       const selectionOnly = typeof options.selectFromClick === 'function'
-        ? options.selectFromClick(row, id, event)
+        ? options.selectFromClick(row, id, event, panel)
         : (controller.selectRow(panel, row, event), false);
-      controller.applyState(panel);
+      controller.applyState(panel, {focusLead: options.rovingFocus === true});
       return selectionOnly === true;
     },
     leadRow(panel) {
       const rows = controller.rows(panel);
-      const leadId = controller.leadId();
+      const leadId = controller.leadId(panel);
       return rows.find(row => sharedTreeRowId(row) === leadId)
-        || rows.find(row => controller.selectedIds().has(sharedTreeRowId(row)))
-        || rows.find(row => controller.rowIsCurrent(row))
+        || rows.find(row => controller.selectedIds(panel).has(sharedTreeRowId(row)))
+        || rows.find(row => controller.rowIsCurrent(row, panel))
         || rows[0]
         || null;
     },
     syncCurrent(panel, syncOptions = {}) {
-      const currentId = controller.currentId();
+      const currentId = controller.currentId(panel);
       if (currentId && typeof options.syncCurrentSelection === 'function') options.syncCurrentSelection(currentId);
-      controller.setLeadId(currentId || controller.leadId());
+      controller.setLeadId(currentId || controller.leadId(panel), panel);
       controller.applyState(panel, {scrollCurrent: syncOptions.scrollIntoView === true});
       return Boolean(currentId);
     },
@@ -24367,13 +24546,13 @@ function sharedTreeSelectionApi(controller, state, options = {}) {
 
 function sharedTreeExpansionApi(controller, options = {}) {
   return {
-    isExpanded(row) {
-      if (typeof options.isExpanded === 'function') return options.isExpanded(row) === true;
+    isExpanded(row, panel = null) {
+      if (typeof options.isExpanded === 'function') return options.isExpanded(row, panel) === true;
       return row?.getAttribute?.('aria-expanded') === 'true';
     },
     setExpanded(panel, row, expanded) {
       if (typeof options.setExpanded === 'function') {
-        options.setExpanded(row, expanded === true);
+        options.setExpanded(row, expanded === true, panel);
         return true;
       }
       return false;
@@ -24395,7 +24574,7 @@ function sharedTreeClickHandler(controller, options = {}) {
     consumeSharedTreeEvent(event);
     const selectionOnly = controller.selectFromClick(panel, row, event);
     if (row.dataset.kind === 'dir' && onDisclosure) {
-      controller.setExpanded(panel, row, !controller.isExpanded(row));
+      controller.setExpanded(panel, row, !controller.isExpanded(row, panel));
       return true;
     }
     if (!selectionOnly && options.activateOnClick !== false) controller.activateRow(panel, row, event);
@@ -24416,10 +24595,10 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     let leadIndex = lead ? rows.indexOf(lead) : -1;
     if (intent === 'select-all' && options.allowSelectAll === true) {
       consumeSharedTreeEvent(event);
-      const selectedIds = controller.selectedIds();
+      const selectedIds = controller.selectedIds(panel);
       selectedIds.clear();
       for (const row of rows) selectedIds.add(sharedTreeRowId(row));
-      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]));
+      controller.setLeadId(sharedTreeRowId(rows[rows.length - 1]), panel);
       if (typeof options.afterSelectAll === 'function') options.afterSelectAll(rows, event);
       controller.applyState(panel);
       return true;
@@ -24434,7 +24613,7 @@ function sharedTreeKeyboardHandler(controller, options = {}) {
     if (intent === 'expand' || intent === 'collapse') {
       if (!lead) return false;
       consumeSharedTreeEvent(event);
-      const expanded = controller.isExpanded(lead);
+      const expanded = controller.isExpanded(lead, panel);
       if (intent === 'expand') {
         if (lead.dataset.kind === 'dir' && !expanded) controller.setExpanded(panel, lead, true);
         else {
@@ -24477,7 +24656,7 @@ function createSharedTreeInteractionController(options = {}) {
     },
     activateRow(panel, row, event = null) {
       if (typeof options.activateRow === 'function') {
-        options.activateRow(row, event);
+        options.activateRow(row, event, panel);
         controller.applyState(panel);
         return true;
       }
@@ -26022,7 +26201,7 @@ function bindTabberPanel(panel) {
     if (!row || !panel.contains(row) || !abs) return;
     event.preventDefault();
     event.stopPropagation();
-    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY);
+    showFileTreeContextMenu(row, abs, {name: basenameOf(abs), kind: 'dir'}, event.clientX, event.clientY, {surface: 'tabber'});
   });
   });
 }
@@ -26150,6 +26329,59 @@ function applyFileExplorerIndexContextAction(path, action) {
   return false;
 }
 
+function finderPathActionDisabledReason(primaryInfo) {
+  if (readOnlyMode) return t('contextmenu.readOnlyUnavailable');
+  if (!primaryInfo) return t('contextmenu.gitVerificationUnavailable');
+  return '';
+}
+
+function finderOpenInNewTabActionsForContext(context = {}) {
+  const fullPath = String(context.fullPath || '');
+  const entry = context.entry || {};
+  const selectedPaths = Array.isArray(context.selectedPaths) ? context.selectedPaths : [];
+  const primaryInfo = context.primaryInfo;
+  const menuState = context.menuState || {};
+  if (selectedPaths.length !== 1) return [];
+  if (entry.kind === 'dir') {
+    if (!primaryInfo?.repo_root) return [];
+    const disabledReason = finderPathActionDisabledReason(primaryInfo);
+    const disabled = Boolean(disabledReason);
+    return [{
+      label: t('contextmenu.showDiff'),
+      item: gitDiffItemFor(fullPath),
+      disabled,
+      disabledReason,
+      action: () => openGitDiffTab(fullPath, {userInitiated: true}),
+    }];
+  }
+  if (entry.kind !== 'file') return [];
+  const baseDisabledReason = finderPathActionDisabledReason(primaryInfo);
+  const baseDisabled = menuState.openInNewTabDisabled === true || Boolean(baseDisabledReason);
+  const previewMime = String(primaryInfo?.preview_mime || '').toLowerCase();
+  const diffCapabilityReason = !primaryInfo?.repo_root
+    ? `${t('common.diff')} ${t('common.notAvailable')}`
+    : Number(primaryInfo?.size) > MAX_FILE_PREVIEW_BYTES
+      ? t('editor.fileTooLargeTitle')
+      : primaryInfo?.diff_capable === false || openFileKindForPreviewPath(entry.name || fullPath) !== 'text' || (previewMime && !previewMime.startsWith('text/'))
+        ? t('fs.error.binary')
+        : '';
+  const diffDisabled = baseDisabled || Boolean(diffCapabilityReason);
+  const diffDisabledReason = baseDisabledReason || diffCapabilityReason;
+  const actionForMode = (mode, labelKey, disabled = baseDisabled, disabledReason = baseDisabledReason) => ({
+    label: t(labelKey),
+    mode,
+    canonical: true,
+    disabled,
+    disabledReason: disabled ? disabledReason : '',
+    action: () => openFileInAdditionalEditorTab(fullPath, entry, {canonical: true, userInitiated: true, viewMode: mode, resetWorkingDiffRefs: mode === 'diff'}),
+  });
+  return [
+    actionForMode('edit', 'contextmenu.editNewTab'),
+    actionForMode('preview', 'contextmenu.previewNewTab'),
+    actionForMode('diff', 'contextmenu.showDiff', diffDisabled, diffDisabledReason),
+  ];
+}
+
 async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {}) {
   closeFileContextMenu();
   closeTerminalContextMenu();
@@ -26172,13 +26404,20 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   const openInNewTab = typeof options.openInNewTab === 'function'
     ? options.openInNewTab
     : () => openFileInAdditionalEditorTab(fullPath, entry, {userInitiated: true});
+  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
   const openInNewTabActions = Array.isArray(options.openInNewTabActions) && options.openInNewTabActions.length
     ? options.openInNewTabActions
-    : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
-  const actionContext = {fullPath, entry, selectedPaths, infos, primaryInfo: infos[0] || null, menuState};
+    : options.surface === 'finder'
+      ? finderOpenInNewTabActionsForContext(actionContext)
+      : [{label: options.openInNewTabLabel || t('contextmenu.openNewTab'), action: openInNewTab}];
   for (const action of openInNewTabActions) {
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
-    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
+    const disabledReason = action.disabledReason || '';
+    appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {
+      disabled: action.disabled ?? menuState.openInNewTabDisabled,
+      title: disabledReason,
+      ariaLabel: disabledReason ? `${label}. ${disabledReason}` : label,
+    });
   }
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
   appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), closeFileContextMenu);
@@ -26580,12 +26819,12 @@ function bindFileExplorerHeaderActions(container = document) {
       clearTabberSessionFilesStates();
       fetchTabberActivity();
       refreshTabberPanels();
-    } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
+    } else if (view === 'differ') fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
         // A user-requested refresh must bypass the Finder directory cache; otherwise the control
         // only repaints cached rows and cannot reveal filesystem changes.
         refreshFileExplorerTrees({fresh: true});
-        fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+        fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
       collapseAllFileExplorerDirectories().catch(error => statusErr(localizedHtml('status.collapseFailed', {error})));
@@ -26629,8 +26868,8 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
     invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     await refreshFileExplorerTrees();
-    if (typeof fetchSessionFiles === 'function') {
-      await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+    if (typeof refreshVisibleSessionFilesSurfaces === 'function') {
+      await refreshVisibleSessionFilesSurfaces({silent: true, force: true});
     }
     renderSessionButtons();
     renderPaneTabStrips();
@@ -27285,6 +27524,7 @@ function openFilePathHasOwner(path) {
 function removeFilePanelOwner(path, item) {
   if (isImageViewerItem(item) && sharedImageViewerPath === path) sharedImageViewerPath = null;
   else removeFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) deleteHistoricalFileState(item);
   fileEditorViewModesForPath(path).delete(item);
   // also drop the per-item CodeMirror scroll/selection state and the LRU timestamp on close
   // so these item-keyed maps don't grow unbounded as editor tabs open and close.
@@ -27522,6 +27762,7 @@ function updateOpenFileDirtyFlag(path) {
 }
 
 function syncOpenFileContentFromPanel(path, panel) {
+  if (fileEditorPanelState(panel)?.historical === true) return false;
   const state = fileState.get(path);
   if (!state || state.kind !== 'text' || !panel) return false;
   const cmContent = codeMirrorPanelContent(panel);
@@ -27867,14 +28108,18 @@ function refreshOpenFileDiffDecorations(path) {
   }
 }
 
-function primaryEditorItemForPath(path, fallbackItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+function existingPrimaryEditorItemForPath(path) {
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   const activeItem = items.find(item => itemIsActivePaneTab(item)) || items.find(item => item === focusedPanelItem);
-  return activeItem || items[0] || fallbackItem || fileEditorItemFor(path);
+  return activeItem || items[0] || null;
+}
+
+function primaryEditorItemForPath(path, fallbackItem = null) {
+  return existingPrimaryEditorItemForPath(path) || fallbackItem || fileEditorItemFor(path);
 }
 
 function foldDuplicateEditorItemsForPath(path, keepItem = null) {
-  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item));
+  const items = fileEditorTabItemsForPath(path).filter(item => !isImageViewerItem(item) && !isHistoricalFileEditorItem(item));
   if (items.length <= 1) return null;
   const keeper = items.includes(keepItem) ? keepItem : primaryEditorItemForPath(path);
   let nextSlots = layoutSlots;
@@ -27956,8 +28201,36 @@ function markOpenFileDiffUnavailable(state, error) {
   state.diffError = String(error || t('common.notAvailable'));
 }
 
+function ensureHistoricalDiffPayloadIdentity(state, payload) {
+  if (state?.historical !== true) return;
+  const expectedFromRef = String(state.diffPinnedFromRef || '');
+  const expectedToRef = String(state.diffPinnedToRef || '');
+  if (expectedFromRef && expectedToRef && payload?.from_ref === expectedFromRef && payload?.to_ref === expectedToRef) return;
+  const error = new Error(t('gitDiff.staleSnapshot'));
+  error.code = 'historical_ref_mismatch';
+  throw error;
+}
+
+function applyRequestedWorkingDiffIdentity(state, options = {}) {
+  if (!state || options.resetWorkingDiffRefs !== true) return state;
+  const alreadyCurrent = state.diffLoaded === true && state.diffUnavailable !== true
+    && state.diffFromRef === 'HEAD' && state.diffToRef === 'current';
+  state.diffPinnedFromRef = 'HEAD';
+  state.diffPinnedToRef = 'current';
+  if (!alreadyCurrent) {
+    state.diff = '';
+    state.diffOriginal = '';
+    state.diffWorking = '';
+    state.diffLoaded = false;
+    state.diffUnavailable = false;
+    state.diffError = '';
+  }
+  return state;
+}
+
 async function refreshOpenFileDiff(path, options = {}) {
-  const state = fileState.get(path);
+  const item = options.item || null;
+  const state = options.state || fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return false;
   // Dedup concurrent triggers (renderFileEditorPanel + ensureCodeMirrorDiffPanel both ask): a second
   // caller awaits the SAME in-flight load instead of returning early, so the diff panel never renders
@@ -27984,7 +28257,15 @@ async function refreshOpenFileDiff(path, options = {}) {
         `/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`,
         'diff',
       );
+      ensureHistoricalDiffPayloadIdentity(state, payload);
       applyOpenFileDiffPayload(state, payload);
+      refreshPaneTabLabel(item || fileEditorItemFor(path));
+      if (state.historical === true) {
+        state.original = String(payload.working || '');
+        state.content = String(payload.working || '');
+        state.dirty = false;
+        state.loading = false;
+      }
       refreshOpenFileDiffDecorations(path);
       return true;
     } catch (error) {
@@ -28001,10 +28282,11 @@ async function refreshOpenFileDiff(path, options = {}) {
       // ignores clicks until some unrelated render happens.
       if (options.updateControlsOnComplete !== false) {
         for (const panel of fileEditorPanelsForPath(path)) {
-          const item = panel.dataset.layoutItem || fileEditorItemFor(path);
-          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
-          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
-          if (options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+          const panelItem = panel.dataset.layoutItem || fileEditorItemFor(path);
+          if (fileEditorStateForItem(path, panelItem) !== state) continue;
+          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, panelItem);
+          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, panelItem);
+          if (options.renderOnComplete !== false && editorViewModeFor(path, panelItem) === 'diff') renderFileEditorPanel(panel, panelItem);
         }
       }
     }
@@ -28075,9 +28357,9 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     ? imageViewerItemFor(fullPath)
     : fileEditorItemFor(fullPath);
   const alreadyOpen = openFileStateHasLoadedEditorPayload(fileState.get(fullPath));
-  const item = identityDedupe && alreadyOpen
+  const item = options.item || (identityDedupe && alreadyOpen
     ? primaryEditorItemForPath(fullPath, options.item || defaultItem)
-    : (options.item || defaultItem);
+    : defaultItem);
   const openOptions = {
     ...options,
     item,
@@ -28087,6 +28369,8 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
   else setFileEditorViewMode(fullPath, defaultFileEditorViewModeForPath(fullPath, kind), item);
   recordEditorNav(item);   // push this tab to the back/forward history (no-op while navigating)
   if (alreadyOpen) {
+    applyRequestedWorkingDiffIdentity(fileStateFor(fullPath), options);
+    if (options.canonical === true) addFileEditorTabItem(fullPath, item);
     foldDuplicateEditorItemsForPath(fullPath, item);
     await refreshOpenFileGitMetadata(fullPath);
     await showFileEditorPaneForPath(fullPath, openOptions);
@@ -28116,14 +28400,14 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
         return focusExistingPhysicalFileEditor(fullPath, existingIdentityPath, options);
       }
     }
-    const state = applyFileGitMetadata({
+    const state = applyRequestedWorkingDiffIdentity(applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
       kind: 'text',
       original: payload.content,
       content: payload.content,
       dirty: false,
-    }, payload);
+    }, payload), options);
     await openFilesSetAndShow(fullPath, state, openOptions);
     return item;
   })();
@@ -28152,8 +28436,70 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
 }
 
 async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}) {
-  const item = options.item || fileEditorCopyItemFor(fullPath);
-  return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
+  const canonical = options.canonical === true;
+  const item = options.item || (canonical ? primaryEditorItemForPath(fullPath, fileEditorItemFor(fullPath)) : fileEditorCopyItemFor(fullPath));
+  const openedItem = await openFileInEditor(fullPath, entryOrName, {...options, item, canonical, forceNewTab: !canonical});
+  if (!openedItem || options.viewMode !== 'diff' || options.resetWorkingDiffRefs !== true) return openedItem;
+  const openedPath = fileItemPath(openedItem) || fullPath;
+  const state = fileEditorStateForItem(openedPath, openedItem);
+  applyRequestedWorkingDiffIdentity(state, options);
+  await refreshOpenFileDiff(openedPath, {
+    item: openedItem,
+    state,
+    fromRef: 'HEAD',
+    toRef: 'current',
+    silent: true,
+    renderOnComplete: false,
+  });
+  return openedItem;
+}
+
+async function openHistoricalFileInEditor(path, fromRef, toRef, options = {}) {
+  const item = options.item || historicalFileEditorItemFor(path, fromRef, toRef);
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity || identity.path !== path) return null;
+  addFileEditorTabItem(path, item);
+  const existingState = fileEditorStateForItem(path, item);
+  const state = existingState || ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+      diffLoaded: false,
+      diffUnavailable: false,
+      diffError: '',
+      gitRoot: normalizeDirectoryPath(options.repo || ''),
+      gitTracked: true,
+    });
+  state.historicalComparisonKind = ['parent', 'root-empty-tree', 'merge-first-parent'].includes(options.historicalComparisonKind)
+    ? options.historicalComparisonKind
+    : 'parent';
+  // A commit file is a drill-down from one repository-history tab. Retain that exact owner so
+  // dismissing the child restores the viewer even when another tab precedes it in the pane.
+  if (gitDiffItemPath(options.returnToItem)) state.closeReturnToItem = options.returnToItem;
+  setFileEditorViewMode(path, 'diff', item);
+  recordEditorNav(item);
+  await showFileEditorPaneForPath(path, {
+    ...options,
+    item,
+    userInitiated: options.userInitiated !== false,
+  });
+  renderOpenFilePath(path);
+  if (existingState?.diffLoaded === true && existingState.diffUnavailable !== true) return item;
+  await refreshOpenFileDiff(path, {
+    item,
+    state,
+    fromRef: identity.fromRef,
+    toRef: identity.toRef,
+    silent: true,
+    renderOnComplete: false,
+    updateControlsOnComplete: false,
+  });
+  state.loading = false;
+  renderOpenFilePath(path);
+  return item;
 }
 
 function textFileStateFromReadPayload(payload) {
@@ -28562,9 +28908,12 @@ function clientServerWatchRootDescriptor() {
   for (const directory of watchedFileExplorerDirectories()) {
     addClientServerWatchRootSurface(rootSurfaces, directory, 'finder');
   }
-  if (fileExplorerSessionFilesPaneIsVisible()) {
+  if (fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) {
     const repoRoots = [];
-    for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
+    const payloads = [];
+    if (fileExplorerTreePaneIsVisible()) payloads.push(fileExplorerFinderSessionFilesState.payload);
+    if (fileExplorerSessionFilesPaneIsVisible()) payloads.push(fileExplorerSessionFilesState.payload);
+    for (const repo of payloads.flatMap(payload => payload?.repos || [])) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
       if (!path || path === '/') continue;
       addClientServerWatchRootSurface(rootSurfaces, path, 'modified-files-repository');
@@ -28572,7 +28921,7 @@ function clientServerWatchRootDescriptor() {
     }
     // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
     // otherwise one Differ result row would redundantly declare one hot directory root.
-    for (const file of fileExplorerSessionFilesState.payload?.files || []) {
+    for (const file of payloads.flatMap(payload => payload?.files || [])) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
       if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
       addClientServerWatchRootSurface(rootSurfaces, dirnameOf(path), 'modified-files-parent');
@@ -28630,7 +28979,7 @@ function clientServerWatchState() {
       hours: typeof infoSessionFileLookbackHours === 'number' ? infoSessionFileLookbackHours : 24,
     };
   }
-  if (fileExplorerSessionFilesPaneIsVisible() && typeof clientSessionFilesWatchRequests === 'function') {
+  if ((fileExplorerTreePaneIsVisible() || fileExplorerSessionFilesPaneIsVisible()) && typeof clientSessionFilesWatchRequests === 'function') {
     state.session_files = clientSessionFilesWatchRequests();
   }
   return state;
@@ -28813,8 +29162,8 @@ async function refreshWatchedFilesystem(options = {}) {
       }
     }
     await refreshOpenFilesIfChanged();
-    if (fileExplorerSessionFilesPaneIsVisible()) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+    if (fileExplorerPaneIsOpen()) {
+      refreshVisibleSessionFilesSurfaces({silent: true});
     }
     syncServerWatchRoots();
   } finally {
@@ -29812,7 +30161,8 @@ function fileEditorStatusSourceText(panel) {
   const viewText = panel?._cmView?.state?.doc?.toString?.();
   if (viewText !== undefined && viewText !== null) return viewText;
   const path = panel?.dataset?.filePath || '';
-  const state = fileState.get(path);
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
   return state?.kind === 'text' ? state.content || '' : '';
 }
 
@@ -29820,7 +30170,8 @@ function updateFileEditorCountStatus(panel) {
   const status = panel?.querySelector?.('.file-editor-count-status');
   if (!status) return;
   const path = panel?.dataset?.filePath || '';
-  const state = path ? fileState.get(path) : null;
+  const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+  const state = path ? fileEditorStateForItem(path, item) : null;
   const text = fileEditorStatusSourceText(panel);
   status.textContent = state?.kind === 'text' || panel?._cmView ? fileEditorCountStatusText(text) : '';
 }
@@ -29903,14 +30254,16 @@ function codeMirrorExtensions(api, panel, path, options = {}) {
 async function removeOpenFile(path, options = {}) {
   const confirmDirty = options.confirmDirty !== false;
   const shouldRender = options.render !== false;
-  if (!path || !fileState.has(path)) return;
-  const state = fileState.get(path);
+  if (!path) return;
   const requestedItem = options.item && fileItemPath(options.item) === path ? options.item : null;
+  if (!requestedItem && !fileState.has(path)) return;
+  const state = requestedItem ? fileEditorStateForItem(path, requestedItem) : fileStateFor(path);
+  const closeReturnToItem = requestedItem ? historicalFileReturnItem(requestedItem) : '';
   const closePanel = requestedItem ? panelNodes.get(requestedItem) : fileEditorPanelsForPath(path)[0];
-  if (confirmDirty && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
+  if (confirmDirty && state?.historical !== true && state?.dirty && !(await confirmDirtyFileClose(path, closePanel))) return false;
   const items = requestedItem ? [requestedItem] : filePanelItemsForPath(path);
   if (!items.length) return false;
-  clearFileAutosaveTimer(path);
+  if (items.some(item => !isHistoricalFileEditorItem(item))) clearFileAutosaveTimer(path);
   let nextSlots = layoutSlots;
   let wasInLayout = false;
   for (const item of items) {
@@ -29925,14 +30278,30 @@ async function removeOpenFile(path, options = {}) {
     deleteFileState(path);
   }
   syncFileLayoutItems();
+  const closeReturnSlot = closeReturnToItem ? slotForItem(closeReturnToItem, nextSlots) : null;
+  if (closeReturnSlot) {
+    nextSlots[closeReturnSlot] = paneStateWithTabsForSlot(
+      closeReturnSlot,
+      paneTabs(closeReturnSlot, nextSlots),
+      closeReturnToItem,
+      nextSlots,
+    );
+  }
   if (activeFile === path && !openFilePathHasOwner(path)) {
     const remaining = Array.from(fileState.keys());
     activeFile = remaining[remaining.length - 1] || null;
   }
   updateFileExplorerCurrentFileHighlight();
-  if (wasInLayout) applyLayoutSlots(nextSlots);
+  if (wasInLayout) applyLayoutSlots(nextSlots, {focusSession: closeReturnSlot ? closeReturnToItem : undefined});
   if (shouldRender) renderSessionButtons();
   return true;
+}
+
+function historicalFileReturnItem(item, slots = layoutSlots) {
+  if (!isHistoricalFileEditorItem(item)) return '';
+  const state = fileEditorStateForItem(fileItemPath(item), item);
+  const returnItem = state?.historical === true ? String(state.closeReturnToItem || '') : '';
+  return gitDiffItemPath(returnItem) && itemInLayout(returnItem, slots) ? returnItem : '';
 }
 
 function closeFileTab(path, options = {}) {
@@ -30580,8 +30949,9 @@ function editorViewModeFor(path, item = null) {
   const modes = fileEditorViewModesForPath(path);
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
-  if (!editorPreviewModeAvailable(path)) return 'edit';
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview') return 'diff';
+  if (!editorPreviewModeAvailable(path, state)) return 'edit';
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -30589,13 +30959,20 @@ function editorViewModeFor(path, item = null) {
 
 function setFileEditorViewMode(path, mode, item = null) {
   if (!path || !editorViewModes.has(mode)) return;
-  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
+  const state = fileEditorStateForItem(path, item);
+  if (state?.historical === true && mode !== 'preview' && mode !== 'diff') mode = 'diff';
+  if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path, state)) mode = state?.historical === true ? 'diff' : 'edit';
   const previousMode = editorViewModeFor(path, item);
-  if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
-  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, fileState.get(path)))) {
+  if (state?.historical !== true && (mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, state))) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
+  if (previousMode !== mode) {
+    renderPaneTabStrips();
+    refreshPaneTabLabel(item || fileEditorItemFor(path));
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
+  }
 }
 
 function updateEditorModeControl(control, path, state, item = null) {
@@ -30606,10 +30983,13 @@ function updateEditorModeControl(control, path, state, item = null) {
   const mode = editorViewModeFor(path, item);
   control.querySelectorAll('[data-editor-mode]').forEach(button => {
     const nextMode = button.dataset.editorMode;
-    button.hidden = state?.kind !== 'text' && nextMode !== 'preview';
+    button.hidden = (state?.kind !== 'text' && nextMode !== 'preview') || (state?.historical === true && nextMode === 'split');
+    button.disabled = state?.historical === true && nextMode === 'edit';
+    if (button.disabled) button.title = t('editor.historicalReadOnly');
     const label = editorModeLabel(nextMode);
+    const visibleLabel = button.disabled ? `${label} (${t('common.readOnly')})` : label;
     const active = nextMode === mode || (state?.kind !== 'text' && nextMode === 'preview');
-    syncPressedButton(button, active, {labelOn: label, labelOff: label});
+    syncPressedButton(button, active, {labelOn: visibleLabel, labelOff: visibleLabel});
     setFileEditorIcon(button, editorModeIconClass(nextMode));
   });
 }
@@ -30783,8 +31163,8 @@ function refreshOpenEditorThemePanels() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    if (!path || fileState.get(path)?.kind !== 'text') return;
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
+    if (!path || state?.kind !== 'text') return;
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
@@ -31116,7 +31496,8 @@ function renderFileEditorPreviewSurface(host = null, pane = null, path = '', tex
   }
   cancelPreviewDeferredWorkAfterUserScroll(pane, 'editor-surface-render');
   const selection = fileEditorPreviewSelectionOffsets(pane);
-  const rendered = renderEditorPreviewPane(pane, path, text, options);
+  const state = options.state || (host ? fileEditorPanelState(host) : null) || fileState.get(path) || null;
+  const rendered = renderEditorPreviewPane(pane, path, text, {...options, state});
   if (rendered === false) return false;
   refreshPreviewFind(host);
   restoreFileEditorPreviewSelectionOffsets(pane, selection);
@@ -31237,7 +31618,7 @@ async function openEditorFindShortcut(host = null) {
 
 async function focusFileEditorSearch(panel = null) {
   const opened = await openEditorFindShortcut(panel);
-  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(fileEditorPanelPath(panel)), panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
   return opened;
 }
 
@@ -31248,10 +31629,11 @@ function applyEditorWrapPreference() {
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
     updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
+    const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
-      if (liveText !== null && state.content !== liveText) state.content = liveText;
+      if (state.historical !== true && liveText !== null && state.content !== liveText) state.content = liveText;
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
@@ -31259,7 +31641,7 @@ function applyEditorWrapPreference() {
       // Re-render each panel with its OWN layout item: passing the editor item flipped
       // a preview/diff pane into an editor on any appearance change (e.g. font-size). This is a fallback
       // for raw/preview panels or browsers without CodeMirror compartments.
-      renderFileEditorPanel(panel, panel.dataset.layoutItem || fileEditorItemFor(path));
+      renderFileEditorPanel(panel, item);
     }
   });
 }
@@ -31276,8 +31658,8 @@ async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
     const path = panel.dataset.filePath;
-    const state = fileState.get(path);
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
     if (fileEditorBlameEnabled && editorViewModeFor(path, item) === 'edit' && fileEditorBlameControlsVisible(path, state, item) && !hasEditorBlameForPath(path)) await fetchEditorBlame(path);
@@ -31309,7 +31691,7 @@ function setDiffExpandUnchanged(enabled) {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
     if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
       renderFileEditorPanel(panel, item);
@@ -31326,7 +31708,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (!isFileEditorItem(item)) return;
   fileEditorDiffExpandOverrides.set(item, enabled === true);
   const panel = panelNodes.get(item);
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
@@ -31417,7 +31799,7 @@ const UI_COLOR_PRESETS = {
   orange: {labelKey: 'pref.appearance.active_color.orange', cursorLabelKey: 'pref.appearance.editor_cursor_color.orange', cursor: {dark: '#ff7a00', light: '#b91c1c'}, active: {dark: {accent: '#f97316', bright: '#f97316', text: '#1a0c00'}, light: {accent: '#b91c1c', bright: '#b91c1c', text: '#ffffff'}}},
   yellow: {labelKey: 'pref.appearance.active_color.yellow', cursorLabelKey: 'pref.appearance.editor_cursor_color.yellow', cursor: {dark: '#ffea00', light: '#9a6700'}, active: {dark: {accent: '#eab308', bright: '#eab308', text: '#1a1500'}, light: {accent: '#d6a400', bright: '#d6a400', text: '#1a1500'}}},
   purple: {labelKey: 'pref.appearance.active_color.purple', cursorLabelKey: 'pref.appearance.editor_cursor_color.purple', cursor: {dark: '#d946ef', light: '#7c3aed'}, active: {dark: {accent: '#a855f7', bright: '#a855f7', text: '#ffffff'}, light: {accent: '#7c3aed', bright: '#7c3aed', text: '#ffffff'}}},
-  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#9aa5b3', bright: '#dfe5ec', text: '#0b0e14'}}},
+  white:  {labelKey: 'pref.appearance.active_color.white', cursorLabelKey: 'pref.appearance.editor_cursor_color.white', cursor: {dark: '#ffffff', light: '#6b7280'}, active: {dark: {accent: '#e8edf2', bright: '#e8edf2', text: '#0b0e14'}, light: {accent: '#64748b', bright: '#aeb8c5', text: '#0b0e14', tabMuted: '#d3dbe6', tabMutedHover: '#c2ccd9', tabMutedBorder: '#8290a3'}}},
   'laser-lime':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.laser-lime', cursor: {dark: '#ccff00', light: '#6b8f00'}},
   'neon-green':   {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-green', cursor: {dark: '#39ff14', light: '#16825d'}},
   'neon-cyan':    {cursorLabelKey: 'pref.appearance.editor_cursor_color.neon-cyan', cursor: {dark: '#00ffff', light: '#0e7490'}},
@@ -31448,6 +31830,7 @@ function editorCursorColorForScheme(scheme = activeEditorScheme()) {
 
 function activeTerminalCursorColorForTheme(baseTheme = terminalThemeForGlobalTheme()) {
   const value = normalizeEditorCursorColor(fileEditorCursorColor);
+  if (value === 'theme' && resolvedTerminalThemeMode() === 'light') return terminalThemeForGlobalTheme().cursor;
   return value === 'theme' ? baseTheme.cursor : cursorColorForPreset(value, resolvedTerminalThemeMode() === 'light');
 }
 
@@ -31465,6 +31848,15 @@ function terminalCursorBlinkEnabled() {
 
 function terminalThemeWithBadConnectionCursor(theme) {
   return {...theme, cursor: badConnectionTerminalCursorColor(), cursorAccent: BAD_CONNECTION_CURSOR_ACCENT};
+}
+
+function terminalCursorColorsForSession(session, baseTheme = terminalRenderThemeForGlobalTheme()) {
+  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor({});
+  const displayTheme = resolvedTerminalThemeMode() === 'light' ? terminalThemeForGlobalTheme() : baseTheme;
+  return {
+    cursor: session === focusedPanelItem ? activeTerminalCursorColorForTheme(displayTheme) : displayTheme.cursor,
+    cursorAccent: displayTheme.cursorAccent,
+  };
 }
 
 function setBadConnectionCursorState(active) {
@@ -31522,7 +31914,7 @@ function uiColorVisualPreset(value, light = false) {
 function applyActiveColor(value) {
   const styles = [document.documentElement?.style, document.body?.style].filter(Boolean);
   if (!styles.length) return;
-  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft'];
+  const vars = ['--active-accent', '--active-accent-rgb', '--active-accent-bright', '--active-accent-text', '--active-accent-dim', '--active-accent-soft', '--active-tab-muted-bg', '--active-tab-muted-hover-bg', '--active-tab-muted-border'];
   const preset = ACTIVE_COLOR_PRESETS[value];
   if (!preset) {
     styles.forEach(style => vars.forEach(v => style.removeProperty(v)));
@@ -31539,6 +31931,14 @@ function applyActiveColor(value) {
     style.setProperty('--active-accent-text', p.text);
     style.setProperty('--active-accent-dim', `color-mix(in srgb, ${p.accent} 26%, var(--panel))`);
     style.setProperty('--active-accent-soft', `rgb(${rgb} / 0.12)`);
+    for (const [name, presetKey] of [
+      ['--active-tab-muted-bg', 'tabMuted'],
+      ['--active-tab-muted-hover-bg', 'tabMutedHover'],
+      ['--active-tab-muted-border', 'tabMutedBorder'],
+    ]) {
+      if (p[presetKey]) style.setProperty(name, p[presetKey]);
+      else style.removeProperty(name);
+    }
   }
   // keep the browser-tab favicon background/glyph in sync with the chosen accent + theme
   updateBrowserFavicon({force: true});
@@ -31650,9 +32050,8 @@ function installGlobalThemeMediaListener() {
 // typing into; every other terminal keeps its theme's default cursor color.
 
 function terminalThemeForSession(session, baseTheme) {
-  const theme = baseTheme || terminalThemeForGlobalTheme();
-  if (badConnectionCursorStateActive()) return terminalThemeWithBadConnectionCursor(theme);
-  return session === focusedPanelItem ? {...theme, cursor: activeTerminalCursorColorForTheme(theme)} : theme;
+  const theme = baseTheme || terminalRenderThemeForGlobalTheme();
+  return {...theme, ...terminalCursorColorsForSession(session, theme)};
 }
 
 function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTheme(), mode = globalThemeMode) {
@@ -31662,10 +32061,11 @@ function applyTerminalContainerTheme(container, theme = terminalThemeForGlobalTh
 }
 
 function applyTerminalRuntimeSettings(options = {}) {
-  // one theme source for every terminal AND its container, so all panes share the same
-  // white in light mode (no pane-level tint showing a different white); + minimumContrastRatio so
-  // faint 24-bit agent output stays legible on white.
-  const theme = terminalThemeForGlobalTheme();
+  // The display theme owns the container/background. The render theme owns xterm's source palette
+  // and contrast reference; in light mode CSS converts those painted rows without collapsing their
+  // original neutral hierarchy.
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const minContrast = terminalMinimumContrastRatio();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term) continue;
@@ -31673,11 +32073,11 @@ function applyTerminalRuntimeSettings(options = {}) {
     item.term.options.fontSize = terminalFontSize;
     item.term.options.scrollback = terminalScrollback;
     item.term.options.cursorBlink = terminalCursorBlinkEnabled();
-    item.term.options.theme = terminalThemeForSession(session, theme);
+    item.term.options.theme = terminalThemeForSession(session, renderTheme);
     item.term.options.minimumContrastRatio = minContrast;
     item.term.clearTextureAtlas?.();
     refreshTerminal(session);
-    applyTerminalContainerTheme(item.container, theme);
+    applyTerminalContainerTheme(item.container, displayTheme);
     if (options.fit !== false) scheduleFit(session);
   }
 }
@@ -31685,15 +32085,12 @@ function applyTerminalRuntimeSettings(options = {}) {
 // Lightweight cursor-only refresh for focus changes: re-color just the cursor so the active pane's
 // terminal blinks yellow and the rest revert to their theme default, without re-fitting every pane.
 function refreshActiveTerminalCursor() {
-  const base = terminalThemeForGlobalTheme();
+  const base = terminalRenderThemeForGlobalTheme();
   const badConnection = badConnectionCursorStateActive();
   for (const [session, item] of terminals.entries()) {
     if (!item?.term?.options) continue;
     item.term.options.cursorBlink = !badConnection;
-    const cursor = badConnection
-      ? badConnectionTerminalCursorColor()
-      : (session === focusedPanelItem ? activeTerminalCursorColorForTheme(base) : base.cursor);
-    const cursorAccent = badConnection ? BAD_CONNECTION_CURSOR_ACCENT : base.cursorAccent;
+    const {cursor, cursorAccent} = terminalCursorColorsForSession(session, base);
     const current = item.term.options.theme || base;
     if (current.cursor !== cursor || current.cursorAccent !== cursorAccent) {
       item.term.options.theme = {...current, cursor, cursorAccent};
@@ -33092,7 +33489,7 @@ function pathBasename(path) {
 
 function filePopoverHtml(item) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
+  const state = fileEditorTabState(item) || {};
   const rows = filePopoverRows(path, state);
   return `<div class="session-popover file-popover" role="tooltip">
     <div class="popover-head">
@@ -34185,7 +34582,7 @@ function tabIsEvictableForCap(item, keepItem) {
   const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
   if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
-    const state = fileState.get(fileItemPath(item));
+    const state = fileEditorTabState(item);
     if (state && state.dirty) return false;
   }
   return true;
@@ -34302,8 +34699,9 @@ function canPaneExpand(item, slots = layoutSlots) {
 function minimizePaneFromLayout(item) {
   const sourceSlot = slotForSession(item);
   if (!sourceSlot) return;
+  const returnItem = historicalFileReturnItem(item);
   if (narrowPaneFrameActionTargetsTab(item)) {
-    removeSessionFromLayout(item, {focusSession: nextNarrowPaneFrameItem(item)});
+    removeSessionFromLayout(item, {focusSession: returnItem || nextNarrowPaneFrameItem(item)});
     return;
   }
   if (narrowSingleColumnMode()) return;
@@ -34314,23 +34712,37 @@ function minimizePaneFromLayout(item) {
   const sourceTabs = paneTabsForGenericActions(sourceSlot);
   const targetSlot = largestNonFileExplorerPaneSlot(new Set([sourceSlot]));
   if (!targetSlot || !sourceTabs.length) {
+    if (returnItem) {
+      if (sourceTabs.includes(returnItem)) activatePaneTab(sourceSlot, returnItem, {userInitiated: true});
+      else applyLayoutSlots(
+        layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)}),
+        {focusSession: returnItem},
+      );
+      return;
+    }
     removePaneFromLayout(item);
     return;
   }
   const targetActive = activeItemForSide(targetSlot);
   const next = layoutWithoutSlot(sourceSlot, {preserveRemovedSlot: shouldPreserveClosedPaneSlot(sourceSlot)});
-  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems: sourceTabs});
+  const keepItems = returnItem ? Array.from(new Set([...sourceTabs, returnItem])) : sourceTabs;
+  const capacity = paneCapacityCheckForInsert(targetSlot, sourceTabs, null, next, {keepItems});
   if (!capacity.ok) {
     showLayoutStatus(paneCapacityRefusalStatusForItems(sourceTabs, capacity, targetSlot), 'danger');
     return;
   }
-  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive, next);
+  next[targetSlot] = paneStateWithTabsForSlot(targetSlot, capacity.finalTabs, targetActive || capacity.finalTabs[0], next);
+  const returnSlot = returnItem ? slotForItem(returnItem, next) : null;
+  if (returnSlot) {
+    next[returnSlot] = paneStateWithTabsForSlot(returnSlot, paneTabs(returnSlot, next), returnItem, next);
+  }
+  const nextActive = returnSlot ? returnItem : targetActive || capacity.finalTabs[0];
   const messages = [t('layout.status.minimized', {items: sourceTabs.map(itemLabel).join(', ')})];
   if (capacity.evicted.length) {
     messages.push(t('layout.status.autoClosed', {items: capacity.evicted.map(itemLabel).join(', '), limit: capacity.cap}));
   }
   applyLayoutSlots(next, {
-    focusSession: targetActive || capacity.finalTabs[0],
+    focusSession: nextActive,
     prune: false,
     message: messages.filter(Boolean).join('; '),
   });
@@ -40488,7 +40900,7 @@ function createDockviewTabRenderer() {
     api?.setActive?.();
   });
   element.addEventListener('dblclick', event => {
-    if (event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
+    if (isHistoricalFileEditorItem(item) || event.target.closest('[data-auto-session], [data-pane-tab-close]')) return;
     event.preventDefault();
     event.stopPropagation();
     beginPaneTabRename(element, item);
@@ -40521,7 +40933,7 @@ function syncDockviewTabShell(tab, item, api = null) {
   tab.dataset.paneTab = item;
   syncDockviewTabActiveClass(tab, api);
   tab.classList.toggle('tmux-pane-tab-token', isTmuxSession(item));
-  tab.classList.toggle('file-missing', isFileEditorItem(item) && openFileIsMissing(fileItemPath(item)));
+  tab.classList.toggle('file-missing', isFileEditorItem(item) && fileEditorTabIsMissing(item));
   tab.classList.toggle('pinned-tab', tabIsPinned(item));
   applySessionStateClasses(tab, isVirtualItem(item) ? null : sessionState(item, transcriptMetadataState.payload.sessions?.[item]));
   tab.setAttribute('aria-label', dockviewTabAriaLabel(item));
@@ -41249,6 +41661,16 @@ function renderPaneTabStripsMeasured() {
   }
 }
 
+function refreshPaneTabLabel(item) {
+  if (!item) return;
+  const label = itemLabel(item);
+  document.querySelectorAll(`[data-pane-tab="${cssEscape(item)}"]`).forEach(tab => {
+    const visibleLabel = tab.querySelector?.('.session-button-dir');
+    if (visibleLabel) visibleLabel.textContent = label;
+    tab.setAttribute?.('aria-label', paneTabAriaLabel(item));
+  });
+}
+
 function updatePaneTabStrip(panel, side) {
   const strip = panel.querySelector('.pane-tabs');
   if (!strip) return;
@@ -41527,7 +41949,7 @@ function createPaneTab(side, item, displayContext = {}) {
   tab.role = 'button';
   tab.tabIndex = 0;
   const virtualClass = type?.className?.(item) || '';
-  const missingFileClass = isEditor && openFileIsMissing(fileItemPath(item)) ? 'file-missing' : '';
+  const missingFileClass = isEditor && fileEditorTabIsMissing(item) ? 'file-missing' : '';
   const tmuxTabClass = !isVirtual && !isEditor ? 'tmux-pane-tab-token' : '';
   tab.className = `pane-tab session-popover-host ${tmuxTabClass} ${virtualClass} ${missingFileClass} ${tabIsPinned(item) ? 'pinned-tab' : ''} ${active ? 'active' : ''}`;
   applySessionStateClasses(tab, state);
@@ -41536,7 +41958,7 @@ function createPaneTab(side, item, displayContext = {}) {
   const rowOptions = isEditor ? {parentLabel: displayContext.fileParentLabels?.get(fileItemPath(item)) || ''} : {};
   tab.innerHTML = paneTabInnerHtml(item, rowOptions);
   if (isEditor) {
-    bindFilePopoverActions(tab);
+    if (!isHistoricalFileEditorItem(item)) bindFilePopoverActions(tab);
     bindPaneTabPopover(tab, item);
   } else if (!isVirtual) {
     bindPaneTabPopover(tab, item);
@@ -41575,7 +41997,7 @@ function createPaneTab(side, item, displayContext = {}) {
     stopPropagation: true,
     ignore: event => Boolean(event.target.closest('[data-auto-session], [data-pane-tab-close]')),
   });
-  if (isEditor) {
+  if (isEditor && !isHistoricalFileEditorItem(item)) {
     tab.addEventListener('dblclick', event => {
       if (event.target.closest('[data-pane-tab-close]')) return;
       event.preventDefault();
@@ -41596,7 +42018,7 @@ function createPaneTab(side, item, displayContext = {}) {
 
 function paneTabAriaLabel(item) {
   if (isFileEditorItem(item)) {
-    const missing = openFileIsMissing(fileItemPath(item)) ? ` ${t('filetab.missingTitle')}` : '';
+    const missing = fileEditorTabIsMissing(item) ? ` ${t('filetab.missingTitle')}` : '';
     return `${itemLabel(item)} ${fileItemPath(item)}${missing}`;
   }
   const type = tabTypeForItem(item);
@@ -41613,6 +42035,7 @@ function beginPaneTabRename(tab, session) {
 }
 
 function beginFileTabRename(tab, item) {
+  if (isHistoricalFileEditorItem(item)) return;
   const path = fileItemPath(item);
   if (!path) return;
   const entry = {kind: 'file', name: basenameOf(path)};
@@ -41681,6 +42104,16 @@ function ensureFileTabStateForItem(item) {
   const path = fileItemPath(item);
   if (!path) return null;
   if (!isImageViewerItem(item)) addFileEditorTabItem(path, item);
+  if (isHistoricalFileEditorItem(item)) {
+    return ensureHistoricalFileState(item, {
+      mtime: 0,
+      kind: 'text',
+      original: '',
+      content: '',
+      dirty: false,
+      loading: true,
+    });
+  }
   let state = fileStateFor(path);
   if (!state || !state.kind) {
     state = ensureFileState(path, {
@@ -41706,7 +42139,7 @@ function refreshFileTabPopover(tab, item) {
   const popover = tab?.querySelector?.(':scope > .file-popover') || detached;
   if (!popover) return;
   const path = fileItemPath(item);
-  const rows = filePopoverRows(path, fileStateFor(path) || {});
+  const rows = filePopoverRows(path, fileEditorTabState(item) || {});
   popover.innerHTML = `
     <div class="popover-head">
       <div>
@@ -41815,15 +42248,15 @@ function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
 
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
-  const state = fileState.get(path) || {};
-  const owners = openFileOwnerSessionsForPath(path);
+  const state = fileEditorTabState(item) || {};
+  const owners = isHistoricalFileEditorItem(item) ? [] : openFileOwnerSessionsForPath(path);
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
   const owner = ownerText ? `<span class="file-tab-owner" title="${esc(ownerTitle)}">${esc(ownerText)}</span>` : '';
   const dirty = state.dirty ? `<span class="file-tab-dirty" title="${esc(t('state.modified'))}" aria-label="${esc(t('state.modified'))}"></span>` : '';
-  const missing = openFileIsMissing(path) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
+  const missing = fileEditorTabIsMissing(item) ? `<span class="file-tab-missing-badge" title="${esc(t('filetab.missingTitle'))}" aria-label="${esc(t('filetab.missingTitle'))}">${esc(t('filetab.missing'))}</span>` : '';
   const parentLabel = options.parentLabel ? `<span class="file-tab-parent" title="${esc(path)}">${esc(options.parentLabel)}</span>` : '';
-  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(basenameOf(path))}</span>${parentLabel}</span></span>`;
+  return `<span class="pane-tab-core">${tabTypeIconHtml(item, options)}<span class="session-button-text">${owner}${dirty}${missing}<span class="session-button-dir">${esc(itemLabel(item))}</span>${parentLabel}</span></span>`;
 }
 
 function tmuxPaneTabHtml(session, info, state, auto, options = {}) {
@@ -49973,7 +50406,7 @@ function bindPreferencesPanel(panel) {
         if (!groups.has(groupId)) groups.set(groupId, new Map());
         const series = groups.get(groupId);
         const seriesName = groupId === 'agent-tokens'
-          ? `agent_tokens_per_minute:${currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length))}`
+          ? `agent_tokens_per_minute:${currentStatsCanonicalSessionKey(name.slice('agent_tokens_per_minute:'.length))}`
           : name;
         if (!series.has(seriesName)) series.set(seriesName, []);
         const points = series.get(seriesName);
@@ -50047,7 +50480,7 @@ function bindPreferencesPanel(panel) {
       {id: 'agent-status', title: 'Agent status', families: ['agent_status']},
       {id: 'gpu', title: 'GPU', families: ['gpu']},
       {id: 'system', title: 'System', families: ['service_load', 'system_memory']},
-      {id: 'agent-tokens', title: 'Agent tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
+      {id: 'agent-tokens', title: 'Session tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-output-tokens', title: 'Model output tokens/min', families: ['agent_tokens'], sharedTokenScale: true},
       {id: 'model-usage', title: 'Model usage', families: ['agent_tokens']},
       {id: 'cost', title: 'Marginal / at API list prices', families: ['cost'], compact: true},
@@ -50062,7 +50495,7 @@ function bindPreferencesPanel(panel) {
       {id: 'agent-status', label: 'Agent status', groups: ['agent-status']},
       {id: 'gpu', label: 'GPU', groups: ['gpu']},
       {id: 'system', label: 'System', groups: ['system']},
-      {id: 'agent-tokens', label: 'Agent tokens', groups: ['agent-tokens']},
+      {id: 'agent-tokens', label: 'Session tokens', groups: ['agent-tokens']},
       {id: 'model-tokens', label: 'Model tokens', groups: ['model-output-tokens', 'model-usage']},
       {id: 'cost', label: 'Cost', groups: ['cost'], defaultVisible: false},
       {id: 'browser', label: 'API/SSE', groups: ['browser']},
@@ -50182,22 +50615,30 @@ function bindPreferencesPanel(panel) {
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
   }
 
-  // Usage series retain a stable pane-level key, while the visible identity is the tmux
-  // session. Cost rows carry that same safe key from the server, so both surfaces call this
-  // one owner instead of independently trimming their agent labels.
+  // Usage series retain a stable pane-level key, while the token-throughput owner is the tmux
+  // session. Keep the exact grouping key separate from display shortening so unrelated private
+  // identities cannot collide merely because their visible labels were bounded.
+  function currentStatsCanonicalSessionKey(value) {
+    const full = String(value || '').trim();
+    if (!full) return '';
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
+  }
+
   function currentStatsCanonicalAgentLabel(value) {
     const full = String(value || '').trim();
     if (!full) return 'Unknown';
+    const sessionKey = currentStatsCanonicalSessionKey(full);
+    if (sessionKey !== full) return sessionKey;
     if (full.startsWith('claude-bg:')) {
       const [, projectValue = '', sessionValue = ''] = full.split(':');
       const projectParts = projectValue.split('-').filter(Boolean);
       const project = projectParts.slice(-2).join('-') || projectValue;
       const session = sessionValue.slice(0, 8);
       return ['claude-bg', project, session].filter(Boolean).join(':');
-    }
-    const parts = full.split('|');
-    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
-      return parts[0] || full;
     }
     return full;
   }
@@ -50794,6 +51235,7 @@ function bindPreferencesPanel(panel) {
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
     canonicalAgentLabel: currentStatsCanonicalAgentLabel,
+    canonicalSessionKey: currentStatsCanonicalSessionKey,
     createBrowserClient,
     createController,
     mount,
@@ -51388,6 +51830,12 @@ const jsDebugGraphProcessCpuColors = Object.freeze({
   current: jsDebugGraphSeriesPalette.currentProcessCpu,
   peers: Object.freeze([jsDebugGraphSeriesPalette.turquoise, jsDebugGraphSeriesPalette.magenta, jsDebugGraphSeriesPalette.beige]),
 });
+const jsDebugGraphCpuProcessAreaColors = Object.freeze([
+  jsDebugGraphSeriesPalette.cyan,
+  jsDebugGraphSeriesPalette.orange,
+  jsDebugGraphSeriesPalette.magenta,
+  jsDebugGraphSeriesPalette.turquoise,
+]);
 const jsDebugGraphGpuDeviceColors = Object.freeze([
   jsDebugGraphSeriesPalette.cyan,
   jsDebugGraphSeriesPalette.orange,
@@ -51444,7 +51892,7 @@ const jsDebugStatsFamilyManifest = Object.freeze({
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', hostMetric: 'cpu'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', kind: 'area', stacked: true, hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
@@ -55035,10 +55483,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
     for (const [key, item] of bucket.agentTokenRates.entries()) {
       if (dimension === 'agent') {
-        const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
-        existing.label = item?.label || existing.label;
+        const sessionKey = debugGraphSessionTokenKey(key);
+        const existing = tokenItems.get(sessionKey) || {
+          label: debugGraphAgentDisplayLabel(sessionKey),
+          rawKeys: new Set(),
+          samples: 0,
+        };
+        existing.rawKeys.add(String(key));
         existing.samples += Number(item?.samples || 0);
-        tokenItems.set(String(key), existing);
+        tokenItems.set(sessionKey, existing);
         continue;
       }
       if (!(item?.modelRates instanceof Map)) continue;
@@ -55069,10 +55522,14 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       agentTokenPatternIndex: visuals[index].patternIndex,
       color: visuals[index].color,
       value: bucket => {
-        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') {
-          if (!tokenItem) return 0;
-          return debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let value = 0;
+          for (const rawKey of item.rawKeys) {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            if (tokenItem) value += debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          }
+          return value;
         }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
@@ -55086,8 +55543,11 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       hasData: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          if (!(bucket?.agentTokenRates instanceof Map)) return false;
+          return [...item.rawKeys].some(rawKey => {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          });
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
           const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
@@ -55096,8 +55556,12 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       sampleCount: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Math.max(0, Number(tokenItem?.samples) || 0);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let samples = 0;
+          for (const rawKey of item.rawKeys) {
+            samples += Math.max(0, Number(bucket.agentTokenRates.get(rawKey)?.samples) || 0);
+          }
+          return samples;
         }
         let samples = 0;
         for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
@@ -55122,23 +55586,63 @@ function debugGraphStablePaletteIndex(identity, count) {
   return hash % size;
 }
 
-function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+function debugGraphVisualCombinations(patternCount = jsDebugGraphAgentTokenPatternCount) {
   const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
-  const patternCount = Math.max(1, jsDebugGraphAgentTokenPatternCount);
+  const normalizedPatternCount = Math.max(1, Math.floor(Number(patternCount) || 0));
   const combinations = [];
-  const pairedCount = Math.min(colorCount, patternCount);
+  const pairedCount = Math.min(colorCount, normalizedPatternCount);
   for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
   for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
-    for (let patternIndex = 0; patternIndex < patternCount; patternIndex += 1) {
+    for (let patternIndex = 0; patternIndex < normalizedPatternCount; patternIndex += 1) {
       if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
       combinations.push([colorIndex, patternIndex]);
     }
   }
+  return combinations;
+}
+
+function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+  const combinations = debugGraphVisualCombinations();
   return (items || []).map((item, index) => {
     const identity = identityForItem(item);
     const combinationIndex = index < combinations.length
       ? index
       : debugGraphStablePaletteIndex(identity, combinations.length);
+    const [colorIndex, patternIndex] = combinations[combinationIndex];
+    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+  });
+}
+
+const jsDebugGraphServiceLoadLinePatterns = Object.freeze(['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short']);
+// Daemons enter and leave retained buckets independently. Keep each assigned visual for the page
+// lifetime so one disappearing service cannot recolor every later legend row; reclaim absent slots
+// only after all 49 color/pattern pairs have been used.
+const jsDebugGraphServiceLoadVisualAssignments = new Map();
+
+function debugGraphStableServiceLoadVisuals(items) {
+  const combinations = debugGraphVisualCombinations(jsDebugGraphServiceLoadLinePatterns.length);
+  const activeKeys = new Set((items || []).map(([key]) => String(key)));
+  if (jsDebugGraphServiceLoadVisualAssignments.size >= combinations.length) {
+    for (const key of jsDebugGraphServiceLoadVisualAssignments.keys()) {
+      if (!activeKeys.has(key)) jsDebugGraphServiceLoadVisualAssignments.delete(key);
+      if (jsDebugGraphServiceLoadVisualAssignments.size < combinations.length) break;
+    }
+  }
+  const used = new Set(jsDebugGraphServiceLoadVisualAssignments.values());
+  return (items || []).map(([rawKey]) => {
+    const key = String(rawKey);
+    let combinationIndex = jsDebugGraphServiceLoadVisualAssignments.get(key);
+    if (!Number.isFinite(combinationIndex)) {
+      combinationIndex = debugGraphStablePaletteIndex(key, combinations.length);
+      for (let candidate = 0; candidate < combinations.length; candidate += 1) {
+        if (!used.has(candidate)) {
+          combinationIndex = candidate;
+          jsDebugGraphServiceLoadVisualAssignments.set(key, candidate);
+          used.add(candidate);
+          break;
+        }
+      }
+    }
     const [colorIndex, patternIndex] = combinations[combinationIndex];
     return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
   });
@@ -55227,6 +55731,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         cssKey: 'cpu',
         chartMetricKey: 'cpu',
         processCpu: true,
+        currentProcessCpu: current,
         processId,
         linePattern: current ? 'solid' : 'dot',
         color,
@@ -55267,8 +55772,100 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     }));
 }
 
+const jsDebugGraphHostProcessVisualAssignments = Object.freeze({
+  cpu: new Map(),
+  memory: new Map(),
+});
+
+function debugGraphStableHostProcessVisuals(metric, displayed, colors) {
+  const assignments = jsDebugGraphHostProcessVisualAssignments[metric];
+  const activeKeys = new Set(displayed.map(([key]) => String(key)));
+  const unassignedActiveCount = displayed.reduce(
+    (count, [key]) => count + (assignments.has(String(key)) ? 0 : 1),
+    0,
+  );
+  for (const key of assignments.keys()) {
+    if (assignments.size + unassignedActiveCount <= colors.length) break;
+    if (!activeKeys.has(key)) assignments.delete(key);
+  }
+  const used = new Set(assignments.values());
+  return displayed.map(([rawKey]) => {
+    const key = String(rawKey);
+    let colorIndex = assignments.get(key);
+    if (!Number.isFinite(colorIndex)) {
+      const start = debugGraphStablePaletteIndex(`${metric}:${key}`, colors.length);
+      colorIndex = start;
+      for (let offset = 0; offset < colors.length; offset += 1) {
+        const candidate = (start + offset) % colors.length;
+        if (used.has(candidate)) continue;
+        colorIndex = candidate;
+        assignments.set(key, candidate);
+        used.add(candidate);
+        break;
+      }
+    }
+    return {
+      color: colors[colorIndex % colors.length],
+      patternIndex: colorIndex % jsDebugGraphServiceLoadLinePatterns.length,
+    };
+  });
+}
+
+function debugGraphHostProcessSeriesDefs(buckets, metric) {
+  const cpu = metric === 'cpu';
+  const mapName = cpu ? 'cpuProcesses' : 'memoryProcesses';
+  const valueKey = cpu ? 'totalPercent' : 'totalBytes';
+  const limit = cpu ? 4 : 5;
+  const keyPrefix = cpu ? 'cpuBinary' : 'memory';
+  const unit = cpu ? 'percent' : 'bytes';
+  const colors = cpu ? jsDebugGraphCpuProcessAreaColors : jsDebugGraphAgentTokenColors;
+  const processes = new Map();
+  for (const bucket of buckets) {
+    const source = bucket.hostMetrics?.[mapName];
+    if (!(source instanceof Map)) continue;
+    for (const [key, item] of source.entries()) {
+      if (Number(item?.samples || 0) <= 0) continue;
+      const value = Number(item[valueKey] || 0) / Number(item.samples || 1);
+      const current = processes.get(key);
+      if (!current || value > current.peakValue) {
+        processes.set(key, {label: String(item.label || key), peakValue: value});
+      }
+    }
+  }
+  const displayed = [...processes.entries()]
+    .sort((left, right) => right[1].peakValue - left[1].peakValue || left[0].localeCompare(right[0]))
+    .slice(0, limit);
+  const visuals = debugGraphStableHostProcessVisuals(metric, displayed, colors);
+  return displayed.map(([hostProcessId, process], index) => ({
+    key: `${keyPrefix}:${hostProcessId}`,
+    label: process.label,
+    unit,
+    hostMetric: metric,
+    hostProcessId,
+    color: visuals[index].color,
+    linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex % jsDebugGraphServiceLoadLinePatterns.length],
+    value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
+    hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
+    sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
+    familyHasData: bucket => cpu
+      ? Number(bucket?.systemCpuCount || 0) > 0
+      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
+  }));
+}
+
+function debugGraphMemoryProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'memory');
+}
+
+function debugGraphCpuProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'cpu');
+}
+
 function debugGraphHostMetricSeriesDefs(buckets) {
   return [
+    ...debugGraphCpuProcessSeriesDefs(buckets),
+    ...debugGraphMemoryProcessSeriesDefs(buckets),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil'),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory'),
   ];
@@ -55331,11 +55928,10 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
-  const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
-  const linePatterns = ['solid', 'dash', 'dot'];
+  const visuals = debugGraphStableServiceLoadVisuals(items);
   return items.map(([key, label], index) => ({
     key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
-    color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
+    color: visuals[index].color, linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
       return debugGraphServiceLoadValue(item, mode);
@@ -56036,7 +56632,7 @@ function debugGraphSeriesClientAttrs(series) {
 
 function debugGraphSeriesLinePattern(series) {
   const pattern = String(series?.linePattern || (series?.clientMetric === true ? series.clientLinePattern : '') || '').trim();
-  return ['solid', 'dot', 'dash'].includes(pattern) ? pattern : '';
+  return ['solid', 'dot', 'dash', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'].includes(pattern) ? pattern : '';
 }
 
 function debugGraphSeriesLinePatternAttrs(series) {
@@ -56046,6 +56642,7 @@ function debugGraphSeriesLinePatternAttrs(series) {
 
 function debugGraphSeriesLineClassName(series, extraClass = '') {
   const classes = ['js-debug-line', `js-debug-line--${debugGraphSeriesClassKey(series)}`];
+  if (series?.currentProcessCpu === true) classes.push('js-debug-line--current-process');
   const linePattern = debugGraphSeriesLinePattern(series);
   if (linePattern) classes.push('js-debug-line--pattern', `js-debug-line--pattern-${linePattern}`);
   if (series?.clientMetric === true) {
@@ -56204,17 +56801,22 @@ function debugGraphInteractionOverlayHtml() {
   return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
-function debugGraphLegendHtml(seriesItems) {
+function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
     ${seriesItems.map(series => {
       const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
-      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series, kind)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
     }).join('')}
   </div>`;
 }
 
-function debugGraphLegendSwatchHtml(series) {
+function debugGraphSeriesUsesArea(series, kind = '') {
+  return kind === 'area' && Boolean(series?.hostMetric && series?.hostProcessId);
+}
+
+function debugGraphLegendSwatchHtml(series, kind = '') {
   if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (debugGraphSeriesUsesArea(series, kind)) return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
@@ -56334,10 +56936,13 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
+  if (group.macMemoryCard === true) {
+    return seriesItems.filter(series => series.key === 'macMemoryPressure' || (series.hostMetric === 'memory' && series.hostProcessId));
+  }
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu');
+      return [...hostSeries, ...seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu')];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
@@ -56389,11 +56994,34 @@ function debugGraphMacMemoryDetailsHtml(buckets) {
   }).join('')}</dl>`;
 }
 
+function debugGraphCurrentProcessCpuOrdered(seriesItems, currentFirst = false) {
+  const current = [];
+  const rest = [];
+  for (const series of seriesItems || []) {
+    (series?.currentProcessCpu === true ? current : rest).push(series);
+  }
+  return currentFirst ? [...current, ...rest] : [...rest, ...current];
+}
+
 function debugGraphLegendSeriesItems(group, groupSeries) {
   const legendKeys = Array.isArray(group?.legendSeries) ? group.legendSeries : null;
-  if (!legendKeys) return groupSeries;
-  const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
-  return legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  let selected = groupSeries;
+  if (legendKeys) {
+    const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
+    selected = legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  }
+  return debugGraphCurrentProcessCpuOrdered(selected, true);
+}
+
+function debugGraphMacMemoryProcessPlotSeries(series, buckets) {
+  if (series?.hostMetric !== 'memory' || !series.hostProcessId) return series;
+  const plotValues = (series.values || []).map((value, index) => {
+    const host = buckets?.[index]?.hostMetrics;
+    const capacity = Number(host?.macPhysicalMemoryTotalBytes || host?.systemMemoryCapacityTotalBytes || 0)
+      / Math.max(1, Number(host?.macMemoryDetailCount || host?.systemMemoryCount || 1));
+    return capacity > 0 ? Math.max(0, Number(value) || 0) / capacity * 100 : 0;
+  });
+  return {...series, plotValues, plotMax: Math.max(0, ...plotValues)};
 }
 
 function debugGraphVisibleChartGroups(seriesItems) {
@@ -56405,10 +57033,10 @@ function debugGraphVisibleChartGroups(seriesItems) {
 }
 
 function debugGraphStackedSeries(seriesItems) {
-  const count = Math.max(0, ...seriesItems.map(series => (series.values || []).length));
+  const count = Math.max(0, ...seriesItems.map(series => debugGraphSeriesPlotValues(series).length));
   const totals = Array.from({length: count}, () => 0);
   return seriesItems.map(series => {
-    const values = series.values || [];
+    const values = debugGraphSeriesPlotValues(series);
     const stackBaseValues = totals.slice();
     const plotValues = values.map((value, index) => {
       const next = totals[index] + Math.max(0, Number(value) || 0);
@@ -56483,14 +57111,20 @@ function debugGraphHoverBucketIndex(buckets, timestamp) {
   return timestamp < end ? index : -1;
 }
 
-function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+function debugGraphDirectHoverSeriesKey(event) {
+  const target = event?.target?.closest?.('[data-js-debug-series], [data-js-debug-area-series]');
+  return String(target?.dataset?.jsDebugSeries || target?.dataset?.jsDebugAreaSeries || '');
+}
+
+function debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, groupKey) {
   const data = jsDebugGraphHoverChartData.get(String(chart?.dataset?.jsDebugChart || ''));
-  if (data?.group?.key !== 'serversLoad') return null;
+  if (data?.group?.key !== groupKey) return null;
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return null;
-  const available = data.groupSeries.filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  const available = (data.hoverSeries || data.groupSeries)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
   if (!available.length) return null;
-  const directKey = String(event?.target?.closest?.('[data-js-debug-series]')?.dataset?.jsDebugSeries || '');
+  const directKey = debugGraphDirectHoverSeriesKey(event);
   const direct = available.find(series => series.key === directKey);
   if (direct) return direct;
   const svg = chart?.querySelector?.('.js-debug-line-chart');
@@ -56504,20 +57138,37 @@ function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
     ? {mode: 'broken-linear', threshold: Number(chart?.dataset?.jsDebugChartAxisBreak) || axisMax, upperFraction: 0.18}
     : scaleName === 'log';
   return available.reduce((nearest, series) => {
-    const startValue = Math.max(0, Number(series.values?.[index]) || 0);
+    const renderedValues = Array.isArray(series.plotValues) ? series.plotValues : series.values;
+    const startValue = Math.max(0, Number(renderedValues?.[index]) || 0);
     const startTime = Number(series.times?.[index]);
     const nextIndex = index + 1;
-    const nextAvailable = nextIndex < series.values.length
+    const nextAvailable = nextIndex < renderedValues.length
       && (!Array.isArray(series.hasDataValues) || series.hasDataValues[nextIndex] === true);
     const nextTime = Number(series.times?.[nextIndex]);
-    const nextValue = Math.max(0, Number(series.values?.[nextIndex]) || 0);
+    const nextValue = Math.max(0, Number(renderedValues?.[nextIndex]) || 0);
     const fraction = nextAvailable && Number.isFinite(startTime) && Number.isFinite(nextTime) && nextTime > startTime
       ? Math.max(0, Math.min(1, (Number(timestamp) - startTime) / (nextTime - startTime)))
       : 0;
     const renderedValue = startValue + ((nextValue - startValue) * fraction);
-    const distance = Math.abs(debugGraphPlotYForValue(renderedValue, axisMax, scale) - pointerY);
+    const renderedY = debugGraphPlotYForValue(renderedValue, axisMax, scale);
+    let distance = Math.abs(renderedY - pointerY);
+    if (Array.isArray(series.stackBaseValues)) {
+      const startBase = Math.max(0, Number(series.stackBaseValues[index]) || 0);
+      const nextBase = Math.max(0, Number(series.stackBaseValues[nextIndex]) || 0);
+      const renderedBase = startBase + ((nextBase - startBase) * fraction);
+      const baseY = debugGraphPlotYForValue(renderedBase, axisMax, scale);
+      const minimumY = Math.min(renderedY, baseY);
+      const maximumY = Math.max(renderedY, baseY);
+      distance = pointerY >= minimumY && pointerY <= maximumY
+        ? 0
+        : Math.min(Math.abs(pointerY - minimumY), Math.abs(pointerY - maximumY));
+    }
     return !nearest || distance < nearest.distance ? {series, distance} : nearest;
   }, null)?.series || available[0];
+}
+
+function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+  return debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'serversLoad');
 }
 
 function debugGraphHoverDetailAtTime(chart, timestamp, event) {
@@ -56532,6 +57183,16 @@ function debugGraphHoverDetailAtTime(chart, timestamp, event) {
       seriesKey: series.key,
     };
   }
+  if (data?.group?.key === 'cpu') {
+    const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+    const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'cpu');
+    if (index >= 0 && series && (!Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)) {
+      return {
+        text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+        seriesKey: series.key,
+      };
+    }
+  }
   return {text: debugGraphHoverValueAtTime(chart, timestamp), seriesKey: ''};
 }
 
@@ -56541,7 +57202,9 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
-  const series = data.group.key === 'activity'
+  const series = data.group.macMemoryCard === true
+    ? data.groupSeries.filter(item => item.key === 'macMemoryPressure')
+    : data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
   const values = series
@@ -56691,19 +57354,25 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   group = debugGraphResolvedChartGroup(group, buckets);
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
-  const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
-  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
+  const selectedGroupSeries = debugGraphGroupSeriesItems(group, seriesItems);
+  const groupSeries = group.macMemoryCard === true
+    ? selectedGroupSeries.map(series => debugGraphMacMemoryProcessPlotSeries(series, buckets))
+    : selectedGroupSeries;
   // Series lines/areas stay continuous across every covered span and break only
   // at these genuine no-data ranges (the same holes painted as red no-data bands).
   const genuineNoDataRanges = debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
-  const areaSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => series.hostMetric && series.hostProcessId) : [];
-  const lineSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries;
+  const areaSeries = plottedGroupSeries.filter(series => debugGraphSeriesUsesArea(series, group.kind));
+  const lineSeries = debugGraphCurrentProcessCpuOrdered(
+    group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries,
+  );
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  const hoverSeries = group.kind === 'area' ? [...plotSeries, ...lineSeries] : groupSeries;
+  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries, hoverSeries});
   // Both subviews stay mounted so switching modes preserves their DOM. Namespace the
   // SVG paint-server IDs by surface; otherwise Cost bars resolve Graphs' now-hidden
   // <pattern> definitions and become invisible even though both views share the data.
@@ -56749,7 +57418,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind})}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
@@ -56825,7 +57494,14 @@ function debugGraphChartLabel(group, buckets = []) {
   const label = debugGraphLocalizedLabel(group);
   const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
   if (!detailKey) return label;
-  const detail = buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
+  const logicalCpus = Math.max(0, Number(cpuTopology?.logicalCpus) || 0);
+  const physicalCores = Math.max(0, Number(cpuTopology?.physicalCores) || 0);
+  const topologyDetail = group?.key !== 'cpu' || logicalCpus <= 0
+    ? ''
+    : physicalCores > 0
+      ? `${logicalCpus} logical CPUs / ${physicalCores} physical cores`
+      : `${logicalCpus} logical CPUs`;
+  const detail = topologyDetail || buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
   return detail ? `${label} (${detail})` : label;
 }
 
@@ -57149,6 +57825,12 @@ function debugGraphAgentDisplayLabel(value) {
   }
   if (Array.from(full).length <= 64) return full;
   return `${Array.from(full).slice(0, 39).join('')}…${Array.from(full).slice(-16).join('')}`;
+}
+
+function debugGraphSessionTokenKey(value) {
+  const full = String(value || '').trim();
+  if (!full) return 'unknown';
+  return globalThis.YOLOmuxStatsCurrent?.canonicalSessionKey?.(full) || full;
 }
 
 function debugGraphCostModelAgentKind(row) {
@@ -58396,7 +59078,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     duration,
     clients: {},
     servers: {},
-    host_metrics: {gpu_devices: {}, service_load: {}},
+    host_metrics: {cpu_processes: {}, memory_processes: {}, gpu_devices: {}, service_load: {}},
     agent_token_rates: [],
   };
   const agentRates = new Map();
@@ -58436,6 +59118,13 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('process_cpu_percent:')) {
+      const binary = name.slice('process_cpu_percent:'.length);
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `process_cpu_max_percent:${binary}`, duration);
+      record.host_metrics.cpu_processes[binary] = {label: binary, total_percent: projected, samples: 1};
+    } else if (name.startsWith('process_memory_bytes:')) {
+      const binary = name.slice('process_memory_bytes:'.length);
+      record.host_metrics.memory_processes[binary] = {label: binary, total_bytes: value, samples: 1};
     } else if (name.startsWith('mac_')) {
       const macMemorySeries = {
         mac_physical_memory_bytes: 'mac_physical_memory_total_bytes', mac_memory_used_bytes: 'mac_memory_used_total_bytes',
@@ -60510,7 +61199,7 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
     return;
   }
   resetRuntimeInterval('debug-logs', () => { void pollDebugLogs(); }, jsDebugLogsPollMs);
-  if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
+  if (pollNow || !jsDebugLogsState.updatedAt) return pollDebugLogs({force: true});
 }
 
 function debugSubviewNoop() {}
@@ -60600,9 +61289,9 @@ function debugPanelSubviewDescriptors() {
 
 function syncDebugSubviewActivation({pollNow = false} = {}) {
   for (const view of debugPanelSubviewDescriptors()) {
-    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
-    else view.deactivate();
+    if (view.id !== debugRuntimeState.subTab) view.deactivate();
   }
+  return debugSubview(debugRuntimeState.subTab).activate({pollNow});
 }
 
 function debugPanelHtml() {
@@ -61108,7 +61797,7 @@ function setDebugSubTab(tab) {
   debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSubviewActivation({pollNow: true});
+  return syncDebugSubviewActivation({pollNow: true});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
@@ -61991,6 +62680,791 @@ registerDebugRuntimeFacade('panel', {
   renderDebugPanels,
   renderYoCostPanels,
 });
+// SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// Finder repository-history tab. Historical files continue through the existing Editor renderer.
+
+function gitDiffTabLabel(item) {
+  const path = gitDiffItemPath(item);
+  const state = gitDiffTabState.get(item);
+  const repo = normalizeDirectoryPath(state?.repo || '');
+  const name = basenameOf(repo || path);
+  const relativePath = String(state?.relativePath || '');
+  return name ? `Δ${name}${relativePath ? `;${relativePath}` : ''}` : 'Δ';
+}
+
+function newGitDiffTabState(item, defaults = {}) {
+  const path = gitDiffItemPath(item);
+  return {
+    item,
+    path,
+    repo: '',
+    relativePath: '',
+    hostedRemote: null,
+    head: '',
+    snapshotCursor: '',
+    commits: [],
+    nextCursor: '',
+    truncated: false,
+    truncationReason: '',
+    loaded: false,
+    loadAttempted: false,
+    loading: false,
+    loadingOlder: false,
+    error: null,
+    expanded: new Set(),
+    details: new Map(),
+    detailErrors: new Map(),
+    detailLoading: new Map(),
+    detailGuards: new Map(),
+    detailControllers: new Map(),
+    detailCollapsedDirectories: new Map(),
+    focusedFilePaths: new Map(),
+    historyGuard: makeGenerationGuard(),
+    historyController: null,
+    focusedSha: '',
+    ...defaults,
+  };
+}
+
+function ensureGitDiffTabState(item, defaults = null) {
+  const path = gitDiffItemPath(item);
+  if (!path) return null;
+  let state = gitDiffTabState.get(item);
+  if (!state) {
+    state = newGitDiffTabState(item, defaults || {});
+    gitDiffTabState.set(item, state);
+  } else if (defaults && typeof defaults === 'object') {
+    Object.assign(state, defaults);
+  }
+  return state;
+}
+
+function invalidateGitDiffDetailRequests(state) {
+  for (const controller of state?.detailControllers?.values?.() || []) controller?.abort?.();
+  for (const guard of state?.detailGuards?.values?.() || []) guard?.invalidate?.();
+  state?.detailControllers?.clear?.();
+  state?.detailLoading?.clear?.();
+}
+
+function cleanupGitDiffTab(item) {
+  const state = gitDiffTabState.get(item);
+  state?.historyController?.abort?.();
+  state?.historyGuard?.invalidate?.();
+  invalidateGitDiffDetailRequests(state);
+  gitDiffTabState.delete(item);
+}
+
+function gitDiffHistoryUrl(path, cursor = '') {
+  const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+  return `/api/fs/git-history?path=${encodeURIComponent(path)}&limit=${gitDiffHistoryPageSize}${suffix}`;
+}
+
+function gitDiffCommitUrl(path, sha, head) {
+  return `/api/fs/git-commit?path=${encodeURIComponent(path)}&commit=${encodeURIComponent(sha)}&head=${encodeURIComponent(head)}`;
+}
+
+function gitDiffErrorSnapshot(error) {
+  return userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: t('common.requestFailed')});
+}
+
+function gitDiffHistoryPayloadIsValid(payload) {
+  return Boolean(payload && typeof payload === 'object'
+    && typeof payload.path === 'string'
+    && typeof payload.repo === 'string'
+    && typeof payload.relative_path === 'string'
+    && typeof payload.head === 'string'
+    && (payload.hosted_remote === undefined || payload.hosted_remote === null || (
+      typeof payload.hosted_remote === 'object'
+      && ['github', 'gitlab'].includes(payload.hosted_remote.provider)
+      && typeof payload.hosted_remote.base_url === 'string'
+    ))
+    && (payload.snapshot_cursor === undefined || typeof payload.snapshot_cursor === 'string')
+    && Array.isArray(payload.commits)
+    && typeof payload.next_cursor === 'string');
+}
+
+function gitDiffCommitPayloadIsValid(payload, sha) {
+  return Boolean(payload && typeof payload === 'object'
+    && payload.sha === sha
+    && typeof payload.repo === 'string'
+    && typeof payload.from_ref === 'string'
+    && typeof payload.to_ref === 'string'
+    && Array.isArray(payload.parents)
+    && Array.isArray(payload.files)
+    && typeof payload.message === 'string');
+}
+
+function gitDiffInvalidResponseError() {
+  const error = new Error('invalid_response_contract');
+  error.code = 'invalid_response_contract';
+  return error;
+}
+
+function mergeGitDiffCommits(current, incoming) {
+  const seen = new Set();
+  return [...(current || []), ...(incoming || [])].filter(commit => {
+    const sha = String(commit?.sha || '');
+    if (!sha || seen.has(sha)) return false;
+    seen.add(sha);
+    return true;
+  });
+}
+
+function pruneGitDiffShaState(state, shas) {
+  for (const sha of [...state.expanded]) if (!shas.has(sha)) state.expanded.delete(sha);
+  for (const map of [state.details, state.detailErrors, state.detailLoading, state.detailGuards, state.detailControllers, state.detailCollapsedDirectories, state.focusedFilePaths]) {
+    for (const sha of [...map.keys()]) if (!shas.has(sha)) map.delete(sha);
+  }
+  if (state.focusedSha && !shas.has(state.focusedSha)) state.focusedSha = '';
+}
+
+async function refreshGitDiffHistory(item, options = {}) {
+  const state = ensureGitDiffTabState(item);
+  if (!state) return false;
+  const append = options.append === true;
+  if (append && (!state.nextCursor || state.loading || state.loadingOlder)) return false;
+  state.historyController?.abort?.();
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  state.historyController = controller;
+  const isCurrent = state.historyGuard.begin();
+  const frozenHead = state.head;
+  const cursor = append ? state.nextCursor : (!options.refresh && !state.loaded ? state.snapshotCursor : '');
+  if (!append) {
+    invalidateGitDiffDetailRequests(state);
+    state.loadAttempted = true;
+    state.loading = true;
+  } else {
+    state.loadingOlder = true;
+  }
+  state.error = null;
+  renderGitDiffPanel(item);
+  try {
+    const payload = await apiFetchJson(gitDiffHistoryUrl(state.path, cursor), {
+      cache: 'no-store',
+      ...(controller ? {signal: controller.signal} : {}),
+    });
+    if (!isCurrent()) return false;
+    if (!gitDiffHistoryPayloadIsValid(payload)) throw gitDiffInvalidResponseError();
+    if (append && payload.head !== frozenHead) {
+      const error = new Error(t('gitDiff.staleSnapshot'));
+      error.code = 'git_history_stale';
+      throw error;
+    }
+    state.path = normalizeDirectoryPath(payload.path) || state.path;
+    state.repo = normalizeDirectoryPath(payload.repo);
+    state.relativePath = payload.relative_path;
+    state.hostedRemote = payload.hosted_remote || null;
+    state.head = payload.head;
+    state.commits = append ? mergeGitDiffCommits(state.commits, payload.commits) : mergeGitDiffCommits([], payload.commits);
+    state.snapshotCursor = String(payload.snapshot_cursor || (!append ? cursor : state.snapshotCursor) || '');
+    state.nextCursor = payload.next_cursor;
+    state.truncated = payload.truncated === true;
+    state.truncationReason = String(payload.truncation_reason || '');
+    state.loaded = true;
+    state.error = null;
+    renderPaneTabStrips();
+    refreshPaneTabLabel(item);
+    if (itemInLayout(tabberItemId)) refreshTabberPanels();
+    if (!append) pruneGitDiffShaState(state, new Set(state.commits.map(commit => String(commit?.sha || '')).filter(Boolean)));
+    for (const sha of state.expanded) if (!state.details.has(sha) && !state.detailLoading.has(sha)) void loadGitDiffCommitDetail(item, sha);
+    refreshLayoutUrlStateSoon();
+    return true;
+  } catch (error) {
+    if (!isCurrent() || error?.name === 'AbortError') return false;
+    state.error = gitDiffErrorSnapshot(error);
+    return false;
+  } finally {
+    if (isCurrent()) {
+      state.loading = false;
+      state.loadingOlder = false;
+      if (state.historyController === controller) state.historyController = null;
+      renderGitDiffPanel(item);
+    }
+  }
+}
+
+function loadOlderGitDiffHistory(item) {
+  return refreshGitDiffHistory(item, {append: true});
+}
+
+function gitDiffDetailGuard(state, sha) {
+  let guard = state.detailGuards.get(sha);
+  if (!guard) {
+    guard = makeGenerationGuard();
+    state.detailGuards.set(sha, guard);
+  }
+  return guard;
+}
+
+async function loadGitDiffCommitDetail(item, sha) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || !state.head || !sha) return false;
+  if (state.details.has(sha)) return true;
+  if (state.detailLoading.has(sha)) return state.detailLoading.get(sha);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const requestedHead = state.head;
+  const isCurrent = gitDiffDetailGuard(state, sha).begin();
+  if (controller) state.detailControllers.set(sha, controller);
+  state.detailErrors.delete(sha);
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(gitDiffCommitUrl(state.path, sha, requestedHead), {
+        cache: 'no-store',
+        ...(controller ? {signal: controller.signal} : {}),
+      });
+      if (!isCurrent() || state.head !== requestedHead) return false;
+      if (!gitDiffCommitPayloadIsValid(payload, sha)) throw gitDiffInvalidResponseError();
+      state.details.set(sha, payload);
+      state.detailErrors.delete(sha);
+      return true;
+    } catch (error) {
+      if (!isCurrent() || state.head !== requestedHead || error?.name === 'AbortError') return false;
+      state.detailErrors.set(sha, gitDiffErrorSnapshot(error));
+      return false;
+    } finally {
+      if (isCurrent() && state.head === requestedHead) {
+        state.detailLoading.delete(sha);
+        if (state.detailControllers.get(sha) === controller) state.detailControllers.delete(sha);
+        renderGitDiffPanel(item);
+      }
+    }
+  })();
+  state.detailLoading.set(sha, request);
+  renderGitDiffPanel(item);
+  return request;
+}
+
+function setGitDiffCommitExpanded(item, sha, expanded) {
+  const state = ensureGitDiffTabState(item);
+  if (!state || !sha) return Promise.resolve(false);
+  if (expanded) state.expanded.add(sha);
+  else state.expanded.delete(sha);
+  state.focusedSha = sha;
+  refreshLayoutUrlStateSoon();
+  renderGitDiffPanel(item);
+  if (!expanded || state.details.has(sha)) return Promise.resolve(true);
+  return loadGitDiffCommitDetail(item, sha);
+}
+
+function toggleGitDiffCommit(item, sha) {
+  const state = ensureGitDiffTabState(item);
+  return setGitDiffCommitExpanded(item, sha, !state?.expanded?.has(sha));
+}
+
+function gitDiffTextNode(className, text = '') {
+  const node = document.createElement('span');
+  node.className = className;
+  node.textContent = String(text || '');
+  return node;
+}
+
+function gitDiffCommitChangesNode(commit) {
+  const files = Math.max(0, Number(commit?.files) || 0);
+  const added = Number.isFinite(Number(commit?.added)) ? Number(commit.added) : 0;
+  const removed = Number.isFinite(Number(commit?.removed)) ? Number(commit.removed) : 0;
+  const binary = Math.max(0, Number(commit?.binary_files) || 0);
+  const node = gitDiffTextNode('git-diff-commit-changes');
+  node.append(
+    document.createTextNode(`${files} ${t('common.files')} `),
+    gitDiffTextNode('git-diff-commit-added', `+${added}`),
+    document.createTextNode(' '),
+    gitDiffTextNode('git-diff-commit-removed', `-${removed}`),
+  );
+  if (binary) node.append(document.createTextNode(` · ${binary} ${t('gitDiff.binary')}`));
+  node.setAttribute('aria-label', `${files} ${t('common.files')} +${added} -${removed}${binary ? ` · ${binary} ${t('gitDiff.binary')}` : ''}`);
+  return node;
+}
+
+function gitDiffHostedLink(remote, kind, value) {
+  if (!remote || !['github', 'gitlab'].includes(remote.provider)) return '';
+  let base;
+  try {
+    base = new URL(String(remote.base_url || ''));
+  } catch (_error) {
+    return '';
+  }
+  if (base.protocol !== 'https:' || base.username || base.password || base.search || base.hash) return '';
+  const identifier = String(value || '');
+  if (kind === 'commit' && !/^[0-9a-f]{40,64}$/.test(identifier)) return '';
+  if (kind === 'change' && !/^[1-9][0-9]*$/.test(identifier)) return '';
+  const suffix = kind === 'commit'
+    ? (remote.provider === 'gitlab' ? `/-/commit/${identifier}` : `/commit/${identifier}`)
+    : (remote.provider === 'gitlab' ? `/-/merge_requests/${identifier}` : `/pull/${identifier}`);
+  return `${base.origin}${base.pathname.replace(/\/$/, '')}${suffix}`;
+}
+
+function gitDiffHostedAnchor(className, text, href) {
+  if (!href) return gitDiffTextNode(className, text);
+  const link = document.createElement('a');
+  link.className = className;
+  link.textContent = String(text || '');
+  link.href = href;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
+}
+
+function gitDiffCommitSubjectNode(commit, remote) {
+  const node = gitDiffTextNode('git-diff-commit-description');
+  const subject = String(commit?.subject || '');
+  let offset = 0;
+  for (const match of subject.matchAll(/#([1-9][0-9]*)\b/g)) {
+    if (match.index > offset) node.append(document.createTextNode(subject.slice(offset, match.index)));
+    node.append(gitDiffHostedAnchor(
+      'git-diff-change-link',
+      match[0],
+      gitDiffHostedLink(remote, 'change', match[1]),
+    ));
+    offset = match.index + match[0].length;
+  }
+  if (offset < subject.length) node.append(document.createTextNode(subject.slice(offset)));
+  return node;
+}
+
+function gitDiffCommitDateText(commit) {
+  return localizedDateTimeFormat(commit?.authored_at, {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  });
+}
+
+function gitDiffCommitRow(item, commit, row = null) {
+  const state = ensureGitDiffTabState(item);
+  const sha = String(commit?.sha || '');
+  const expanded = state?.expanded?.has(sha) === true;
+  const control = row?.localName === 'div' ? row : document.createElement('div');
+  control.className = 'git-diff-commit-row';
+  control.dataset.gitDiffCommit = sha;
+  control.dataset.path = `/commit/${sha}`;
+  control.dataset.kind = 'dir';
+  control.dataset.name = String(commit?.subject || sha);
+  control.setAttribute('role', 'treeitem');
+  control.setAttribute('aria-level', '1');
+  control.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  const caret = gitDiffTextNode('git-diff-commit-caret ui-disclosure-triangle', disclosureTriangleGlyph(expanded));
+  caret.dataset.disclosureExpanded = expanded ? 'true' : 'false';
+  caret.setAttribute('aria-hidden', 'true');
+  const shortShaText = commit?.short || sha.slice(0, 9);
+  const shortSha = gitDiffHostedAnchor(
+    'git-diff-commit-sha',
+    shortShaText,
+    gitDiffHostedLink(state?.hostedRemote, 'commit', sha),
+  );
+  const date = gitDiffTextNode('git-diff-commit-date', gitDiffCommitDateText(commit));
+  date.title = localizedExactDateTimeFormat(commit?.authored_at);
+  const changes = gitDiffCommitChangesNode(commit);
+  const author = gitDiffTextNode('git-diff-commit-author', commit?.author || '');
+  const description = gitDiffCommitSubjectNode(commit, state?.hostedRemote);
+  control.setAttribute('aria-label', [shortShaText, date.textContent, changes.getAttribute('aria-label'), author.textContent, commit?.subject || ''].filter(Boolean).join(' '));
+  control.replaceChildren(caret, shortSha, date, changes, author, description);
+  return control;
+}
+
+function gitDiffTreeItem(tree) {
+  return String(tree?.closest?.('.git-diff-panel')?.dataset?.layoutItem || '');
+}
+
+function gitDiffCommitShaFromRow(row) {
+  return String(row?.dataset?.gitDiffCommit || '');
+}
+
+const gitDiffCommitTreeInteractionController = createSharedTreeInteractionController({
+  name: 'git-diff-commits',
+  rowSelector: '.git-diff-commit-row[data-path]',
+  shouldIgnoreEvent: event => Boolean(event?.target?.closest?.('a[href]')),
+  rovingFocus: true,
+  applyCurrentClasses: false,
+  selectedIds: tree => {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    return new Set(state?.focusedSha ? [`/commit/${state.focusedSha}`] : []);
+  },
+  getLeadId: tree => {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    return state?.focusedSha ? `/commit/${state.focusedSha}` : '';
+  },
+  setLeadId(id, tree) {
+    const state = ensureGitDiffTabState(gitDiffTreeItem(tree));
+    if (!state) return;
+    state.focusedSha = String(id || '').replace(/^\/commit\//, '');
+    refreshLayoutUrlStateSoon();
+  },
+  isExpanded: row => row?.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded, tree) {
+    const item = gitDiffTreeItem(tree);
+    const sha = gitDiffCommitShaFromRow(row);
+    if (item && sha) void setGitDiffCommitExpanded(item, sha, expanded);
+  },
+  activateRow(row, _event, tree) {
+    const item = gitDiffTreeItem(tree);
+    const sha = gitDiffCommitShaFromRow(row);
+    if (item && sha) void toggleGitDiffCommit(item, sha);
+  },
+});
+
+function bindGitDiffCommitTree(tree) {
+  bindScopedOnce(tree, 'git-diff-commit-tree', scope => {
+    scope.ownEvent('click', tree, 'click', event => gitDiffCommitTreeInteractionController.handleClick(event, tree));
+    scope.ownEvent('keydown', tree, 'keydown', event => gitDiffCommitTreeInteractionController.handleKeydown(event, tree));
+    scope.ownEvent('focusin', tree, 'focusin', event => {
+      const row = event.target?.closest?.('.git-diff-commit-row[data-path]');
+      if (row && tree.contains(row)) gitDiffCommitTreeInteractionController.selectRow(tree, row, event);
+    });
+  });
+}
+
+function gitDiffCommitMessage(detail) {
+  const message = document.createElement('pre');
+  message.className = 'git-diff-commit-message';
+  message.textContent = String(detail?.message || '');
+  return message;
+}
+
+function gitDiffCommitFilesTree(detail) {
+  const repo = normalizeDirectoryPath(detail?.repo || '');
+  const files = (Array.isArray(detail?.files) ? detail.files : []).map(file => ({
+    ...file,
+    path: String(file?.path || ''),
+    old_path: String(file?.old_path || ''),
+    abs_path: normalizeDirectoryPath(`${repo}/${String(file?.path || '')}`),
+    repo,
+    mtime: Number(detail?.authored_at || 0),
+    missing: false,
+  }));
+  return buildSessionFileTree(repo, files);
+}
+
+function gitDiffHistoricalFileItem(detail, file) {
+  const path = normalizeDirectoryPath(file?.abs_path || `${detail?.repo || ''}/${file?.path || ''}`);
+  return historicalFileEditorItemFor(path, detail?.from_ref || '', detail?.to_ref || '');
+}
+
+function gitDiffHistoricalComparisonKind(detail) {
+  const parents = Array.isArray(detail?.parents) ? detail.parents : [];
+  if (!parents.length) return 'root-empty-tree';
+  return parents.length > 1 ? 'merge-first-parent' : 'parent';
+}
+
+async function openGitDiffHistoricalFile(detail, file, options = {}) {
+  const item = gitDiffHistoricalFileItem(detail, file);
+  const identity = historicalFileEditorIdentity(item);
+  if (!identity) return null;
+  return openHistoricalFileInEditor(identity.path, identity.fromRef, identity.toRef, {
+    item,
+    repo: detail.repo,
+    returnToItem: options.returnToItem,
+    historicalComparisonKind: gitDiffHistoricalComparisonKind(detail),
+    userInitiated: options.userInitiated !== false,
+  });
+}
+
+function gitDiffDetailCollapsedDirectories(state, sha) {
+  let collapsed = state.detailCollapsedDirectories.get(sha);
+  if (!collapsed) {
+    collapsed = new Set();
+    state.detailCollapsedDirectories.set(sha, collapsed);
+  }
+  return collapsed;
+}
+
+function bindGitDiffFileTreeRow(row, rowState, item, sha, detail) {
+  row.dataset.gitDiffCommitSha = sha;
+  row.dataset.gitDiffCommitPath = rowState.fullPath;
+  row.dataset.gitDiffItem = item;
+  row.dataset.gitDiffDetailRepo = String(detail?.repo || '');
+}
+
+function gitDiffFileTreeContext(tree) {
+  const item = gitDiffTreeItem(tree);
+  const sha = String(tree?.dataset?.gitDiffCommitSha || '');
+  const state = ensureGitDiffTabState(item);
+  return {item, sha, state, detail: state?.details?.get(sha) || null};
+}
+
+const gitDiffFileTreeInteractionController = createSharedTreeInteractionController({
+  name: 'git-diff-files',
+  rowSelector: '.file-tree-row[data-path]',
+  rovingFocus: true,
+  applyCurrentClasses: false,
+  selectedIds: tree => {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    const path = state?.focusedFilePaths?.get(sha) || '';
+    return new Set(path ? [path] : []);
+  },
+  getLeadId: tree => {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    return state?.focusedFilePaths?.get(sha) || '';
+  },
+  setLeadId(id, tree) {
+    const {state, sha} = gitDiffFileTreeContext(tree);
+    if (!state || !sha) return;
+    state.focusedFilePaths.set(sha, String(id || ''));
+    refreshLayoutUrlStateSoon();
+  },
+  isExpanded: row => row?.dataset?.kind === 'dir' && row.getAttribute?.('aria-expanded') === 'true',
+  setExpanded(row, expanded, tree) {
+    const {item, sha, state} = gitDiffFileTreeContext(tree);
+    if (!item || !sha || !state || row?.dataset?.kind !== 'dir') return;
+    const collapsed = gitDiffDetailCollapsedDirectories(state, sha);
+    if (expanded) collapsed.delete(row.dataset.path);
+    else collapsed.add(row.dataset.path);
+    refreshLayoutUrlStateSoon();
+    renderGitDiffPanel(item);
+  },
+  activateRow(row, _event, tree) {
+    const context = gitDiffFileTreeContext(tree);
+    if (row?.dataset?.kind === 'dir') {
+      gitDiffFileTreeInteractionController.setExpanded(tree, row, !gitDiffFileTreeInteractionController.isExpanded(row, tree));
+      return;
+    }
+    const file = context.detail ? gitDiffCommitFilesTree(context.detail).sessionFilesMap.get(row?.dataset?.path || '') : null;
+    if (file) void openGitDiffHistoricalFile(context.detail, file, {returnToItem: context.item});
+  },
+});
+
+function bindGitDiffFileTree(tree) {
+  bindScopedOnce(tree, 'git-diff-file-tree', scope => {
+    scope.ownEvent('click', tree, 'click', event => gitDiffFileTreeInteractionController.handleClick(event, tree));
+    scope.ownEvent('keydown', tree, 'keydown', event => gitDiffFileTreeInteractionController.handleKeydown(event, tree));
+    scope.ownEvent('focusin', tree, 'focusin', event => {
+      const row = event.target?.closest?.('.file-tree-row[data-path]');
+      if (row && tree.contains(row)) gitDiffFileTreeInteractionController.selectRow(tree, row, event);
+    });
+  });
+}
+
+function gitDiffStatusNode(className, text, role = '') {
+  const node = document.createElement('div');
+  node.className = className;
+  node.textContent = String(text || '');
+  if (role) node.setAttribute('role', role);
+  return node;
+}
+
+function renderGitDiffCommitDetail(item, sha, detailNode) {
+  const state = ensureGitDiffTabState(item);
+  const detail = state.details.get(sha);
+  const error = state.detailErrors.get(sha);
+  const existingTree = detailNode.querySelector?.(':scope > .git-diff-file-tree');
+  const restoreFileFocus = Boolean(existingTree?.contains?.(document.activeElement));
+  detailNode.className = 'git-diff-commit-detail';
+  detailNode.dataset.gitDiffCommitDetail = sha;
+  detailNode.setAttribute('role', 'group');
+  if (!detail) {
+    detailNode.replaceChildren(gitDiffStatusNode(
+      error ? 'git-diff-state git-diff-state-error' : 'git-diff-state git-diff-state-loading',
+      error ? userMessageText(error, t('common.requestFailed')) : t('common.loading'),
+      error ? 'alert' : 'status',
+    ));
+    return detailNode;
+  }
+  const nodes = [];
+  const refs = gitDiffStatusNode('git-diff-commit-refs', `${t('diff.ref.from')} ${String(detail.from_ref).slice(0, 9)} → ${t('diff.ref.to')} ${String(detail.to_ref).slice(0, 9)}`);
+  if (detail.parents.length > 1) refs.textContent += ` · ${t('gitDiff.firstParent')}`;
+  nodes.push(refs, gitDiffCommitMessage(detail));
+  if (detail.message_truncated === true) nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.messageTruncated'), 'status'));
+  const model = gitDiffCommitFilesTree(detail);
+  const tree = existingTree || document.createElement('div');
+  tree.className = 'git-diff-file-tree file-tree';
+  tree.dataset.gitDiffCommitSha = sha;
+  tree.setAttribute('role', 'tree');
+  tree.setAttribute('aria-label', t('gitDiff.changedFiles'));
+  renderTreeChildren(tree, normalizeDirectoryPath(detail.repo), model.entries, 0, {
+    entriesByDir: model.entriesByDir,
+    sessionFilesMap: model.sessionFilesMap,
+    directoryStatusCounts: model.directoryStatusCounts,
+    differMode: true,
+    compact: true,
+    repoForDiffer: normalizeDirectoryPath(detail.repo),
+    view: 'differ',
+    treeSortMode: 'az',
+    includeHidden: true,
+    collapsedSet: gitDiffDetailCollapsedDirectories(state, sha),
+    rowBinding: (row, rowState) => bindGitDiffFileTreeRow(row, rowState, item, sha, detail),
+  });
+  bindGitDiffFileTree(tree);
+  nodes.push(tree);
+  if (detail.files_truncated === true) nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.filesTruncated'), 'status'));
+  detailNode.replaceChildren(...nodes);
+  gitDiffFileTreeInteractionController.applyState(tree, {focusLead: restoreFileFocus});
+  return detailNode;
+}
+
+function renderGitDiffCommitList(item, list, state) {
+  const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
+  const existing = new Map(Array.from(list.children || []).map(group => [group.dataset?.gitDiffCommitGroup || '', group]));
+  const groups = [];
+  for (const commit of state.commits) {
+    const sha = String(commit?.sha || '');
+    if (!sha) continue;
+    const group = existing.get(sha) || document.createElement('section');
+    group.className = 'git-diff-commit';
+    group.dataset.gitDiffCommitGroup = sha;
+    group.setAttribute('role', 'none');
+    let row = group.querySelector?.(':scope > .git-diff-commit-row');
+    row = gitDiffCommitRow(item, commit, row);
+    const nodes = [row];
+    if (state.expanded.has(sha)) {
+      const detail = group.querySelector?.(':scope > .git-diff-commit-detail') || document.createElement('div');
+      nodes.push(renderGitDiffCommitDetail(item, sha, detail));
+    }
+    group.replaceChildren(...nodes);
+    groups.push(group);
+  }
+  reconcileChildNodes(list, groups);
+  list.setAttribute('role', 'tree');
+  bindGitDiffCommitTree(list);
+  gitDiffCommitTreeInteractionController.applyState(list, {focusLead: restoreCommitFocus});
+}
+
+function createGitDiffPanel(item) {
+  const panel = document.createElement('section');
+  panel.className = 'git-diff-panel';
+  panel.dataset.layoutItem = item;
+  panel.setAttribute('aria-label', gitDiffTabLabel(item));
+  const toolbar = document.createElement('header');
+  toolbar.className = 'git-diff-toolbar';
+  const heading = gitDiffTextNode('git-diff-heading', t('contextmenu.showDiff'));
+  const path = gitDiffTextNode('git-diff-path');
+  const refresh = makeButton({className: 'git-diff-refresh', label: t('common.refresh'), ariaLabel: t('common.refresh'), onClick: () => void refreshGitDiffHistory(item, {refresh: true})});
+  toolbar.append(heading, path, refresh);
+  const meta = document.createElement('div');
+  meta.className = 'git-diff-meta';
+  const body = document.createElement('div');
+  body.className = 'git-diff-panel-body';
+  body.setAttribute('aria-label', gitDiffTabLabel(item));
+  panel.append(toolbar, meta, body);
+  ensureGitDiffTabState(item);
+  return panel;
+}
+
+function renderGitDiffPanel(item, options = {}) {
+  const panel = panelNodes.get(item) || options.panel || null;
+  const state = ensureGitDiffTabState(item);
+  if (!panel || !state) return state;
+  panel.setAttribute('aria-label', gitDiffTabLabel(item));
+  const path = panel.querySelector?.('.git-diff-path');
+  if (path) {
+    path.textContent = compactHomePath(state.path);
+    path.title = state.path;
+  }
+  const refresh = panel.querySelector?.('.git-diff-refresh');
+  if (refresh) {
+    refresh.textContent = t('common.refresh');
+    refresh.setAttribute('aria-label', t('common.refresh'));
+    refresh.disabled = state.loading === true;
+  }
+  const meta = panel.querySelector?.('.git-diff-meta');
+  if (meta) {
+    const scope = state.relativePath ? state.relativePath : t('gitDiff.repositoryRoot');
+    meta.textContent = `${t('gitDiff.scope', {scope})} · ${t('gitDiff.newestCommits', {count: state.commits.length || gitDiffHistoryPageSize})}`;
+  }
+  const body = panel.querySelector?.('.git-diff-panel-body');
+  if (!body) return state;
+  body.setAttribute('aria-label', gitDiffTabLabel(item));
+  const list = body.querySelector?.(':scope > .git-diff-commits') || document.createElement('div');
+  const restoreCommitFocus = Boolean(list.contains?.(document.activeElement));
+  list.className = 'git-diff-commits';
+  renderGitDiffCommitList(item, list, state);
+  const nodes = [];
+  if (state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-loading', t('common.loading'), 'status'));
+  if (state.error) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-error', userMessageText(state.error, t('common.requestFailed')), 'alert'));
+  if (state.commits.length) nodes.push(list);
+  else if (state.loaded && !state.loading) nodes.push(gitDiffStatusNode('git-diff-state git-diff-state-empty', t('gitDiff.empty'), 'status'));
+  if (state.nextCursor) {
+    nodes.push(makeButton({
+      className: 'git-diff-load-older',
+      label: state.loadingOlder ? t('common.loading') : t('gitDiff.loadOlder'),
+      disabled: state.loadingOlder,
+      onClick: () => void loadOlderGitDiffHistory(item),
+    }));
+  } else if (state.truncated) {
+    nodes.push(gitDiffStatusNode('git-diff-truncated', t('gitDiff.historyTruncated'), 'status'));
+  }
+  body.replaceChildren(...nodes);
+  if (restoreCommitFocus && body.contains(list)) gitDiffCommitTreeInteractionController.applyState(list, {focusLead: true});
+  if (!state.loadAttempted) void refreshGitDiffHistory(item);
+  return state;
+}
+
+function relocalizeGitDiffPanel(item, panel) {
+  panel?.setAttribute?.('aria-label', gitDiffTabLabel(item));
+  const heading = panel?.querySelector?.('.git-diff-heading');
+  if (heading) heading.textContent = t('contextmenu.showDiff');
+  renderGitDiffPanel(item, {panel});
+}
+
+function gitDiffLayoutOid(value) {
+  const oid = String(value || '').trim();
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(oid) ? oid : '';
+}
+
+function layoutUrlGitDiffStateSnapshot() {
+  const result = [];
+  for (const item of paneItems(layoutSlots)) {
+    if (!gitDiffItemPath(item) || result.some(entry => entry.item === item)) continue;
+    const state = gitDiffTabState.get(item);
+    if (!state?.head || !state.snapshotCursor) continue;
+    result.push({
+      item,
+      head: state.head,
+      snapshotCursor: state.snapshotCursor,
+      expanded: Array.from(state.expanded).slice(0, gitDiffHistoryPageSize),
+      focusedSha: state.focusedSha || '',
+      collapsed: Array.from(state.detailCollapsedDirectories, ([sha, paths]) => [sha, Array.from(paths).slice(0, 500)]).slice(0, gitDiffHistoryPageSize),
+      focusedFiles: Array.from(state.focusedFilePaths).slice(0, gitDiffHistoryPageSize),
+    });
+    if (result.length >= 32) break;
+  }
+  return result;
+}
+
+function applyLayoutUrlGitDiffState(entries) {
+  if (!Array.isArray(entries)) return 0;
+  let applied = 0;
+  for (const entry of entries.slice(0, 32)) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = String(entry.item || '');
+    const head = gitDiffLayoutOid(entry.head);
+    const snapshotCursor = String(entry.snapshotCursor || '').slice(0, 4096);
+    if (!gitDiffItemPath(item) || !head || !snapshotCursor) continue;
+    const state = ensureGitDiffTabState(item);
+    state.historyController?.abort?.();
+    state.historyGuard.invalidate();
+    invalidateGitDiffDetailRequests(state);
+    state.head = head;
+    state.snapshotCursor = snapshotCursor;
+    state.commits = [];
+    state.nextCursor = '';
+    state.loaded = false;
+    state.loadAttempted = false;
+    state.error = null;
+    state.expanded = new Set((Array.isArray(entry.expanded) ? entry.expanded : []).map(gitDiffLayoutOid).filter(Boolean).slice(0, gitDiffHistoryPageSize));
+    state.focusedSha = gitDiffLayoutOid(entry.focusedSha);
+    state.details.clear();
+    state.detailErrors.clear();
+    state.detailCollapsedDirectories = new Map((Array.isArray(entry.collapsed) ? entry.collapsed : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+      const sha = gitDiffLayoutOid(pair?.[0]);
+      const paths = Array.isArray(pair?.[1]) ? pair[1].map(path => normalizeDirectoryPath(String(path || ''))).filter(Boolean).slice(0, 500) : [];
+      return sha ? [[sha, new Set(paths)]] : [];
+    }));
+    state.focusedFilePaths = new Map((Array.isArray(entry.focusedFiles) ? entry.focusedFiles : []).slice(0, gitDiffHistoryPageSize).flatMap(pair => {
+      const sha = gitDiffLayoutOid(pair?.[0]);
+      const path = normalizeDirectoryPath(String(pair?.[1] || ''));
+      return sha && path ? [[sha, path]] : [];
+    }));
+    applied += 1;
+  }
+  return applied;
+}
+
+function openGitDiffTab(path, options = {}) {
+  const item = resolveLayoutItem(options.item || gitDiffItemFor(path));
+  if (!item) return null;
+  ensureGitDiffTabState(item, {path: gitDiffItemPath(item)});
+  recordEditorNav(item);
+  void Promise.resolve(selectSession(item, {userInitiated: options.userInitiated === true})).then(() => renderGitDiffPanel(item));
+  return item;
+}
 const changesOutsideRepoKey = 'Outside repo';
 
 function sessionForFileRepo(path) {
@@ -62095,25 +63569,43 @@ function sessionFilesRefsQuery() {
   return Object.keys(map).length ? `&refs=${encodeURIComponent(JSON.stringify(map))}` : '';
 }
 
-function sessionFilesRequestQueryString() {
-  return `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
+function sessionFilesRequestQueryString(destination = 'differ') {
+  return destination === 'finder'
+    ? 'from=HEAD&to=current'
+    : `${diffRefQueryString()}${sessionFilesRefsQuery()}`;
 }
 
-function clientSessionFilesWatchRequests() {
-  const params = new URLSearchParams(sessionFilesRequestQueryString());
+function sessionFilesRequestForDestination(destination, sessionOverride = '') {
+  const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
   let repoRefs = null;
   const refs = params.get('refs');
   if (refs) {
     const parsed = safeJsonParse(refs, null);
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) repoRefs = parsed;
   }
-  return [{
-    session: fileExplorerSessionFilesTargetSession(),
+  return {
+    session: sessionOverride || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession()),
     hours: 24,
     from_ref: params.get('from') || 'HEAD',
     to_ref: params.get('to') || 'current',
     repo_refs: repoRefs,
-  }];
+  };
+}
+
+function clientSessionFilesWatchRequests() {
+  const candidates = [];
+  if (fileExplorerTreePaneIsVisible()) candidates.push(sessionFilesRequestForDestination('finder'));
+  if (fileExplorerSessionFilesPaneIsVisible()) candidates.push(sessionFilesRequestForDestination('differ'));
+  const requests = [];
+  const seen = new Set();
+  for (const request of candidates) {
+    if (!request.session) continue;
+    const key = sessionFilesRequestKey(request, request.session);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    requests.push(request);
+  }
+  return requests;
 }
 
 function normalizedSessionFilesRepoRefs(repoRefs) {
@@ -62148,14 +63640,24 @@ function sessionFilesRequestKey(request = {}, sessionFallback = '') {
   return JSON.stringify(normalized);
 }
 
-function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+function sessionFilesRequestMatchesDestination(request = {}, session = '', destination = 'differ') {
   if (!request || typeof request !== 'object') return false;
-  const current = clientSessionFilesWatchRequests()[0] || {};
+  if (destination === 'finder' && !fileExplorerTreePaneIsVisible()) return false;
+  if (destination === 'differ' && !fileExplorerSessionFilesPaneIsVisible()) return false;
+  const current = sessionFilesRequestForDestination(destination);
   return sessionFilesRequestKey(request, session) === sessionFilesRequestKey(current, session);
 }
 
-function sessionFilesCacheKey(session) {
-  return `${String(session || '')}\x1f${sessionFilesRequestQueryString()}`;
+function sessionFilesPushRequestMatchesCurrent(request = {}, session = '') {
+  return ['finder', 'differ'].some(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesDestinationsForRequest(request = {}, session = '') {
+  return ['finder', 'differ'].filter(destination => sessionFilesRequestMatchesDestination(request, session, destination));
+}
+
+function sessionFilesCacheKey(session, destination = 'differ') {
+  return `${String(session || '')}\x1f${sessionFilesRequestQueryString(destination)}`;
 }
 
 function sessionFilesPayloadHasDifferPath(payload, path) {
@@ -62714,6 +64216,19 @@ function diffRefControlsHtml(options = {}) {
   </span>`;
 }
 
+function historicalDiffRefControlsHtml(state) {
+  const fromRef = String(state?.diffPinnedFromRef || state?.diffFromRef || '');
+  const toRef = String(state?.diffPinnedToRef || state?.diffToRef || '');
+  const comparison = state?.historicalComparisonKind === 'merge-first-parent'
+    ? `<span class="diff-ref-historical-note">${esc(t('gitDiff.firstParent'))}</span>`
+    : '';
+  return `<span class="diff-ref-controls compact historical" data-diff-ref-controls data-diff-ref-historical>
+    <span class="diff-ref-control">${esc(t('diff.ref.from'))} <span class="diff-ref-static-value" title="${esc(fromRef)}">${esc(fromRef.slice(0, 9))}</span></span>
+    <span class="diff-ref-control">${esc(t('diff.ref.to'))} <span class="diff-ref-static-value" title="${esc(toRef)}">${esc(toRef.slice(0, 9))}</span></span>
+    ${comparison}
+  </span>`;
+}
+
 function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   const isDefault = refs.from === 'HEAD' && refs.to === 'current';
   const resetHidden = isDefault ? ' hidden' : '';
@@ -62722,8 +64237,12 @@ function diffRefResetButtonHtml(refs = repoDiffRefs(''), extraClass = '') {
   return `<button type="button" class="${className}" data-diff-ref-reset${resetHidden} title="${label}" aria-label="${label}">${esc(t('common.reset'))}</button>`;
 }
 
-function invalidateSessionFilesCaches() {
-  fileExplorerSessionFilesCache.clear();
+function sessionFilesCacheForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesCache : fileExplorerSessionFilesCache;
+}
+
+function invalidateSessionFilesCaches(destination = 'differ') {
+  sessionFilesCacheForDestination(destination).clear();
 }
 
 // C6: set the FROM/TO for ONE repo (or the global default when repo is empty), then refresh. The diff-ref
@@ -62743,7 +64262,7 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     diffRefTo = nextTo;
   }
   writeStoredDiffRefs();
-  invalidateSessionFilesCaches();
+  invalidateSessionFilesCaches('differ');
   for (const state of fileState.values()) {
     if (!state || state.kind !== 'text') continue;
     state.diffLoaded = false;
@@ -62752,8 +64271,8 @@ function setRepoDiffRefs(repo, fromRef, toRef, options = {}) {
     state.diffPinnedFromRef = '';
     state.diffPinnedToRef = '';
   }
-  renderFileExplorerChangesPanels({force: true});
-  fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
+  renderFileExplorerChangesPanels({force: true, view: 'differ'});
+  fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
   for (const path of fileState.keys()) renderOpenFilePath(path);
   return true;
 }
@@ -62798,7 +64317,7 @@ function fileExplorerFinderTargetSession() {
     fileExplorerFinderSelectedSession = selected;
     return selected;
   }
-  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  const payloadSession = String(fileExplorerFinderSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
   return sessions[0] || '';
 }
@@ -62814,8 +64333,9 @@ function fileExplorerSessionFilesTargetSession() {
   return sessions[0] || '';
 }
 
-function emptySessionFilesPayload(session = '', loaded = true) {
-  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: diffRefFrom, to_ref: diffRefTo, loaded};
+function emptySessionFilesPayload(session = '', loaded = true, destination = 'differ') {
+  const refs = destination === 'finder' ? {from: 'HEAD', to: 'current'} : {from: diffRefFrom, to: diffRefTo};
+  return {session, files: [], repos: [], refs_by_repo: {}, errors: [], from_ref: refs.from, to_ref: refs.to, loaded};
 }
 
 function normalizedSessionFilesPayload(payload = {}, defaults = {}) {
@@ -62873,9 +64393,9 @@ function sessionFilesPanelIsLoading(payload, files = null) {
   return !sessionFilesPayloadHasVisibleDifferResult(payload, files);
 }
 
-function sessionFilesPayloadShouldPreserveCurrent(nextPayload) {
+function sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination = 'differ') {
   const session = String(nextPayload?.session || '');
-  const current = sessionFilesPayloadForDestination('finder');
+  const current = sessionFilesPayloadForDestination(destination);
   if (!session) return false;
   if (!sessionFilesPayloadIsLoadedForSession(current, session)) return false;
   if (sessionFilesPayloadIsRefreshingElsewhere(nextPayload)) return sessionFilesRepoRoots(current).length > 0;
@@ -62895,22 +64415,22 @@ function switchFileExplorerChangesSession(session) {
     scheduleTabberTreeLayoutStateSync();
     return;
   }
-  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session));
+  const cached = fileExplorerSessionFilesCache.get(sessionFilesCacheKey(session, 'differ'));
   const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
   if (cachedPayloadIsLoaded) {
-    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesPayloadForDestination('differ', cached.payload);
     fileExplorerSessionFilesState.signature = cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload);
   } else {
-    const pendingPayload = emptySessionFilesPayload(session, false);
-    setSessionFilesPayloadForDestination('finder', pendingPayload);
+    const pendingPayload = emptySessionFilesPayload(session, false, 'differ');
+    setSessionFilesPayloadForDestination('differ', pendingPayload);
     fileExplorerSessionFilesState.signature = sessionFilesPayloadSignatureForPayload(pendingPayload);
   }
-  setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
+  setSessionFilesLoadingForDestination('differ', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
   // A cached session switch already has visible last-known-good rows. Let the server decide
   // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
   // that parent and submit a full session-files job for every tab switch.
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
+  fetchSessionFiles({destination: 'differ', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
 }
 
 function switchFileExplorerFinderSession(session) {
@@ -62919,6 +64439,13 @@ function switchFileExplorerFinderSession(session) {
   fileExplorerFinderSelectedSession = session;
   rememberFileExplorerExplicitSyncSession(session);
   scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  const cached = fileExplorerFinderSessionFilesCache.get(sessionFilesCacheKey(session, 'finder'));
+  const cachedPayloadIsLoaded = sessionFilesPayloadIsLoadedForSession(cached?.payload, session);
+  if (cachedPayloadIsLoaded) {
+    setSessionFilesPayloadForDestination('finder', cached.payload);
+    setSessionFilesSignatureForDestination('finder', cached.signature || sessionFilesPayloadSignatureForPayload(cached.payload));
+  }
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   return true;
 }
 
@@ -62940,7 +64467,11 @@ function noteFileExplorerChangesSessionInteraction(session) {
 }
 
 function sessionFilesPayloadForDestination(destination) {
-  return fileExplorerSessionFilesState.payload;
+  return sessionFilesStateForDestination(destination).payload;
+}
+
+function sessionFilesStateForDestination(destination = 'differ') {
+  return destination === 'finder' ? fileExplorerFinderSessionFilesState : fileExplorerSessionFilesState;
 }
 
 const sessionFilesProducerDeadlineMs = 5000;
@@ -62961,18 +64492,18 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(nextPayload.session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(nextPayload.session, destination), {payload: nextPayload, signature});
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }, sessionFilesProducerDeadlineMs);
 }
 
-function retireSessionFilesRequest(reason = 'session-files request superseded') {
-  fileExplorerSessionFilesState.guard.invalidate();
-  const controller = fileExplorerSessionFilesState.abortController;
-  fileExplorerSessionFilesState.abortController = null;
+function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+  const state = sessionFilesStateForDestination(destination);
+  state.guard.invalidate();
+  const controller = state.abortController;
+  state.abortController = null;
   if (!controller || controller.signal.aborted) return;
   const error = new Error(reason);
   error.name = 'AbortError';
@@ -62980,8 +64511,9 @@ function retireSessionFilesRequest(reason = 'session-files request superseded') 
 }
 
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
-  if (options.invalidateRequest !== false) retireSessionFilesRequest(options.retirementReason);
-  fileExplorerSessionFilesState.payload = payload;
+  const state = sessionFilesStateForDestination(destination);
+  if (options.invalidateRequest !== false) retireSessionFilesRequest(destination, options.retirementReason);
+  state.payload = payload;
   scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
   if (
@@ -63039,19 +64571,19 @@ function sessionFilesPayloadSignatureForPayload(payload) {
 }
 
 function sessionFilesSignatureForDestination(destination) {
-  return fileExplorerSessionFilesState.signature;
+  return sessionFilesStateForDestination(destination).signature;
 }
 
 function setSessionFilesSignatureForDestination(destination, signature) {
-  fileExplorerSessionFilesState.signature = signature;
+  sessionFilesStateForDestination(destination).signature = signature;
 }
 
 function sessionFilesLoadingForDestination(destination) {
-  return fileExplorerSessionFilesState.loading;
+  return sessionFilesStateForDestination(destination).loading;
 }
 
 function setSessionFilesLoadingForDestination(destination, loading) {
-  fileExplorerSessionFilesState.loading = loading;
+  sessionFilesStateForDestination(destination).loading = loading;
 }
 
 function sessionFilesRenderOptions(options = {}) {
@@ -63064,26 +64596,33 @@ function sessionFilesPerfDetails(payload = {}, extra = {}) {
 }
 
 function renderSessionFilesDestination(destination, options = {}) {
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRender', 0, {skipped: 1});
     return;
   }
-  renderFileExplorerChangesPanels(options);
+  if (destination === 'finder') {
+    updateFileTreeGitStatusRows();
+  } else {
+    renderFileExplorerChangesPanels({...options, view: 'differ'});
+  }
 }
 
 async function fetchSessionFiles(options = {}) {
-  const destination = 'finder';
+  const destination = options.destination === 'finder' ? 'finder' : 'differ';
   const forceRefresh = options.force === true;
   const backgroundRefresh = options.background === true;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
+  const visible = destination === 'finder' ? fileExplorerTreePaneIsVisible() : fileExplorerSessionFilesPaneIsVisible();
+  if (!visible) {
     recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
     return false;
   }
   if (sessionFilesLoadingForDestination(destination) && !forceRefresh) return;
-  const session = options.session || fileExplorerSessionFilesTargetSession();
+  const session = options.session || (destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession());
+  const state = sessionFilesStateForDestination(destination);
   let shouldRender = options.silent !== true;
   if (!session) {
-    const emptyPayload = emptySessionFilesPayload('', true);
+    const emptyPayload = emptySessionFilesPayload('', true, destination);
     const signature = sessionFilesPayloadSignatureForPayload(emptyPayload);
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, emptyPayload);
@@ -63092,10 +64631,10 @@ async function fetchSessionFiles(options = {}) {
     if (shouldRender) renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
     return;
   }
-  retireSessionFilesRequest('session-files request replaced');
-  const requestIsCurrent = fileExplorerSessionFilesState.guard.begin();
+  retireSessionFilesRequest(destination, 'session-files request replaced');
+  const requestIsCurrent = state.guard.begin();
   const requestController = typeof AbortController === 'function' ? new AbortController() : null;
-  fileExplorerSessionFilesState.abortController = requestController;
+  state.abortController = requestController;
   if (!backgroundRefresh) setSessionFilesLoadingForDestination(destination, true);
   if (!options.silent) statusEl.textContent = t('status.changedFilesLoading');
   if (!options.silent) {
@@ -63103,9 +64642,8 @@ async function fetchSessionFiles(options = {}) {
     renderPaneTabStrips();
   }
   try {
-    // C6: Differ follows selected refs; Finder file mode must stay tied to the current worktree so it
-    // does not paint historical diff badges after the repo is clean.
-    const params = new URLSearchParams(sessionFilesRequestQueryString());
+    const request = sessionFilesRequestForDestination(destination, session);
+    const params = new URLSearchParams(sessionFilesRequestQueryString(destination));
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
@@ -63128,21 +64666,25 @@ async function fetchSessionFiles(options = {}) {
         method: 'GET',
       });
     }
-    const nextPayload = normalizedSessionFilesPayload(payload, {session});
+    const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
-    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return;
+    if (backgroundRefresh && sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
     setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
     setSessionFilesSignatureForDestination(destination, signature);
-    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+    sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
+    for (const mirrorDestination of sessionFilesDestinationsForRequest(request, session)) {
+      if (mirrorDestination === destination) continue;
+      applySessionFilesPayloadToDestination(mirrorDestination, nextPayload, request, session);
+    }
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
     if (isApiPendingResponse(err)) {
       const nextPayload = {
-        ...emptySessionFilesPayload(session, false),
+        ...emptySessionFilesPayload(session, false, destination),
         refreshing_elsewhere: true,
         pending_key: err.key,
         pending_epoch: err.epoch,
@@ -63157,7 +64699,8 @@ async function fetchSessionFiles(options = {}) {
       return;
     }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
-    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
+    const failedRefs = sessionFilesRequestForDestination(destination, session);
+    const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: failedRefs.from_ref, to_ref: failedRefs.to_ref, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
     shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
@@ -63167,61 +64710,79 @@ async function fetchSessionFiles(options = {}) {
     if (!options.silent) statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(err?.payload, String(err))}));
   } finally {
     const current = requestIsCurrent();
-    if (fileExplorerSessionFilesState.abortController === requestController) {
-      fileExplorerSessionFilesState.abortController = null;
+    if (state.abortController === requestController) {
+      state.abortController = null;
     }
     const wasLoading = current && sessionFilesLoadingForDestination(destination);
     if (current && !backgroundRefresh) setSessionFilesLoadingForDestination(destination, false);
-    if (current && (shouldRender || wasLoading) && fileExplorerSessionFilesPaneIsVisible()) {
+    if (current && (shouldRender || wasLoading) && visible) {
       renderSessionFilesDestination(destination, sessionFilesRenderOptions(options));
-      if (destination === 'finder') updateFileTreeGitStatusRows();
       renderPaneTabStrips();
       renderSessionButtons();
     }
   }
 }
 
-function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
-  const destination = 'finder';
-  const session = payload.session || request.session || fileExplorerSessionFilesTargetSession();
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(request, session)) return false;
-  if (!fileExplorerSessionFilesPaneIsVisible()) {
-    if (sessionFilesLoadingForDestination(destination)) setSessionFilesLoadingForDestination(destination, false);
-    recordClientPerfCounter('sessionFilesRefresh', 0, {skipped: 1});
-    return false;
+async function refreshVisibleSessionFilesSurfaces(options = {}) {
+  const destinations = [];
+  if (fileExplorerTreePaneIsVisible()) destinations.push('finder');
+  if (fileExplorerSessionFilesPaneIsVisible()) destinations.push('differ');
+  const seen = new Set();
+  const requests = [];
+  for (const destination of destinations) {
+    const request = sessionFilesRequestForDestination(destination);
+    const key = sessionFilesRequestKey(request, request.session);
+    if (!request.session || seen.has(key)) continue;
+    seen.add(key);
+    requests.push(fetchSessionFiles({
+      destination,
+      session: request.session,
+      silent: options.silent !== false,
+      force: options.force === true,
+    }));
   }
+  await Promise.all(requests);
+}
+
+function applySessionFilesPayloadToDestination(destination, payload, request, session) {
   const nextPayload = normalizedSessionFilesPayload(payload, {session, from_ref: request.from_ref, to_ref: request.to_ref});
-  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload)) return false;
+  if (sessionFilesPayloadShouldPreserveCurrent(nextPayload, destination)) return false;
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
-  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (shouldRender) {
     renderSessionFilesDestination(destination, {force: true});
-    updateFileTreeGitStatusRows();
     renderPaneTabStrips();
     renderSessionButtons();
   }
   return true;
 }
 
-function applySessionFilesOperationFailure(result = {}, context = {}) {
-  const destination = 'finder';
-  const session = String(context.session || fileExplorerSessionFilesTargetSession() || '');
-  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
-  if (!sessionFilesPushRequestMatchesCurrent(context, session)) return false;
+function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
+  const session = String(payload.session || request.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(request, session);
+  if (!destinations.length) return false;
+  let applied = false;
+  for (const destination of destinations) {
+    applied = applySessionFilesPayloadToDestination(destination, payload, request, session) || applied;
+  }
+  if (applied && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  return applied;
+}
+
+function applySessionFilesOperationFailureToDestination(destination, result, context, session) {
   const error = result.error && typeof result.error === 'object' ? result.error : {};
   const issue = error.message && typeof error.message === 'object'
     ? {...error.message}
     : userMessageSnapshot(result, 'session-files request failed').user_message;
   const nextPayload = {
-    ...emptySessionFilesPayload(session, true),
+    ...emptySessionFilesPayload(session, true, destination),
     refreshing_elsewhere: false,
     errors: [issue],
     operation_error: error,
@@ -63230,11 +64791,21 @@ function applySessionFilesOperationFailure(result = {}, context = {}) {
   setSessionFilesLoadingForDestination(destination, false);
   setSessionFilesPayloadForDestination(destination, nextPayload);
   setSessionFilesSignatureForDestination(destination, signature);
-  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   renderSessionFilesDestination(destination, {force: true});
-  updateFileTreeGitStatusRows();
   renderPaneTabStrips();
   renderSessionButtons();
+  return true;
+}
+
+function applySessionFilesOperationFailure(result = {}, context = {}) {
+  const session = String(context.session || '');
+  if (!session) return false;
+  const destinations = sessionFilesDestinationsForRequest(context, session);
+  if (!destinations.length) return false;
+  for (const destination of destinations) {
+    applySessionFilesOperationFailureToDestination(destination, result, context, session);
+  }
   statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(result, 'session-files request failed')}));
   return true;
 }
@@ -63357,6 +64928,8 @@ function sessionFileDisplayTimeTextForEntry(entry, options = {}) {
 }
 
 function sessionFileDiffText(item) {
+  if (item?.binary === true) return [{kind: 'file-label', text: t('gitDiff.binary')}];
+  if (item?.counts_available === false) return [{kind: 'file-label', text: t('common.notAvailable')}];
   const addKind = item?.diff_tracked === false ? 'add-neutral' : 'add';
   return [
     Number.isFinite(Number(item?.added)) && Number(item.added) !== 0 ? {kind: addKind, text: `+${Number(item.added)}`} : null,
@@ -63731,7 +65304,15 @@ function buildSessionFileTree(repoPath, sessionFiles) {
       // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
       // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
       // file created and then removed is missing but still displays A.
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, deleted: status === 'D', changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
+      siblings.push({
+        name: fileName,
+        display_name: item.old_path ? `${item.old_path} → ${item.path}` : '',
+        kind: 'file',
+        mtime: item.mtime,
+        size: item.size,
+        deleted: status === 'D',
+        changedFileMissingTime: sessionFileDatePlaceholderNeeded(item),
+      });
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
@@ -64122,8 +65703,9 @@ function activeChangesControl(panel) {
 }
 
 async function openChangedFileInDiff(path, ownerSession = '', status = '', repo = '', options = {}) {
+  const existingItem = options.forceNewTab === true ? null : existingPrimaryEditorItemForPath(path);
   let item = options.item
-    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : reusableFileEditorDiffPreviewItem(path));
+    || (options.forceNewTab === true ? fileEditorCopyItemFor(path) : existingItem || reusableFileEditorDiffPreviewItem(path));
   const normalizedStatus = String(status || '').toUpperCase();
   const openDiffMode = options.openMode !== 'edit';
   if (openDiffMode) setFileEditorDiffExpandUnchangedForItem(path, item, false);
@@ -64316,10 +65898,10 @@ function bindChangesPanel(panel) {
     const refresh = event.target.closest('[data-session-files-refresh]');
     if (refresh && panel.contains(refresh)) {
       event.preventDefault();
-      const destination = refresh.closest('[data-file-explorer-changes]') ? 'finder' : 'changes';
+      const destination = fileExplorerViewForItem(panel.dataset.panelItem) === 'finder' ? 'finder' : 'differ';
       fetchSessionFiles({
         destination,
-        session: destination === 'finder' ? fileExplorerSessionFilesTargetSession() : sessionFilesTargetSession(),
+        session: destination === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession(),
       });
       return;
     }
@@ -64857,11 +66439,17 @@ function createFileExplorerPanel(item = finderItemId) {
   } else {
     renderFileExplorerChangesPanel(panel);
   }
-  if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+  if (view === 'finder' && !sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, fileExplorerFinderTargetSession())) {
     if (clientPushCanSupplyData()) {
       if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     } else {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true});
+      fetchSessionFiles({destination: 'finder', session: fileExplorerFinderTargetSession(), silent: true});
+    }
+  } else if (view === 'differ' && (!fileExplorerSessionFilesState.payload.loaded || fileExplorerSessionFilesState.payload.session !== fileExplorerSessionFilesTargetSession())) {
+    if (clientPushCanSupplyData()) {
+      if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+    } else {
+      fetchSessionFiles({destination: 'differ', session: fileExplorerSessionFilesTargetSession(), silent: true});
     }
   } else if (view === 'tabber') fetchTabberActivity();
   return panel;
@@ -64963,6 +66551,10 @@ function activateFileExplorerSurface(item) {
   if (!view || !panel) return false;
   if (view === 'finder') {
     refreshFileExplorerPanelTree(panel, {preserveExpanded: true, preserveScroll: true});
+    const session = fileExplorerFinderTargetSession();
+    if (!sessionFilesPayloadIsLoadedForSession(fileExplorerFinderSessionFilesState.payload, session)) {
+      fetchSessionFiles({destination: 'finder', session, silent: true});
+    }
     return true;
   }
   renderFileExplorerChangesPanel(panel, {force: true});
@@ -64972,7 +66564,7 @@ function activateFileExplorerSurface(item) {
   }
   const session = fileExplorerSessionFilesTargetSession();
   if (!sessionFilesPayloadIsLoadedForSession(fileExplorerSessionFilesState.payload, session)) {
-    fetchSessionFiles({destination: 'finder', session, silent: true});
+    fetchSessionFiles({destination: 'differ', session, silent: true});
   }
   return true;
 }
@@ -65015,8 +66607,8 @@ function bindFileExplorerChangesResizer(panel) {
 }
 
 function handleFileEditorContentChanged(panel, path, content, options = {}) {
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return;
+  const state = fileEditorPanelState(panel);
+  if (!state || state.kind !== 'text' || state.historical === true) return;
   state.content = String(content ?? '');
   const dirty = state.content !== state.original;
   const dirtyChanged = dirty !== state.dirty;
@@ -65048,7 +66640,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
 }
 
 async function enterFileEditorDiffMode(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.kind !== 'text') return;
   if (!fileStateHasRepo(path, state)) {
     setFileEditorViewMode(path, 'edit', item);
@@ -65060,10 +66652,10 @@ async function enterFileEditorDiffMode(path, panel, item) {
     renderFileEditorPanel(panel, item);
     return;
   }
-  const loadPromise = refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+  const loadPromise = refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
   renderFileEditorPanel(panel, item);
   await loadPromise;
-  const current = fileState.get(path);
+  const current = fileEditorStateForItem(path, item);
   if (!current || current.kind !== 'text' || panel.dataset.filePath !== path) return;
   if (fileStateHasRepo(path, current) && (openFileDiffAvailable(current) || fileStateHasUsefulGitHistory(current))) {
     setFileEditorViewMode(path, 'diff', item);
@@ -65365,7 +66957,10 @@ function createFileEditorPanel(item) {
   delegate(panel, 'pointerdown', 'button', event => event.stopPropagation());
   bindActionDispatcher(panel, {
     'editor-save': () => saveFileEditor(path, panel),
-    'editor-reload': () => reloadOpenFileFromDisk(path),
+    'editor-reload': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return false;
+      return reloadOpenFileFromDisk(path);
+    },
     'editor-upload': () => openFileUploadChooserForEditor(panel, path),
     'editor-mode': (_event, target) => {
       const mode = target?.dataset?.editorMode;
@@ -65384,7 +66979,7 @@ function createFileEditorPanel(item) {
     'editor-toggle-wrap': () => toggleEditorWrap(),
     'editor-find': async () => {
       await toggleEditorFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     },
     'editor-blame': (_event, target) => {
       if (target?.disabled) return;
@@ -65404,6 +66999,7 @@ function createFileEditorPanel(item) {
       toggleFileEditorDiffExpandUnchangedForItem(path, item);  // show all context vs collapse unchanged runs for this editor
     },
     'editor-popout-preview': () => {
+      if (fileEditorPanelState(panel)?.historical === true) return;
       if (openFilePreviewPopout(path, panel)) {
         setFileEditorViewMode(path, 'edit', item);
         renderFileEditorPanel(panel, item);
@@ -65477,14 +67073,14 @@ function createFileEditorPanel(item) {
     }
     if (event.target.closest('[data-preview-find-close]')) {
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     }
   });
   previewFindPanel?.addEventListener('keydown', event => {
     if (event.key === 'Escape') {
       event.preventDefault();
       closePreviewFind(panel);
-      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(path), panel);
+      updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileEditorPanelState(panel), panel);
     } else if (event.key === 'Enter') {
       event.preventDefault();
       const state = previewFindStateForHost(panel, true);
@@ -65765,9 +67361,17 @@ async function activateNavItem(item) {
     activatePaneTab(side, item);   // userInitiated defaults falsey → does not re-record
     return true;
   }
+  if (gitDiffItemPath(item)) {
+    return Boolean(openGitDiffTab(gitDiffItemPath(item), {item, userInitiated: false}));
+  }
   if (isFileEditorItem(item)) {
     const path = fileItemPath(item);
     if (path) {
+      const identity = historicalFileEditorIdentity(item);
+      if (identity) {
+        await openHistoricalFileInEditor(path, identity.fromRef, identity.toRef, {item, userInitiated: false});
+        return true;
+      }
       await openFileInEditor(path, basenameOf(path), {item});
       return true;
     }
@@ -66432,13 +68036,16 @@ function markdownTextWithTaskLineToggled(text, sourceLine, checked) {
 function updateMarkdownTaskFromPreview(container, input) {
   const path = container?.dataset?.mdPath || '';
   const sourceLine = Number(input?.dataset?.sourceLine || 0);
-  const state = fileState.get(path);
+  const panels = fileEditorPanelsForPath(path);
+  const sourcePanel = container.closest?.('.file-editor-panel') || panels.find(panel => fileEditorPanelState(panel)?.historical !== true) || null;
+  const state = sourcePanel ? fileEditorPanelState(sourcePanel) : fileState.get(path);
+  if (state?.historical === true) return false;
   if (readOnlyMode || !path || !sourceLine || !state || state.kind !== 'text') return false;
   const next = markdownTextWithTaskLineToggled(state.content, sourceLine, input.checked === true);
   if (next === null || next === state.content) return false;
-  const sourcePanel = container.closest?.('.file-editor-panel') || fileEditorPanelsForPath(path)[0] || null;
   handleFileEditorContentChanged(sourcePanel, path, next, {syntax: false});
-  for (const panel of fileEditorPanelsForPath(path)) {
+  for (const panel of panels) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     if (panel?._cmView) syncCodeMirrorDocument(panel._cmView, next, {path});
   }
   return true;
@@ -66453,9 +68060,10 @@ function bindMarkdownTaskCheckboxes(container, text, markdownPath) {
     input.dataset.sourceLine = String(task.line);
     input.classList.add('markdown-task-checkbox');
     input.checked = task.checked;
-    if (markdownPath && !readOnlyMode) {
-      input.disabled = false;
-      input.removeAttribute('disabled');
+    if (markdownPath) {
+      input.disabled = readOnlyMode || container._markdownReadOnly === true;
+      if (input.disabled) input.setAttribute('disabled', 'disabled');
+      else input.removeAttribute('disabled');
       input.setAttribute('aria-label', t('editor.toggleTaskLine', {line: task.line}));
     }
   });
@@ -66778,6 +68386,7 @@ function renderMarkdownPreviewInto(container, text, markdownPath, options = {}) 
     isCurrent: () => container._markdownPreviewGeneration === generation,
     previewContainer: container,
   });
+  container._markdownReadOnly = options.readOnly === true;
   container.replaceChildren(frag);
   applyMarkdownSourceLines(container, text);
   const mermaid = renderMarkdownMermaidBlocks(container, markdownPath, {
@@ -68415,14 +70024,14 @@ function mermaidPreviewStrategySignature({path, text, context}) {
   return JSON.stringify([path, text, typeof editorPreviewThemeState === 'function' ? editorPreviewThemeState() : '', context]);
 }
 
-function renderMarkdownPreviewStrategy({container, path, text, context, signature}) {
+function renderMarkdownPreviewStrategy({container, path, text, state, context, signature}) {
   const currentSignature = JSON.stringify([container._previewPath, container._previewText, container._previewDisplayMode, container._previewContext]);
   if (currentSignature === signature) return false;
   container._previewPath = path;
   container._previewText = text;
   container._previewDisplayMode = fileEditorPreviewDisplayMode;
   container._previewContext = context;
-  renderMarkdownPreviewInto(container, text, path, {context});
+  renderMarkdownPreviewInto(container, text, path, {context, readOnly: state?.historical === true});
   return true;
 }
 
@@ -68570,7 +70179,7 @@ function renderEditorPreviewPane(container, path, text, options = {}) {
   const scrollTop = container.scrollTop || 0;
   const scrollLeft = container.scrollLeft || 0;
   const scrollOwner = createPassiveDeferredElementScrollOwner(container);
-  const state = fileState.get(path) || null;
+  const state = options.state || fileState.get(path) || null;
   const renderer = previewRendererForPath(path, state);
   const previewContext = previewContextId(options.context || 'preview');
   for (const className of PREVIEW_SURFACE_CLASSES) container.classList.toggle(className, renderer.surfaceClasses.includes(className));
@@ -68907,7 +70516,7 @@ function closePanePopout(item) {
 
 function closePopoutsForLayoutItem(item) {
   let closed = closePanePopout(item);
-  if (isFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
+  if (isFileEditorItem(item) && !isHistoricalFileEditorItem(item) && typeof closeFilePreviewPopout === 'function') {
     closed = closeFilePreviewPopout(fileItemPath(item)) || closed;
   }
   return closed;
@@ -69291,7 +70900,7 @@ function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
 
 function syncFilePreviewPopoutsFromPanel(panel, source) {
   const path = fileEditorPanelPath(panel);
-  if (!path || !fileEditorSourceCanDrive(panel, source)) return false;
+  if (!path || fileEditorPanelState(panel)?.historical === true || !fileEditorSourceCanDrive(panel, source)) return false;
   let synced = false;
   for (const record of filePreviewPopoutsForPath(path)) {
     synced = syncFilePreviewPopoutFromPanel(path, record, panel, source) || synced;
@@ -69312,6 +70921,7 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
   }
   let synced = false;
   for (const panel of fileEditorPanelsForPath(path)) {
+    if (fileEditorPanelState(panel)?.historical === true) continue;
     setFileEditorScrollSyncGuard(panel);
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
@@ -70126,6 +71736,7 @@ function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
 }
 
 function openFilePreviewPopout(path, panel = null) {
+  if (panel && fileEditorPanelState(panel)?.historical === true) return false;
   if (!path || !editorPreviewModeAvailable(path)) return false;
   const initialState = fileState.get(path);
   if (initialState?.kind === 'text') syncOpenFileContentFromPanels(path, panel);
@@ -70313,7 +71924,7 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   if (!view) return;
   const next = String(text || '');
   if (view.state.doc.toString() === next) return;
-  if (options.cleanOnly && fileState.get(options.path)?.dirty) return;
+  if (options.cleanOnly && (options.state || fileState.get(options.path))?.dirty) return;
   const selection = view.state.selection;
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
@@ -70998,15 +72609,17 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     if (panel._cmGeneration !== generation) return null;
   } else if (!state.diffLoaded && !state.diffUnavailable) {
     setFileEditorPanelStatus(panel, t('editor.diffLoading'), '');
-    await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false});
+    await refreshOpenFileDiff(path, {item, state, silent: true, renderOnComplete: false});
     if (panel._cmGeneration !== generation) return null;
   }
   if (!fileStateCanRenderDiffView(path, state)) {
     if (state.diffUnavailable) {
       const msg = t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')});
       setFileEditorPanelStatus(panel, msg, 'warn');
+      if (state.historical === true) return false;
       return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
     }
+    if (state.historical === true) return false;
     return ensureCodeMirrorPanel(panel, item, path, state, {forceMode: 'edit'});
   }
   const original = String(state.diffOriginal || '');
@@ -71021,16 +72634,16 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     const expandUnchanged = fileEditorDiffExpandUnchangedForItem(item);
     const diffTargetIsCurrent = !state.diffToRef || state.diffToRef === 'current';
     const currentText = diffTargetIsCurrent ? String(state.content || '') : String(state.diffWorking || '');
-    const diffEditsAllowed = diffTargetIsCurrent;
+    const diffEditsAllowed = diffTargetIsCurrent && state.historical !== true;
     const signature = codeMirrorConfigSignature(path, {mode: 'diff', layout, original, from: state.diffFromRef, to: state.diffToRef, expand: expandUnchanged});
     installCodeMirrorDiffCollapsedScrollGuard(panel, container);
     if (panel._cmView && panel._cmMode === 'diff' && panel._cmSignature === signature) {
       installCodeMirrorDiffResizeObserver(panel, item, path, container);
       if (layout === 'side') {
         syncCodeMirrorDocument(panel._cmMergeView?.a, original);
-        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmMergeView?.b, currentText, {cleanOnly: true, path, state});
       } else {
-        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path});
+        syncCodeMirrorDocument(panel._cmView, currentText, {cleanOnly: true, path, state});
       }
       updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
       scheduleDiffOverviewSettledRebuild(panel);
@@ -71253,7 +72866,8 @@ function renderFileEditorRawPane(rawPane, path, content) {
 // ARBITRARY refs. Force-exiting on an empty default diff (the old behavior) hid the picker entirely on
 // clean files — the recurring "press DIFF, no FROM/TO menu" bug.
 function diffModeShouldFallBackToEdit(path, state, item = null) {
-  return state?.kind === 'text'
+  return state?.historical !== true
+    && state?.kind === 'text'
     && editorViewModeFor(path, item) === 'diff'
     && (!fileStateHasRepo(path, state)
       || (state.diffLoaded === true
@@ -71372,6 +72986,16 @@ function syncEditorDiffRefPanel(path, state, item, parts, mode) {
   const diffRefPanel = parts.diffRefPanel;
   if (!diffRefPanel) return;
   diffRefPanel.hidden = mode !== 'diff' || state.kind !== 'text';
+  if (state.historical === true) {
+    const historySignature = JSON.stringify([state.diffPinnedFromRef, state.diffPinnedToRef, state.historicalComparisonKind]);
+    if (!diffRefPanel.hidden && diffRefPanel.dataset.diffRefHistoryRendered !== historySignature) {
+      diffRefPanel.innerHTML = historicalDiffRefControlsHtml(state);
+      diffRefPanel.dataset.diffRefRepoRendered = state.gitRoot || state.diffRepo || '';
+      diffRefPanel.dataset.diffRefPathRendered = path;
+      diffRefPanel.dataset.diffRefHistoryRendered = historySignature;
+    }
+    return;
+  }
   // C6: scope the editor's own FROM/TO controls to THIS file's repo, so they match the repo header and
   // drive the file's diff. Re-render only when the repo actually changed and the picker isn't focused.
   const diffRepo = fileRepoForPath(path);
@@ -71414,7 +73038,7 @@ function syncTextEditorControls(panel, path, state, item, parts, mode) {
   updateFileEditorBlameButton(parts.blameButton, path, state, item);
   updateFileEditorDiffButton(parts.diffButton, path, state, item);
   updateFileEditorDiffExpandButton(diffExpandButton, path, state, item);
-  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable;
+  if (popoutPreviewButton) popoutPreviewButton.hidden = !previewable || state.historical === true;
   syncEditorDiffRefPanel(path, state, item, parts, mode);
   updateFileEditorToolbarSeparators(panel);
   return {previewable};
@@ -71518,7 +73142,7 @@ function renderFileEditorPanel(panel, item, options = {}) {
   } else if (activeFile === path) {
     updateFileExplorerCurrentFileHighlight();
   }
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   updateFileEditorPanelChrome(panel, path);
   const parts = editorPanelParts(panel);
   updateEditorThemeButton(parts.themeButton, {includeVanilla: true});
@@ -71554,8 +73178,29 @@ function renderFileEditorPanel(panel, item, options = {}) {
 }
 
 function loadFileEditorState(path, panel, item) {
-  const state = fileState.get(path);
+  const state = fileEditorStateForItem(path, item);
   if (!state || state.loadingPromise) return;
+  if (state.historical === true) {
+    const identity = historicalFileEditorIdentity(item);
+    if (!identity) return;
+    const loadingPromise = refreshOpenFileDiff(path, {
+      item,
+      state,
+      fromRef: identity.fromRef,
+      toRef: identity.toRef,
+      silent: true,
+      renderOnComplete: false,
+      updateControlsOnComplete: false,
+    }).finally(() => {
+      state.loading = false;
+      if (state.loadingPromise === loadingPromise) delete state.loadingPromise;
+      if (panel) renderFileEditorPanel(panel, item);
+      renderSessionButtons();
+      renderPaneTabStrips();
+    });
+    state.loadingPromise = loadingPromise;
+    return;
+  }
   const loadingPromise = (async () => {
     const kind = openFileKindForPreviewPath(basenameOf(path));
     if (kind === 'image' || kind === 'media') {
@@ -71634,9 +73279,9 @@ function loadFileEditorState(path, panel, item) {
 }
 
 function updateFileEditorPanelChrome(panel, path) {
-  const state = fileState.get(path);
   const item = panel?.dataset?.layoutItem || '';
-  const previewOnly = false;
+  const state = fileEditorStateForItem(path, item);
+  const previewOnly = state?.historical === true;
   panel.classList.toggle('dirty', !!state?.dirty);
   const dirtyDot = panel.querySelector('.file-editor-title .file-tab-dirty');
   if (dirtyDot) dirtyDot.hidden = !state?.dirty;
@@ -72280,6 +73925,12 @@ function fileEditorPanelPath(panel) {
   return panel?.dataset?.filePath || '';
 }
 
+function fileEditorPanelState(panel) {
+  const path = fileEditorPanelPath(panel);
+  const item = fileEditorPanelItem(panel) || fileEditorItemFor(path);
+  return fileEditorStateForItem(path, item);
+}
+
 function fileEditorPanelMode(panel) {
   const path = fileEditorPanelPath(panel);
   return editorViewModeFor(path, fileEditorPanelItem(panel));
@@ -72349,7 +74000,9 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    const state = fileEditorPanelState(panel);
+    const panelContent = state?.kind === 'text' ? state.content : content;
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, panelContent, {context: mode});
   }
 }
 
@@ -72435,10 +74088,10 @@ function refreshEditorPreviews() {
   for (const [item, panel] of panelNodes.entries()) {
     if (!isFileEditorItem(item)) continue;
     const path = fileItemPath(item);
-    const state = fileState.get(path);
+    const state = fileEditorStateForItem(path, item);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
       renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
-      updateFilePreviewPopout(path, state.content || '');
+      if (state.historical !== true) updateFilePreviewPopout(path, state.content || '');
     }
   }
 }
@@ -72461,6 +74114,8 @@ function normalizeFileEditorSaveContent(content, options = fileEditorSaveHygiene
 
 function syncFileEditorNormalizedContentToPanels(path, content) {
   for (const openPanel of fileEditorPanelsForPath(path)) {
+    const panelState = fileEditorPanelState(openPanel);
+    if (panelState?.historical === true) continue;
     if (openPanel?._cmView) syncCodeMirrorDocument(openPanel._cmView, content, {path});
     const rawCode = openPanel?.querySelector?.('.file-editor-raw-panel code');
     if (rawCode) rawCode.textContent = content;
@@ -72468,7 +74123,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (mode === 'preview' || mode === 'split') {
       renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
-    const status = openFileStatus(fileState.get(path));
+    const status = openFileStatus(panelState);
     setFileEditorPanelStatus(openPanel, status.message, status.level);
   }
   renderLinkedFilePreviewPanels(null, path, content);
@@ -72488,8 +74143,9 @@ function applyFileEditorSaveHygiene(path) {
 
 async function saveFileEditor(path, panel, options = {}) {
   if (readOnlyMode) return false;
-  const state = fileState.get(path);
-  if (!state || state.kind !== 'text') return false;
+  const item = fileEditorPanelItem(panel) || options.item || fileEditorItemFor(path);
+  const state = fileEditorStateForItem(path, item);
+  if (!state || state.kind !== 'text' || state.historical === true) return false;
   syncOpenFileContentFromPanels(path, panel);
   if (!options.force && (state.externalChanged || state.externalMissing)) {
     if (!state.dirty) return reloadOpenFileFromDisk(path, {force: true});
@@ -77858,7 +79514,8 @@ function startTerminal(session) {
   }
   container.innerHTML = '';
   const size = estimateTerminalSize(container);
-  const baseTheme = terminalThemeForGlobalTheme();
+  const displayTheme = terminalThemeForGlobalTheme();
+  const renderTheme = terminalRenderThemeForGlobalTheme();
   const term = new TerminalCtor({
     cols: size.cols,
     rows: size.rows,
@@ -77870,7 +79527,7 @@ function startTerminal(session) {
     lineHeight: 1.0,
     scrollback: terminalScrollback,
     disableStdin: readOnlyMode,
-    theme: terminalThemeForSession(session, baseTheme),
+    theme: terminalThemeForSession(session, renderTheme),
     minimumContrastRatio: terminalMinimumContrastRatio(),
     // Unicode11Addon uses xterm's unicode width service; this local xterm build gates it behind proposed API opt-in.
     allowProposedApi: true,
@@ -77882,7 +79539,7 @@ function startTerminal(session) {
   applyTerminalUnicode11Addon(term);
   term.open(container);
   // match the container bg to the terminal theme so every pane shares one white.
-  applyTerminalContainerTheme(container, baseTheme);
+  applyTerminalContainerTheme(container, displayTheme);
   installTerminalLinkProvider(session, term);
   installTerminalOsc52Bridge(session, term);   // Claude/tmux OSC 52 clipboard escapes -> browser clipboard
   const openedSize = estimateTerminalSize(container, term);

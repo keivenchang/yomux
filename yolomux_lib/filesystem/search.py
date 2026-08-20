@@ -850,64 +850,73 @@ def _search_files_from_safe_root(
         )
     else:
         visited_dirs = 1
-        direct_names = sorted(os.listdir(scan_root), key=str.lower)
-        for name in direct_names:
-            path = scan_root / name
-            display_path = root / name
-            if name in skip_dirs or paths._path_is_secret(display_path):
-                continue
-            try:
-                entry_fd = os.open(path, os.O_RDONLY | paths.nofollow_flag())
-            except OSError:
-                continue
-            try:
-                entry_stat = os.fstat(entry_fd)
-            finally:
-                os.close(entry_fd)
-            if stat.S_ISDIR(entry_stat.st_mode):
-                try:
-                    child_fd = os.open(
-                        path,
-                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
-                    )
-                except OSError:
-                    continue
-                try:
-                    child_path = paths.SafePathHandle(display_path, display_path, child_fd).descriptor_path()
-                    if not _directory_is_repo(child_path):
-                        continue
-                    child_dirs, child_files, child_truncated = _search_full_tree(
-                        root,
-                        child_path,
-                        tokens,
-                        results,
-                        skip_dirs,
-                        display_search_root=display_path,
-                        search_descriptor=child_fd,
-                    )
-                finally:
-                    os.close(child_fd)
-                visited_dirs += child_dirs
-                visited_files += child_files
-                truncated = truncated or child_truncated
-                if len(results) >= max_results or visited_files > MAX_SEARCH_FILES or visited_dirs > MAX_SEARCH_DIRS:
-                    truncated = True
-                    break
-                continue
-            visited_files += 1
-            if visited_files > MAX_SEARCH_FILES:
-                truncated = True
-                break
-            entry = _search_file_entry(
-                root,
-                path,
-                tokens,
-                display_path=display_path,
-                stat_result=entry_stat,
+        owned_scan_fd: int | None = None
+        if access_descriptor is None:
+            owned_scan_fd = os.open(
+                scan_root,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
             )
-            if entry is None:
-                continue
-            results.append(entry)
+        scan_fd = access_descriptor if access_descriptor is not None else owned_scan_fd
+        try:
+            direct_names = sorted(os.listdir(scan_fd), key=str.lower)
+            for name in direct_names:
+                display_path = root / name
+                if name in skip_dirs:
+                    continue
+                # Every child is opened RELATIVE to the pinned scan-root descriptor through the one
+                # shared authorization owner.  This branch used to `os.open()` an ABSOLUTE child
+                # path and wrap the raw descriptor in a bare `SafePathHandle`, so the child never
+                # passed `_ensure_path_allowed` and its name was resolved a second time after the
+                # scan root had already been authorized.  `safe_child` keeps `O_NOFOLLOW`, applies
+                # the one root/secret policy, and pins the generation the scan then consumes.
+                try:
+                    with paths.safe_child(
+                        scan_fd,
+                        display_path,
+                        display_path,
+                        flags=os.O_RDONLY,
+                        operation="search_files",
+                        observe_name=False,
+                    ) as child:
+                        entry_stat = child.stat_result
+                        if stat.S_ISDIR(entry_stat.st_mode):
+                            if not _directory_is_repo(display_path, directory_descriptor=child.descriptor):
+                                continue
+                            child_dirs, child_files, child_truncated = _search_full_tree(
+                                root,
+                                child.descriptor_path(),
+                                tokens,
+                                results,
+                                skip_dirs,
+                                display_search_root=display_path,
+                                search_descriptor=child.descriptor,
+                            )
+                            visited_dirs += child_dirs
+                            visited_files += child_files
+                            truncated = truncated or child_truncated
+                            if len(results) >= max_results or visited_files > MAX_SEARCH_FILES or visited_dirs > MAX_SEARCH_DIRS:
+                                truncated = True
+                                break
+                            continue
+                        visited_files += 1
+                        if visited_files > MAX_SEARCH_FILES:
+                            truncated = True
+                            break
+                        entry = _search_file_entry(
+                            root,
+                            display_path,
+                            tokens,
+                            display_path=display_path,
+                            stat_result=entry_stat,
+                        )
+                        if entry is None:
+                            continue
+                        results.append(entry)
+                except (paths.FilesystemError, OSError):
+                    continue
+        finally:
+            if owned_scan_fd is not None:
+                os.close(owned_scan_fd)
     results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
     if len(results) > max_results:
         truncated = True

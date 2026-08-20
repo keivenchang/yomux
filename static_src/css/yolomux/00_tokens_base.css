@@ -702,13 +702,13 @@
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: var(--bad);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: var(--good);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: var(--accent-gold);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00b7ff;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff7a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #f000d5;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #f4d08a;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #31dca0;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff4f70;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #9b6cff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #00a8ff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #ff6a00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #ff00d4;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #ffd400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #00e676;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #ff1744;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #8b5cf6;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-white);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 255 255 255;
   --30-preferences-changes-preferences-setting-control-bg-14: #10151d;
@@ -1230,13 +1230,13 @@ body.theme-light {
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-attention-2: #cf1625;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-working-3: #17813a;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-transition-4: #bf6a00;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #0074a4;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: var(--icon-archive);
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #b0009f;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #805b1c;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #087c5b;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #c21f45;
-  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #5b21d1;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5: #006dff;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6: #f04400;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-magenta-7: #d000b8;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-beige-8: #b06b00;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-turquoise-9: #008f55;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-rose-10: #d00040;
+  --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-violet-11: #6d28d9;
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-12: var(--paint-black);
   --30-preferences-changes-js-debug-graph-view-js-debug-agent-token-pattern-ink-rgb-13: 0 0 0;
   --30-preferences-changes-preferences-setting-control-bg-14: var(--paint-white);
@@ -1468,6 +1468,7 @@ body.editor-theme-light {
 .modal pre,
 .drop-action-result pre,
 .file-editor-conflict-compare pre,
+.git-diff-commit-message,
 .js-debug-log-message {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1540,6 +1541,7 @@ body.editor-theme-light {
   color: var(--text);
 }
 :where(button),
+.diff-ref-static-value,
 .diff-ref-suggestion-popover,
 .yoagent-message,
 .conversation-message,
@@ -1735,6 +1737,7 @@ body.editor-theme-light {
 .file-explorer-hidden-toggle.active,
 .file-explorer-root-mode-toggle.active,
 .file-explorer-date-toggle.active,
+.js-debug-service-load-mode-control input:checked + span,
 .js-debug-chart-layout-control button[aria-pressed="true"],
 .js-debug-chart-toggle-control button[aria-pressed="true"],
 .js-debug-log-level[aria-pressed="true"],
@@ -1778,6 +1781,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .terminal-drop-suggestion-label,
 .js-debug-system-kv dd,
 .backend-health-indicator-text,
+.git-diff-path,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;

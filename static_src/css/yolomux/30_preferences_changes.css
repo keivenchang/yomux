@@ -860,6 +860,7 @@
   --js-debug-api-series: var(--link-soft);
   --js-debug-sse-series: var(--accent-gold);
   --js-debug-client-comparison-opacity: 0.68;
+  --js-debug-process-area-opacity: 0.52;
   --js-debug-bad-connection-rgb: 220 38 38;
   --js-debug-agent-token-cyan: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-cyan-5);
   --js-debug-agent-token-orange: var(--30-preferences-changes-js-debug-graph-view-js-debug-agent-token-orange-6);
@@ -1312,11 +1313,6 @@
   padding: var(--space-3) var(--space-5);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-}
-.js-debug-service-load-mode-control input:checked + span {
-  border-color: var(--active-accent-bright);
-  color: var(--active-accent-bright);
-  background: var(--active-accent-soft);
 }
 .js-debug-service-load-mode-control input:focus-visible + span {
   box-shadow: var(--active-control-focus-shadow-compact);
@@ -2105,6 +2101,16 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+body.theme-light :is(.js-debug-graph-view, .js-yocost-graphs) {
+  --js-debug-client-comparison-opacity: 0.9;
+  --js-debug-process-area-opacity: 0.52;
+}
+body.theme-light .js-debug-line {
+  stroke-width: 1.6;
+}
+body.theme-light .js-debug-line--moving-average {
+  stroke-width: 2.2;
+}
 .js-debug-live-pulse.heartbeat-pulse {
   fill: rgb(var(--active-accent-rgb) / 0.14);
   pointer-events: none;
@@ -2148,6 +2154,9 @@
 .js-debug-area {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
   opacity: 0.18;
+}
+:is(.js-debug-chart[data-js-debug-chart="cpu"], .js-debug-chart[data-js-debug-chart="memory"]) .js-debug-area {
+  opacity: var(--js-debug-process-area-opacity);
 }
 .js-debug-bar {
   fill: var(--js-debug-series-color, var(--accent-sky-strong));
@@ -2218,6 +2227,9 @@
 .js-debug-line--systemCpu {
   stroke: var(--js-debug-series-color, var(--js-debug-agent-token-rose));
 }
+.js-debug-line--current-process {
+  stroke-width: 2.4;
+}
 .js-debug-line--systemMemory {
   stroke: var(--accent-gold);
 }
@@ -2243,6 +2255,18 @@
 }
 .js-debug-line--pattern-dash {
   --js-debug-line-dash: 6 4;
+}
+.js-debug-line--pattern-dash-dot {
+  --js-debug-line-dash: 7 3 1 3;
+}
+.js-debug-line--pattern-long-dash {
+  --js-debug-line-dash: 11 4;
+}
+.js-debug-line--pattern-dense-dot {
+  --js-debug-line-dash: 1 2;
+}
+.js-debug-line--pattern-long-short {
+  --js-debug-line-dash: 10 3 3 3;
 }
 .js-debug-legend {
   display: flex;
@@ -2272,6 +2296,17 @@
 }
 .js-debug-legend-line .js-debug-line {
   stroke-width: 1.5;
+}
+.js-debug-legend-line .js-debug-line--current-process {
+  stroke-width: 2.5;
+}
+.js-debug-legend-area {
+  width: 18px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 1px;
+  background: var(--js-debug-series-color, var(--accent-sky-strong));
+  opacity: 0.68;
 }
 .js-debug-legend-swatch--api {
   color: var(--js-debug-api-series);

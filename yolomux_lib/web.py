@@ -38,6 +38,7 @@ from .locales import resolve_locale_preference
 from .settings import save_settings
 from .settings import settings_payload
 from .stats_current import storage as stats_current_storage
+from .stats_current.host_collectors import cpu_topology
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_entry_available
 from .workdir import agent_auth_status
@@ -326,6 +327,7 @@ def html_page(
         # one copy instead of the bundle carrying a remembered literal that can drift from it.
         "filesystemBatchLimits": filesystem_batch_limits_payload(),
         "serverHostname": SERVER_HOSTNAME,
+        "cpuTopology": cpu_topology(),
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),
         "linearIssueBaseUrl": DEFAULT_LINEAR_ISSUE_BASE_URL,

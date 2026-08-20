@@ -269,7 +269,7 @@ def test_tmux_control_attach_command_is_readonly_and_ignores_size(monkeypatch):
         "-f",
         "read-only,ignore-size",
         "-t",
-        "alpha:",
+        "=alpha:",
     ]
 
 
@@ -451,8 +451,8 @@ def test_install_tmux_signal_monitoring_scopes_options_and_hooks(monkeypatch):
     errors = install_tmux_signal_monitoring(["alpha", ""], timeout=1.25)
 
     assert errors == []
-    assert (["set-window-option", "-t", "alpha:", "monitor-activity", "on"], 1.25) in calls
-    assert (["set-window-option", "-t", "alpha:", "monitor-silence", str(tmux_signals.TMUX_SIGNAL_MONITOR_SILENCE_SECONDS)], 1.25) in calls
+    assert (["set-window-option", "-t", "=alpha:", "monitor-activity", "on"], 1.25) in calls
+    assert (["set-window-option", "-t", "=alpha:", "monitor-silence", str(tmux_signals.TMUX_SIGNAL_MONITOR_SILENCE_SECONDS)], 1.25) in calls
     hook_calls = [args for args, _timeout in calls if args[:2] == ["set-hook", "-g"]]
     assert len(hook_calls) == len(tmux_signals.TMUX_SIGNAL_HOOKS)
     assert all(f"[{tmux_signals.TMUX_SIGNAL_HOOK_INDEX}]" in args[2] for args in hook_calls)

@@ -1051,10 +1051,15 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
     for (const [key, item] of bucket.agentTokenRates.entries()) {
       if (dimension === 'agent') {
-        const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
-        existing.label = item?.label || existing.label;
+        const sessionKey = debugGraphSessionTokenKey(key);
+        const existing = tokenItems.get(sessionKey) || {
+          label: debugGraphAgentDisplayLabel(sessionKey),
+          rawKeys: new Set(),
+          samples: 0,
+        };
+        existing.rawKeys.add(String(key));
         existing.samples += Number(item?.samples || 0);
-        tokenItems.set(String(key), existing);
+        tokenItems.set(sessionKey, existing);
         continue;
       }
       if (!(item?.modelRates instanceof Map)) continue;
@@ -1085,10 +1090,14 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       agentTokenPatternIndex: visuals[index].patternIndex,
       color: visuals[index].color,
       value: bucket => {
-        const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') {
-          if (!tokenItem) return 0;
-          return debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let value = 0;
+          for (const rawKey of item.rawKeys) {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            if (tokenItem) value += debugGraphAgentTokenBucketValue(bucket, tokenItem);
+          }
+          return value;
         }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
@@ -1102,8 +1111,11 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       hasData: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          if (!(bucket?.agentTokenRates instanceof Map)) return false;
+          return [...item.rawKeys].some(rawKey => {
+            const tokenItem = bucket.agentTokenRates.get(rawKey);
+            return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
+          });
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
           const modelRate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(key) : null;
@@ -1112,8 +1124,12 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       },
       sampleCount: bucket => {
         if (dimension === 'agent') {
-          const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          return Math.max(0, Number(tokenItem?.samples) || 0);
+          if (!(bucket?.agentTokenRates instanceof Map)) return 0;
+          let samples = 0;
+          for (const rawKey of item.rawKeys) {
+            samples += Math.max(0, Number(bucket.agentTokenRates.get(rawKey)?.samples) || 0);
+          }
+          return samples;
         }
         let samples = 0;
         for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
@@ -1138,23 +1154,63 @@ function debugGraphStablePaletteIndex(identity, count) {
   return hash % size;
 }
 
-function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+function debugGraphVisualCombinations(patternCount = jsDebugGraphAgentTokenPatternCount) {
   const colorCount = Math.max(1, jsDebugGraphAgentTokenColors.length);
-  const patternCount = Math.max(1, jsDebugGraphAgentTokenPatternCount);
+  const normalizedPatternCount = Math.max(1, Math.floor(Number(patternCount) || 0));
   const combinations = [];
-  const pairedCount = Math.min(colorCount, patternCount);
+  const pairedCount = Math.min(colorCount, normalizedPatternCount);
   for (let index = 0; index < pairedCount; index += 1) combinations.push([index, index]);
   for (let colorIndex = 0; colorIndex < colorCount; colorIndex += 1) {
-    for (let patternIndex = 0; patternIndex < patternCount; patternIndex += 1) {
+    for (let patternIndex = 0; patternIndex < normalizedPatternCount; patternIndex += 1) {
       if (colorIndex === patternIndex && colorIndex < pairedCount) continue;
       combinations.push([colorIndex, patternIndex]);
     }
   }
+  return combinations;
+}
+
+function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.key) {
+  const combinations = debugGraphVisualCombinations();
   return (items || []).map((item, index) => {
     const identity = identityForItem(item);
     const combinationIndex = index < combinations.length
       ? index
       : debugGraphStablePaletteIndex(identity, combinations.length);
+    const [colorIndex, patternIndex] = combinations[combinationIndex];
+    return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
+  });
+}
+
+const jsDebugGraphServiceLoadLinePatterns = Object.freeze(['solid', 'dash', 'dot', 'dash-dot', 'long-dash', 'dense-dot', 'long-short']);
+// Daemons enter and leave retained buckets independently. Keep each assigned visual for the page
+// lifetime so one disappearing service cannot recolor every later legend row; reclaim absent slots
+// only after all 49 color/pattern pairs have been used.
+const jsDebugGraphServiceLoadVisualAssignments = new Map();
+
+function debugGraphStableServiceLoadVisuals(items) {
+  const combinations = debugGraphVisualCombinations(jsDebugGraphServiceLoadLinePatterns.length);
+  const activeKeys = new Set((items || []).map(([key]) => String(key)));
+  if (jsDebugGraphServiceLoadVisualAssignments.size >= combinations.length) {
+    for (const key of jsDebugGraphServiceLoadVisualAssignments.keys()) {
+      if (!activeKeys.has(key)) jsDebugGraphServiceLoadVisualAssignments.delete(key);
+      if (jsDebugGraphServiceLoadVisualAssignments.size < combinations.length) break;
+    }
+  }
+  const used = new Set(jsDebugGraphServiceLoadVisualAssignments.values());
+  return (items || []).map(([rawKey]) => {
+    const key = String(rawKey);
+    let combinationIndex = jsDebugGraphServiceLoadVisualAssignments.get(key);
+    if (!Number.isFinite(combinationIndex)) {
+      combinationIndex = debugGraphStablePaletteIndex(key, combinations.length);
+      for (let candidate = 0; candidate < combinations.length; candidate += 1) {
+        if (!used.has(candidate)) {
+          combinationIndex = candidate;
+          jsDebugGraphServiceLoadVisualAssignments.set(key, candidate);
+          used.add(candidate);
+          break;
+        }
+      }
+    }
     const [colorIndex, patternIndex] = combinations[combinationIndex];
     return {color: jsDebugGraphAgentTokenColors[colorIndex], colorIndex, patternIndex};
   });
@@ -1243,6 +1299,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         cssKey: 'cpu',
         chartMetricKey: 'cpu',
         processCpu: true,
+        currentProcessCpu: current,
         processId,
         linePattern: current ? 'solid' : 'dot',
         color,
@@ -1283,8 +1340,100 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
     }));
 }
 
+const jsDebugGraphHostProcessVisualAssignments = Object.freeze({
+  cpu: new Map(),
+  memory: new Map(),
+});
+
+function debugGraphStableHostProcessVisuals(metric, displayed, colors) {
+  const assignments = jsDebugGraphHostProcessVisualAssignments[metric];
+  const activeKeys = new Set(displayed.map(([key]) => String(key)));
+  const unassignedActiveCount = displayed.reduce(
+    (count, [key]) => count + (assignments.has(String(key)) ? 0 : 1),
+    0,
+  );
+  for (const key of assignments.keys()) {
+    if (assignments.size + unassignedActiveCount <= colors.length) break;
+    if (!activeKeys.has(key)) assignments.delete(key);
+  }
+  const used = new Set(assignments.values());
+  return displayed.map(([rawKey]) => {
+    const key = String(rawKey);
+    let colorIndex = assignments.get(key);
+    if (!Number.isFinite(colorIndex)) {
+      const start = debugGraphStablePaletteIndex(`${metric}:${key}`, colors.length);
+      colorIndex = start;
+      for (let offset = 0; offset < colors.length; offset += 1) {
+        const candidate = (start + offset) % colors.length;
+        if (used.has(candidate)) continue;
+        colorIndex = candidate;
+        assignments.set(key, candidate);
+        used.add(candidate);
+        break;
+      }
+    }
+    return {
+      color: colors[colorIndex % colors.length],
+      patternIndex: colorIndex % jsDebugGraphServiceLoadLinePatterns.length,
+    };
+  });
+}
+
+function debugGraphHostProcessSeriesDefs(buckets, metric) {
+  const cpu = metric === 'cpu';
+  const mapName = cpu ? 'cpuProcesses' : 'memoryProcesses';
+  const valueKey = cpu ? 'totalPercent' : 'totalBytes';
+  const limit = cpu ? 4 : 5;
+  const keyPrefix = cpu ? 'cpuBinary' : 'memory';
+  const unit = cpu ? 'percent' : 'bytes';
+  const colors = cpu ? jsDebugGraphCpuProcessAreaColors : jsDebugGraphAgentTokenColors;
+  const processes = new Map();
+  for (const bucket of buckets) {
+    const source = bucket.hostMetrics?.[mapName];
+    if (!(source instanceof Map)) continue;
+    for (const [key, item] of source.entries()) {
+      if (Number(item?.samples || 0) <= 0) continue;
+      const value = Number(item[valueKey] || 0) / Number(item.samples || 1);
+      const current = processes.get(key);
+      if (!current || value > current.peakValue) {
+        processes.set(key, {label: String(item.label || key), peakValue: value});
+      }
+    }
+  }
+  const displayed = [...processes.entries()]
+    .sort((left, right) => right[1].peakValue - left[1].peakValue || left[0].localeCompare(right[0]))
+    .slice(0, limit);
+  const visuals = debugGraphStableHostProcessVisuals(metric, displayed, colors);
+  return displayed.map(([hostProcessId, process], index) => ({
+    key: `${keyPrefix}:${hostProcessId}`,
+    label: process.label,
+    unit,
+    hostMetric: metric,
+    hostProcessId,
+    color: visuals[index].color,
+    linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex % jsDebugGraphServiceLoadLinePatterns.length],
+    value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
+    hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
+    sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
+    familyHasData: bucket => cpu
+      ? Number(bucket?.systemCpuCount || 0) > 0
+      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
+  }));
+}
+
+function debugGraphMemoryProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'memory');
+}
+
+function debugGraphCpuProcessSeriesDefs(buckets) {
+  return debugGraphHostProcessSeriesDefs(buckets, 'cpu');
+}
+
 function debugGraphHostMetricSeriesDefs(buckets) {
   return [
+    ...debugGraphCpuProcessSeriesDefs(buckets),
+    ...debugGraphMemoryProcessSeriesDefs(buckets),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuUtil'),
     ...debugGraphGpuDeviceSeriesDefs(buckets, 'gpuMemory'),
   ];
@@ -1347,11 +1496,10 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     services.set(key, String(item.label || key));
   }
   const items = [...services.entries()].sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
-  const visuals = debugGraphDisplayedTokenVisuals(items, ([key]) => key);
-  const linePatterns = ['solid', 'dash', 'dot'];
+  const visuals = debugGraphStableServiceLoadVisuals(items);
   return items.map(([key, label], index) => ({
     key: `serviceLoad:${key}`, label, unit: 'percent', serviceLoad: true,
-    color: visuals[index].color, linePattern: linePatterns[visuals[index].patternIndex % linePatterns.length],
+    color: visuals[index].color, linePattern: jsDebugGraphServiceLoadLinePatterns[visuals[index].patternIndex],
     value: bucket => {
       const item = bucket?.hostMetrics?.serviceLoad?.get?.(key);
       return debugGraphServiceLoadValue(item, mode);
@@ -2052,7 +2200,7 @@ function debugGraphSeriesClientAttrs(series) {
 
 function debugGraphSeriesLinePattern(series) {
   const pattern = String(series?.linePattern || (series?.clientMetric === true ? series.clientLinePattern : '') || '').trim();
-  return ['solid', 'dot', 'dash'].includes(pattern) ? pattern : '';
+  return ['solid', 'dot', 'dash', 'dash-dot', 'long-dash', 'dense-dot', 'long-short'].includes(pattern) ? pattern : '';
 }
 
 function debugGraphSeriesLinePatternAttrs(series) {
@@ -2062,6 +2210,7 @@ function debugGraphSeriesLinePatternAttrs(series) {
 
 function debugGraphSeriesLineClassName(series, extraClass = '') {
   const classes = ['js-debug-line', `js-debug-line--${debugGraphSeriesClassKey(series)}`];
+  if (series?.currentProcessCpu === true) classes.push('js-debug-line--current-process');
   const linePattern = debugGraphSeriesLinePattern(series);
   if (linePattern) classes.push('js-debug-line--pattern', `js-debug-line--pattern-${linePattern}`);
   if (series?.clientMetric === true) {
@@ -2220,17 +2369,22 @@ function debugGraphInteractionOverlayHtml() {
   return `<rect class="js-debug-selection-rect" data-js-debug-selection-rect x="0" y="${esc(jsDebugGraphGeometry.plotTop)}" width="0" height="${esc(jsDebugGraphGeometry.plotHeight)}"></rect><line class="js-debug-hover-line" data-js-debug-hover-line x1="0" y1="${esc(jsDebugGraphGeometry.plotTop)}" x2="0" y2="${esc(jsDebugGraphGeometry.hoverBottom)}" vector-effect="non-scaling-stroke"></line>`;
 }
 
-function debugGraphLegendHtml(seriesItems) {
+function debugGraphLegendHtml(seriesItems, {kind = ''} = {}) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
     ${seriesItems.map(series => {
       const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
-      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series, kind)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
     }).join('')}
   </div>`;
 }
 
-function debugGraphLegendSwatchHtml(series) {
+function debugGraphSeriesUsesArea(series, kind = '') {
+  return kind === 'area' && Boolean(series?.hostMetric && series?.hostProcessId);
+}
+
+function debugGraphLegendSwatchHtml(series, kind = '') {
   if (series?.tokenPatternSeries === true) return debugGraphAgentTokenLegendSwatchHtml(series);
+  if (debugGraphSeriesUsesArea(series, kind)) return `<span class="js-debug-legend-area" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}></span>`;
   if (series?.clientMetric === true || series?.processCpu === true || series?.key === 'systemCpu' || series?.key === 'systemMemory' || debugGraphSeriesLinePattern(series)) {
     return `<svg class="js-debug-legend-line" viewBox="0 0 18 4" aria-hidden="true"><line class="${esc(debugGraphSeriesLineClassName(series))}"${debugGraphSeriesLinePatternAttrs(series)} x1="0" y1="2" x2="18" y2="2" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}></line></svg>`;
   }
@@ -2350,10 +2504,13 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   if (group.serviceLoad === true) return seriesItems.filter(series => series.serviceLoad === true);
   if (group.dynamicAgentTokens === true) return seriesItems.filter(series => series.agentTokenSeries === true);
   if (group.dynamicTokenDimension) return seriesItems.filter(series => series.tokenDimension === group.dynamicTokenDimension);
+  if (group.macMemoryCard === true) {
+    return seriesItems.filter(series => series.key === 'macMemoryPressure' || (series.hostMetric === 'memory' && series.hostProcessId));
+  }
   if (group.hostMetric) {
     const hostSeries = seriesItems.filter(series => series.hostMetric === group.hostMetric);
     if (group.hostMetric === 'cpu') {
-      return seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu');
+      return [...hostSeries, ...seriesItems.filter(series => series.processCpu === true || series.key === 'cpu' || series.key === 'systemCpu')];
     }
     if (hostSeries.length || group.hostMetric !== 'cpu') {
       return [...hostSeries, ...seriesItems.filter(series => group.hostMetric === 'memory' && series.key === 'systemMemory')];
@@ -2405,11 +2562,34 @@ function debugGraphMacMemoryDetailsHtml(buckets) {
   }).join('')}</dl>`;
 }
 
+function debugGraphCurrentProcessCpuOrdered(seriesItems, currentFirst = false) {
+  const current = [];
+  const rest = [];
+  for (const series of seriesItems || []) {
+    (series?.currentProcessCpu === true ? current : rest).push(series);
+  }
+  return currentFirst ? [...current, ...rest] : [...rest, ...current];
+}
+
 function debugGraphLegendSeriesItems(group, groupSeries) {
   const legendKeys = Array.isArray(group?.legendSeries) ? group.legendSeries : null;
-  if (!legendKeys) return groupSeries;
-  const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
-  return legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  let selected = groupSeries;
+  if (legendKeys) {
+    const seriesByKey = new Map(groupSeries.map(series => [series.key, series]));
+    selected = legendKeys.map(key => seriesByKey.get(key)).filter(Boolean);
+  }
+  return debugGraphCurrentProcessCpuOrdered(selected, true);
+}
+
+function debugGraphMacMemoryProcessPlotSeries(series, buckets) {
+  if (series?.hostMetric !== 'memory' || !series.hostProcessId) return series;
+  const plotValues = (series.values || []).map((value, index) => {
+    const host = buckets?.[index]?.hostMetrics;
+    const capacity = Number(host?.macPhysicalMemoryTotalBytes || host?.systemMemoryCapacityTotalBytes || 0)
+      / Math.max(1, Number(host?.macMemoryDetailCount || host?.systemMemoryCount || 1));
+    return capacity > 0 ? Math.max(0, Number(value) || 0) / capacity * 100 : 0;
+  });
+  return {...series, plotValues, plotMax: Math.max(0, ...plotValues)};
 }
 
 function debugGraphVisibleChartGroups(seriesItems) {
@@ -2421,10 +2601,10 @@ function debugGraphVisibleChartGroups(seriesItems) {
 }
 
 function debugGraphStackedSeries(seriesItems) {
-  const count = Math.max(0, ...seriesItems.map(series => (series.values || []).length));
+  const count = Math.max(0, ...seriesItems.map(series => debugGraphSeriesPlotValues(series).length));
   const totals = Array.from({length: count}, () => 0);
   return seriesItems.map(series => {
-    const values = series.values || [];
+    const values = debugGraphSeriesPlotValues(series);
     const stackBaseValues = totals.slice();
     const plotValues = values.map((value, index) => {
       const next = totals[index] + Math.max(0, Number(value) || 0);
@@ -2499,14 +2679,20 @@ function debugGraphHoverBucketIndex(buckets, timestamp) {
   return timestamp < end ? index : -1;
 }
 
-function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+function debugGraphDirectHoverSeriesKey(event) {
+  const target = event?.target?.closest?.('[data-js-debug-series], [data-js-debug-area-series]');
+  return String(target?.dataset?.jsDebugSeries || target?.dataset?.jsDebugAreaSeries || '');
+}
+
+function debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, groupKey) {
   const data = jsDebugGraphHoverChartData.get(String(chart?.dataset?.jsDebugChart || ''));
-  if (data?.group?.key !== 'serversLoad') return null;
+  if (data?.group?.key !== groupKey) return null;
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return null;
-  const available = data.groupSeries.filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
+  const available = (data.hoverSeries || data.groupSeries)
+    .filter(series => !Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true);
   if (!available.length) return null;
-  const directKey = String(event?.target?.closest?.('[data-js-debug-series]')?.dataset?.jsDebugSeries || '');
+  const directKey = debugGraphDirectHoverSeriesKey(event);
   const direct = available.find(series => series.key === directKey);
   if (direct) return direct;
   const svg = chart?.querySelector?.('.js-debug-line-chart');
@@ -2520,20 +2706,37 @@ function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
     ? {mode: 'broken-linear', threshold: Number(chart?.dataset?.jsDebugChartAxisBreak) || axisMax, upperFraction: 0.18}
     : scaleName === 'log';
   return available.reduce((nearest, series) => {
-    const startValue = Math.max(0, Number(series.values?.[index]) || 0);
+    const renderedValues = Array.isArray(series.plotValues) ? series.plotValues : series.values;
+    const startValue = Math.max(0, Number(renderedValues?.[index]) || 0);
     const startTime = Number(series.times?.[index]);
     const nextIndex = index + 1;
-    const nextAvailable = nextIndex < series.values.length
+    const nextAvailable = nextIndex < renderedValues.length
       && (!Array.isArray(series.hasDataValues) || series.hasDataValues[nextIndex] === true);
     const nextTime = Number(series.times?.[nextIndex]);
-    const nextValue = Math.max(0, Number(series.values?.[nextIndex]) || 0);
+    const nextValue = Math.max(0, Number(renderedValues?.[nextIndex]) || 0);
     const fraction = nextAvailable && Number.isFinite(startTime) && Number.isFinite(nextTime) && nextTime > startTime
       ? Math.max(0, Math.min(1, (Number(timestamp) - startTime) / (nextTime - startTime)))
       : 0;
     const renderedValue = startValue + ((nextValue - startValue) * fraction);
-    const distance = Math.abs(debugGraphPlotYForValue(renderedValue, axisMax, scale) - pointerY);
+    const renderedY = debugGraphPlotYForValue(renderedValue, axisMax, scale);
+    let distance = Math.abs(renderedY - pointerY);
+    if (Array.isArray(series.stackBaseValues)) {
+      const startBase = Math.max(0, Number(series.stackBaseValues[index]) || 0);
+      const nextBase = Math.max(0, Number(series.stackBaseValues[nextIndex]) || 0);
+      const renderedBase = startBase + ((nextBase - startBase) * fraction);
+      const baseY = debugGraphPlotYForValue(renderedBase, axisMax, scale);
+      const minimumY = Math.min(renderedY, baseY);
+      const maximumY = Math.max(renderedY, baseY);
+      distance = pointerY >= minimumY && pointerY <= maximumY
+        ? 0
+        : Math.min(Math.abs(pointerY - minimumY), Math.abs(pointerY - maximumY));
+    }
     return !nearest || distance < nearest.distance ? {series, distance} : nearest;
   }, null)?.series || available[0];
+}
+
+function debugGraphServiceLoadHoverSeriesAtTime(chart, timestamp, event) {
+  return debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'serversLoad');
 }
 
 function debugGraphHoverDetailAtTime(chart, timestamp, event) {
@@ -2548,6 +2751,16 @@ function debugGraphHoverDetailAtTime(chart, timestamp, event) {
       seriesKey: series.key,
     };
   }
+  if (data?.group?.key === 'cpu') {
+    const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
+    const series = debugGraphNearestHoverSeriesAtTime(chart, timestamp, event, 'cpu');
+    if (index >= 0 && series && (!Array.isArray(series.hasDataValues) || series.hasDataValues[index] === true)) {
+      return {
+        text: `${series.label}: ${debugGraphValueText(series.values?.[index], 'percent')}`,
+        seriesKey: series.key,
+      };
+    }
+  }
   return {text: debugGraphHoverValueAtTime(chart, timestamp), seriesKey: ''};
 }
 
@@ -2557,7 +2770,9 @@ function debugGraphHoverValueAtTime(chart, timestamp) {
   if (!data) return debugGraphValueText(0, chart?.dataset?.jsDebugChartUnit);
   const index = debugGraphHoverBucketIndex(data.buckets, timestamp);
   if (index < 0) return debugGraphValueText(0, data.group.unit);
-  const series = data.group.key === 'activity'
+  const series = data.group.macMemoryCard === true
+    ? data.groupSeries.filter(item => item.key === 'macMemoryPressure')
+    : data.group.key === 'activity'
     ? data.groupSeries.filter(item => item.key !== 'idleAgents')
     : data.groupSeries;
   const values = series
@@ -2707,19 +2922,25 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   group = debugGraphResolvedChartGroup(group, buckets);
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
-  const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
-  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
+  const selectedGroupSeries = debugGraphGroupSeriesItems(group, seriesItems);
+  const groupSeries = group.macMemoryCard === true
+    ? selectedGroupSeries.map(series => debugGraphMacMemoryProcessPlotSeries(series, buckets))
+    : selectedGroupSeries;
   // Series lines/areas stay continuous across every covered span and break only
   // at these genuine no-data ranges (the same holes painted as red no-data bands).
   const genuineNoDataRanges = debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
-  const areaSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => series.hostMetric && series.hostProcessId) : [];
-  const lineSeries = group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries;
+  const areaSeries = plottedGroupSeries.filter(series => debugGraphSeriesUsesArea(series, group.kind));
+  const lineSeries = debugGraphCurrentProcessCpuOrdered(
+    group.kind === 'area' ? plottedGroupSeries.filter(series => !areaSeries.includes(series)) : plottedGroupSeries,
+  );
   const plotSeries = group.kind === 'area'
     ? debugGraphStackedSeries(areaSeries)
     : (group.stacked === true ? debugGraphStackedSeries(plottedGroupSeries) : plottedGroupSeries);
+  const hoverSeries = group.kind === 'area' ? [...plotSeries, ...lineSeries] : groupSeries;
+  jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries, hoverSeries});
   // Both subviews stay mounted so switching modes preserves their DOM. Namespace the
   // SVG paint-server IDs by surface; otherwise Cost bars resolve Graphs' now-hidden
   // <pattern> definitions and become invisible even though both views share the data.
@@ -2765,7 +2986,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
-      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries)}
+      ${chartUnavailable ? '' : debugGraphLegendHtml(renderedLegendSeries, {kind: group.kind})}
       ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
@@ -2841,7 +3062,14 @@ function debugGraphChartLabel(group, buckets = []) {
   const label = debugGraphLocalizedLabel(group);
   const detailKey = group?.key === 'cpu' ? 'cpuLabel' : group?.key === 'memory' ? 'systemMemoryLabel' : '';
   if (!detailKey) return label;
-  const detail = buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
+  const logicalCpus = Math.max(0, Number(cpuTopology?.logicalCpus) || 0);
+  const physicalCores = Math.max(0, Number(cpuTopology?.physicalCores) || 0);
+  const topologyDetail = group?.key !== 'cpu' || logicalCpus <= 0
+    ? ''
+    : physicalCores > 0
+      ? `${logicalCpus} logical CPUs / ${physicalCores} physical cores`
+      : `${logicalCpus} logical CPUs`;
+  const detail = topologyDetail || buckets.map(bucket => String(bucket?.hostMetrics?.[detailKey] || '').trim()).find(Boolean);
   return detail ? `${label} (${detail})` : label;
 }
 
@@ -3165,6 +3393,12 @@ function debugGraphAgentDisplayLabel(value) {
   }
   if (Array.from(full).length <= 64) return full;
   return `${Array.from(full).slice(0, 39).join('')}…${Array.from(full).slice(-16).join('')}`;
+}
+
+function debugGraphSessionTokenKey(value) {
+  const full = String(value || '').trim();
+  if (!full) return 'unknown';
+  return globalThis.YOLOmuxStatsCurrent?.canonicalSessionKey?.(full) || full;
 }
 
 function debugGraphCostModelAgentKind(row) {
@@ -4412,7 +4646,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     duration,
     clients: {},
     servers: {},
-    host_metrics: {gpu_devices: {}, service_load: {}},
+    host_metrics: {cpu_processes: {}, memory_processes: {}, gpu_devices: {}, service_load: {}},
     agent_token_rates: [],
   };
   const agentRates = new Map();
@@ -4452,6 +4686,13 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('process_cpu_percent:')) {
+      const binary = name.slice('process_cpu_percent:'.length);
+      const projected = jsDebugCurrentCpuProjectionValue(series, name, `process_cpu_max_percent:${binary}`, duration);
+      record.host_metrics.cpu_processes[binary] = {label: binary, total_percent: projected, samples: 1};
+    } else if (name.startsWith('process_memory_bytes:')) {
+      const binary = name.slice('process_memory_bytes:'.length);
+      record.host_metrics.memory_processes[binary] = {label: binary, total_bytes: value, samples: 1};
     } else if (name.startsWith('mac_')) {
       const macMemorySeries = {
         mac_physical_memory_bytes: 'mac_physical_memory_total_bytes', mac_memory_used_bytes: 'mac_memory_used_total_bytes',
@@ -6526,7 +6767,7 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
     return;
   }
   resetRuntimeInterval('debug-logs', () => { void pollDebugLogs(); }, jsDebugLogsPollMs);
-  if (pollNow || !jsDebugLogsState.updatedAt) void pollDebugLogs({force: true});
+  if (pollNow || !jsDebugLogsState.updatedAt) return pollDebugLogs({force: true});
 }
 
 function debugSubviewNoop() {}
@@ -6616,9 +6857,9 @@ function debugPanelSubviewDescriptors() {
 
 function syncDebugSubviewActivation({pollNow = false} = {}) {
   for (const view of debugPanelSubviewDescriptors()) {
-    if (view.id === debugRuntimeState.subTab) view.activate({pollNow});
-    else view.deactivate();
+    if (view.id !== debugRuntimeState.subTab) view.deactivate();
   }
+  return debugSubview(debugRuntimeState.subTab).activate({pollNow});
 }
 
 function debugPanelHtml() {
@@ -7124,7 +7365,7 @@ function setDebugSubTab(tab) {
   debugRuntimeState.subTab = normalizedJsDebugSubTab(tab);
   saveJsDebugStatsUiPreferences();
   for (const panel of document.querySelectorAll('.js-debug-panel')) applyDebugSubTab(panel);
-  syncDebugSubviewActivation({pollNow: true});
+  return syncDebugSubviewActivation({pollNow: true});
 }
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {

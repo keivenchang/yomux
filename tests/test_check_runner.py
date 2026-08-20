@@ -1868,6 +1868,50 @@ def test_host_qualification_measures_this_host_with_windowed_and_instantaneous_s
     assert asserted_instead["evidence_only"] == {}, asserted_instead["evidence_only"]
 
 
+def test_host_qualification_initializes_storage_probe_before_measured_counters(monkeypatch, tmp_path):
+    """A fresh evidence root must not count its own SQLite initialization as host load."""
+
+    evidence_root = tmp_path / "host-qualification"
+    probe_path = latency_calibration.host_storage_probe_path(evidence_root)
+    events = []
+    original_storage_work = latency_calibration._storage_work_samples_ms
+
+    def read_pressure():
+        events.append(("pressure", probe_path.exists()))
+        return None
+
+    def read_disk():
+        events.append(("disk", probe_path.exists()))
+        return {}
+
+    def storage_work(path):
+        events.append(("storage-before", path.exists()))
+        samples = original_storage_work(path)
+        events.append(("storage-after", path.exists()))
+        return samples
+
+    monkeypatch.setattr(latency_calibration, "_read_pressure_totals", read_pressure)
+    monkeypatch.setattr(latency_calibration, "_read_disk_counters", read_disk)
+    monkeypatch.setattr(latency_calibration, "_read_procs_running", lambda: None)
+    monkeypatch.setattr(latency_calibration, "_cpu_work_samples_ms", lambda: [1.0] * latency_calibration.HOST_CPU_WORK_SAMPLES)
+    monkeypatch.setattr(latency_calibration, "_storage_work_samples_ms", storage_work)
+    monkeypatch.setattr(latency_calibration, "HOST_INSTANT_SAMPLE_MINIMUM", 1)
+
+    measurement = latency_calibration.measure_host_resources(evidence_root=evidence_root, sample_seconds=0)
+
+    assert probe_path.exists()
+    assert events == [
+        ("pressure", True),
+        ("disk", True),
+        ("disk", True),
+        ("storage-before", True),
+        ("storage-after", True),
+        ("pressure", True),
+        ("disk", True),
+    ]
+    assert len(measurement["storage_work_samples_ms"]) == latency_calibration.HOST_STORAGE_WORK_SAMPLES
+
+
 def _with_outliers(samples: list[float], count: int, value: float = 10_000.0) -> list[float]:
     replaced = sorted(samples)
     for index in range(count):

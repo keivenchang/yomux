@@ -48,6 +48,16 @@ def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
     browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{urlencode({'sessions': session, 'layout': 'left', 'tabs': f'left:{session}'})}")
     assert_live_runtime_boot_healthy(browser, "regression-gate", timeout=12)
     wait_for_browser_boot(browser, globals_required=EDITOR_GLOBALS, dom_anchors=("#grid",), timeout=12)
+    stats_client_stopped = browser.execute_script(
+        """
+        if (typeof jsDebugCurrentStatsClientState === 'undefined') return false;
+        const client = jsDebugCurrentStatsClientState?.client;
+        if (typeof client?.stop !== 'function') return false;
+        client.stop();
+        return true;
+        """
+    )
+    assert stats_client_stopped is True, "editor/differ fixture could not retire its unrelated stats client"
     try:
         yield SimpleNamespace(browser=browser, runtime=runtime, server=server, session=session)
     finally:
