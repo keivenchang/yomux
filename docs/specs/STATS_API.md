@@ -48,27 +48,27 @@ The complete numeric resolution universe is exactly `1s`, `10s`, `60s`, and `300
 | --- | ---: | --- |
 | 5m | 1s | 1s, 10s |
 | 15m | 10s | 10s, 60s |
-| 30m | 10s | 10s, 60s |
-| 1h | 10s | 10s, 60s, 300s |
-| 2h | 60s | 60s, 300s |
-| 4h | 60s | 60s, 300s |
-| 8h | 60s | 60s, 300s |
+| 30m | 60s | 10s, 60s |
+| 1h | 300s | 60s, 300s |
+| 2h | 300s | 60s, 300s |
+| 4h | 300s | 60s, 300s |
+| 8h | 300s | 60s, 300s |
 | 16h | 300s | 300s |
 | 24h | 300s | 300s |
 
-Explicit choices are the values `r` in `{1,10,60,300}` for which `12 <= range_seconds / r <= 600`. AUTO is the finest value for which `range_seconds / r <= 600`. Every materialized bucket starts at `floor(timestamp / resolution) * resolution`, so its identity is stable across ranges, refreshes, ports, and clients.
+Explicit choices are the values `r` in `{1,10,60,300}` for which `12 <= range_seconds / r <= 600` and the configured ring retains the complete range. AUTO resolves 5m to 1s and 15m to 10s for detail, then resolves every longer range to its coarsest explicit value for lower transfer and render cost. Every materialized bucket starts at `floor(timestamp / resolution) * resolution`, so its identity is stable across ranges, refreshes, ports, and clients.
 
 `2s`, `5s`, `30s`, `120s`, `600s`, and every other numeric duration are unsupported current values. They may be read only inside the atomic migration transaction and never survive as accepted current rows, cache keys, requests, responses, controls, preferences, or labels. Tests and documentation may name them only to prove or explain rejection and migration. An invalid persisted browser choice normalizes visibly to AUTO before a request; an invalid wire request is rejected and never promoted, clamped, or substituted.
 
 ## Current routes
 
 - `GET /api/stats-capabilities` returns the one server-owned Range/Resolution matrix.
-- `GET /api/stats-snapshot` returns one exact immutable generation or a structured terminal/pending result.
+- `GET /api/stats-snapshot` retains the bounded one-shot exact snapshot contract for non-browser consumers.
 - `GET /api/stats-delta` returns the bounded one-shot exact delta for an active cache cursor.
-- `GET /api/stats-stream` carries the same delta cursor as SSE and emits `delta`, `ready`, `repair`, or `unavailable`.
+- `GET /api/stats-stream` is the browser's one-request snapshot-and-live SSE owner. It emits `ack`, one or more `snapshot` frames, `ready`, then live `delta`/`ready` frames or a typed terminal/recovery event.
 - `POST /api/stats-observations` durably appends bounded browser-originated originals under the server-bound private identity.
 
-## Exact snapshot endpoint
+## Exact one-shot snapshot endpoint
 
 `GET /api/stats-snapshot` is the only current full retained-data snapshot endpoint. It requires normal read authentication and accepts these query parameters:
 
@@ -144,7 +144,16 @@ A successful response contains:
 
 ## Live delta delivery and cadence
 
-`GET /api/stats-stream` carries the exact delta SSE shape; `GET /api/stats-delta` exposes the same cursor as a one-shot response. Each delta contains `protocol_version`, `range_seconds`, concrete `resolution_seconds`, `source_generation`, `base_cache_generation`, `cache_generation`, consecutive `revision`, complete replacement `buckets` and `no_data`, explicit `tombstones`, and one full precomputed `cost_report` replacement rather than a client-calculated patch. A bucket identity is `(start, duration)` because its `series` map is replaced atomically. A no-data identity is `(family, source_id, epoch, start, end)`. The server retains only the previous-to-current delta for each exact key; the browser applies it only when its key and base generation continue the active snapshot, and any older or mismatched cursor schedules one exact snapshot repair.
+The browser opens one authenticated `GET /api/stats-stream` request with `range_seconds`, requested `resolution`, `client_id`, and `since_generation`. It does not issue parallel snapshot fetches. That same SSE connection emits, in order:
+
+1. one `ack` with the pinned `cache_generation`, expected `chunk_count`, exact range, requested and concrete resolution, and whether the generation is unchanged;
+2. one full `snapshot` frame or a contiguous sequence of size-derived `snapshot` chunks for a changed generation;
+3. one `ready` with the initial generation and revision-zero cursor;
+4. live `delta` frames when the view changes, or `ready` heartbeats when the cursor remains current.
+
+Snapshot chunks target about 1 MiB of encoded data, are partitioned by bucket count, and are capped at 64 frames while every statsd RPC frame remains below 4 MiB. Chunk count therefore follows encoded data size rather than elapsed hours: a 24-hour request can reasonably arrive in several frames without creating 24 one-hour requests or responses, while a normal 5-minute view usually needs only one or two frames. Every chunk shares one immutable generation and exact view and carries explicit index/count and bucket-aligned bounds. Chunks remain private transport assembly state: the browser does not publish or paint any partial snapshot, and only a contiguous complete assembly followed by the matching `ready` frame atomically replaces the active generation. The previously accepted bucket store and viewport remain unchanged during assembly. Closing or replacing the EventSource invalidates every later frame from that stream.
+
+After readiness, the stream carries the exact delta SSE shape; `GET /api/stats-delta` exposes the same cursor as a one-shot response. Each delta contains `protocol_version`, `range_seconds`, concrete `resolution_seconds`, `source_generation`, `base_cache_generation`, `cache_generation`, consecutive `revision`, complete replacement `buckets` and `no_data`, explicit `tombstones`, and one full precomputed `cost_report` replacement rather than a client-calculated patch. A bucket identity is `(start, duration)` because its `series` map is replaced atomically. A no-data identity is `(family, source_id, epoch, start, end)`. The server retains a cadence-sized bounded chain for each exact key and composes the current delivery from the browser's accepted cursor; the browser applies it only when its key and base generation continue the active snapshot. Accepted live deltas delete tombstoned graph records, replace only named bucket records, and retain every unchanged bucket in the existing browser store without clearing or replaying the snapshot. A cursor outside that bounded exact chain reopens one exact snapshot-and-live stream.
 
 Delivery and repaint cadence is derived only from the server-echoed concrete resolution, never from the selected range:
 
