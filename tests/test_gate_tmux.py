@@ -51,6 +51,7 @@ TERMINAL_PRESSURE_CHUNK_BYTES = 4096
 TERMINAL_PRESSURE_INTERVAL_SECONDS = 0.02
 TERMINAL_PRESSURE_WARMUP_BYTES = 64 * 1024
 TERMINAL_PRESSURE_SAMPLING_MIN_BYTES = 128 * 1024
+TERMINAL_PRESSURE_WAIT_TIMEOUT_MS = 8000
 
 
 @dataclass(frozen=True)
@@ -206,19 +207,37 @@ def _establish_terminal_output_pressure(
 
     browser.execute_script("clearClientPerfCounters();")
     _start_terminal_output_pressure(runtime, session, duration_seconds=duration_seconds)
-    pressure_ready = browser.execute_async_script(
+    observed_bytes = _wait_for_xterm_write_bytes(
+        browser,
+        TERMINAL_PRESSURE_WARMUP_BYTES,
+        "terminal output pressure reaches xterm",
+    )
+    assert observed_bytes >= TERMINAL_PRESSURE_WARMUP_BYTES, observed_bytes
+    return TerminalOutputPressure(session=session, duration_seconds=duration_seconds)
+
+
+def _wait_for_xterm_write_bytes(browser, minimum_bytes: int, description: str) -> int:
+    """Wait for one durable xterm byte floor instead of sampling an in-flight final counter."""
+
+    observed = browser.execute_async_script(
         """
         const minimumBytes = arguments[0];
+        const description = arguments[1];
         const done = arguments[arguments.length - 1];
         window.__yolomuxTestWaitFor(() => {
           const counter = Object.fromEntries(clientPerfSummary().map(item => [item.name, item])).xtermWrite;
           return Number(counter?.bytes || 0) >= minimumBytes;
-        }, {timeoutMs: 8000, description: 'terminal output pressure reaches xterm'}).then(() => done(true), error => done({error: String(error)}));
+        }, {timeoutMs: arguments[2], description}).then(() => {
+          const counter = Object.fromEntries(clientPerfSummary().map(item => [item.name, item])).xtermWrite;
+          done(Number(counter?.bytes || 0));
+        }, error => done({error: String(error)}));
         """,
-        TERMINAL_PRESSURE_WARMUP_BYTES,
+        minimum_bytes,
+        description,
+        TERMINAL_PRESSURE_WAIT_TIMEOUT_MS,
     )
-    assert pressure_ready is True, pressure_ready
-    return TerminalOutputPressure(session=session, duration_seconds=duration_seconds)
+    assert isinstance(observed, (int, float)), observed
+    return int(observed)
 
 
 def _client_perf_counter(driver, name: str) -> dict[str, object]:
@@ -315,7 +334,16 @@ def _keystroke_round(
         if after_key is not None:
             after_key(index)
     sampling_seconds = time.monotonic() - started_at
-    xterm_bytes_after = _counter_total(_client_perf_counter(browser, "xtermWrite"), "bytes")
+    if pressure:
+        # The producer and xterm are asynchronous. Keep the same 128 KiB pressure floor, but let
+        # writes already emitted during the round converge instead of judging one in-flight read.
+        xterm_bytes_after = _wait_for_xterm_write_bytes(
+            browser,
+            xterm_bytes_before + TERMINAL_PRESSURE_SAMPLING_MIN_BYTES,
+            "terminal output pressure remains observable through the keystroke round",
+        )
+    else:
+        xterm_bytes_after = _counter_total(_client_perf_counter(browser, "xtermWrite"), "bytes")
     trace = _client_perf_trace(browser)
     return {
         "label": label,
@@ -330,7 +358,7 @@ def _keystroke_round(
         "term_on_data_count": _counter_total(trace["termOnData"], "count"),
         "term_on_data_bytes": _counter_total(trace["termOnData"], "bytes"),
         "echo_count": _counter_total(trace["echoToTermWrite"], "count"),
-        "pressure_bytes_during_sampling": xterm_bytes_after - xterm_bytes_before,
+        "pressure_bytes_observed": xterm_bytes_after - xterm_bytes_before,
         "long_tasks": trace["longTasks"],
     }
 
@@ -361,10 +389,10 @@ def _keystroke_delivery_failures(observed: dict[str, object]) -> list[str]:
         )
     if observed["echo_count"] < 1:
         failures.append(f"socket-echo: the session must answer at least one send while typing; echoToTermWrite count={observed['echo_count']}")
-    if observed["pressure"] and int(observed["pressure_bytes_during_sampling"]) < TERMINAL_PRESSURE_SAMPLING_MIN_BYTES:
+    if observed["pressure"] and int(observed["pressure_bytes_observed"]) < TERMINAL_PRESSURE_SAMPLING_MIN_BYTES:
         failures.append(
-            f"output-pressure: xterm must keep consuming the streaming session during sampling; "
-            f"expected at least {TERMINAL_PRESSURE_SAMPLING_MIN_BYTES} bytes, observed {observed['pressure_bytes_during_sampling']}"
+            f"output-pressure: xterm must keep consuming the streaming session during the round; "
+            f"expected at least {TERMINAL_PRESSURE_SAMPLING_MIN_BYTES} bytes, observed {observed['pressure_bytes_observed']}"
         )
     return failures
 
@@ -389,7 +417,7 @@ def _keystroke_summary(observed: dict[str, object]) -> dict[str, object]:
         "term_on_data_count": observed["term_on_data_count"],
         "term_on_data_bytes": observed["term_on_data_bytes"],
         "echo_count": observed["echo_count"],
-        "pressure_bytes_during_sampling": observed["pressure_bytes_during_sampling"],
+        "pressure_bytes_observed": observed["pressure_bytes_observed"],
         "long_task_count": observed["long_tasks"]["count"],
         "long_task_max_ms": observed["long_tasks"]["maxMs"],
     }
@@ -487,6 +515,64 @@ def test_s1_cpu_slowdown_starts_only_after_pressure_is_established(monkeypatch):
         ("sample", pressure.session, pressure),
         ("Emulation.setCPUThrottlingRate", {"rate": 1}),
     ]
+
+
+def test_s1_pressure_round_waits_for_the_existing_byte_floor_before_final_observation(monkeypatch):
+    baseline_bytes = 41
+    sent_keys = 0
+    barriers: list[tuple[int, str]] = []
+    pressure = TerminalOutputPressure(session="fixture-session", duration_seconds=12.0)
+
+    class Browser:
+        def execute_script(self, script):
+            assert script == "clearClientPerfCounters();"
+
+    def send_native_key(_browser, character):
+        nonlocal sent_keys
+        assert character == "a"
+        sent_keys += 1
+
+    def client_perf_counter(_browser, name):
+        if name == "xtermWrite":
+            return {"bytes": baseline_bytes}
+        assert name == "keydownToTermData"
+        return {"count": sent_keys, "lastMs": 0.1}
+
+    def wait_for_bytes(_browser, minimum_bytes, description):
+        barriers.append((minimum_bytes, description))
+        return minimum_bytes + 17
+
+    monkeypatch.setattr(sys.modules[__name__], "_send_native_key", send_native_key)
+    monkeypatch.setattr(sys.modules[__name__], "_client_perf_counter", client_perf_counter)
+    monkeypatch.setattr(sys.modules[__name__], "_wait_for_xterm_write_bytes", wait_for_bytes)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_client_perf_trace",
+        lambda _browser: {
+            "focusSet": None,
+            "wsSend": {"count": sent_keys, "bytes": sent_keys},
+            "termOnData": {"count": sent_keys, "bytes": sent_keys},
+            "echoToTermWrite": {"count": 1},
+            "xtermWrite": {"bytes": baseline_bytes + TERMINAL_PRESSURE_SAMPLING_MIN_BYTES + 17},
+            "longTasks": {"count": 0, "maxMs": 0},
+        },
+    )
+
+    observed = _keystroke_round(
+        Browser(),
+        object(),
+        pressure.session,
+        label="pressure-barrier",
+        sample_count=2,
+        pressure=True,
+        established_pressure=pressure,
+    )
+
+    assert barriers == [(
+        baseline_bytes + TERMINAL_PRESSURE_SAMPLING_MIN_BYTES,
+        "terminal output pressure remains observable through the keystroke round",
+    )]
+    assert observed["pressure_bytes_observed"] == TERMINAL_PRESSURE_SAMPLING_MIN_BYTES + 17
 
 
 def _certified_latency_statistic(cpu_qualified: bool) -> str:
@@ -684,7 +770,9 @@ def test_s1_negative_control_stalled_websocket_fails_send_completeness(browser, 
         session,
         label="negative-control-stalled-websocket",
         sample_count=KEYSTROKE_LATENCY_SAMPLE_COUNT,
-        pressure=True,
+        # Output pressure has its own positive control. This negative control injects one
+        # transport defect and must not acquire a second, scheduler-sensitive precondition.
+        pressure=False,
         after_key=stall_socket,
     )
     reasons = _negative_control_reasons(observed)
@@ -709,7 +797,7 @@ def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:
         "term_on_data_count": sample_count,
         "term_on_data_bytes": sample_count,
         "echo_count": sample_count,
-        "pressure_bytes_during_sampling": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES,
+        "pressure_bytes_observed": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES,
         "long_tasks": {"count": 0, "maxMs": 0},
     }
 
@@ -724,7 +812,7 @@ def _complete_delivery_observation(sample_count: int = 4) -> dict[str, object]:
         ({"term_on_data_count": 3}, "term-on-data"),
         ({"term_on_data_bytes": 3}, "term-on-data"),
         ({"echo_count": 0}, "socket-echo"),
-        ({"pressure_bytes_during_sampling": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES - 1}, "output-pressure"),
+        ({"pressure_bytes_observed": TERMINAL_PRESSURE_SAMPLING_MIN_BYTES - 1}, "output-pressure"),
     ],
 )
 def test_s1_delivery_report_names_exactly_the_violated_contract(violation, expected_reason):

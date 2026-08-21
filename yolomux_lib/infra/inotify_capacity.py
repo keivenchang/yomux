@@ -102,6 +102,37 @@ def process_fd_owners(pid: int) -> dict[str, int]:
     return owners
 
 
+def inotify_watch_descriptor_count(pid: int) -> int:
+    """Count one process's kernel inotify WATCH DESCRIPTORS, not its instances.
+
+    Instance count and watch-descriptor count answer different questions and only one of them
+    bounds memory.  A single inotify instance holding 126,028 ``inotify wd:`` records reads as ONE
+    instance while pinning a kernel object per watched directory; that shape is exactly the
+    filesystem-daemon incident this measurement exists to make impossible to claim away.
+
+    Each descriptor is one ``inotify wd:`` line in ``/proc/<pid>/fdinfo/<fd>``, which is the only
+    place the kernel exposes them.  A Python-side count of the registration tuple proves what the
+    daemon INTENDED to register and cannot prove what the kernel actually holds -- a recursive
+    registration, a library that expands a root, or a retained generation would all be invisible to
+    it.  Reading is passive: no fd is opened on the target process and nothing is written.
+    """
+
+    total = 0
+    fdinfo_dir = Path(f"/proc/{pid}/fdinfo")
+    try:
+        names = os.listdir(fdinfo_dir)
+    except OSError:
+        return 0
+    for name in names:
+        try:
+            text = (fdinfo_dir / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # A descriptor closed between listing and reading is not a measurement failure.
+            continue
+        total += sum(1 for line in text.splitlines() if line.startswith("inotify wd:"))
+    return total
+
+
 def inotify_instance_census() -> tuple[int, dict[int, int]]:
     """Count this uid's inotify instances per pid and in total.
 

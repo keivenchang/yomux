@@ -517,9 +517,28 @@ def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -
 
 
 @normalize_os_errors
-def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
+def delete_path(
+    raw_path: str,
+    *,
+    recursive: bool = False,
+    cancel_event: Any | None = None,
+    deadline_monotonic: float | None = None,
+) -> dict[str, Any]:
     _sync_package_overrides()
-    payload = io_ops.delete_path(raw_path, recursive=recursive)
+    try:
+        payload = io_ops.delete_path(
+            raw_path,
+            recursive=recursive,
+            cancel_event=cancel_event,
+            deadline_monotonic=deadline_monotonic,
+        )
+    except io_ops.PartialDeleteError as error:
+        # Only observed removals invalidate policy/search state. A cancellation or expired deadline
+        # before the first unlink is a non-terminal refusal, not a filesystem mutation.
+        if error.deleted_paths:
+            paths.invalidate_path_policy_caches()
+            _reindex_after_mutation([raw_path, *error.deleted_paths], reason="fs-delete-partial")
+        raise
     if payload.get("pending"):
         # A non-terminal probe deleted NOTHING.  Invalidating the path policy caches or fanning out
         # a reindex here would publish a filesystem change that never happened; both are terminal

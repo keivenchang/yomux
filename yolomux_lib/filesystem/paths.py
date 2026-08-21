@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import contextvars
+import fcntl
 import hashlib
 import json
 import os
 import stat
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -574,6 +576,17 @@ class SafePathHandle:
             "this platform cannot expose the pinned filesystem descriptor",
             status=500,
             message_key="fs.error.operationFailed",
+            # The localized string stays the shared generic one, because nothing the USER can do
+            # differs here.  An OPERATOR reading a 500 does need to tell this apart from every other
+            # operation failure: it is a platform capability refusal, not a fault in the request or
+            # the file, and it is the fail-closed branch of the descriptor-bound authorization owner
+            # rather than a re-resolution.  `diagnostic` is the existing field for exactly that --
+            # operator-facing detail carried alongside an unchanged localized message.
+            diagnostic=(
+                "descriptor-bound authorization refused: no per-descriptor path root "
+                f"({', '.join(str(root) for root in DESCRIPTOR_PATH_ROOTS)}) is available on this "
+                "platform, so the authorized generation cannot be named for the consumer"
+            ),
         )
 
 
@@ -864,6 +877,44 @@ def _ensure_not_configured_root(path: Path, action: str, *, resolved: Path | Non
             )
 
 
+def _darwin_devfs_live_realpath(resolved: Path) -> Path:
+    """The live, fd-authoritative real path for a `/dev/fd/N`-rooted path, Darwin only.
+
+    Listing walks a pinned root via its `/dev/fd/N`/`/proc/self/fd/N` descriptor path (see
+    `SafePathHandle.descriptor_path`), and on Linux `.resolve()` on that root correctly follows
+    the `/proc/self/fd/N` symlink back to the true directory -- procfs fd entries answer "what is
+    the CURRENT path of this exact live descriptor", so this is fd-authoritative, not a by-name
+    re-lookup, and both the "realpath"/repo "root" display fields and `_path_is_secret`'s
+    directory-component matching rely on it reflecting the truth. Darwin's `/dev/fd/N` is a devfs
+    character-special node, not a symlink, so the same `.resolve()` leaves the raw
+    `/dev/fd/N/...` path untouched, leaking it verbatim into display fields, AND silently
+    defeating secret-directory detection for a child whose parent was swapped after this exact
+    descriptor's authorization (the case `test_listing_opens_regular_children_from_the_pinned_parent_generation`
+    exercises). `F_GETPATH` is the Darwin equivalent of that same "ask the kernel this fd's
+    current path" query -- it is NOT the name-based re-resolution `DESCRIPTOR_PATH_ROOTS`'s
+    docstring warns against (that danger is a caller re-`open()`ing a returned pathname, which
+    reopens the check/use race; nothing here re-opens anything with this result, it is only ever
+    compared as a string).
+    """
+    if sys.platform != "darwin":
+        return resolved
+    parts = resolved.parts
+    if len(parts) < 4 or parts[:3] != ("/", "dev", "fd"):
+        return resolved
+    try:
+        descriptor = int(parts[3])
+    except ValueError:
+        return resolved
+    try:
+        raw = fcntl.fcntl(descriptor, DARWIN_F_GETPATH, b"\0" * DARWIN_PATH_BUFFER_BYTES)
+    except OSError:
+        return resolved
+    root_text = raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+    if not root_text:
+        return resolved
+    return Path(root_text).joinpath(*parts[4:])
+
+
 def _physical_file_identity(
     path: Path,
     *,
@@ -879,7 +930,7 @@ def _physical_file_identity(
         return {}
     file_id = f"{st.st_dev}:{st.st_ino}"
     return {
-        "realpath": str(resolved),
+        "realpath": str(_darwin_devfs_live_realpath(resolved)),
         "file_id": file_id,
         "file_identity": f"id:{file_id}",
     }

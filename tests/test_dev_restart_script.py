@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 STARTUP_COMMON = ROOT / "tools" / "startup_common.sh"
@@ -364,6 +366,81 @@ def test_instance_preflight_uses_the_direct_plan_not_ambient_tmpdir():
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def _run_instance_preflight(row_plan_file, port=8881):
+    """Drive the real production preflight exactly as `boot.sh` does.
+
+    `yolomux_validate_instance_isolation` is called unconditionally at `boot.sh:483`, outside the
+    `uname -s == Darwin` gate, so this is the one half of the retained-tmux-environment fix that
+    executes on every platform. Setting `YOLOMUX_ROW_PLAN_FILE` here reproduces exactly what a
+    long-lived tmux server leaks into a session created from a clean shell.
+    """
+    env = {**os.environ}
+    for key in ("YOLOMUX_ROOT", "YOLOMUX_ROW_PLAN_FILE"):
+        env.pop(key, None)
+    if row_plan_file is not None:
+        env["YOLOMUX_ROW_PLAN_FILE"] = str(row_plan_file)
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "$1"; yolomux_validate_instance_isolation "$2" "$3" {port}',
+            "instance-preflight",
+            str(STARTUP_COMMON),
+            str(ROOT),
+            sys.executable,
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "write"),
+    [
+        ("missing", None),
+        ("not-json", lambda path: path.write_text("this is not a row plan", encoding="utf-8")),
+        ("wrong-shape", lambda path: path.write_text(json.dumps({"assign": {}}), encoding="utf-8")),
+        ("unset-not-strings", lambda path: path.write_text(json.dumps({"unset": [1], "assign": {}}), encoding="utf-8")),
+    ],
+)
+def test_a_stale_row_plan_file_is_refused_by_the_preflight_instead_of_silently_accepted(tmp_path, name, write):
+    """The Linux-live half of the retained-tmux-environment fix, which had no regression at all.
+
+    Before the fix `yolomux_validate_instance_isolation` never read `YOLOMUX_ROW_PLAN_FILE`, so a
+    server born from a poisoned tmux server started with a stale root and rc=0. Each row here is a
+    plan a retained environment can actually point at: a path that no longer exists, and three that
+    exist but cannot be a plan. All four must fail CLOSED with the typed message, not be ignored.
+    """
+    plan_file = tmp_path / f"{name}-row-plan.json"
+    if write is not None:
+        write(plan_file)
+
+    result = _run_instance_preflight(plan_file)
+
+    assert result.returncode == 2, f"stale row plan was ACCEPTED\nstdout={result.stdout}\nstderr={result.stderr}"
+    assert "invalid row plan" in result.stderr, result.stderr
+
+
+def test_a_valid_row_plan_file_is_still_accepted_so_the_refusal_is_not_blanket(tmp_path):
+    """Negative control for the row above: refusing every plan would pass that test and be a defect."""
+    plan = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "instance_isolation.py"), "plan-direct", "--port", "8881"],
+        env={key: value for key, value in os.environ.items() if key not in {"YOLOMUX_ROOT", "YOLOMUX_ROW_PLAN_FILE"}},
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    assert json.loads(plan).keys() == {"unset", "assign"}
+    plan_file = tmp_path / "valid-row-plan.json"
+    plan_file.write_text(plan, encoding="utf-8")
+
+    result = _run_instance_preflight(plan_file)
+
+    assert result.returncode == 0, result.stderr
+    assert "invalid row plan" not in result.stderr
 
 
 def test_shared_start_lock_rejects_concurrent_launcher_and_releases_cleanly(tmp_path):

@@ -8,6 +8,7 @@ executor capacity so CPU-bound Python work cannot run in HTTP request threads.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import multiprocessing
@@ -19,6 +20,7 @@ import time
 import traceback
 import uuid
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import Future
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -194,6 +196,21 @@ JOBD_MAX_PRODUCTS = 256
 JOBD_MAX_SOURCE_DIAGNOSTICS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_SCHEDULER_POLL_SECONDS = 0.05
+# How long past its deadline a RUNNING job may still be, before the broker terminalizes it without
+# its worker's answer.  A worker that honors its deadline stops by itself and owns the terminal
+# state, so this is a backstop for work that cannot stop -- an uninterruptible syscall on a wedged
+# mount -- and never the ordinary path.
+#
+# Derived from measurement on this host, not chosen.  The longest stretch of a recursive delete with
+# no cooperative check in it is one directory's `os.scandir` plus `sorted`, which runs BEFORE the
+# first per-entry check: measured 0.71 us/entry (0.143 s at 200,000 entries), so 0.326 s at the
+# 457,364-entry directory this codebase already cites.  One entry's own stat+unlink between checks
+# measured 63.8 us, the worker-raise-to-broker-visible round trip measured 1.3 ms, and the broker's
+# own maintenance poll is JOBD_SCHEDULER_POLL_SECONDS.  Measured worst sum ~= 0.378 s; 2.0 s is
+# roughly 5x that, which is the headroom for a cold page cache that no constant can bound exactly.
+# When a directory IS large enough to blow through this, the backstop fires and the worker's partial
+# evidence is retained instead of discarded -- that retention is what makes an imperfect bound safe.
+JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS = 2.0
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
 JOBD_BROKER_ACTIONS = frozenset({
@@ -447,7 +464,15 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes | JobdTaskR
         # Still ONE `delete` arm.  `recursive` picks the cost class the caller already reserved a
         # lane for; a bounded request that turns out to need a subtree walk comes back as a typed
         # pending result and is re-submitted with `recursive=True` on the bulk lane.
-        result = filesystem.delete_path(path, recursive=args.get("recursive") is True)
+        recursive = args.get("recursive") is True
+        # A recursive delete is the one filesystem operation whose cost is input-sized, so it is the
+        # one that must be able to stop.  The bounded form is a single syscall: a deadline check
+        # there could only refuse work that was already about to finish, so it carries none.
+        result = filesystem.delete_path(
+            path,
+            recursive=recursive,
+            deadline_monotonic=current_task_control().deadline_monotonic if recursive else None,
+        )
     elif operation == "unindex":
         result = filesystem.unindex_root(path)
     elif operation == "rename":
@@ -640,13 +665,65 @@ def _validated_product_metadata(body: bytes, product: dict[str, object], *, expe
     return dict(product)
 
 
-def run_registered_task_result(task: str, payload: bytes) -> JobdTaskResult | JobdArtifactResult:
-    """Executor entry point that preserves opaque task bodies for broker retention."""
+@dataclass(frozen=True, slots=True)
+class JobdTaskControl:
+    """The bounds one dispatched job carries into its worker process.
+
+    ``deadline_monotonic`` is an ABSOLUTE ``time.monotonic()`` instant read in the broker process.
+    ``CLOCK_MONOTONIC`` is system-wide rather than per-process on every platform this runs on, so a
+    spawned worker compares against it directly.  A relative budget would be wrong: the worker would
+    start its countdown after cold ``ProcessPoolExecutor`` startup, putting its stop strictly AFTER
+    the broker's deadline -- which is the defect this type exists to remove.
+    """
+
+    deadline_monotonic: float | None = None
+
+
+# One worker process runs exactly one task at a time, so the active control is process-local state
+# rather than a registry.  ``run_registered_task_result`` is the only writer.
+_active_task_control: JobdTaskControl | None = None
+_NO_TASK_CONTROL = JobdTaskControl()
+
+
+def current_task_control() -> JobdTaskControl:
+    """The control for the task this process is running, or an empty one outside a task."""
+    return _active_task_control if _active_task_control is not None else _NO_TASK_CONTROL
+
+
+@contextlib.contextmanager
+def active_task_control(control: JobdTaskControl | None) -> Iterator[None]:
+    """Install one task's control for the duration of that task and always clear it after.
+
+    Clearing is not optional even when the task raises: a leaked deadline would be inherited by
+    whatever this worker runs next, and an already-expired one would refuse it instantly.
+    """
+    global _active_task_control
+    previous = _active_task_control
+    _active_task_control = control
+    try:
+        yield
+    finally:
+        _active_task_control = previous
+
+
+def run_registered_task_result(
+    task: str,
+    payload: bytes,
+    control: JobdTaskControl | None = None,
+) -> JobdTaskResult | JobdArtifactResult:
+    """Executor entry point that preserves opaque task bodies for broker retention.
+
+    This is the ONE entry point every registered task is dispatched through, so it is also where a
+    per-job control is installed -- once, for all of them -- rather than threaded through fifteen
+    task signatures.  A task that never reads it is unaffected, and ``control=None`` reproduces the
+    behaviour of every caller that predates it.
+    """
     if task not in REGISTERED_TASKS:
         raise ValueError("unknown task")
     if len(payload) > JOBD_MAX_PAYLOAD_BYTES:
         raise ValueError("payload too large")
-    result = REGISTERED_TASKS[task](payload)
+    with active_task_control(control):
+        result = REGISTERED_TASKS[task](payload)
     if isinstance(result, JobdArtifactResult):
         _validated_product_metadata(b"", result.product, expected_length=int(result.product.get("length") or -1))
         return result
@@ -1173,10 +1250,34 @@ class PersistentJobBroker:
         return executor
 
     def _shutdown_executor(self, *, lane: str) -> None:
+        """Shut down one lane's process pool and prove every worker process is actually gone.
+
+        `ProcessPoolExecutor.shutdown(wait=False, ...)` only stops the executor from accepting
+        new work; it does not wait for spawned worker PROCESSES to exit, and its `_ExecutorManagerThread`
+        is daemonized so it cannot itself block process exit. But `multiprocessing` separately
+        registers an `atexit` hook (`multiprocessing.util._exit_function`) that unconditionally
+        `join()`s every still-`active_children()` process with NO timeout. If a worker was mid-git
+        subprocess (or any other blocking call) when the lane was told to stop, that worker never
+        exits on its own, and the whole jobd process then hangs forever inside Python's own
+        interpreter-shutdown thread-join -- reachable via `sample`/`py-spy` as `wait_for_thread_shutdown`,
+        with the listening socket already unlinked, looking alive but serving nothing. Terminating
+        (then killing, if needed) every worker here, synchronously and with bounded timeouts, means
+        no active child is left for that atexit hook to hang on, regardless of what it was doing.
+        """
         executor = self.executors.get(lane)
         self.executors[lane] = None
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        if executor is None:
+            return
+        workers = list(executor._processes.values())
+        executor.shutdown(wait=False, cancel_futures=True)
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+        for worker in workers:
+            worker.join(timeout=2.0)
+            if worker.is_alive():
+                worker.kill()
+                worker.join(timeout=1.0)
 
     def _record_payload(self, record: JobRecord, *, include_result: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1220,12 +1321,27 @@ class PersistentJobBroker:
         )
 
     def _expire_deadlines(self, now: float) -> None:
+        """Expire queued work exactly at its deadline, and running work only past the backstop.
+
+        A running job now carries its own absolute deadline into its worker, so a task that honors
+        it stops by itself and its typed result -- including which paths a partial delete actually
+        removed -- becomes the terminal state.  Terminalizing here at the same instant would race
+        that answer and publish `timed_out` while the filesystem was still changing.  So this waits
+        JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS past the deadline, which is derived from measured
+        cooperative-stop latency, and only then acts for work that could not stop at all.
+
+        A queued job has no worker to answer for it, so its expiry stays exact.
+        """
         for record in self.records.values():
-            if record.status not in {"queued", "running"} or record.deadline_at <= 0 or now < record.deadline_at:
+            if record.status not in {"queued", "running"} or record.deadline_at <= 0:
                 continue
             if record.status == "queued":
+                if now < record.deadline_at:
+                    continue
                 self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
             else:
+                if now < record.deadline_at + JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS:
+                    continue
                 # ProcessPoolExecutor cannot safely cancel an already-running task.  Keep
                 # its future occupying a slot until it exits so a deadline cannot create
                 # unbounded hidden CPU work behind the broker's capacity accounting.
@@ -1244,6 +1360,13 @@ class PersistentJobBroker:
                     abandoned = future.result()
                     if isinstance(abandoned, JobdArtifactResult):
                         self.product_store.discard_artifact_result(abandoned)
+                except JobdFilesystemOperationFailure as exc:
+                    # The backstop can still beat a worker that DID stop cooperatively.  Its payload
+                    # names the entries a partial delete actually removed, and it is the only record
+                    # of them: discarding it leaves the requester unable to invalidate those paths.
+                    # The terminal state itself is not revised -- the backstop already owns that.
+                    if not record.failure:
+                        record.failure = {"filesystem_error": dict(exc.payload), "status": exc.status}
                 except Exception:
                     pass
                 record.future = None
@@ -1401,9 +1524,21 @@ class PersistentJobBroker:
                 self.coalesced.pop((record.task, record.coalesce_key), None)
 
     def _refresh_records(self, *, finalize_artifacts: bool = False) -> list[tuple[JobRecord, JobdArtifactResult]]:
-        now = time.monotonic()
-        self._expire_deadlines(now)
+        """Collect answers first, then expire what never answered.
+
+        Order is load-bearing, and this is the one place both owners are called from.  A worker that
+        already published its result has answered; the broker merely looked late.  Expiring first
+        relabelled that delivered answer -- a 409 partial delete carrying the paths it removed, or an
+        ordinary completed product -- as `timed_out`, telling the requester nothing came back about
+        work it had in fact heard back about.  The backstop is for work still running, so it must be
+        evaluated only after every finished future has been claimed.
+
+        Queued expiry is unaffected: a queued record has no future for the first pass to touch, so
+        its deadline stays exact.  Claiming finished futures first also releases their slots before
+        capacity is recounted, which can only let more queued work start in the same pump.
+        """
         pending_artifacts = self._handle_finished_futures(finalize_artifacts=finalize_artifacts)
+        self._expire_deadlines(time.monotonic())
         self._prune_records()
         self.product_store.prune_leases()
         return pending_artifacts
@@ -1439,7 +1574,12 @@ class PersistentJobBroker:
             self._finalize_artifact(record, task_result)
         for record in dispatch:
             try:
-                future = self._executor(record.priority).submit(run_registered_task_result, record.task, record.payload)
+                future = self._executor(record.priority).submit(
+                    run_registered_task_result,
+                    record.task,
+                    record.payload,
+                    JobdTaskControl(deadline_monotonic=record.deadline_at or None),
+                )
             except Exception as exc:
                 with self.state_lock:
                     self._mark_terminal(

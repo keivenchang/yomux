@@ -287,6 +287,34 @@ _DESCRIPTOR_LITERAL_ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
         1, "lane classification only; `_queue_record` never executes the payload",
     ),
     ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "abs-deadline", deadline_at=deadline,'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "still-deleting",'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "wedged",'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "backstopped",'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     'record = service._queue_record("filesystem_operation", {"op": "delete"}, "interactive", 1, "running-delete")'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "done-then-late-pump",'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
+     '"filesystem_operation", {"op": "delete"}, "interactive", 1, "never-answers",'): (
+        1, "deadline scheduling fixture only; `_queue_record` never executes the payload",
+    ),
+    ("tests/test_jobd.py",
      'index_status = service._queue_record("filesystem_operation", {"op": "index_status"}, "point", 1, "point-index")'): (
         1, "lane classification only; `_queue_record` never executes the payload",
     ),

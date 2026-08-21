@@ -1243,6 +1243,49 @@ def test_git_repo_info_distinguishes_detached_head_from_unknown_branch(tmp_path,
     assert unknown["head_sha"] == ""
 
 
+def test_git_repo_info_does_not_collide_across_two_repos_sharing_a_recycled_descriptor_number(tmp_path):
+    # Forces the real cache-collision bug red: `_REPO_INFO_CACHE` is a process-wide cache keyed
+    # by `root = str(repo.expanduser().resolve(strict=False))`. Finder listing passes a pinned
+    # `/dev/fd/N` descriptor path here so the existence check stays fd-safe (see `listing.py`'s
+    # `inspection_path`). On Darwin, `/dev/fd/N` is a devfs node, not a symlink, so `.resolve()`
+    # left `root` as the literal, unresolved `/dev/fd/N/...` string before the fix -- and the OS
+    # recycles low fd numbers quickly, so two DIFFERENT repos opened at different times can land
+    # on the identical fd number and therefore the identical cache key, serving one repo's cached
+    # branch for a completely unrelated repo. This drives that exact collision by hand: open repo
+    # A's directory, read its info through the fd-string path, close it, then open repo B's
+    # directory (very likely reusing that same low fd number) and prove its info is its own, not
+    # a stale hit for repo A.
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+    repo_a = tmp_path / "repo-a"
+    repo_a.mkdir()
+    git(repo_a, "init")
+    git(repo_a, "checkout", "-b", "branch-a")
+    repo_b = tmp_path / "repo-b"
+    repo_b.mkdir()
+    git(repo_b, "init")
+    git(repo_b, "checkout", "-b", "branch-b")
+
+    descriptor_a = os.open(repo_a, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        info_a = git_ops.git_repo_info(Path("/dev/fd") / str(descriptor_a), include_status=False)
+    finally:
+        os.close(descriptor_a)
+    descriptor_b = os.open(repo_b, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        info_b = git_ops.git_repo_info(Path("/dev/fd") / str(descriptor_b), include_status=False)
+    finally:
+        os.close(descriptor_b)
+
+    assert info_a["branch"] == "branch-a"
+    assert info_b["branch"] == "branch-b"
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        cache_keys = {key[0] for key in git_ops._REPO_INFO_CACHE}
+    assert str(repo_a.resolve()) in cache_keys, "the cache key must be the resolved real path, not the raw descriptor path"
+    assert str(repo_b.resolve()) in cache_keys
+    assert not any(key.startswith("/dev/fd/") for key in cache_keys), "a raw fd-string must never become a cache key"
+
+
 def test_list_directory_explicit_opt_out_skips_git_repo_probe_and_info(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()

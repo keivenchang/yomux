@@ -8,6 +8,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import Future
+from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from pathlib import Path
@@ -27,11 +28,17 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import TmuxPaneInfo
 from yolomux_lib.filesystem import FilesystemError
+from yolomux_lib.filesystem import io_ops
 from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services import runtime
 
 from _git_helpers import git
 from _git_helpers import init_repo
+
+
+def _blocking_worker_task():
+    """Module-level so the spawn context can pickle it; simulates a worker mid-task at shutdown."""
+    time.sleep(30)
 
 
 def _session_info_json(session, repo, transcript=None, kind="claude"):
@@ -2258,6 +2265,9 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
     broken.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2325,7 +2335,13 @@ def test_jobd_submit_never_creates_a_process_in_the_request_path(tmp_path, monke
 @pytest.mark.parametrize("priority", ["interactive", "freshness"])
 def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_exit(tmp_path, priority):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    timed_out = service._queue_record("text_facts", {"text": "slow"}, priority, 1, "slow", deadline_at=time.monotonic() - 1.0)
+    # Past the BACKSTOP, not merely past the deadline.  A running job now carries its deadline into
+    # its worker and is given JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS to answer for itself; this row
+    # is about work that never does, which is the only case the broker still terminalizes blind.
+    timed_out = service._queue_record(
+        "text_facts", {"text": "slow"}, priority, 1, "slow",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
     timed_out.status = "running"
     timed_out.future = Future()
     waiting = service._queue_record("text_facts", {"text": "wait"}, priority, 1, "wait")
@@ -2373,6 +2389,9 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
     crashed.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2765,6 +2784,9 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
     failing.future.set_exception(BrokenProcessPool("child exited"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
@@ -2826,6 +2848,19 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     class Process:
         def __init__(self, pid):
             self.pid = pid
+            self._alive = False
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            pass
+
+        def join(self, timeout=None):
+            del timeout
+
+        def kill(self):
+            pass
 
     class Executor:
         def __init__(self, pid):
@@ -2850,6 +2885,37 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     assert sorted(shutdown_pids) == [101, 102, 103, 104]
     assert set(service.executors) == set(jobd.JOBD_LANE_PRIORITIES)
     assert all(executor is None for executor in service.executors.values())
+
+
+def test_shutdown_executor_terminates_a_worker_stuck_mid_task_without_hanging(tmp_path):
+    """Forces the real hang red: a worker mid-task at shutdown must not survive `_shutdown_executor`.
+
+    Reproduces the exact defect found via `sample`/`py-spy` on a live macOS jobd: a
+    `ProcessPoolExecutor` worker still running when its lane is told to shut down was left
+    alive by `shutdown(wait=False, ...)`, so Python's own `multiprocessing.util._exit_function`
+    atexit hook later blocked forever inside `wait_for_thread_shutdown` trying to join it, with
+    the listening socket already unlinked. Before the fix this worker stays alive well past a
+    bounded `join(timeout=2.0)`, since nothing terminates it and its task sleeps 30s. After the
+    fix `_shutdown_executor` terminates (then kills, if needed) every process it owns, so the
+    worker is provably dead within the bound below.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    executor = service._executor("freshness")
+    future = executor.submit(_blocking_worker_task)
+    deadline = time.monotonic() + 10.0
+    while not executor._processes and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert executor._processes, "worker process never started"
+    workers = list(executor._processes.values())
+    assert any(worker.is_alive() for worker in workers), "worker process did not report alive"
+
+    service._shutdown_executor(lane=service._lane_for_priority("freshness"))
+
+    for worker in workers:
+        worker.join(timeout=2.0)
+        assert not worker.is_alive(), "worker process survived a bounded join after shutdown"
+    assert not executor._processes, "executor still tracks a worker process after shutdown"
+    future.cancel()
 
 
 def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):
@@ -3113,3 +3179,479 @@ def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):
         assert meta["state"] == "none" and body == b""  # a tombstoned key reports honestly, not stale data
     finally:
         jobd.JOBD_MAX_PRODUCTS = original_max
+
+
+# --- recursive-delete deadline control ----------------------------------------------------------
+# A recursive delete used to run to completion no matter what the broker decided: jobd's delete arm
+# called `filesystem.delete_path(path, recursive=...)` with neither of the two controls that owner
+# already accepts, so `_raise_if_delete_stopped` was a no-op on every entry.  The broker meanwhile
+# published `timed_out` while the worker kept unlinking.  These rows pin the control end to end.
+
+
+class _ControlledMonotonic:
+    """Replace only `io_ops`'s view of `time`, so a deadline crossing is exact and not timed.
+
+    Patching the real `time.monotonic` would reach pytest and every other module in this process.
+    `io_ops` reads its clock through its own module attribute, so replacing that attribute alone
+    controls the delete walk and nothing else.  Everything but `monotonic` proxies to the real module.
+    """
+
+    def __init__(self, start: float) -> None:
+        self.now = float(start)
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _ordered_tree(tmp_path, count=5):
+    """A directory whose entries the delete walk visits in a known order.
+
+    `_delete_directory_contents` sorts by `name.lower()`, so zero-padded names make "the entry it
+    stopped at" and "the entries after it" exact rather than incidental.
+    """
+    root = tmp_path / "tree"
+    root.mkdir()
+    names = [f"{index:02d}.txt" for index in range(1, count + 1)]
+    for name in names:
+        (root / name).write_text(name, encoding="utf-8")
+    return root, names
+
+
+def _delete_descriptor(path, *, recursive):
+    return json.dumps(_fs_descriptor(op="delete", path=str(path), args={"recursive": recursive})).encode("utf-8")
+
+
+def test_recursive_delete_stops_at_the_deadline_and_every_later_entry_survives(monkeypatch, tmp_path):
+    """The held-worker regression: one entry removed, deadline crossed, nothing after it touched."""
+    root, names = _ordered_tree(tmp_path)
+    clock = _ControlledMonotonic(1000.0)
+    deadline = 1000.5
+    monkeypatch.setattr(io_ops, "time", clock)
+    real_unlink = os.unlink
+
+    def unlink_then_cross_the_deadline(*args, **kwargs):
+        # Hold the walk at exactly one completed removal: the next cooperative check is past the
+        # deadline, so the stop point is a decision and not a race with wall-clock time.
+        result = real_unlink(*args, **kwargs)
+        clock.now = deadline
+        return result
+
+    monkeypatch.setattr(os, "unlink", unlink_then_cross_the_deadline)
+
+    with jobd.active_task_control(jobd.JobdTaskControl(deadline_monotonic=deadline)):
+        with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
+            jobd._filesystem_operation(_delete_descriptor(root, recursive=True))
+
+    body = failure.value.payload
+    assert body["partial"] is True
+    assert body["delete_reason"] == "deadline_exceeded"
+    assert body["deleted_paths"] == [str(root / names[0])]
+    assert body["failed_path"] == str(root / names[1])
+    assert not (root / names[0]).exists()
+    for name in names[1:]:
+        assert (root / name).exists(), f"{name} disappeared after the deadline"
+    assert root.exists()
+
+
+def test_jobd_delete_arm_forwards_the_active_deadline_to_the_filesystem_owner(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def record_delete(path, *, recursive=False, cancel_event=None, deadline_monotonic=None):
+        captured.update(
+            path=path, recursive=recursive, cancel_event=cancel_event, deadline_monotonic=deadline_monotonic,
+        )
+        return {"path": path, "deleted": True, "kind": "dir"}
+
+    monkeypatch.setattr(jobd.filesystem, "delete_path", record_delete)
+
+    with jobd.active_task_control(jobd.JobdTaskControl(deadline_monotonic=1234.5)):
+        jobd._filesystem_operation(_delete_descriptor(tmp_path / "subtree", recursive=True))
+
+    assert captured["recursive"] is True
+    assert captured["deadline_monotonic"] == 1234.5
+
+
+def test_a_bounded_delete_carries_no_deadline_because_it_is_one_syscall(monkeypatch, tmp_path):
+    """A bounded delete must stay byte-identical: a deadline check could only refuse it."""
+    captured: dict[str, object] = {}
+
+    def record_delete(path, *, recursive=False, cancel_event=None, deadline_monotonic=None):
+        captured.update(recursive=recursive, deadline_monotonic=deadline_monotonic)
+        return {"path": path, "deleted": True, "kind": "file"}
+
+    monkeypatch.setattr(jobd.filesystem, "delete_path", record_delete)
+
+    with jobd.active_task_control(jobd.JobdTaskControl(deadline_monotonic=1234.5)):
+        jobd._filesystem_operation(_delete_descriptor(tmp_path / "one.txt", recursive=False))
+
+    assert captured["recursive"] is False
+    assert captured["deadline_monotonic"] is None
+
+
+def test_no_active_control_leaves_the_recursive_delete_exactly_as_it_was(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    def record_delete(path, *, recursive=False, cancel_event=None, deadline_monotonic=None):
+        captured.update(deadline_monotonic=deadline_monotonic, cancel_event=cancel_event)
+        return {"path": path, "deleted": True, "kind": "dir"}
+
+    monkeypatch.setattr(jobd.filesystem, "delete_path", record_delete)
+
+    jobd._filesystem_operation(_delete_descriptor(tmp_path / "subtree", recursive=True))
+
+    assert captured["deadline_monotonic"] is None
+    assert captured["cancel_event"] is None
+
+
+def test_the_active_task_control_is_installed_and_cleared_around_one_task(tmp_path):
+    """One worker runs one task at a time, so the process-local control must not outlive it."""
+    seen: list[object] = []
+
+    def observe(_payload: bytes) -> bytes:
+        seen.append(jobd.current_task_control().deadline_monotonic)
+        return b'{"ok":true}'
+
+    original = dict(jobd.REGISTERED_TASKS)
+    jobd.REGISTERED_TASKS["text_facts"] = observe
+    try:
+        assert jobd.current_task_control().deadline_monotonic is None
+        jobd.run_registered_task_result("text_facts", b"{}", jobd.JobdTaskControl(deadline_monotonic=77.5))
+        assert seen == [77.5]
+        assert jobd.current_task_control().deadline_monotonic is None
+        # A raising task must clear it too, or the next task on this worker inherits a dead deadline.
+        def explode(_payload: bytes) -> bytes:
+            raise ValueError("task failed")
+        jobd.REGISTERED_TASKS["text_facts"] = explode
+        with pytest.raises(ValueError):
+            jobd.run_registered_task_result("text_facts", b"{}", jobd.JobdTaskControl(deadline_monotonic=88.5))
+        assert jobd.current_task_control().deadline_monotonic is None
+    finally:
+        jobd.REGISTERED_TASKS.clear()
+        jobd.REGISTERED_TASKS.update(original)
+
+
+@pytest.mark.parametrize("task,payload,expected_key", (
+    ("text_facts", {"text": "one two"}, "bytes"),
+    ("filesystem_operation", None, "entries"),
+))
+def test_unrelated_task_types_are_byte_identical_with_and_without_a_control(tmp_path, task, payload, expected_key):
+    """The control must be inert for every task that does not read it."""
+    if task == "filesystem_operation":
+        (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+        encoded = json.dumps(_fs_descriptor(op="list", path=str(tmp_path), args={})).encode("utf-8")
+    else:
+        encoded = json.dumps(payload).encode("utf-8")
+
+    without = jobd.run_registered_task_result(task, encoded).body
+    with_control = jobd.run_registered_task_result(
+        task, encoded, jobd.JobdTaskControl(deadline_monotonic=time.monotonic() + 600.0),
+    ).body
+
+    assert json.loads(without.decode("utf-8")).keys() >= {expected_key}
+    assert without == with_control
+
+
+def test_the_dispatched_control_carries_the_absolute_broker_deadline(tmp_path, monkeypatch):
+    """Not a relative budget: a budget restarts after cold pool startup and stops too late."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    submitted: list[tuple] = []
+
+    class _CapturingExecutor:
+        def submit(self, function, *args):
+            submitted.append((function, args))
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda _priority="freshness": _CapturingExecutor())
+    deadline = time.monotonic() + 30.0
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "abs-deadline", deadline_at=deadline,
+    )
+
+    service._pump()
+
+    assert len(submitted) == 1
+    function, args = submitted[0]
+    assert function is jobd.run_registered_task_result
+    assert args[0] == record.task
+    control = args[2]
+    assert isinstance(control, jobd.JobdTaskControl)
+    # Equal to the record's own absolute instant, not a delta derived from it.
+    assert control.deadline_monotonic == deadline
+    assert control.deadline_monotonic == record.deadline_at
+
+
+def test_a_deadline_free_record_dispatches_a_control_with_no_deadline(tmp_path, monkeypatch):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    submitted: list[tuple] = []
+
+    class _CapturingExecutor:
+        def submit(self, function, *args):
+            submitted.append(args)
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda _priority="freshness": _CapturingExecutor())
+    service._queue_record("text_facts", {"text": "x"}, "freshness", 1, "no-deadline")
+
+    service._pump()
+
+    assert submitted[0][2].deadline_monotonic is None
+
+
+def test_monotonic_is_comparable_across_the_spawned_worker_boundary():
+    """The absolute deadline works only if this platform's monotonic clock is shared, not per-process.
+
+    Deliberately NOT asserted by implementation name.  Linux reports
+    `clock_gettime(CLOCK_MONOTONIC)` and Darwin reports `mach_absolute_time()`; pinning the string
+    would fail the canonical Darwin gate while proving nothing extra, because the name is not the
+    invariant.  The invariant is that a spawned worker's reading falls inside an interval bracketed
+    by the parent, which is exactly what an absolute cross-process deadline needs -- and it is
+    measured here on whatever platform is running, with no skip and no weaker assertion.
+    """
+    assert time.get_clock_info("monotonic").monotonic is True
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+        pool.submit(time.monotonic).result()  # pay cold-start once, outside the measurement
+        readings = []
+        for _ in range(3):
+            before = time.monotonic()
+            inside_worker = pool.submit(time.monotonic).result()
+            after = time.monotonic()
+            assert before <= inside_worker <= after, (before, inside_worker, after)
+            readings.append((before, inside_worker, after))
+    # Strengthened beyond the original pin: the bracket must be tight, so a per-process clock whose
+    # epoch merely happened to land inside a wide window cannot pass. Each round trip is sub-second,
+    # so a worker clock with an independent origin would sit outside the interval, not inside it.
+    assert all(after - before < 1.0 for before, _worker, after in readings), readings
+    # And the readings must advance with the parent's own clock across rounds.
+    assert [worker for _b, worker, _a in readings] == sorted(worker for _b, worker, _a in readings)
+
+
+def test_a_recursive_delete_honors_its_deadline_across_a_real_process_boundary(tmp_path):
+    """End to end through a real spawned worker: an already-expired deadline deletes nothing."""
+    root, names = _ordered_tree(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    control = jobd.JobdTaskControl(deadline_monotonic=time.monotonic() - 1.0)
+    with ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+        future = pool.submit(
+            jobd.run_registered_task_result, "filesystem_operation", _delete_descriptor(root, recursive=True), control,
+        )
+        with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
+            future.result(timeout=60)
+
+    assert failure.value.payload["delete_reason"] == "deadline_exceeded"
+    assert failure.value.payload["deleted_paths"] == []
+    for name in names:
+        assert (root / name).exists(), f"{name} was deleted after its deadline had already passed"
+
+
+def test_a_running_record_is_not_terminal_while_its_worker_is_still_inside_the_backstop(tmp_path):
+    """No terminal state may be published while the filesystem is still being changed."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "still-deleting",
+        deadline_at=time.monotonic() - (jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS / 2.0),
+    )
+    record.status = "running"
+    record.future = Future()
+
+    service._pump()
+
+    assert record.status == "running"
+    assert service._record_payload(record)["status"] == "running"
+
+    # The worker's own cooperative stop lands first and owns the terminal state.
+    record.future.set_exception(jobd.JobdFilesystemOperationFailure(409, {
+        "partial": True, "delete_reason": "deadline_exceeded", "deleted_paths": ["/tmp/one"],
+    }))
+    service._pump()
+
+    assert record.status == "failed"
+    assert record.failure["filesystem_error"]["deleted_paths"] == ["/tmp/one"]
+
+
+def test_the_running_backstop_fires_only_after_the_measured_stop_bound(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "wedged",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+
+    service._pump()
+
+    assert record.status == "timed_out"
+    assert service.common_status()["product_counters"]["filesystem_operation"]["timed_out"] == 1
+    # Capacity accounting is unchanged: the future still holds its slot until the worker exits.
+    assert service._future_slots(lane=service._lane_for_priority(record.priority)) == 1
+
+
+def test_queued_deadline_expiry_stays_exact_and_takes_no_backstop(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "text_facts", {"text": "late"}, "freshness", 1, "queued-late", deadline_at=time.monotonic() - 0.001,
+    )
+
+    service._pump()
+
+    assert record.status == "timed_out"
+    assert record.error == "deadline exceeded before execution"
+
+
+def test_a_backstop_timeout_still_publishes_the_paths_the_worker_removed(tmp_path):
+    """The backstop can beat the worker's stop; its partial evidence must not be discarded."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "backstopped",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+
+    service._pump()
+    assert record.status == "timed_out"
+
+    record.future.set_exception(jobd.JobdFilesystemOperationFailure(409, {
+        "partial": True,
+        "delete_reason": "deadline_exceeded",
+        "failed_path": "/tmp/tree/03.txt",
+        "deleted_paths": ["/tmp/tree/01.txt", "/tmp/tree/02.txt"],
+    }))
+    service._pump()
+
+    assert record.status == "timed_out", "the backstop already owned the terminal state"
+    assert record.future is None, "the future must still be released"
+    assert record.failure["filesystem_error"]["deleted_paths"] == ["/tmp/tree/01.txt", "/tmp/tree/02.txt"]
+    assert record.failure["status"] == 409
+    assert service._record_payload(record)["failure"]["filesystem_error"]["partial"] is True
+
+
+def test_a_backstop_timeout_still_releases_an_ordinary_abandoned_result(tmp_path):
+    """Retaining partial evidence must not change how a plain abandoned result is drained."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "text_facts", {"text": "slow"}, "freshness", 1, "abandoned",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+
+    service._pump()
+    assert record.status == "timed_out"
+
+    record.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
+    service._pump()
+
+    assert record.future is None
+    assert record.status == "timed_out"
+    assert not record.failure
+
+
+def test_running_cancel_is_still_honestly_refused(tmp_path):
+    """The deadline mechanism cannot revoke work already dispatched, so cancel must not claim it can.
+
+    `Future.cancel()` always returns False once a task is running, and reaching into the worker
+    would need a Manager/Event/shared-memory channel this deliberately does not add.  Refusing is
+    the honest answer; a `{"ok": True}` here would tell a browser the delete stopped when it had not.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record("filesystem_operation", {"op": "delete"}, "interactive", 1, "running-delete")
+    record.status = "running"
+    record.future = Future()
+    record.future.set_running_or_notify_cancel()
+
+    response, _binary = service.handle({"action": "cancel", "job_id": record.job_id})
+
+    assert response["ok"] is False
+    assert response["error"] == "job already executing"
+    assert record.status == "running"
+
+
+def test_a_done_worker_result_owns_terminal_state_even_on_a_late_pump(tmp_path):
+    """An answer that already arrived is not a timeout, however late the broker looks at it.
+
+    The backstop exists for work that CANNOT stop.  A cooperative delete that already stopped and
+    published which entries it removed has answered; if the broker happens not to pump until past
+    `deadline_at + backstop`, expiring it first would relabel a real 409 partial result as a
+    timeout, and the requester would read "we never heard back" about a delete it did hear back
+    about.  So finished futures are processed before the running backstop, always.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "done-then-late-pump",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+    # The worker answered BEFORE this pump; only the broker's look is late.
+    record.future.set_exception(jobd.JobdFilesystemOperationFailure(409, {
+        "partial": True,
+        "delete_reason": "deadline_exceeded",
+        "failed_path": "/tmp/tree/03.txt",
+        "deleted_paths": ["/tmp/tree/01.txt", "/tmp/tree/02.txt"],
+    }))
+
+    service._pump()
+
+    assert record.status == "failed", "a delivered worker answer must not be relabelled timed_out"
+    assert record.failure["status"] == 409
+    assert record.failure["filesystem_error"]["partial"] is True
+    assert record.failure["filesystem_error"]["deleted_paths"] == ["/tmp/tree/01.txt", "/tmp/tree/02.txt"]
+    assert service.common_status()["product_counters"]["filesystem_operation"]["failed"] == 1
+    assert service.common_status()["product_counters"]["filesystem_operation"].get("timed_out", 0) == 0
+    assert record.future is None, "the slot must be released in the same pump"
+
+
+def test_a_done_worker_success_also_owns_terminal_state_on_a_late_pump(tmp_path):
+    """The same ordering for the ordinary outcome: a completed result is not a timeout either."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "text_facts", {"text": "done"}, "freshness", 1, "done-success-late-pump",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+    record.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
+
+    service._pump()
+
+    assert record.status == "completed"
+    assert service.common_status()["product_counters"]["text_facts"]["completed"] == 1
+    assert record.future is None
+
+
+def test_work_that_never_answers_still_hits_the_backstop_after_the_reorder(tmp_path):
+    """Reordering must not disarm the backstop for a future that is genuinely still running."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record(
+        "filesystem_operation", {"op": "delete"}, "interactive", 1, "never-answers",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
+    record.status = "running"
+    record.future = Future()
+
+    service._pump()
+
+    assert record.status == "timed_out"
+    assert record.future is not None, "an unfinished future keeps holding its slot"
+    assert service._future_slots(lane=service._lane_for_priority(record.priority)) == 1
+
+
+def test_queued_expiry_is_unchanged_by_processing_finished_futures_first(tmp_path):
+    """A queued record has no future, so the reorder cannot move its exact deadline."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    exact = service._queue_record(
+        "text_facts", {"text": "late"}, "freshness", 1, "queued-exact", deadline_at=time.monotonic() - 0.001,
+    )
+    inside = service._queue_record(
+        "text_facts", {"text": "early"}, "freshness", 1, "queued-inside", deadline_at=time.monotonic() + 30.0,
+    )
+
+    service._pump()
+
+    assert exact.status == "timed_out"
+    assert exact.error == "deadline exceeded before execution"
+    assert inside.status in {"queued", "running"}
