@@ -2405,70 +2405,84 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
                 self.server.app.stop_client_event_watcher_if_idle()
 
-    def stream_stats_current_delta(
+    def stream_stats_current(
         self,
         raw_query: str,
         *,
         authenticated_username: str,
     ) -> None:
         try:
-            cursor = stats_current_http.parse_http_delta_query(raw_query)
+            cursor = stats_current_http.parse_http_snapshot_query(raw_query)
         except stats_current_protocol.UnsupportedRequest as error:
             self.write_json(error.response, status=HTTPStatus.BAD_REQUEST)
             return
-        result = self.server.app.stats_current_http.delta_stream(
+        result = self.server.app.stats_current_http.snapshot_stream(
             raw_query,
             authenticated_username=authenticated_username,
         )
-        # EventSource does not expose a non-200 response body to its listeners.
-        # A stale initial cursor is a normal repair terminal, so carry it over the
-        # established SSE channel just as we do for a cursor that goes stale after
-        # the stream is open. Otherwise the browser receives only a generic error
-        # and cannot discharge the pending range selection with the typed reason.
-        if result.status == HTTPStatus.CONFLICT:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("X-Accel-Buffering", "no")
-            self.send_auth_cookie_if_needed()
-            self.end_headers()
-            self.write_sse_json("repair", result.metadata)
-            return
-        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
-            self.write_json(
-                result.metadata,
-                status=result.status,
-            )
-            return
+        persistent_stream = result.status in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "keep-alive" if persistent_stream else "close")
         self.send_header("X-Accel-Buffering", "no")
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        cache_generation = cursor.after_cache_generation
-        revision_number = cursor.after_revision
+        if result.status == HTTPStatus.ACCEPTED:
+            self.write_sse_json("pending", result.metadata)
+            self.close_connection = True
+            return
+        if result.status == HTTPStatus.UPGRADE_REQUIRED:
+            self.write_sse_json("upgrade_required", result.metadata)
+            self.close_connection = True
+            return
+        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+            self.write_sse_json("unavailable", result.metadata)
+            self.close_connection = True
+            return
+
+        cache_generation = int(result.metadata.get("cache_generation") or 0)
+        chunk_count = int(result.metadata.get("chunk_count") or 1)
+        self.write_sse_json("ack", {
+            "cache_generation": cache_generation,
+            "chunk_count": chunk_count,
+            "not_modified": result.status == HTTPStatus.NOT_MODIFIED,
+            "range_seconds": cursor.range_seconds,
+            "requested_resolution": cursor.resolution,
+            "resolution_seconds": cursor.resolution_seconds,
+        })
+        if result.status == HTTPStatus.OK:
+            self.write_sse_bytes("snapshot", result.body)
+            for chunk_index in range(1, chunk_count):
+                chunk_query = urlencode({
+                    "range_seconds": cursor.range_seconds,
+                    "resolution": cursor.resolution,
+                    "client_id": cursor.client_id,
+                    "since_generation": cursor.since_generation or 0,
+                    "chunk_index": chunk_index,
+                    "chunk_generation": cache_generation,
+                })
+                chunk = self.server.app.stats_current_http.snapshot_stream(
+                    chunk_query,
+                    authenticated_username=authenticated_username,
+                )
+                if chunk.status != HTTPStatus.OK:
+                    event = "pending" if chunk.status == HTTPStatus.ACCEPTED else "unavailable"
+                    self.write_sse_json(event, chunk.metadata)
+                    return
+                self.write_sse_bytes("snapshot", chunk.body)
+        self.write_sse_json("ready", {
+            "cache_generation": cache_generation,
+            "revision": 0,
+        })
+
+        revision_number = 0
         cadence_seconds = stats_current_protocol.live_cadence_seconds(
-            cursor.resolution_seconds
+            cursor.resolution_seconds,
         )
         next_deadline = time.monotonic() + cadence_seconds
         try:
             while True:
-                if result.status == HTTPStatus.OK:
-                    self.write_sse_bytes("delta", result.body)
-                    cache_generation = int(result.metadata["cache_generation"])
-                    revision_number = int(result.metadata["revision"])
-                elif result.status == HTTPStatus.NOT_MODIFIED:
-                    payload = result.metadata
-                    cache_generation = int(
-                        payload.get("cache_generation") or cache_generation
-                    )
-                    self.write_sse_json("ready", {
-                        "cache_generation": cache_generation,
-                        "revision": revision_number,
-                    })
                 if self.server.persistent_request_stop.wait(
                     max(0.0, next_deadline - time.monotonic())
                 ):
@@ -2497,6 +2511,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 }:
                     self.write_sse_json("unavailable", result.metadata)
                     return
+                if result.status == HTTPStatus.OK:
+                    self.write_sse_bytes("delta", result.body)
+                    cache_generation = int(result.metadata["cache_generation"])
+                    revision_number = int(result.metadata["revision"])
+                elif result.status == HTTPStatus.NOT_MODIFIED:
+                    cache_generation = int(
+                        result.metadata.get("cache_generation") or cache_generation
+                    )
+                    self.write_sse_json("ready", {
+                        "cache_generation": cache_generation,
+                        "revision": revision_number,
+                    })
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
             return
 

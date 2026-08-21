@@ -377,10 +377,11 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
                 if (Number(range.value) !== rangeSeconds) {
                   range.value = String(rangeSeconds);
                   range.dispatchEvent(new Event('change', {bubbles: true}));
+                  const rangeDefaultResolution = String(root.querySelector('[data-stats-current-resolution]').value);
                   const state = renderedState();
-                  if (state.renderedRange !== rangeSeconds || state.renderedResolution !== 'AUTO' || state.cpuPoints <= 0) {
+                  if (state.renderedRange !== rangeSeconds || state.renderedResolution !== rangeDefaultResolution || state.cpuPoints <= 0) {
                     await fixture.clock.advance(0);
-                    await waitForRenderedSnapshot(rangeSeconds, 'AUTO', renderDelayMs, timeoutMs);
+                    await waitForRenderedSnapshot(rangeSeconds, rangeDefaultResolution, renderDelayMs, timeoutMs);
                   } else if (renderDelayMs) {
                     await new Promise(resolve => window.setTimeout(resolve, renderDelayMs));
                   }
@@ -424,17 +425,25 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
                 }
               }
               const injectedLatencyMs = await selectAndMeasure(900, 10, latencyBudgetMs);
-              const originalFetch = window.fetch;
+              const originalOpenNetworkEventSource = fixture.openNetworkEventSource;
               const pendingBeforeInjection = new Set(fixture.finiteOperations.keys());
-              let rejectInjectedFetch;
-              let injectedFetch;
-              window.fetch = (input, options) => {
+              let injectedSource = null;
+              fixture.openNetworkEventSource = (input, options) => {
                 const url = new URL(String(input), location.href);
-                if (url.pathname === '/api/stats-snapshot') {
-                  injectedFetch = new Promise((_resolve, reject) => { rejectInjectedFetch = reject; });
-                  return injectedFetch;
+                if (url.pathname === '/api/stats-stream' && Number(url.searchParams.get('range_seconds')) === 1800) {
+                  const listeners = new Map();
+                  injectedSource = {
+                    closed: false,
+                    addEventListener(name, callback) {
+                      const values = listeners.get(name) || [];
+                      values.push(callback);
+                      listeners.set(name, values);
+                    },
+                    close() { this.closed = true; },
+                  };
+                  return injectedSource;
                 }
-                return originalFetch(input, options);
+                return originalOpenNetworkEventSource(input, options);
               };
               let completionInjection = '';
               let injectedFiniteOperation = '';
@@ -445,13 +454,12 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
               } finally {
                 const injectedOperations = [...fixture.finiteOperations.keys()].filter(operation => (
                   !pendingBeforeInjection.has(operation)
-                  && operation.includes('fetch:')
-                  && operation.includes('/api/stats-snapshot')
+                  && operation.includes('sse-init:')
+                  && operation.includes('/api/stats-stream')
                 ));
                 injectedFiniteOperation = injectedOperations.length === 1 ? injectedOperations[0] : '';
-                window.fetch = originalFetch;
-                if (rejectInjectedFetch) rejectInjectedFetch(new DOMException('G4b injected fetch released', 'AbortError'));
-                if (injectedFetch) await Promise.allSettled([injectedFetch]);
+                fixture.openNetworkEventSource = originalOpenNetworkEventSource;
+                injectedSource?.close();
                 if (injectedFiniteOperation) {
                   await window.__yolomuxTestWaitFor(
                     () => !fixture.finiteOperations.has(injectedFiniteOperation),
@@ -480,20 +488,22 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
             INJECTED_COMPLETION_TIMEOUT_MS,
         )
         assert result.get("error") is None, result
+        # Data identity is (range_seconds, resolved resolution_seconds): an explicit pick that
+        # resolves to the same concrete bucket size as the AUTO fetch that just landed for this
+        # range (900/10, 86400/300) reuses that generation with zero refetch, so only the first
+        # occurrence of each distinct (range, resolved resolution) pair appears here. The trailing
+        # 300/AUTO transition also resolves to 1s, already cached from the initial page load.
         expected_first_lap_requests = [
             (900, "AUTO"),
-            (900, "10"),
             (3600, "AUTO"),
             (3600, "60"),
             (86400, "AUTO"),
-            (86400, "300"),
-            (300, "AUTO"),
         ]
         first_lap_request_identities = []
         for request_url in result["firstLapRequests"]:
             parsed = urlparse(request_url)
             query = parse_qs(parsed.query)
-            assert parsed.path == "/api/stats-snapshot", request_url
+            assert parsed.path == "/api/stats-stream", request_url
             assert query["client_id"] == ["browser-current-fixture"], request_url
             first_lap_request_identities.append((int(query["range_seconds"][0]), query["resolution"][0]))
         assert first_lap_request_identities == expected_first_lap_requests, result
@@ -509,7 +519,10 @@ def test_v0610_stats_range_shift_g4b_keeps_each_transition_fast_and_complete(bro
             request_deltas = result["results"][label]["requestDeltas"]
             assert len(first) == 1, (label, first)
             assert request_deltas[1:] == [0] * (SAMPLE_COUNT - 1), (label, request_deltas)
-            expected_cold = 0 if label in {"300s->60s", "60s->10s"} else 1
+            # "10s->1s" (900 -> 300, explicit 1) now also resolves entirely from cache: range 300's
+            # resolved-1s generation was already fetched at page load, so the range-change AUTO
+            # step and the explicit pick both reuse it under the resolved-resolution cache key.
+            expected_cold = 0 if label in {"300s->60s", "60s->10s", "10s->1s"} else 1
             assert len(cold) == expected_cold, (label, cold, request_deltas)
             assert len(cached) == SAMPLE_COUNT - expected_cold, (label, cached)
             median, p95, maximum = _distribution(cached)

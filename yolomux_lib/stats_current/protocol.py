@@ -19,6 +19,7 @@ MAX_CLIENT_ID_BYTES = 128
 MAX_SOURCE_ID_BYTES = 256
 MAX_RETRY_AFTER_SECONDS = 60
 MAX_DELTA_IDENTITIES = 2 * resolution_policy.MAX_BUCKETS
+MAX_SNAPSHOT_CHUNKS = 64
 # Cache-write durations are distinct billable provider operations.  They must remain
 # exclusive cost-report dimensions so each report's dimension sum still reconciles
 # exactly to its total.
@@ -30,7 +31,14 @@ MAX_COST_DETAIL_MODELS = 16
 MAX_COST_DETAIL_AGENTS = 16
 MAX_COST_DETAIL_EVIDENCE = 32
 SNAPSHOT_REQUEST_FIELDS = frozenset(
-    {"range_seconds", "resolution", "client_id", "since_generation"}
+    {
+        "range_seconds",
+        "resolution",
+        "client_id",
+        "since_generation",
+        "chunk_index",
+        "chunk_generation",
+    }
 )
 DELTA_REQUEST_FIELDS = frozenset(
     {
@@ -74,6 +82,13 @@ class SnapshotWire(TypedDict):
     buckets: list[dict[str, object]]
     no_data: list[dict[str, object]]
     cost_report: dict[str, object]
+
+
+class SnapshotChunkWire(SnapshotWire):
+    chunk_index: int
+    chunk_count: int
+    chunk_start: int
+    chunk_end: int
 
 
 class DeltaWire(TypedDict):
@@ -232,6 +247,8 @@ class SnapshotRequest:
     resolution_seconds: int
     client_id: str
     since_generation: int | None
+    chunk_index: int | None = None
+    chunk_generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +291,27 @@ def parse_snapshot_request(params: Mapping[str, object]) -> SnapshotRequest:
         concrete = resolution_policy.resolve_requested(range_seconds, requested)
         client_id = _client_id(params["client_id"])
         since = _query_generation(params["since_generation"], "since_generation") if "since_generation" in params else None
-        return SnapshotRequest(range_seconds, requested, concrete, client_id, since)
+        chunk_fields = {"chunk_index", "chunk_generation"} & keys
+        if chunk_fields and chunk_fields != {"chunk_index", "chunk_generation"}:
+            raise ProtocolValidationError("chunk_index and chunk_generation must be supplied together")
+        chunk_index = None
+        chunk_generation = None
+        if chunk_fields:
+            chunk_index = _query_integer(params["chunk_index"], "chunk_index")
+            chunk_generation = _query_generation(params["chunk_generation"], "chunk_generation")
+            if chunk_generation < 1:
+                raise ProtocolValidationError("chunk_generation must be positive")
+            if chunk_index >= MAX_SNAPSHOT_CHUNKS:
+                raise ProtocolValidationError("chunk_index exceeds the snapshot chunk limit")
+        return SnapshotRequest(
+            range_seconds,
+            requested,
+            concrete,
+            client_id,
+            since,
+            chunk_index,
+            chunk_generation,
+        )
     except (ProtocolValidationError, ValueError) as error:
         raise UnsupportedRequest(unsupported_response(str(error), range_seconds)) from error
 
@@ -326,6 +363,7 @@ NO_DATA_FIELDS = {"family", "source_id", "start", "end", "epoch", "reason", "sou
 BUCKET_TOMBSTONE_FIELDS = {"kind", "start", "duration"}
 NO_DATA_TOMBSTONE_FIELDS = {"kind", "family", "source_id", "start", "end", "epoch"}
 SNAPSHOT_FIELDS = {"protocol_version", "range_seconds", "requested_resolution", "resolution_seconds", "window_start", "window_end", "generated_at", "source_generation", "cache_generation", "rightmost_open", "buckets", "no_data", "cost_report"}
+SNAPSHOT_CHUNK_FIELDS = SNAPSHOT_FIELDS | {"chunk_index", "chunk_count", "chunk_start", "chunk_end"}
 DELTA_FIELDS = {"protocol_version", "range_seconds", "resolution_seconds", "source_generation", "base_cache_generation", "cache_generation", "revision", "buckets", "no_data", "tombstones", "cost_report"}
 
 COST_REPORT_FIELDS = {
@@ -739,6 +777,58 @@ def validate_snapshot(value: object) -> SnapshotWire:
     if buckets and buckets[-1]["open"] and buckets[-1]["start"] + concrete != end:
         raise ProtocolValidationError("open bucket must end at window_end")
     return cast(SnapshotWire, value)
+
+
+def validate_snapshot_chunk(value: object) -> SnapshotChunkWire:
+    data = _fields(value, "snapshot_chunk", SNAPSHOT_CHUNK_FIELDS)
+    if data["protocol_version"] != WIRE_PROTOCOL_VERSION:
+        raise ProtocolValidationError("unsupported snapshot chunk protocol_version")
+    range_seconds, _, concrete = _key(
+        data["range_seconds"],
+        data["requested_resolution"],
+        data["resolution_seconds"],
+    )
+    start = _integer(data["window_start"], "window_start")
+    end = _integer(data["window_end"], "window_end")
+    if end - start != range_seconds:
+        raise ProtocolValidationError("snapshot chunk window length does not match range_seconds")
+    chunk_count = _integer(data["chunk_count"], "chunk_count", minimum=2)
+    if chunk_count > MAX_SNAPSHOT_CHUNKS:
+        raise ProtocolValidationError("snapshot chunk_count exceeds the wire limit")
+    chunk_index = _integer(data["chunk_index"], "chunk_index")
+    if chunk_index >= chunk_count:
+        raise ProtocolValidationError("snapshot chunk_index lies outside the requested range")
+    chunk_start = _integer(data["chunk_start"], "chunk_start")
+    chunk_end = _integer(data["chunk_end"], "chunk_end")
+    if not start <= chunk_start < chunk_end <= end:
+        raise ProtocolValidationError("snapshot chunk bounds lie outside the full window")
+    if (chunk_start - start) % concrete or (chunk_end - start) % concrete:
+        raise ProtocolValidationError("snapshot chunk bounds are not bucket aligned")
+    if chunk_index == 0 and chunk_start != start:
+        raise ProtocolValidationError("first snapshot chunk does not start the full window")
+    if chunk_index == chunk_count - 1 and chunk_end != end:
+        raise ProtocolValidationError("final snapshot chunk does not end the full window")
+    _number(data["generated_at"], "generated_at")
+    _generation(data["source_generation"], "source_generation")
+    _generation(data["cache_generation"], "cache_generation")
+    if not isinstance(data["rightmost_open"], bool):
+        raise ProtocolValidationError("rightmost_open must be a boolean")
+    buckets = _buckets(data["buckets"], concrete, (chunk_start, chunk_end))
+    if (
+        len(buckets) != (chunk_end - chunk_start) // concrete
+        or not buckets
+        or buckets[0]["start"] != chunk_start
+        or buckets[-1]["start"] + concrete != chunk_end
+    ):
+        raise ProtocolValidationError("snapshot chunk buckets do not fill its exact bounds")
+    _no_data(data["no_data"], (chunk_start, chunk_end))
+    validate_cost_report(data["cost_report"])
+    final_chunk = chunk_index == chunk_count - 1
+    if any(bool(bucket["open"]) for bucket in buckets[:-1]):
+        raise ProtocolValidationError("only the final bucket may be open")
+    if buckets and bool(buckets[-1]["open"]) != (final_chunk and data["rightmost_open"]):
+        raise ProtocolValidationError("snapshot chunk open state disagrees with the full snapshot")
+    return cast(SnapshotChunkWire, value)
 
 
 def validate_delta(value: object) -> DeltaWire:

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,8 +33,9 @@ from tests.gate_harness import gate_auth_credentials  # noqa: F401
 from tests.gate_harness import gate_http_port  # noqa: F401
 from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
+from tests.gate_harness import assert_no_surviving_local_service_daemons
+from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import run_fixture_cleanup_phases
-from tests.serving_process import pid_is_serving
 from tests.serving_process import serving_process_table
 from yolomux_lib import auth as auth_module
 from yolomux_lib import common
@@ -161,10 +163,6 @@ def test_ring_server_stop_preserves_retirement_failure_after_stopping_process(mo
     assert events == [("retire", browser_driver), ("stop", process)]
 
 
-def _pid_alive(pid: int) -> bool:
-    return pid > 0 and pid_is_serving(pid)
-
-
 def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object]]:
     matches = []
     for pid, process in serving_process_table().items():
@@ -202,27 +200,34 @@ def _production_stats_client(
     return stats_client.StatsCurrentClient(requested_socket, database_path), process
 
 
-def _stop_fixture_statsd(
-    browser_driver,
-    pid: int,
-    paths: GateRuntimePaths,
-    requested_socket: Path,
-) -> bool:
-    if not _pid_alive(pid):
-        return False
-    cmdline = serving_process_table()[pid].command
-    assert "yolomux_lib.stats_current.service" in cmdline, cmdline
-    assert str(paths.state_dir) in cmdline, cmdline
-    expected_socket = stats_service.safe_socket_path(requested_socket, prefix="yolomux-statsd")
-    assert f"--socket {expected_socket}" in cmdline, cmdline
-    os.kill(pid, signal.SIGTERM)
-    try:
-        WebDriverWait(browser_driver, 5, poll_frequency=0.05).until(lambda _driver: not _pid_alive(pid))
-    except TimeoutException:
-        if _pid_alive(pid):
-            os.kill(pid, signal.SIGKILL)
-            WebDriverWait(browser_driver, 5, poll_frequency=0.05).until(lambda _driver: not _pid_alive(pid))
-    return True
+def _retire_ring_fixture_daemons(paths: GateRuntimePaths) -> None:
+    """Settle every root-owned sidecar through the gate's shared lifecycle owner."""
+
+    label = "ring browser restart"
+    retire_local_service_daemons_beneath(paths.root, label=label)
+    assert_no_surviving_local_service_daemons(paths.root, label=label)
+
+
+@pytest.mark.e2e
+def test_ring_fixture_daemon_retirement_uses_shared_root_owner(monkeypatch, tmp_path: Path) -> None:
+    phases = []
+
+    def retire(root: Path, *, label: str) -> tuple[object, ...]:
+        phases.append(("retire", root, label))
+        return ()
+
+    def assert_settled(root: Path, *, label: str) -> None:
+        phases.append(("settled", root, label))
+
+    monkeypatch.setattr(sys.modules[__name__], "retire_local_service_daemons_beneath", retire)
+    monkeypatch.setattr(sys.modules[__name__], "assert_no_surviving_local_service_daemons", assert_settled)
+
+    _retire_ring_fixture_daemons(SimpleNamespace(root=tmp_path))
+
+    assert phases == [
+        ("retire", tmp_path, "ring browser restart"),
+        ("settled", tmp_path, "ring browser restart"),
+    ]
 
 
 def _wait_ring_published(browser_driver, client: stats_client.StatsCurrentClient, source_generation: int) -> dict[str, object]:
@@ -639,17 +644,32 @@ def _load_real_stats_page(
     return harness
 
 
-@pytest.mark.e2e
-@pytest.mark.socket
-def test_ring_landing_real_page_restart_and_zero_gap(
-    request,
-    browser,
+@dataclass(frozen=True)
+class _RingRuntime:
+    """Everything a real-page ring journey needs to launch and re-launch one server."""
+
+    runtime: ExternalRuntime
+    port: int
+    session: str
+    database_path: Path
+    requested_socket: Path
+    service_runtime_dir: Path
+    log_path: Path
+
+
+def _prepare_ring_runtime(
     monkeypatch,
     gate_runtime_paths: GateRuntimePaths,
     gate_http_port,
     gate_tmux,
     gate_auth_credentials: GateAuthCredentials,
-) -> None:
+) -> _RingRuntime:
+    """Authenticate one user and resolve the runtime addresses both ring journeys launch against.
+
+    ONE owner for this setup. A second journey that re-typed it would drift from the first the
+    moment either changed, and the addresses here -- database, socket, runtime dir -- are exactly
+    what the restart half of both journeys must reuse unchanged.
+    """
     assert 7900 <= gate_http_port.port <= 7999
     monkeypatch.delenv(common.TEST_AUTH_BYPASS_ENV, raising=False)
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
@@ -668,9 +688,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
     assert auth_module.auth_password_is_hash(initialized[0].password)
 
     port = gate_http_port.release()
-    runtime = ExternalRuntime(port=port, tmux=gate_tmux)
     service_runtime_dir = Path(tempfile.mkdtemp(prefix="ring-runtime-", dir=gate_runtime_paths.root))
-    database_path = storage.default_database_path(gate_runtime_paths.state_dir)
     runtime_environ = dict(os.environ)
     runtime_environ["YOLOMUX_RUNTIME_DIR"] = str(service_runtime_dir)
     with monkeypatch.context() as runtime_patch:
@@ -683,7 +701,38 @@ def test_ring_landing_real_page_restart_and_zero_gap(
     log_file = tempfile.NamedTemporaryFile(prefix="yolomux-ring-server-", suffix=".txt", dir="/tmp", delete=False)
     log_path = Path(log_file.name)
     log_file.close()
-    process = _launch_server(port, str(gate_tmux.sessions[0]), log_path, service_runtime_dir)
+    return _RingRuntime(
+        runtime=ExternalRuntime(port=port, tmux=gate_tmux),
+        port=port,
+        session=str(gate_tmux.sessions[0]),
+        database_path=storage.default_database_path(gate_runtime_paths.state_dir),
+        requested_socket=requested_socket,
+        service_runtime_dir=service_runtime_dir,
+        log_path=log_path,
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_ring_landing_real_page_restart_and_zero_gap(
+    request,
+    browser,
+    monkeypatch,
+    gate_runtime_paths: GateRuntimePaths,
+    gate_http_port,
+    gate_tmux,
+    gate_auth_credentials: GateAuthCredentials,
+) -> None:
+    prepared = _prepare_ring_runtime(
+        monkeypatch, gate_runtime_paths, gate_http_port, gate_tmux, gate_auth_credentials,
+    )
+    port = prepared.port
+    runtime = prepared.runtime
+    service_runtime_dir = prepared.service_runtime_dir
+    database_path = prepared.database_path
+    requested_socket = prepared.requested_socket
+    log_path = prepared.log_path
+    process = _launch_server(port, prepared.session, log_path, service_runtime_dir)
     latest_statsd_pid = 0
     try:
         _wait_http(browser, port)
@@ -714,9 +763,8 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert first_zero_gap["gapRects"], first_zero_gap
 
         _retire_browser_and_stop_server(browser, runtime, process)
-        sidecar_survived_server_stop = _pid_alive(latest_statsd_pid)
-        if sidecar_survived_server_stop:
-            _stop_fixture_statsd(browser, latest_statsd_pid, gate_runtime_paths, requested_socket)
+        sidecar_survived_server_stop = latest_statsd_pid > 0 and latest_statsd_pid in serving_process_table()
+        _retire_ring_fixture_daemons(gate_runtime_paths)
 
         restart_started = time.monotonic()
         process = _launch_server(port, str(gate_tmux.sessions[0]), log_path, service_runtime_dir)
@@ -788,5 +836,201 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         print("RING_BROWSER_EVIDENCE=" + json.dumps(evidence, sort_keys=True), flush=True)
     finally:
         _retire_browser_and_stop_server(browser, runtime, process)
-        if _pid_alive(latest_statsd_pid):
-            _stop_fixture_statsd(browser, latest_statsd_pid, gate_runtime_paths, requested_socket)
+        _retire_ring_fixture_daemons(gate_runtime_paths)
+
+
+# --- publish -> invalidate -> production restart -> first ready page ----------------------------
+# The journey above proves a restart still renders. This one proves the two OWED outcomes do not
+# get conflated: an owed cell the materializer can still rebuild must be republished before
+# readiness, and an owed cell that has aged out of its window must become an explicit gap -- the
+# contradicted payload dropped, never served.
+
+
+def _durable_ring_state(database_path: Path) -> dict[str, object]:
+    """Read the durable ring and ledger directly, with no daemon in the way."""
+    connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+    try:
+        slots = {
+            (int(row[0]), int(row[1])): {
+                "bucket_start": row[2],
+                "complete": int(row[3]),
+                "source_generation": int(row[4]),
+                "ring_generation": int(row[5]),
+                "published_at": float(row[6]),
+            }
+            for row in connection.execute(
+                "SELECT resolution_seconds, slot_index, bucket_start, complete, source_generation, "
+                "ring_generation, published_at FROM aggregate_ring_slots"
+            )
+        }
+        pending = {
+            (int(row[0]), int(row[1]))
+            for row in connection.execute(
+                "SELECT resolution_seconds, bucket_start FROM ring_invalidations WHERE applied_at IS NULL"
+            )
+        }
+    finally:
+        connection.close()
+    return {"slots": slots, "pending": pending}
+
+
+def _slot_address(resolution_seconds: int, bucket_start: int) -> tuple[int, int]:
+    return (resolution_seconds, storage.ring_slot_index(resolution_seconds, bucket_start))
+
+
+def _ring_observation(event_id: str, observed_at: float, util_percent: int) -> storage.Observation:
+    return storage.Observation(
+        event_id,
+        "gpu",
+        "gpu:ring-e2e",
+        observed_at,
+        "ring-e2e-after",
+        1,
+        {
+            "util_percent": util_percent,
+            "memory_used_bytes": util_percent * 10,
+            "memory_capacity_bytes": 1000,
+            "label": "Ring E2E GPU",
+        },
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.socket
+def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
+    request,
+    browser,
+    monkeypatch,
+    gate_runtime_paths: GateRuntimePaths,
+    gate_http_port,
+    gate_tmux,
+    gate_auth_credentials: GateAuthCredentials,
+) -> None:
+    """One mutation, two owed outcomes, across a real production-style restart.
+
+    The contradicting append touches one instant, so it owes a cell at EVERY resolution. By the
+    time the restarted process repairs, the 1-second cell has aged out of the 1-second
+    materializer window while its slot still physically holds the contradicted payload, and the
+    60-second cell is still inside its window. The first is an honest gap: the payload is dropped
+    and the row retired, so nothing stale can be served. The second must be republished before
+    readiness and must still render the retained cost on the first authenticated page read.
+    """
+    prepared = _prepare_ring_runtime(
+        monkeypatch, gate_runtime_paths, gate_http_port, gate_tmux, gate_auth_credentials,
+    )
+    second_capacity = storage.stats_resolution.RING_CAPACITIES[1]
+    process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir)
+    latest_statsd_pid = 0
+    try:
+        _wait_http(browser, prepared.port)
+        client, _initial = _production_stats_client(
+            browser, prepared.database_path, prepared.requested_socket,
+        )
+        assert client.ensure_started()
+        seeded, _markers = _seed_zero_and_gap(client, f"port:{prepared.port}")
+        # A fact far enough back that its 1-second bucket is still inside the 300-slot window now
+        # and provably outside it after the restart wait below. Everything else in the journey is
+        # derived from what the product then publishes, not from these constants.
+        aligned = int(time.time())
+        aligned -= aligned % 10
+        left_edge = aligned - 240
+        aging = client.append(observations=(
+            _ring_observation("ring-e2e-left-edge", float(left_edge) + 0.5, 55),
+        ))
+        assert aging.get("ok") is True, aging
+        published_status = _wait_ring_published(browser, client, int(aging["source_generation"]))
+        latest_statsd_pid = int(published_status.get("pid") or 0)
+
+        before = _durable_ring_state(prepared.database_path)
+        aging_address = _slot_address(1, left_edge)
+        assert before["slots"][aging_address]["bucket_start"] == left_edge, (
+            "the 1-second slot under test was never published"
+        )
+        rebuildable_start = left_edge - left_edge % 60
+        rebuildable_address = _slot_address(60, rebuildable_start)
+        assert before["slots"][rebuildable_address]["bucket_start"] == rebuildable_start
+
+        # Production-style restart: the page retires, the server stops, the sidecar stops.
+        _retire_browser_and_stop_server(browser, prepared.runtime, process)
+        _retire_ring_fixture_daemons(gate_runtime_paths)
+        latest_statsd_pid = 0
+
+        # With no daemon running, wait out the 1-second window and contradict both cells through
+        # the same storage owner statsd itself appends with. Contradicting while nothing can
+        # republish is what makes the two outcomes deterministic rather than a race with a flush.
+        window_clear_at = left_edge + second_capacity + 1
+        WebDriverWait(browser, 300, poll_frequency=0.5).until(
+            lambda _driver: time.time() > window_clear_at
+        )
+        with storage.Store.open(prepared.database_path) as offline:
+            contradiction = offline.append_batch(observations=(
+                _ring_observation("ring-e2e-contradiction", float(left_edge) + 0.75, 61),
+            ))
+            assert contradiction.observations_accepted == 1, contradiction
+        owed = _durable_ring_state(prepared.database_path)["pending"]
+        assert (1, left_edge) in owed, owed
+        assert (60, rebuildable_start) in owed, owed
+
+        process = _launch_server(prepared.port, prepared.session, prepared.log_path, prepared.service_runtime_dir)
+        _wait_http(browser, prepared.port)
+        restarted_client, restarted_statsd = _production_stats_client(
+            browser, prepared.database_path, prepared.requested_socket,
+        )
+        assert restarted_client.ensure_started()
+        latest_statsd_pid = int(restarted_statsd["pid"])
+        restarted_status = _wait_ring_published(browser, restarted_client, int(contradiction.source_generation))
+
+        # Measured BEFORE the first page read: readiness already owns both outcomes.
+        after = _durable_ring_state(prepared.database_path)
+        aged_out = {
+            "left_edge": left_edge,
+            "before_slot": before["slots"][aging_address],
+            "after_slot": after["slots"][aging_address],
+            "still_pending": (1, left_edge) in after["pending"],
+            "ring_writer": restarted_status.get("ring_writer"),
+        }
+        assert (1, left_edge) not in after["pending"], aged_out
+        # The modular slot may already hold its next-lap bucket. The logical contract is only that
+        # the contradicted old identity is gone; clearing a legitimate new occupant would be loss.
+        assert after["slots"][aging_address]["bucket_start"] != left_edge, (
+            "the out-of-window contradicted payload remained logically readable after repair: "
+            + json.dumps(aged_out, sort_keys=True, default=str)
+        )
+        assert (60, rebuildable_start) not in after["pending"], after["pending"]
+        assert after["slots"][rebuildable_address]["bucket_start"] == rebuildable_start, (
+            "a rebuildable owed cell was gapped instead of republished"
+        )
+        assert (
+            after["slots"][rebuildable_address]["published_at"]
+            > before["slots"][rebuildable_address]["published_at"]
+        ), "the rebuildable owed cell was never republished"
+
+        _load_real_stats_page(request, browser, prepared.runtime, gate_auth_credentials)
+        _show_gpu_util_and_cost_summary(browser)
+        _set_range_from_slider(browser, 3_600)
+        _set_resolution_from_select(browser, 60)
+        rendered = _wait_pair(browser, 3_600, 60)
+        rendered_total = next(
+            row["tokens"] for row in rendered["costRows"] if row["label"] == "Total"
+        )
+        assert rendered_total == 12, rendered
+        assert not [
+            span for span in rendered["noData"]
+            if span.get("family") in {"agent_tokens", "cost"}
+            and span.get("reason") == "coverage_gap"
+        ], rendered
+        assert rendered["bootErrors"] == [], rendered
+        assert rendered["bootRejections"] == [], rendered
+
+        print("RING_OWED_SPLIT_EVIDENCE=" + json.dumps({
+            "left_edge": left_edge,
+            "rebuildable_start": rebuildable_start,
+            "second_capacity": second_capacity,
+            "ring_publications_before_page": int(
+                (restarted_status.get("ring_writer") or {}).get("publications") or 0
+            ),
+            "cost_tokens": rendered_total,
+        }, sort_keys=True), flush=True)
+    finally:
+        _retire_browser_and_stop_server(browser, prepared.runtime, process)
+        _retire_ring_fixture_daemons(gate_runtime_paths)

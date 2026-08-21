@@ -19,11 +19,11 @@ from yolomux_lib.stats_current import resolution as sr
 EXPECTED_MATRIX = {
     5 * 60: (1, (1, 10)),
     15 * 60: (10, (10, 60)),
-    30 * 60: (10, (10, 60)),
-    60 * 60: (60, (60, 300)),
-    2 * 60 * 60: (60, (60, 300)),
-    4 * 60 * 60: (60, (60, 300)),
-    8 * 60 * 60: (60, (60, 300)),
+    30 * 60: (60, (10, 60)),
+    60 * 60: (300, (60, 300)),
+    2 * 60 * 60: (300, (60, 300)),
+    4 * 60 * 60: (300, (60, 300)),
+    8 * 60 * 60: (300, (60, 300)),
     16 * 60 * 60: (300, (300,)),
     24 * 60 * 60: (300, (300,)),
 }
@@ -56,10 +56,11 @@ def test_auto_is_always_in_the_explicit_set(range_seconds):
     assert sr.auto_resolution(range_seconds) in sr.explicit_resolutions(range_seconds)
 
 
-@pytest.mark.parametrize("range_seconds", sr.RANGE_SECONDS)
-def test_auto_is_the_finest_offered_resolution(range_seconds):
-    auto = sr.auto_resolution(range_seconds)
-    assert auto == min(sr.explicit_resolutions(range_seconds))
+def test_auto_keeps_5m_and_15m_detailed_then_uses_the_coarsest_offered_resolution():
+    assert sr.auto_resolution(5 * 60) == 1
+    assert sr.auto_resolution(15 * 60) == 10
+    for range_seconds in sr.RANGE_SECONDS[2:]:
+        assert sr.auto_resolution(range_seconds) == max(sr.explicit_resolutions(range_seconds))
 
 
 def test_retired_dense_cells_are_not_offered():
@@ -72,7 +73,7 @@ def test_retired_dense_cells_are_not_offered():
 def test_resolve_requested_never_substitutes():
     # AUTO resolves to a concrete value...
     assert sr.resolve_requested(5 * 60, sr.AUTO) == 1
-    assert sr.resolve_requested(2 * 60 * 60, sr.AUTO) == 60
+    assert sr.resolve_requested(2 * 60 * 60, sr.AUTO) == 300
     # ...a supported explicit value passes through unchanged...
     assert sr.resolve_requested(60 * 60, 300) == 300
     # ...and an unsupported explicit value raises rather than coarsening.

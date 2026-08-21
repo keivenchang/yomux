@@ -527,19 +527,6 @@ def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_wi
         "g4-selection-cache.html",
         _current_stats_fixture_html(),
     )
-    browser.execute_script(
-        """
-        const nativeFixtureFetch = window.__statsFixture.fetch;
-        window.__statsFixture.fetch = async input => {
-          const url = new URL(String(input), location.href);
-          if (url.pathname === '/api/stats-snapshot'
-              && Number(url.searchParams.get('since_generation')) > 0) {
-            return {status: 304, json: async () => ({})};
-          }
-          return nativeFixtureFetch(input);
-        };
-        """
-    )
     _start_current_stats(browser)
     result = browser.execute_async_script(
         """
@@ -568,6 +555,7 @@ def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_wi
           const before = fixture.snapshotRequests.length;
           for (const resolution of [300, 60, 300, 60]) await choose(3600, resolution);
           const unchangedFetches = fixture.snapshotRequests.length - before;
+          await settle(500);
           const source = [...fixture.eventSources].reverse().find(item => !item.closed);
           const sourcesBeforeRepair = fixture.eventSources.length;
           source.emit('repair', {});
@@ -586,8 +574,8 @@ def test_g4_revisiting_unchanged_selection_reuses_cache_and_repair_reconnects_wi
         """
     )
     assert result.get("error") is None, result
-    assert result["unchangedFetches"] == 1, result
-    assert result["after"] - result["before"] == 1, result
+    assert result["unchangedFetches"] == 0, result
+    assert result["after"] - result["before"] == 0, result
     assert result["sourcesAfterRepair"] == result["sourcesBeforeRepair"] + 1, result
     assert result["priorSourceClosed"] is True and result["replacementSourceOpen"] is True, result
 
@@ -657,13 +645,9 @@ def test_g2_unpriced_live_attribution_never_renders_as_zero_cost(browser, tmp_pa
         """
         const done = arguments[arguments.length - 1];
         (async () => {
-          const originalFetch = window.__statsFixture.fetch;
           let pricedReport = null;
-          window.__statsFixture.fetch = async input => {
-            const response = await originalFetch(input);
-            const url = new URL(String(input), location.href);
-            if (url.pathname !== '/api/stats-snapshot') return response;
-            const snapshot = structuredClone(await response.json());
+          window.__statsFixture.snapshotTransform = input => {
+            const snapshot = structuredClone(input);
             const report = snapshot.cost_report;
             pricedReport = structuredClone(report);
             const zeroCosts = value => {
@@ -681,7 +665,7 @@ def test_g2_unpriced_live_attribution_never_renders_as_zero_cost(browser, tmp_pa
               row.unpriced = {atoms: 3, tokens: row.total_tokens};
             }
             for (const row of report.evidence) row.priced_atoms = 0;
-            return {status: 200, json: async () => structuredClone(snapshot)};
+            return snapshot;
           };
           await window.__statsFixture.start('cost');
           const root = document.getElementById('stats-root');
@@ -690,7 +674,10 @@ def test_g2_unpriced_live_attribution_never_renders_as_zero_cost(browser, tmp_pa
             summary: root.querySelector('[data-stats-current-cost-summary]').textContent,
             details: document.querySelector('[data-stats-current-cost-modal-scroll]').textContent,
           };
-          window.__statsFixture.lastSnapshot.cost_report = pricedReport;
+          window.__statsFixture.lastSnapshot = {
+            ...structuredClone(window.__statsFixture.lastSnapshot),
+            cost_report: pricedReport,
+          };
           window.__statsFixture.emitCpuDelta(12);
           await window.__statsFixture.clock.advance(0);
           done({
@@ -715,12 +702,8 @@ def test_g6_unlisted_series_uses_declared_micro_usd_unit(browser, tmp_path, gate
     result = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        const originalFetch = window.__statsFixture.fetch;
-        window.__statsFixture.fetch = async input => {
-          const response = await originalFetch(input);
-          const url = new URL(String(input), location.href);
-          if (url.pathname !== '/api/stats-snapshot') return response;
-          const snapshot = await response.json();
+        window.__statsFixture.snapshotTransform = input => {
+          const snapshot = structuredClone(input);
           const bucket = snapshot.buckets.find(item => Object.keys(item.series).length > 0);
           delete bucket.series.cost_micro_usd;
           bucket.series.unlisted_billing_probe = {
@@ -730,7 +713,7 @@ def test_g6_unlisted_series_uses_declared_micro_usd_unit(browser, tmp_path, gate
             first_timestamp: bucket.start,
             last_timestamp: bucket.start,
           };
-          return {status: 200, json: async () => snapshot};
+          return snapshot;
         };
         (async () => {
           await window.__statsFixture.start('cost');

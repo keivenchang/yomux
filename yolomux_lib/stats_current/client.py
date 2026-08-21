@@ -583,6 +583,9 @@ class StatsCurrentClient:
             }
             if request.since_generation is not None:
                 params["since_generation"] = str(request.since_generation)
+            if request.chunk_index is not None:
+                params["chunk_index"] = str(request.chunk_index)
+                params["chunk_generation"] = str(request.chunk_generation)
         else:
             params = dict(request)
         validated = protocol.parse_snapshot_request(params)
@@ -595,6 +598,9 @@ class StatsCurrentClient:
         }
         if validated.since_generation is not None:
             payload["since_generation"] = validated.since_generation
+        if validated.chunk_index is not None:
+            payload["chunk_index"] = validated.chunk_index
+            payload["chunk_generation"] = validated.chunk_generation
         response, binary = self._transport.dispatch(
             "snapshot",
             payload,
