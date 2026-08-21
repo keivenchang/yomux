@@ -180,6 +180,8 @@ def discover_javascript_endpoint_uses(
 def classify_stats_snapshot_use(use: JavaScriptEndpointUse) -> str:
     if use.path == CURRENT_STATS_OWNER_PATH and use.function == CURRENT_STATS_OWNER_FUNCTION:
         return "current-owner"
+    if re.search(r"\b(?:fetch|EventSource)\s*\(", use.function_source) is None:
+        return "diagnostic"
     prefix = use.function_source[:use.endpoint_offset]
     if (
         use.function == LEGACY_STATS_DELEGATE_FUNCTION

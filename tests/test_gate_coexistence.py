@@ -465,7 +465,7 @@ def _stop_fixture_services(
             or refreshed.proof.group_exists
         )
     ]
-    assert not retained, (paths.root, retained)
+    assert not retained, f"{paths.root}: fixture services survived teardown: {retained}"
 
 
 def _runtime_relative_paths(root: Path) -> frozenset[Path]:

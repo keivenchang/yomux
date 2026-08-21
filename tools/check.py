@@ -241,8 +241,18 @@ def check_cpu_percent(cpu_percent: int | None = None) -> int:
     return 50
 
 
+def schedulable_cpu_count() -> int:
+    """Return CPUs this process may schedule on, falling back to host visibility."""
+
+    logical = max(1, os.cpu_count() or 1)
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return logical
+
+
 def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None) -> tuple[str, str, str]:
-    """Divide a core-derived concurrent worker budget across pytest pools."""
+    """Divide the schedulable CPU budget across the concurrent pytest pools."""
     if serial:
         return "1", "1", "1"
     override = os.environ.get("YOLOMUX_PYTEST_WORKERS", "").strip()
@@ -253,7 +263,7 @@ def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None
         if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
             return parts[0], parts[1], parts[2]
         raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
-    cpus = max(1, os.cpu_count() or 1)
+    cpus = schedulable_cpu_count()
     percent = check_cpu_percent(cpu_percent)
     # The three pools run together and split one budget 1/2 non-browser,
     # 1/3 browser, remainder E2E; the floor of 3 keeps every pool alive.
@@ -922,7 +932,12 @@ def certification_step(evidence_dir: Path) -> Step:
         ["python3", "-m", "pytest", *CERTIFICATION_NODE_IDS, "-p", "no:xdist", "-o", "junit_family=xunit1", f"--junit-xml={junit_path}", "-rs", "-q"],
         tuple(
             [(name, "1") for name in latency_calibration.CERTIFICATION_ENV_NAMES]
-            + [("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir))]
+            + [
+                ("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir)),
+                # Certification runs alone and owns the complete port range; a synthetic lane
+                # name would be rejected by gate_http_port_candidates before any unit runs.
+                (CHECK_LANE_ENV, ""),
+            ]
         ),
     )
 
@@ -1163,7 +1178,7 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
     started = time.monotonic()
     start_clean_state = working_tree_clean_state()
     retirement = retire_owned_processes(expected_containers=expected_containers)
-    preflight = latency_calibration.host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
+    preflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
     lane_result: LaneResult | None = None
     postflight: dict[str, object] | None = None
     outcomes: dict[str, dict[str, object]] | None = None
@@ -1172,7 +1187,7 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
     if preflight is not None and preflight["qualified"]:
         lane_result = run_lane(Lane("certification", "latency certification", (certification_step(evidence_dir),)))
         returncode = lane_result.steps[-1].returncode if lane_result.steps else None
-        postflight = latency_calibration.host_qualification(evidence_root=evidence_dir)
+        postflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
         junit_admission = certification_junit_admission(evidence_dir / CERTIFICATION_JUNIT_NAME)
         outcomes = junit_admission["outcomes"] if junit_admission["admitted"] else certification_outcomes(evidence_dir / CERTIFICATION_JUNIT_NAME)
     verdict = certification_verdict(retirement=retirement, preflight=preflight, postflight=postflight, outcomes=outcomes, returncode=returncode, junit_admission=junit_admission)

@@ -184,6 +184,11 @@ def stop_independent_browser_pressure(browser: Any) -> None:
 # ---------------------------------------------------------------------------
 
 HOST_SAMPLE_SECONDS = 1.5
+HOST_QUALIFICATION_CONFIRMATION_WINDOWS = 2
+# A post-gate kernel/scheduler burst can alternate with one clean window even after every owned
+# process has retired. Five total windows are the smallest bound that can prove two clean windows
+# after the observed red/green/red sequence without changing any admission limit.
+HOST_QUALIFICATION_MAX_WINDOWS = 5
 HOST_CPU_WORK_ITERATIONS = 100_000
 HOST_CPU_WORK_SAMPLES = 15
 HOST_STORAGE_PROBE_ROWS = 20_000
@@ -853,6 +858,62 @@ def host_qualification(
     }
 
 
+def certification_host_qualification(
+    measurement: dict[str, Any] | None = None,
+    *,
+    evidence_root: Path | None = None,
+    limits: dict[str, float] | None = None,
+    sample_seconds: float = HOST_SAMPLE_SECONDS,
+) -> dict[str, Any]:
+    """Require a stable host without letting one short stall decide the certification.
+
+    A first qualified window is sufficient. After a red live window, measure at most five total
+    windows and recover only after two CONSECUTIVE qualified windows. Sustained or alternating load
+    therefore keeps refusing, while the observed post-gate red/green/red scheduler sequence can
+    converge without a sleep or a wider limit. Explicit injected measurements stay single-shot so
+    negative controls never retry fixed evidence.
+    """
+
+    first = host_qualification(
+        measurement=measurement,
+        evidence_root=evidence_root,
+        limits=limits,
+        sample_seconds=sample_seconds,
+    )
+    if measurement is not None or first["qualified"]:
+        return first
+
+    windows = [first]
+    consecutive_qualified = 0
+    while (
+        len(windows) < HOST_QUALIFICATION_MAX_WINDOWS
+        and consecutive_qualified < HOST_QUALIFICATION_CONFIRMATION_WINDOWS
+    ):
+        window = host_qualification(
+            evidence_root=evidence_root,
+            limits=limits,
+            sample_seconds=sample_seconds,
+        )
+        windows.append(window)
+        consecutive_qualified = consecutive_qualified + 1 if window["qualified"] else 0
+    recovered = consecutive_qualified >= HOST_QUALIFICATION_CONFIRMATION_WINDOWS
+    result = dict(windows[-1] if recovered else first)
+    result["confirmation"] = {
+        "required_consecutive_qualified_windows": HOST_QUALIFICATION_CONFIRMATION_WINDOWS,
+        "maximum_windows": HOST_QUALIFICATION_MAX_WINDOWS,
+        "recovered_transient": recovered,
+        "windows": [
+            {
+                "qualified": window["qualified"],
+                "reasons": window["reasons"],
+                "measurement": window["measurement"],
+            }
+            for window in windows
+        ],
+    }
+    return result
+
+
 def browser_calibration_qualification(calibration: dict[str, Any], *, admission_ms: float = CALIBRATION_ADMISSION_MS) -> dict[str, Any]:
     """Qualify the renderer against the declared admission envelope. Never returns a factor.
 
@@ -1052,7 +1113,11 @@ def require_qualified_host(
     from a certification.
     """
 
-    qualification = host_qualification(measurement=measurement, evidence_root=evidence_root, sample_seconds=sample_seconds)
+    qualification = certification_host_qualification(
+        measurement=measurement,
+        evidence_root=evidence_root,
+        sample_seconds=sample_seconds,
+    )
     if not qualification["qualified"]:
         artifact = write_latency_evidence(
             nodeid=nodeid,

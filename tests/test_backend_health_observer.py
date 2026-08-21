@@ -568,6 +568,22 @@ def test_no_event_is_published_when_the_stable_signature_is_unchanged(harness: H
     assert harness.observer.state()["revision"] == revision
 
 
+def test_ready_process_identity_change_publishes_and_counts_a_restart(harness: Harness):
+    harness.cycle(2)
+    published = len(harness.published)
+
+    harness.services["statsd"].row["pid"] = 101
+    cycle = harness.cycle()
+
+    assert harness.states()["statsd"] == "ready"
+    assert cycle.published is True
+    assert len(harness.published) == published + 1
+    statsd = harness.store.document()["resources"]["statsd"]
+    assert statsd["current"]["pid"] == 101
+    assert statsd["current"]["process_epoch"] == "pid:101:start:101"
+    assert statsd["aggregate"]["restart_count"] == 1
+
+
 def test_each_published_change_advances_exactly_one_store_revision(harness: Harness):
     harness.cycle(2)
     harness.services["statusd"].down("statusd exited")

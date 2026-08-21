@@ -28,8 +28,12 @@ yoagent = [
 ]
 # Test / dev tooling.
 dev = [
+  "mypy",
+  "pillow",
+  "pytest",
   "pytest-timeout",
   "pytest-xdist",
+  "selenium",
 ]
 
 [project.scripts]

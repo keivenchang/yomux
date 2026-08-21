@@ -450,6 +450,7 @@ def test_browser_capability_preflight_names_missing_dependency_browser_and_drive
     browser.write_text("", encoding="utf-8")
     monkeypatch.undo()
     monkeypatch.setattr(check.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(check.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(
         check.shutil,
         "which",
@@ -505,7 +506,7 @@ def test_catalog_and_collection_share_filename_marker_owner():
     assert test_plan.automatic_test_markers("test_new.py") == ()
 
 
-def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
+def test_check_runner_scales_one_concurrent_pytest_budget_from_schedulable_cpus(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
@@ -519,7 +520,8 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
         32: ("8", "5", "3"),
     }
     for cores, counts in expected.items():
-        monkeypatch.setattr(check.os, "cpu_count", lambda cores=cores: cores)
+        monkeypatch.setattr(check.os, "cpu_count", lambda: 64)
+        monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid, cores=cores: set(range(cores)))
         assert check.pytest_worker_counts() == counts
 
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
@@ -529,6 +531,10 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(8)))
+    assert check.pytest_worker_counts() == ("2", "1", "1")
+
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: (_ for _ in ()).throw(OSError("unavailable")))
     assert check.pytest_worker_counts() == ("2", "1", "1")
 
 
@@ -538,6 +544,7 @@ def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(32)))
 
     # Explicit argument (the --cpu-percent flag path) wins.
     assert check.pytest_worker_counts(cpu_percent=50) == ("8", "5", "3")
@@ -1151,6 +1158,7 @@ def test_certification_step_runs_every_named_unit_serially_with_its_admission_en
     assert ["-o", "junit_family=xunit1"] == step.args[step.args.index("-o"):step.args.index("-o") + 2], step.args
     environment = dict(step.env)
     assert environment["YOLOMUX_E2E_EVIDENCE_DIR"] == "/tmp/yolomux-certification-probe"
+    assert environment[check.CHECK_LANE_ENV] == ""
     for name in latency_calibration.CERTIFICATION_ENV_NAMES:
         assert environment[name] == "1", environment
 
@@ -1526,6 +1534,64 @@ def test_require_qualified_host_refuses_instead_of_skipping_and_names_every_reas
     inside = {signal: limit / 2 for signal, limit in limits.items()}
     qualified = latency_calibration.require_qualified_host(nodeid="n", label="l", measurement=inside)
     assert qualified["qualified"] is True and qualified["reasons"] == []
+
+
+def test_certification_host_qualification_requires_two_clean_windows_after_a_transient(monkeypatch):
+    limits = latency_calibration.HOST_QUALIFICATION_LIMITS
+    red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
+    green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
+    windows = iter((red, green, green))
+    calls = []
+
+    def qualify(**kwargs):
+        calls.append(kwargs)
+        return next(windows)
+
+    monkeypatch.setattr(latency_calibration, "host_qualification", qualify)
+    recovered = latency_calibration.certification_host_qualification()
+
+    assert recovered["qualified"] is True
+    assert len(calls) == 3
+    assert recovered["confirmation"]["recovered_transient"] is True
+    assert [window["qualified"] for window in recovered["confirmation"]["windows"]] == [False, True, True]
+    assert recovered["confirmation"]["maximum_windows"] == latency_calibration.HOST_QUALIFICATION_MAX_WINDOWS
+
+
+def test_certification_host_qualification_converges_after_the_observed_post_gate_red_green_red(monkeypatch):
+    limits = latency_calibration.HOST_QUALIFICATION_LIMITS
+    red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
+    green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
+    sequence = (False, True, False, True, True)
+    windows = iter(green if qualified else red for qualified in sequence)
+    monkeypatch.setattr(latency_calibration, "host_qualification", lambda **_kwargs: next(windows))
+
+    recovered = latency_calibration.certification_host_qualification()
+
+    assert recovered["qualified"] is True
+    assert recovered["confirmation"]["recovered_transient"] is True
+    assert [window["qualified"] for window in recovered["confirmation"]["windows"]] == list(sequence)
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        (False, False, False, False, False),
+        (False, True, False, True, False),
+        (False, False, True, False, True),
+    ],
+)
+def test_certification_host_qualification_never_recovers_without_two_clean_confirmations(monkeypatch, sequence):
+    limits = latency_calibration.HOST_QUALIFICATION_LIMITS
+    red = latency_calibration.host_qualification({signal: limit * 4 for signal, limit in limits.items()})
+    green = latency_calibration.host_qualification({signal: limit / 4 for signal, limit in limits.items()})
+    windows = iter(green if qualified else red for qualified in sequence)
+    monkeypatch.setattr(latency_calibration, "host_qualification", lambda **_kwargs: next(windows))
+
+    refused = latency_calibration.certification_host_qualification()
+
+    assert refused["qualified"] is False
+    assert refused["confirmation"]["recovered_transient"] is False
+    assert [window["qualified"] for window in refused["confirmation"]["windows"]] == list(sequence)
 
 
 def test_certification_phase_fixture_skips_when_unasked_and_refuses_on_an_unqualified_host(monkeypatch):
@@ -2180,6 +2246,7 @@ def test_retirement_counts_live_test_containers_the_process_walk_cannot_see(monk
         observed_command.append(command)
         return Completed()
 
+    monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
     monkeypatch.setattr(check.subprocess, "run", fake_run)
     probe = check.running_test_containers()
     assert observed_command[0] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"]
@@ -2501,12 +2568,13 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
     monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
     monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+    monkeypatch.setattr(check.os, "sched_getaffinity", lambda _pid: set(range(24)))
 
     percent = check.check_cpu_percent()
     counts = check.pytest_worker_counts()
     assert percent == 50
-    assert counts == ("8", "5", "3")
-    assert sum(int(count) for count in counts) == 16
+    assert counts == ("6", "4", "2")
+    assert sum(int(count) for count in counts) == 12
 
     with pytest.raises(SystemExit):
         check.main(["--help"])
@@ -2515,4 +2583,4 @@ def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypa
 
     documentation = " ".join((REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(encoding="utf-8").split())
     assert f"Linux makes {percent}% of that capacity available to pytest" in documentation
-    assert f"32 Linux cores produce {counts[0]}/{counts[1]}/{counts[2]}" in documentation
+    assert f"32 logical but 24 schedulable Linux CPUs produce {counts[0]}/{counts[1]}/{counts[2]}" in documentation
