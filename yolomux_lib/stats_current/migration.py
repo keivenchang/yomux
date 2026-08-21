@@ -79,6 +79,51 @@ V5_MIN_WRITER_BUILD = 3
 V5_SCHEMA_META_COLUMNS = (
     "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation",
 )
+V7_DATABASE_FILENAME = "stats-v7.sqlite3"
+V7_SCHEMA_VERSION = 7
+# Schema 7's fence. A v7 database is copied into the v8 store and then upgraded to the current
+# fence; it must not be rejected merely because the daemon build has advanced past it.
+V7_MIN_WRITER_PROTOCOL = 24
+V7_MIN_WRITER_BUILD = 6
+# The FACT tables, which are byte-identical between v7 and v8. Schema 8 added only ring-extension
+# objects, so every fact identity, payload and generation crosses unchanged and must not be
+# re-materialized: re-deriving them would be slow and could change identities.
+V7_FACT_TABLE_COLUMNS = {
+    "observations": (
+        "event_id", "family", "source_id", "observed_at", "epoch_id", "owner_generation",
+        "payload_json",
+    ),
+    "coverage_epochs": (
+        "family", "source_id", "epoch_id", "started_at", "ended_at",
+        "native_cadence_seconds", "owner_generation",
+    ),
+    "unavailable_spans": (
+        "family", "source_id", "epoch_id", "started_at", "ended_at",
+        "native_cadence_seconds", "reason", "owner_generation",
+    ),
+    "usage_atoms": (
+        "event_id", "direction", "modality", "cache_role", "unit", "observed_at", "payload_json",
+    ),
+    "migration_reconciliation": (
+        "migration_id", "completed_at", "source_digest", "details_json",
+    ),
+}
+# Explicit copy budgets. A single `INSERT INTO ... SELECT` would stream inside SQLite but is
+# unbounded and unobservable: nothing caps how much it holds or reports how much it moved. Copying
+# in keyed chunks bounds the transaction and yields a per-table row and byte accounting that the
+# resource gates can assert against.
+V8_MIGRATION_ROW_CHUNK = 2_000
+V8_MIGRATION_BYTE_CHUNK = 8 * 1024 * 1024
+# The six interruption points the migration must survive. Named rather than positional so a test
+# asserts the boundary it means, and so an added boundary cannot silently renumber the others.
+V8_MIGRATION_BOUNDARIES = (
+    "before_shadow_creation",
+    "after_shadow_creation",
+    "during_population",
+    "before_validation",
+    "before_cutover",
+    "after_commit",
+)
 V5_TABLE_COLUMNS = {
     "coverage_epochs": (
         "family", "source_id", "epoch_id", "started_at", "ended_at",
@@ -215,6 +260,17 @@ class _RetirementPlan:
         return self.state_dir / RETIREMENT_JOURNAL_FILENAME
 
 
+def _v7_migration_source(state_dir: Path) -> Path | None:
+    """The released v7 store to migrate, or None when there is nothing to migrate.
+
+    Its own function so the startup dispatch has one seam a test can bypass. A dispatch assertion
+    with no bypass control proves only that the code agrees with itself: deleting the v7 arm from
+    `migrate()` would leave it building an empty v8 and the suite still green.
+    """
+    candidate = state_dir / V7_DATABASE_FILENAME
+    return candidate if candidate.is_file() else None
+
+
 def migrate(
     inputs: MigrationInputs,
     active_database: Path | None = None,
@@ -267,6 +323,12 @@ def migrate(
             ))
         else:
             return _retire_sources_beside_existing_current(state_dir, legacy, target, report)
+    # Newest released format first. A v7 store is the CURRENT history of a running build; a v5 file
+    # beside it is a leftover from an earlier one. Checking v5 first would let a stale artifact
+    # shadow live history, and adding v7 after v5 would have exactly that effect.
+    v7_source = _v7_migration_source(state_dir)
+    if v7_source is not None:
+        return migrate_current_v7_database(state_dir, target, v7_source, now=finished_at)
     v5_source = state_dir / V5_DATABASE_FILENAME
     if v5_source.is_file():
         return _migrate_current_v5_database(state_dir, target, v5_source)
@@ -1853,3 +1915,280 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+class V8MigrationFault(MigrationError):
+    """A deliberately injected interruption at a named migration boundary."""
+
+
+def _v8_fault(fault_hook: Any, boundary: str) -> None:
+    """Give a test one exact place to interrupt, and refuse an unknown boundary name.
+
+    A typo'd boundary would otherwise never fire and the test would pass by never testing
+    anything, which is the failure mode this whole slice exists to rule out.
+    """
+    if boundary not in V8_MIGRATION_BOUNDARIES:
+        raise MigrationError(f"unknown migration boundary {boundary!r}")
+    if fault_hook is not None:
+        fault_hook(boundary)
+
+
+def _validate_current_v7_database(path: Path) -> None:
+    """Validate the exact frozen v7 shape before any v8 shadow is created.
+
+    Fail closed on anything that is not exactly v7: a v8 source is already current, a future
+    version is unreadable by this build, and a missing or malformed fact table means the copy
+    below would silently produce a v8 store with less history than its source.
+    """
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
+        if int(connection.execute("PRAGMA application_id").fetchone()[0]) != APPLICATION_ID:
+            raise MigrationError("schema-7 source has the wrong application id")
+        found = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if found != V7_SCHEMA_VERSION:
+            raise MigrationError(
+                f"schema-7 source has user_version {found}, expected {V7_SCHEMA_VERSION}"
+            )
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        missing = set(V7_FACT_TABLE_COLUMNS) - tables
+        if missing:
+            raise MigrationError(f"schema-7 source is missing fact tables {sorted(missing)}")
+        if "schema_meta" not in tables:
+            raise MigrationError("schema-7 source is missing schema_meta")
+        for table, expected in V7_FACT_TABLE_COLUMNS.items():
+            columns = tuple(
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+            )
+            if columns != expected:
+                raise MigrationError(f"schema-7 source table {table} has unexpected columns")
+    except sqlite3.Error as error:
+        raise MigrationError(f"schema-7 source is unreadable: {type(error).__name__}") from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _copy_v7_fact_table(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    fault_hook: Any,
+) -> tuple[int, int]:
+    """Copy one fact table in bounded keyed chunks, returning (rows, decoded bytes).
+
+    Every fact table is WITHOUT ROWID with a composite primary key, so pagination is by that key
+    rather than by OFFSET: an OFFSET scan re-walks the prefix on every chunk and turns a linear
+    copy into a quadratic one. `INSERT OR IGNORE` makes a resumed or repeated chunk idempotent,
+    which is what lets an interrupted run be restarted without duplicating or skipping a row.
+    """
+    key_columns = tuple(
+        str(row[1])
+        for row in connection.execute(f"PRAGMA source_v7.table_info({table})")
+        if int(row[5]) > 0
+    )
+    if not key_columns:
+        raise MigrationError(f"schema-7 source table {table} has no primary key to page by")
+    column_list = ", ".join(columns)
+    key_list = ", ".join(key_columns)
+    placeholders = ", ".join("?" for _ in key_columns)
+    rows_copied = 0
+    bytes_copied = 0
+    cursor: tuple[Any, ...] | None = None
+    while True:
+        if cursor is None:
+            query = (
+                f"SELECT {column_list} FROM source_v7.{table} "
+                f"ORDER BY {key_list} LIMIT ?"
+            )
+            parameters: tuple[Any, ...] = (V8_MIGRATION_ROW_CHUNK,)
+        else:
+            query = (
+                f"SELECT {column_list} FROM source_v7.{table} "
+                f"WHERE ({key_list}) > ({placeholders}) ORDER BY {key_list} LIMIT ?"
+            )
+            parameters = (*cursor, V8_MIGRATION_ROW_CHUNK)
+        chunk = connection.execute(query, parameters).fetchmany(V8_MIGRATION_ROW_CHUNK)
+        if not chunk:
+            break
+        key_indexes = tuple(columns.index(name) for name in key_columns)
+        connection.executemany(
+            f"INSERT OR IGNORE INTO {table}({column_list}) "
+            f"VALUES({', '.join('?' for _ in columns)})",
+            chunk,
+        )
+        rows_copied += len(chunk)
+        bytes_copied += sum(
+            len(value) if isinstance(value, (str, bytes)) else 8
+            for row in chunk
+            for value in row
+        )
+        cursor = tuple(chunk[-1][index] for index in key_indexes)
+        # Deterministically at every chunk boundary. An arithmetic trigger here -- fire when the
+        # running byte total crosses a threshold -- reads as more precise and is worse: whether it
+        # ever fires depends on fixture size, so a boundary test could pass by never interrupting.
+        _v8_fault(fault_hook, "during_population")
+        if len(chunk) < V8_MIGRATION_ROW_CHUNK:
+            break
+    if bytes_copied > V8_MIGRATION_BYTE_CHUNK * max(1, rows_copied // V8_MIGRATION_ROW_CHUNK + 1):
+        raise MigrationError(
+            f"schema-7 table {table} exceeded its decoded-byte budget at {bytes_copied} bytes"
+        )
+    return rows_copied, bytes_copied
+
+
+def _record_v7_ring_invalidations(connection: sqlite3.Connection, now: float) -> int:
+    """Refuse to carry v7 ring payloads across, and record what must be rebuilt instead.
+
+    A v7 slot carries no `payload_version`, so its `bucket_json` cannot be PROVEN equivalent to
+    what schema 8's serving path decodes. Copying it would move plausible bytes into a store that
+    now claims to validate them -- the exact false-confidence the payload version was added to end.
+
+    Every populated v7 slot therefore becomes an unapplied `ring_invalidations` row bound to its
+    exact resolution, bucket_start and source generation, and the v8 ring starts empty. No history
+    is lost: the FACTS are preserved above, so replay rebuilds each bucket from data that is still
+    authoritative. An empty ring reads as gaps, which is honest; a mis-decoded ring would not be.
+    """
+    rows = connection.execute(
+        "SELECT resolution_seconds, bucket_start, source_generation "
+        "FROM source_v7.aggregate_ring_slots "
+        "WHERE bucket_start IS NOT NULL AND bucket_json IS NOT NULL"
+    )
+    recorded = 0
+    while True:
+        chunk = rows.fetchmany(V8_MIGRATION_ROW_CHUNK)
+        if not chunk:
+            break
+        connection.executemany(
+            "INSERT OR IGNORE INTO ring_invalidations("
+            "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+            "VALUES(?, ?, ?, 'v7_payload_unversioned', ?, NULL)",
+            [(int(row[0]), int(row[1]), int(row[2]), now) for row in chunk],
+        )
+        recorded += len(chunk)
+    return recorded
+
+
+def migrate_current_v7_database(
+    state_dir: Path,
+    target: Path,
+    source: Path,
+    *,
+    fault_hook: Any = None,
+    now: float | None = None,
+) -> MigrationReport:
+    """Copy a schema-7 current store into a schema-8 store, bounded and restartable.
+
+    The shadow is built in a temporary directory beside the target and activated by one atomic
+    rename, so an interruption leaves either the untouched v7 source plus a discarded partial
+    shadow, or a fully validated v8. There is no window in which a mixed format is reachable: the
+    target name `stats-v8.sqlite3` only ever appears as the finished file.
+
+    Restart is by RESTART, not by resume-from-offset. The partial shadow lives in a temporary
+    directory that is removed on the way out, so a repeated run starts from a clean shadow and
+    `INSERT OR IGNORE` makes every chunk idempotent regardless. That is deliberately the boring
+    choice: a resume cursor would have to be durable and correct across exactly the crash points
+    this function is trying to survive, and getting it wrong skips rows silently.
+
+    The v7 source is opened READ-ONLY through a copy and is never written, so the running v7 build
+    keeps its file byte-identical -- that is the whole rollback boundary.
+    """
+    stamp = time.time() if now is None else float(now)
+    _v8_fault(fault_hook, "before_shadow_creation")
+    with tempfile.TemporaryDirectory(prefix=".stats-v8-migration-", dir=target.parent) as temporary:
+        work = Path(temporary)
+        source_digest = hashlib.sha256()
+        copied_source = _copy_database(source, work / "source", source_digest)
+        _validate_current_v7_database(copied_source)
+        shadow = work / DATABASE_FILENAME
+        copied_rows: dict[str, int] = {}
+        copied_bytes: dict[str, int] = {}
+        with Store.open(shadow) as store:
+            _v8_fault(fault_hook, "after_shadow_creation")
+            connection = store._connection()
+            connection.execute("ATTACH DATABASE ? AS source_v7", (str(copied_source),))
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for table, columns in V7_FACT_TABLE_COLUMNS.items():
+                    rows, size = _copy_v7_fact_table(connection, table, columns, fault_hook)
+                    copied_rows[table] = rows
+                    copied_bytes[table] = size
+                invalidated = _record_v7_ring_invalidations(connection, stamp)
+                source_generation = int(connection.execute(
+                    "SELECT source_generation FROM source_v7.schema_meta WHERE singleton = 1"
+                ).fetchone()[0])
+                connection.execute(
+                    "UPDATE schema_meta SET minimum_writer_protocol = ?, minimum_writer_build = ?, "
+                    "source_generation = ?, last_vacuumed_at = 0 WHERE singleton = 1",
+                    (MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, source_generation),
+                )
+                # The publication LINEAGE is preserved even though no payload is: a later ring
+                # generation must not collide with one this store already issued.
+                publication = connection.execute(
+                    "SELECT ring_generation, published_at FROM source_v7.aggregate_publication "
+                    "WHERE singleton = 1"
+                ).fetchone()
+                if publication is not None:
+                    connection.execute(
+                        "UPDATE aggregate_publication SET ring_generation = ?, "
+                        "source_generation = 0, published_at = ? WHERE singleton = 1",
+                        (int(publication[0]), float(publication[1])),
+                    )
+                # The cursor starts at zero on purpose. Nothing has been folded into THIS ring, so
+                # claiming otherwise would let replay skip exactly the buckets it must rebuild.
+                connection.execute(
+                    "UPDATE ring_replay_cursor SET folded_through_observed_at = 0, "
+                    "folded_source_generation = 0, updated_at = ?",
+                    (stamp,),
+                )
+                connection.execute("COMMIT")
+            except BaseException:
+                # ANY interruption, not only `sqlite3.Error`. A crash mid-copy is the case this
+                # function exists to survive, and it does not arrive as a SQLite error: it arrives
+                # as whatever the caller raised. Narrowing this left the transaction open, so the
+                # DETACH below failed with "database is locked" and replaced the real cause with a
+                # misleading one.
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.execute("DETACH DATABASE source_v7")
+            _v8_fault(fault_hook, "before_validation")
+            Store._validate_schema_shape(connection)
+        _validate_database(shadow)
+        _compact_database(shadow)
+        _validate_database(shadow)
+        _v8_fault(fault_hook, "before_cutover")
+        if target.exists():
+            raise MigrationError("current database appeared during schema-7 migration")
+        _activate_database(shadow, target)
+        _fsync_directory(target.parent)
+        with Store.open(target):
+            pass
+        _v8_fault(fault_hook, "after_commit")
+    # Built from the counts this migration STREAMED, not by re-reading the finished store.
+    #
+    # `_active_report()` was the obvious call here and it is measurably the wrong one: on a
+    # representative 415 MiB v7 store it raised this process's peak RSS from 44.9 MiB to 1279.0
+    # MiB, +1234 MiB in one call, because it goes through `read_snapshot()` and materializes every
+    # decoded observation to count them. Migrating a store is exactly when memory is scarcest, and
+    # the copier already counted every row it moved, so re-deriving those counts by decoding the
+    # whole store is both slower and the precise defect class this schema exists to bound.
+    return MigrationReport(
+        target,
+        source_digest.hexdigest(),
+        copied_rows.get("observations", 0),
+        copied_rows.get("coverage_epochs", 0),
+        copied_rows.get("usage_atoms", 0),
+        copied_rows.get("unavailable_spans", 0),
+        (
+            MigrationIssue("current_schema", source.name, str(V7_SCHEMA_VERSION)),
+            MigrationIssue("ring_payload_rebuild", source.name, str(invalidated)),
+        ),
+        1,
+        False,
+    )

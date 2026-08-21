@@ -32,7 +32,14 @@ from . import resolution as stats_resolution
 # combination makes the legacy writer's read-only header fence stop before it
 # can reinterpret or mutate this intentionally incompatible schema.
 APPLICATION_ID = 0x594F5354
-SCHEMA_VERSION = 7
+# Schema 8 adds the ring's durability kernel: a per-resolution replay cursor, an invalidation
+# ledger, and a versioned slot payload. It is a SIDE-BY-SIDE format, not an in-place upgrade --
+# DATABASE_FILENAME embeds the version, so a v8 build creates `stats-v8.sqlite3` and never opens,
+# writes, or WAL-touches an existing `stats-v7.sqlite3`. Migration is an explicit, bounded copy
+# (`migrate_v7_to_v8`), so the rollback boundary is simply "keep running the v7 build against the
+# v7 file". SOCKET_FILENAME also embeds the version, so a v8 build and a v7 build address different
+# statsd sockets and cannot half-share a store.
+SCHEMA_VERSION = common.STATS_SCHEMA_VERSION
 MIN_WRITER_PROTOCOL = 24
 # Build 4 moved recurring CPU/GPU host sampling into statsd. Build 5 added the
 # strict process-memory payload. Build 6 makes the same census the sole owner of
@@ -57,12 +64,15 @@ WAL_AUTOCHECKPOINT_PAGES = 1000
 # the file. This connection policy bounds the retained allocation after a reset;
 # Store.vacuum() separately truncates the rewrite-sized allocation immediately.
 WAL_ALLOCATION_CEILING_BYTES = 8 * 1024 * 1024
-DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
+DATABASE_FILENAME = common.STATS_DATABASE_FILENAME
 # Sidecar beside the database, like WRITER_FENCE_FILENAME. The nightly prune
 # schedule needs the last successful prune to survive a restart, and schema_meta
 # cannot grow a column without a SCHEMA_VERSION bump that would strand the
 # operator's existing history.
-PRUNE_STATE_FILENAME = "stats-prune.json"
+# VERSIONED, like DATABASE_FILENAME and SOCKET_FILENAME. Prune state is mutable companion state
+# belonging to one database, and schema 8 is a SIDE-BY-SIDE format: an unversioned name would have
+# a v8 build rewriting the still-running v7 build's prune schedule.
+PRUNE_STATE_FILENAME = f"stats-prune-v{SCHEMA_VERSION}.json"
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -115,7 +125,14 @@ def socket_filename(protocol_version: int, schema_generation: int) -> str:
 # been schema-scoped since v5; it deliberately remains the durable owner for
 # all compatible protocol builds of this schema.
 SOCKET_FILENAME = socket_filename(MIN_WRITER_PROTOCOL, SCHEMA_VERSION)
-WRITER_FENCE_FILENAME = "stats-writer-compat.json"
+# VERSIONED for the same reason, and this one is load-bearing for rollback. The fence is a
+# deliberate cross-BUILD guard: a writer whose schema is older than the fence refuses to open. That
+# is correct within one format lineage and actively wrong across a side-by-side pair -- a v8 build
+# publishing `schema_version: 8` into a shared fence made the still-running v7 build raise
+# SchemaTooNewError against its OWN v7 database, destroying the rollback boundary the side-by-side
+# design exists to provide. Measured before this change: a v7 fence read `7`, and after one v8
+# `Store.open` in the same state directory it read `8` with `database_filename: stats-v8.sqlite3`.
+WRITER_FENCE_FILENAME = f"stats-writer-compat-v{SCHEMA_VERSION}.json"
 MAX_DIRTY_INTERVALS = 32
 MAX_BROWSER_FAILURE_FINGERPRINTS = 128
 MAX_RING_BUCKET_BYTES = 256 * 1024
@@ -166,8 +183,24 @@ _COLUMNS = {
     ),
 }
 _RING_TABLES = frozenset(
+    {
+        "aggregate_publication",
+        "aggregate_rings",
+        "aggregate_ring_slots",
+        "ring_replay_cursor",
+        "ring_invalidations",
+    }
+)
+# The fixed-row triggers guard the three tables whose row set is pre-allocated and immutable. The
+# two schema-8 tables are deliberately NOT in that set: the cursor has one row per resolution but
+# the ledger is append-and-retire by nature, so pinning its rows would defeat its purpose.
+_RING_FIXED_ROW_TABLES = frozenset(
     {"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"}
 )
+# The payload schema `bucket_json` is written with. Schema 8 stops accepting shape-only ring data:
+# serving decodes named fields out of this blob, so a blob written by a build with a different
+# payload contract must be refused as data rather than mis-decoded into a plausible chart.
+RING_PAYLOAD_VERSION = 1
 _RING_COLUMNS = {
     "aggregate_publication": (
         "singleton", "ring_generation", "source_generation", "published_at",
@@ -177,12 +210,28 @@ _RING_COLUMNS = {
     ),
     "aggregate_ring_slots": (
         "resolution_seconds", "slot_index", "bucket_start", "bucket_json", "complete",
-        "source_generation", "ring_generation", "published_at",
+        "source_generation", "ring_generation", "published_at", "payload_version",
+    ),
+    # One row per resolution: how far replay has folded, and the store generation it folded at.
+    # `folded_through_observed_at` is the durable answer to "which facts are already in the ring",
+    # which nothing could answer before: `newest_bucket_start` is a head with no tail, and
+    # `source_generation` is a change counter with no time semantics.
+    "ring_replay_cursor": (
+        "resolution_seconds", "folded_through_observed_at", "folded_source_generation", "updated_at",
+    ),
+    # Every published bucket a later mutation contradicted, bound to the exact bucket, resolution
+    # and store generation that invalidated it. A usage tombstone hard-DELETEs its atoms and prune
+    # removes facts outright; without this row the affected slot stays published and permanently
+    # over-counted, because the materializer only republishes cells it independently knows are
+    # dirty and cannot know about facts that no longer exist.
+    "ring_invalidations": (
+        "resolution_seconds", "bucket_start", "source_generation", "reason", "created_at",
+        "applied_at",
     ),
 }
 _RING_TRIGGER_NAMES = frozenset(
     f"{table}_reject_{operation}"
-    for table in _RING_TABLES
+    for table in _RING_FIXED_ROW_TABLES
     for operation in ("insert", "delete")
 )
 
@@ -451,6 +500,24 @@ class RingWindow:
     source_generation: int
     ring_generation: int
     published_at: float
+    # The RAW STORE's generation, read in the same transaction as the publication row above, so the
+    # two can be compared without racing a concurrent append. ``source_generation`` is what the ring
+    # was published FROM; this is what the store holds NOW.
+    #
+    # A lag between them is the ORDINARY steady state, not an error: publication coalesces on
+    # RING_FLUSH_SECONDS, so the store is routinely ahead by up to one flush. What this field makes
+    # possible is measuring that distance instead of guessing at it, which is the prerequisite for
+    # the durable cursor and invalidation ledger that will eventually bound it.
+    store_source_generation: int = 0
+    # The buckets in THIS window with unapplied invalidations. Already read to hide them from
+    # `rows`, so exposing them costs no extra query and gives the restart owner the durable work
+    # list rather than making it re-derive one.
+    pending_invalidations: tuple[int, ...] = ()
+
+    @property
+    def publication_lag(self) -> int:
+        """How many store generations the published ring is behind. Zero when fully caught up."""
+        return max(0, self.store_source_generation - self.source_generation)
 
 
 @dataclass(frozen=True)
@@ -560,6 +627,16 @@ def _decoded_ring_bucket_json(value: object) -> str:
         raise SchemaMismatchError("aggregate ring bucket compression is invalid") from error
 
 
+def ring_slot_index(resolution_seconds: int, bucket_start: int) -> int:
+    """The one owner of bucket-start -> ring slot address.
+
+    Writes, reads, and every caller that needs to name a slot must agree exactly, because a ring
+    IS its modular addressing: two copies that disagree by one write a bucket where a reader will
+    never look for it.
+    """
+    return (bucket_start // resolution_seconds) % stats_resolution.RING_CAPACITIES[resolution_seconds]
+
+
 def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | bytes, int]:
     if not isinstance(bucket, RingBucketWrite):
         raise StorageValidationError("ring bucket must be a RingBucketWrite")
@@ -588,7 +665,7 @@ def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str | b
         raise StorageValidationError("bucket_json must be a JSON object")
     if not isinstance(bucket.complete, bool):
         raise StorageValidationError("complete must be a boolean")
-    slot_index = (bucket_start // resolution_seconds) % slot_count
+    slot_index = ring_slot_index(resolution_seconds, bucket_start)
     return (
         resolution_seconds,
         slot_index,
@@ -1356,13 +1433,291 @@ def _unavailable_values(span: UnavailableSpan) -> tuple[object, ...]:
     )
 
 
+def invalidated_buckets(
+    observed_range: tuple[float, float], *, end_exclusive: bool = False,
+) -> tuple[tuple[int, int], ...]:
+    """The exact (resolution, bucket_start) pairs one mutated time range makes stale.
+
+    THE one range-to-buckets owner. Every producer that can contradict a published aggregate --
+    a late observation, a usage tombstone, a prune, a coverage or unavailable-span change -- asks
+    this instead of computing bucket boundaries itself. Per-producer copies of this arithmetic are
+    how a resolution gets missed: the 1s ring would be invalidated and the 300s ring silently left
+    serving the contradicted value.
+
+    The range is INCLUSIVE at both ends. A fact exactly on a bucket boundary belongs to the bucket
+    it starts, and a fact exactly at the end instant still lands in the bucket containing it.
+
+    CLAMPED TO THE BOUNDED RING HORIZON, per resolution, and that clamp is the whole reason this is
+    one owner rather than arithmetic each caller repeats.
+
+    A ring holds exactly `RING_CAPACITIES[resolution]` slots, so nothing older than
+    `resolution * capacity` before the range end can be stored OR served. A prune passes
+    `(0, cutoff)` because it deletes everything below the cutoff, and expanding that literally
+    walked from the Unix epoch: measured at a current cutoff, 2,001,470,467 pairs across the four
+    resolutions, roughly 134 GiB, materialized in one list inside the mutating transaction. Every
+    pair beyond the horizon named a slot that cannot exist and could never be retired.
+
+    Clamping makes the result depend on the range's LENGTH, never on how far the epoch is from the
+    start, so the worst case is `sum(RING_CAPACITIES.values())` pairs no matter how old the clock
+    is.
+    """
+    start, end = observed_range
+    if end < start:
+        raise StorageValidationError("invalidated range end precedes its start")
+    pairs: list[tuple[int, int]] = []
+    for resolution_seconds, slot_count in sorted(stats_resolution.RING_CAPACITIES.items()):
+        # A prune deletes facts strictly BELOW its cutoff, so its range is half-open. With an
+        # inclusive end an aligned cutoff C both included bucket C -- which holds only facts at or
+        # after C and is therefore untouched -- and omitted C-Nr at the far end, so the boundary
+        # was wrong at BOTH ends by exactly one bucket. An inside-bucket cutoff still lands on the
+        # bucket containing it, because that bucket really did lose facts.
+        end_instant = max(0.0, end)
+        if end_exclusive:
+            if end_instant <= 0.0:
+                continue
+            # EXACT half-open math, never epsilon arithmetic. `end - 1e-9` is below the float ULP
+            # at production epoch values: measured at cutoff 1_700_000_000 with r=1 it did not move
+            # the value at all, so the excluded cutoff bucket was included. Deciding on the
+            # remainder is exact at every magnitude.
+            quotient = math.floor(end_instant / resolution_seconds)
+            last = int(quotient) * resolution_seconds
+            if last == end_instant:
+                last -= resolution_seconds
+            if last < 0:
+                continue
+        else:
+            last = int(end_instant // resolution_seconds) * resolution_seconds
+        horizon_start = last - (slot_count - 1) * resolution_seconds
+        first = int(max(0.0, start) // resolution_seconds) * resolution_seconds
+        first = max(first, horizon_start, 0)
+        if first > last:
+            continue
+        pairs.extend(
+            (resolution_seconds, bucket_start)
+            for bucket_start in range(first, last + resolution_seconds, resolution_seconds)
+        )
+    return tuple(pairs)
+
+
+def invalidated_buckets_for_instants(instants: Iterable[float]) -> tuple[tuple[int, int], ...]:
+    """The exact buckets a SET of mutated instants touches, with no span between them.
+
+    A batch is not an interval. Collapsing one to `(min, max)` and clamping to the ring horizon
+    dropped genuinely contradicted old buckets whenever the same batch also carried a far-future
+    timestamp: the clamp anchors to the newest instant, so a sparse batch of one old fact plus one
+    future fact invalidated the future end and silently left the old published bucket serving
+    contradicted data.
+
+    Deriving per instant removes the span entirely. The result is bounded by
+    `len(instants) * len(RING_CAPACITIES)` and is exact rather than conservative, so it also stops
+    an ordinary two-point batch from invalidating everything between its ends.
+    """
+    pairs: set[tuple[int, int]] = set()
+    for instant in instants:
+        moment = max(0.0, float(instant))
+        for resolution_seconds in stats_resolution.RING_CAPACITIES:
+            pairs.add((resolution_seconds, int(moment // resolution_seconds) * resolution_seconds))
+    return tuple(sorted(pairs))
+
+
+def pending_invalidation_cells(
+    connection: sqlite3.Connection,
+) -> tuple[tuple[int, int, int], ...]:
+    """Every unapplied invalidation as (resolution, bucket_start, source_generation).
+
+    Bounded by the ring's fixed slot count, because actionability already guarantees each row names
+    a populated slot. This is the DURABLE half of the dirty set: the service's in-memory
+    `_pending_ring_dirty` does not survive a restart, so after one this ledger is the only record
+    that those buckets still owe a rebuild.
+    """
+    return tuple(
+        (int(row[0]), int(row[1]), int(row[2]))
+        for row in connection.execute(
+            "SELECT resolution_seconds, bucket_start, source_generation FROM ring_invalidations "
+            "WHERE applied_at IS NULL ORDER BY resolution_seconds, bucket_start"
+        )
+    )
+
+
+def _slots_intersecting_intervals(
+    connection: sqlite3.Connection, intervals: Iterable[tuple[float, float | None]],
+) -> set[tuple[int, int]]:
+    """Every currently published bucket whose half-open span intersects a changed half-open span.
+
+    THE one interval-to-slot owner, for coverage epochs and unavailable spans alike. Flattening an
+    interval to its two endpoints was wrong in both directions at once: a coverage change over
+    `[6000, 6300)` recorded only `{6000, 6300}`, so the interior buckets 6060/6120/6180/6240 stayed
+    FALSELY CLEAN while the exclusive end 6300 -- which the change never touched -- was marked.
+
+    Derived FROM the persisted slots rather than by enumerating the interval. That is what makes an
+    OPEN coverage epoch (`ended_at is None`, so `[started_at, +inf)`) expressible at all without an
+    epoch-sized walk, and it keeps the result inherently actionable and bounded by the ring's fixed
+    slot count.
+
+    Both spans are half-open: a bucket `[b, b + r)` intersects `[start, end)` exactly when
+    `b < end and b + r > start`. That single comparison is what excludes the end bucket and
+    includes every interior one.
+    """
+    spans = [
+        (max(0.0, float(start)), None if end is None else float(end))
+        for start, end in intervals
+    ]
+    if not spans:
+        return set()
+    matched: set[tuple[int, int]] = set()
+    for row in connection.execute(
+        "SELECT resolution_seconds, bucket_start FROM aggregate_ring_slots "
+        "WHERE bucket_json IS NOT NULL"
+    ):
+        resolution_seconds = int(row[0])
+        bucket_start = int(row[1])
+        bucket_end = bucket_start + resolution_seconds
+        for span_start, span_end in spans:
+            if bucket_end > span_start and (span_end is None or bucket_start < span_end):
+                matched.add((resolution_seconds, bucket_start))
+                break
+    return matched
+
+
+def _populated_ring_slots(
+    connection: sqlite3.Connection, pairs: Iterable[tuple[int, int]],
+) -> set[tuple[int, int]]:
+    """Of these (resolution, bucket_start) pairs, the ones a populated slot actually holds.
+
+    An invalidation is only meaningful when a PUBLISHED slot currently contradicts the facts. If no
+    slot holds that bucket -- never published, cold, or already overwritten by ring wraparound --
+    `read_ring_window` already reports it missing and routes it to the materializer, so a ledger row
+    would add nothing and could never be retired: retirement happens in `publish_ring_buckets`, and
+    nothing will republish a bucket the ring does not hold.
+
+    Matching on `bucket_start` and not on slot index alone is what makes wraparound correct: a
+    lapped slot holds a DIFFERENT bucket, so the old bucket is genuinely gone.
+    """
+    matched: set[tuple[int, int]] = set()
+    for resolution_seconds, bucket_start in pairs:
+        row = connection.execute(
+            "SELECT 1 FROM aggregate_ring_slots WHERE resolution_seconds = ? AND bucket_start = ? "
+            "AND bucket_json IS NOT NULL",
+            (resolution_seconds, bucket_start),
+        ).fetchone()
+        if row is not None:
+            matched.add((resolution_seconds, bucket_start))
+    return matched
+
+
+def _retire_unactionable_invalidations(connection: sqlite3.Connection) -> int:
+    """Delete pending rows whose slot can no longer be rebuilt, in the caller's transaction.
+
+    A pending row survives only while a concrete populated slot still holds its bucket. Once the
+    ring has lapped past it, or the slot was cleared, no publication will ever retire it and the
+    read path already reports that bucket missing -- so the row is pure accumulation, and this is
+    what stopped repeated prunes leaking rows per generation.
+
+    Deleting is safe precisely BECAUSE the slot is gone: there is no stale payload left to be
+    falsely clean about. A row whose slot is still populated is never touched here.
+    """
+    stale = [
+        (int(row[0]), int(row[1]))
+        for row in connection.execute(
+            "SELECT i.resolution_seconds, i.bucket_start FROM ring_invalidations AS i "
+            "LEFT JOIN aggregate_ring_slots AS s "
+            "ON s.resolution_seconds = i.resolution_seconds AND s.bucket_start = i.bucket_start "
+            "AND s.bucket_json IS NOT NULL "
+            "WHERE i.applied_at IS NULL AND s.bucket_start IS NULL"
+        )
+    ]
+    if not stale:
+        return 0
+    connection.executemany(
+        "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+        "AND applied_at IS NULL",
+        stale,
+    )
+    return len(stale)
+
+
+def _record_invalidations(
+    connection: sqlite3.Connection,
+    observed_range: tuple[float, float],
+    *,
+    reason: str,
+    source_generation: int,
+    now: float,
+    end_exclusive: bool = False,
+    instants: Iterable[float] | None = None,
+    slots: set[tuple[int, int]] | None = None,
+) -> int:
+    """Record stale buckets INSIDE the caller's transaction, never after it.
+
+    Recording after the mutation commits would leave a window in which the facts already
+    contradict the ring and nothing says so; a crash inside that window loses the invalidation
+    permanently, because the mutation that caused it has already been accounted for and will never
+    be replayed. Same transaction or it is not durable.
+    """
+    if not _aggregate_tables(connection):
+        return 0
+    if slots is not None:
+        # Already derived FROM persisted slots by the interval owner, so it is actionable by
+        # construction and must not be re-intersected against a bucket enumeration.
+        pairs = tuple(sorted(slots))
+    else:
+        pairs = (
+            invalidated_buckets_for_instants(instants)
+            if instants is not None
+            else invalidated_buckets(observed_range, end_exclusive=end_exclusive)
+        )
+    # ACTIONABILITY, not just cardinality. The horizon clamp bounded each call to at most 1,248
+    # rows but every one of them was still recorded whether or not a slot existed to rebuild, so a
+    # cold store accumulated 1,252 permanently pending rows PER PRUNE -- measured 3,756 after three
+    # cycles with zero populated slots and no publication at all.
+    if slots is None:
+        actionable = _populated_ring_slots(connection, pairs)
+        pairs = tuple(pair for pair in pairs if pair in actionable)
+    if not pairs:
+        return 0
+    connection.executemany(
+        "INSERT OR IGNORE INTO ring_invalidations("
+        "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+        "VALUES(?, ?, ?, ?, ?, NULL)",
+        [
+            (resolution_seconds, bucket_start, int(source_generation), str(reason), float(now))
+            for resolution_seconds, bucket_start in pairs
+        ],
+    )
+    # AT MOST ONE PENDING ROW PER BUCKET. The primary key includes the generation, so a bucket
+    # contradicted again at a newer generation gained a second pending row -- and a store that is
+    # mutated repeatedly without republishing accumulated one per generation forever.
+    #
+    # Superseding is also the correct meaning, not merely the cheaper one: the bucket is
+    # contradicted as of the NEWEST generation, and retirement already clears every pending row for
+    # that bucket at or below the publishing generation, so the older rows carry no information the
+    # newer one lacks. Only PENDING rows are collapsed; retired rows are history and stay.
+    connection.executemany(
+        "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+        "AND applied_at IS NULL AND source_generation < ?",
+        [
+            (resolution_seconds, bucket_start, int(source_generation))
+            for resolution_seconds, bucket_start in pairs
+        ],
+    )
+    return len(pairs)
+
+
 def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
+    """Every table of the ring extension, matched by NAME SET rather than by prefix.
+
+    Schema 8 added `ring_replay_cursor` and `ring_invalidations`, which do not share the
+    `aggregate_` prefix the original three were discovered by. Intersecting against `_RING_TABLES`
+    keeps one list authoritative instead of coupling the extension's membership to a naming
+    convention that a later table can silently fall outside of -- which is exactly how a partial
+    ring shape would have been admitted as complete.
+    """
     return frozenset(
         str(row[0])
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'aggregate_%'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
-    )
+    ) & _RING_TABLES
 
 
 def _validate_ring_schema(connection: sqlite3.Connection) -> None:
@@ -1422,16 +1777,80 @@ def _validate_ring_schema(connection: sqlite3.Connection) -> None:
         str(row[0])
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'trigger' "
-            "AND tbl_name LIKE 'aggregate_%'"
+            "AND tbl_name IN (SELECT name FROM sqlite_master WHERE type = 'table')"
         )
     )
     if trigger_names != _RING_TRIGGER_NAMES:
         raise SchemaMismatchError("aggregate ring fixed-row triggers do not match the exact schema")
 
 
+# The cross-clock constraint shipped by the first schema-8 build. `created_at` is the OBSERVED
+# instant of the causing fact and `applied_at` is the publication's WALL CLOCK, so ordering them
+# rejected correct retirements whenever data time ran ahead of wall clock. New databases stopped
+# carrying it, but `_validate_ring_schema` compares columns, rows and triggers -- never table SQL --
+# so an EXISTING v8 kept it and still refuses valid replay today.
+_RING_INVALIDATIONS_RETIRED_CHECK = "applied_at >= created_at"
+
+
+def _ring_invalidations_needs_check_upgrade(connection: sqlite3.Connection) -> bool:
+    """Whether this database still carries the retired cross-clock CHECK."""
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ring_invalidations'"
+    ).fetchone()
+    return bool(row) and _RING_INVALIDATIONS_RETIRED_CHECK in str(row[0])
+
+
+def _upgrade_ring_invalidations_check(connection: sqlite3.Connection) -> None:
+    """Rebuild `ring_invalidations` without the retired CHECK, preserving every row.
+
+    A table rebuild rather than an in-place edit because SQLite cannot drop a CHECK. The whole
+    sequence runs in ONE transaction, so a crash leaves the old table intact rather than a
+    half-migrated ledger: failure-atomic by construction, not by cleanup.
+
+    Keeps the schema-version identity at v8 deliberately. The public contract -- table set,
+    columns, capacities, triggers -- is unchanged; only an internal constraint that was always
+    wrong is removed. Bumping the version would strand every existing v8 store behind a filename
+    and socket change for a defect that is invisible to any consumer.
+
+    Idempotent because the caller only invokes it when the retired text is present, and after the
+    rebuild it is not.
+    """
+    with _transaction(connection):
+        connection.execute(
+            "CREATE TABLE ring_invalidations_upgraded ("
+            "resolution_seconds INTEGER NOT NULL, "
+            "bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0), "
+            "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+            "reason TEXT NOT NULL, "
+            "created_at REAL NOT NULL CHECK (created_at >= 0), "
+            "applied_at REAL, "
+            "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+            "CHECK (bucket_start % resolution_seconds = 0), "
+            "CHECK (applied_at IS NULL OR applied_at >= 0)"
+            ") WITHOUT ROWID"
+        )
+        connection.execute(
+            "INSERT INTO ring_invalidations_upgraded("
+            "resolution_seconds, bucket_start, source_generation, reason, created_at, applied_at) "
+            "SELECT resolution_seconds, bucket_start, source_generation, reason, created_at, "
+            "applied_at FROM ring_invalidations"
+        )
+        connection.execute("DROP TABLE ring_invalidations")
+        connection.execute("ALTER TABLE ring_invalidations_upgraded RENAME TO ring_invalidations")
+        connection.execute(
+            "CREATE INDEX ring_invalidations_pending "
+            "ON ring_invalidations(resolution_seconds, bucket_start) WHERE applied_at IS NULL"
+        )
+
+
 def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
     tables = _aggregate_tables(connection)
     if tables:
+        # Before validation, because the retired CHECK is exactly what an existing store carries
+        # and validation does not inspect table SQL at all.
+        if _ring_invalidations_needs_check_upgrade(connection):
+            _upgrade_ring_invalidations_check(connection)
         _validate_ring_schema(connection)
         return
     with _transaction(connection):
@@ -1461,13 +1880,52 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
             "source_generation INTEGER NOT NULL DEFAULT 0 CHECK (source_generation >= 0), "
             "ring_generation INTEGER NOT NULL DEFAULT 0 CHECK (ring_generation >= 0), "
             "published_at REAL NOT NULL DEFAULT 0 CHECK (published_at >= 0), "
+            "payload_version INTEGER NOT NULL DEFAULT 0 CHECK (payload_version >= 0), "
             "PRIMARY KEY (resolution_seconds, slot_index), "
             "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
             "CHECK (bucket_start IS NULL OR bucket_start >= 0), "
             "CHECK (bucket_start IS NULL OR bucket_start % resolution_seconds = 0), "
             "CHECK ((bucket_start IS NULL AND bucket_json IS NULL AND complete = 0 "
-            "AND source_generation = 0 AND ring_generation = 0 AND published_at = 0) "
-            "OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL))) WITHOUT ROWID"
+            "AND source_generation = 0 AND ring_generation = 0 AND published_at = 0 "
+            "AND payload_version = 0) "
+            "OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL AND payload_version > 0))) WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE ring_replay_cursor ("
+            "resolution_seconds INTEGER PRIMARY KEY, "
+            "folded_through_observed_at REAL NOT NULL DEFAULT 0 "
+            "CHECK (folded_through_observed_at >= 0), "
+            "folded_source_generation INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (folded_source_generation >= 0), "
+            "updated_at REAL NOT NULL DEFAULT 0 CHECK (updated_at >= 0), "
+            "CHECK (resolution_seconds > 0), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds)"
+            ") WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE ring_invalidations ("
+            "resolution_seconds INTEGER NOT NULL, "
+            "bucket_start INTEGER NOT NULL CHECK (bucket_start >= 0), "
+            "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+            "reason TEXT NOT NULL, "
+            "created_at REAL NOT NULL CHECK (created_at >= 0), "
+            "applied_at REAL, "
+            "PRIMARY KEY (resolution_seconds, bucket_start, source_generation), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+            "CHECK (bucket_start % resolution_seconds = 0), "
+            # `created_at` and `applied_at` are DIFFERENT CLOCKS and must not be ordered against
+            # each other. `created_at` is the OBSERVED instant of the fact that caused the
+            # staleness -- data time, so this module needs no ambient clock -- while `applied_at`
+            # is the publication's wall clock. Ordering them rejected correct retirements whenever
+            # data time ran ahead of wall clock, which is routine for a store replaying history.
+            "CHECK (applied_at IS NULL OR applied_at >= 0)"
+            ") WITHOUT ROWID"
+        )
+        # Outstanding work first: a replay that must find unapplied rows cannot afford a scan of
+        # every retired one, and this is the only index the ledger needs.
+        connection.execute(
+            "CREATE INDEX ring_invalidations_pending "
+            "ON ring_invalidations(resolution_seconds, bucket_start) WHERE applied_at IS NULL"
         )
         connection.execute(
             "INSERT INTO aggregate_publication("
@@ -1478,6 +1936,12 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
             "resolution_seconds, slot_count, newest_bucket_start) VALUES(?, ?, NULL)",
             stats_resolution.RING_CAPACITIES.items(),
         )
+        # After aggregate_rings, because both schema-8 tables carry a foreign key to it and
+        # `foreign_keys` is ON for every connection this store opens.
+        connection.executemany(
+            "INSERT INTO ring_replay_cursor(resolution_seconds) VALUES(?)",
+            ((resolution_seconds,) for resolution_seconds in stats_resolution.RING_CAPACITIES),
+        )
         connection.executemany(
             "INSERT INTO aggregate_ring_slots(resolution_seconds, slot_index) VALUES(?, ?)",
             (
@@ -1486,7 +1950,7 @@ def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
                 for slot_index in range(slot_count)
             ),
         )
-        for table in sorted(_RING_TABLES):
+        for table in sorted(_RING_FIXED_ROW_TABLES):
             for operation in ("insert", "delete"):
                 connection.execute(
                     f"CREATE TRIGGER {table}_reject_{operation} "
@@ -1550,6 +2014,12 @@ class Store:
             connection.execute("PRAGMA busy_timeout = 5000")
             connection.execute(f"PRAGMA wal_autocheckpoint = {WAL_AUTOCHECKPOINT_PAGES}")
             connection.execute(f"PRAGMA journal_size_limit = {WAL_ALLOCATION_CEILING_BYTES}")
+            # Schema 8 makes the ring extension part of the FORMAT rather than an opt-in a caller
+            # remembers to request. The durability kernel -- replay cursor and invalidation ledger
+            # -- has to exist before the first append can be recorded as un-folded, and an optional
+            # kernel is one that is absent exactly when a crash needs it. Creation is idempotent:
+            # an existing extension is validated, not rebuilt.
+            _initialize_ring_schema(connection)
             if include_browser_diagnostics:
                 _initialize_browser_diagnostics(connection)
             # A clean writer takeover must not inherit the largest WAL allocation
@@ -1881,14 +2351,29 @@ class Store:
                 raise StorageValidationError("published_at cannot move backward")
             ring_generation = int(previous[0]) + 1
             newest_by_resolution: dict[int, int] = {}
+            # A slot about to be REWRITTEN may currently hold a different bucket. That older
+            # bucket is displaced by this write and can never be rebuilt from the ring again, so
+            # any pending row naming it is dead the moment the write lands. Cleanup previously ran
+            # only inside prune, so a full-lap overwrite followed by a no-op prune left the row
+            # forever. Reading the occupant BEFORE the update is what makes this exact.
+            displaced: list[tuple[int, int]] = []
+            for resolution_seconds, slot_index, bucket_start, _json, _complete in prepared:
+                occupant = connection.execute(
+                    "SELECT bucket_start FROM aggregate_ring_slots "
+                    "WHERE resolution_seconds = ? AND slot_index = ? AND bucket_json IS NOT NULL",
+                    (resolution_seconds, slot_index),
+                ).fetchone()
+                if occupant is not None and occupant[0] is not None and int(occupant[0]) != bucket_start:
+                    displaced.append((resolution_seconds, int(occupant[0])))
             for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared:
                 changed = connection.execute(
                     "UPDATE aggregate_ring_slots SET bucket_start = ?, bucket_json = ?, "
-                    "complete = ?, source_generation = ?, ring_generation = ?, published_at = ? "
+                    "complete = ?, source_generation = ?, ring_generation = ?, published_at = ?, "
+                    "payload_version = ? "
                     "WHERE resolution_seconds = ? AND slot_index = ?",
                     (
                         bucket_start, bucket_json, complete, source, ring_generation, published,
-                        resolution_seconds, slot_index,
+                        RING_PAYLOAD_VERSION, resolution_seconds, slot_index,
                     ),
                 ).rowcount
                 if changed != 1:
@@ -1897,6 +2382,54 @@ class Store:
                     bucket_start,
                     newest_by_resolution.get(resolution_seconds, bucket_start),
                 )
+            # Only the DISPLACED buckets, and only their PENDING rows. The newly written bucket is
+            # deliberately untouched here: its own contradiction is settled by the generation-gated
+            # retirement below, not by having been overwritten.
+            if displaced:
+                connection.executemany(
+                    "DELETE FROM ring_invalidations WHERE resolution_seconds = ? AND bucket_start = ? "
+                    "AND applied_at IS NULL",
+                    displaced,
+                )
+            # Retire each invalidation in the SAME transaction as the republication that answers
+            # it, and only for the exact buckets actually rewritten. This is the whole
+            # crash-safety argument, and it is why no separate replay pass exists: there is no
+            # window where a bucket is both marked clean and not yet rewritten, and none where it
+            # has been rewritten but is still reported stale. A retry re-publishes the same bucket
+            # and retires the same already-retired row, which is idempotent.
+            connection.executemany(
+                "UPDATE ring_invalidations SET applied_at = ? "
+                "WHERE resolution_seconds = ? AND bucket_start = ? AND applied_at IS NULL "
+                # Retirement authority is the SOURCE GENERATION, never the wall clock. A
+                # publication built from a generation-N snapshot cannot contain facts that arrived
+                # at N+1, so it must not clear their invalidation merely because its clock is
+                # later -- which `created_at <= published_at` allowed, marking a bucket reconciled
+                # that the publication demonstrably could not account for.
+                "AND source_generation <= ?",
+                [
+                    (published, resolution_seconds, bucket_start, source)
+                    for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared
+                ],
+            )
+            # The cursor advances only AFTER those effects are staged in this same transaction, so
+            # it can never claim work that a crash then loses. It records the newest instant this
+            # ring has folded, per resolution.
+            connection.executemany(
+                "UPDATE ring_replay_cursor SET folded_through_observed_at = max(folded_through_observed_at, ?), "
+                "folded_source_generation = ?, updated_at = ? "
+                # Gated on GENERATION, not on the horizon moving. A republication of the same
+                # bucket at a newer generation is exactly what replaying contradicted work looks
+                # like, and the horizon does not move for it -- so a horizon-gated update left
+                # `folded_source_generation` stale precisely when it mattered most.
+                "WHERE resolution_seconds = ? AND folded_source_generation <= ?",
+                [
+                    (
+                        float(newest + resolution_seconds), source, published,
+                        resolution_seconds, source,
+                    )
+                    for resolution_seconds, newest in newest_by_resolution.items()
+                ],
+            )
             for resolution_seconds, newest_bucket_start in newest_by_resolution.items():
                 changed = connection.execute(
                     "UPDATE aggregate_rings SET newest_bucket_start = CASE "
@@ -1914,6 +2447,77 @@ class Store:
             if changed != 1:
                 raise SchemaMismatchError("aggregate publication row is missing")
         return RingPublication(ring_generation, source, published, len(prepared))
+
+    def retire_unrebuildable_ring_cells(
+        self,
+        cells: Iterable[tuple[int, int, int]],
+    ) -> tuple[tuple[int, int], ...]:
+        """Clear an exact contradicted slot and retire its observed pending row, together.
+
+        The ONE owner of the honest-gap transition. A pending invalidation is answered by a
+        republication (`publish_ring_buckets`), and that is the only path that may retire a row
+        whose bucket is still rebuildable. But a bucket that has aged out of the materializer's
+        candidate window can never be rebuilt again: startup repair stages it, no candidate bucket
+        exists to write, no publication answers it, and the row stays pending forever while
+        `read_ring_window` hides the slot. The retained payload is then both permanently hidden and
+        permanently contradicted.
+
+        The serving decision is an honest gap: drop the contradicted payload and the row it owes in
+        ONE transaction, so there is never a moment where the slot is served without its
+        contradiction or the row survives its slot. Retirement is a DELETE, matching
+        `_retire_unactionable_invalidations`, because no publication ever answered this row --
+        stamping `applied_at` would claim a republication that did not happen.
+
+        Exactness is the whole safety argument. The caller passes the pending row's observed source
+        generation, and the transaction proceeds only while that exact row is still pending and
+        the slot still holds the older bucket it contradicts. A row another publisher retired or
+        replaced, or a slot that publisher rebuilt or lapped, leaves stale repair work no authority
+        over the new state. Callers must only pass rows they measured to be unrebuildable.
+        """
+        if self.read_only:
+            raise StatsCurrentError("stats store reader cannot retire ring cells")
+        addressed = sorted({
+            (
+                _validate_nonnegative_integer(resolution_seconds, "resolution_seconds"),
+                _validate_nonnegative_integer(bucket_start, "bucket_start"),
+                _validate_nonnegative_integer(source_generation, "source_generation"),
+            )
+            for resolution_seconds, bucket_start, source_generation in cells
+        })
+        if not addressed:
+            return ()
+        connection = self._require_ring_storage()
+        retired: list[tuple[int, int]] = []
+        with _transaction(connection):
+            for resolution_seconds, bucket_start, source_generation in addressed:
+                cleared = connection.execute(
+                    "UPDATE aggregate_ring_slots SET bucket_start = NULL, bucket_json = NULL, "
+                    "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0, "
+                    "payload_version = 0 "
+                    "WHERE resolution_seconds = ? AND bucket_start = ? AND bucket_json IS NOT NULL "
+                    "AND source_generation < ? AND EXISTS ("
+                    "SELECT 1 FROM ring_invalidations WHERE resolution_seconds = ? "
+                    "AND bucket_start = ? AND source_generation = ? AND applied_at IS NULL)",
+                    (
+                        resolution_seconds, bucket_start, source_generation,
+                        resolution_seconds, bucket_start, source_generation,
+                    ),
+                ).rowcount
+                if not cleared:
+                    # Retired/replaced work, a rebuilt slot, or a lapped slot is a different
+                    # identity, so this stale observation has no authority over either half.
+                    continue
+                deleted = connection.execute(
+                    "DELETE FROM ring_invalidations WHERE resolution_seconds = ? "
+                    "AND bucket_start = ? AND source_generation = ? AND applied_at IS NULL",
+                    (resolution_seconds, bucket_start, source_generation),
+                ).rowcount
+                if deleted != 1:
+                    raise SchemaMismatchError(
+                        "pending ring invalidation changed inside honest-gap transaction"
+                    )
+                retired.append((resolution_seconds, bucket_start))
+        return tuple(retired)
 
     def read_ring_window(
         self,
@@ -1940,7 +2544,6 @@ class Store:
         connection = self._require_ring_storage()
         window_start = end - range_value
         expected_starts = tuple(range(window_start, end, resolution_value))
-        slot_count = stats_resolution.RING_CAPACITIES[resolution_value]
         with _transaction(connection):
             publication = connection.execute(
                 "SELECT ring_generation, source_generation, published_at "
@@ -1948,21 +2551,54 @@ class Store:
             ).fetchone()
             if publication is None:
                 raise SchemaMismatchError("aggregate publication row is missing")
+            store_row = connection.execute(
+                "SELECT source_generation FROM schema_meta WHERE singleton = 1"
+            ).fetchone()
+            if store_row is None:
+                raise SchemaMismatchError("stats schema metadata row is missing")
+            store_generation = int(store_row[0])
             slot_rows = {
                 int(row[0]): row
                 for row in connection.execute(
                     "SELECT slot_index, bucket_start, bucket_json, complete, "
-                    "source_generation, ring_generation, published_at "
+                    "source_generation, ring_generation, published_at, payload_version "
                     "FROM aggregate_ring_slots WHERE resolution_seconds = ?",
                     (resolution_value,),
+                )
+            }
+            # Bounded by the requested window, not by the whole ledger: a store that has
+            # accumulated invalidations outside this window must not make this read grow.
+            stale_starts = {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT bucket_start FROM ring_invalidations "
+                    "WHERE applied_at IS NULL AND resolution_seconds = ? "
+                    "AND bucket_start >= ? AND bucket_start < ?",
+                    (resolution_value, window_start, end),
                 )
             }
             rows: list[RingBucketRow] = []
             missing: list[int] = []
             for bucket_start in expected_starts:
-                slot_index = (bucket_start // resolution_value) % slot_count
+                slot_index = ring_slot_index(resolution_value, bucket_start)
                 candidate = slot_rows.get(slot_index)
                 if candidate is None or candidate[1] is None or int(candidate[1]) != bucket_start:
+                    missing.append(bucket_start)
+                    continue
+                if bucket_start in stale_starts:
+                    # A fact mutation has contradicted this published bucket and no republication
+                    # has happened yet. Serving it would answer with an aggregate the store's own
+                    # facts disagree with, which is worse than answering with a gap: the gap is
+                    # visibly incomplete, the stale bucket is confidently wrong. Reporting it
+                    # MISSING routes it to the materializer, which rebuilds it from the facts.
+                    missing.append(bucket_start)
+                    continue
+                if int(candidate[7]) != RING_PAYLOAD_VERSION:
+                    # Shape-only acceptance ends here. Serving decodes named fields out of
+                    # `bucket_json`, so a blob written under a different payload contract would be
+                    # mis-decoded into a chart that looks plausible and is wrong. Reporting the
+                    # bucket as MISSING routes it to the materializer, which rebuilds it from facts
+                    # that are still authoritative, rather than refusing the whole window.
                     missing.append(bucket_start)
                     continue
                 rows.append(
@@ -1986,7 +2622,22 @@ class Store:
             int(publication[1]),
             int(publication[0]),
             float(publication[2]),
+            store_generation,
+            tuple(sorted(stale_starts)),
         )
+
+    def pending_invalidation_cells(self) -> tuple[tuple[int, int, int], ...]:
+        """Every unapplied invalidation as (resolution, bucket_start, source_generation).
+
+        A PUBLIC method rather than a module function taking `_connection()`, because the service
+        is the caller and reaching through a private accessor both breaks the owner boundary and
+        breaks every store double that legitimately does not have one.
+
+        Bounded by the ring's fixed slot count: actionability already guarantees each row names a
+        populated slot. This is the DURABLE half of the dirty set, and after a restart it is the
+        only record that those buckets still owe a rebuild.
+        """
+        return pending_invalidation_cells(self._connection())
 
     def last_vacuumed_at(self) -> float:
         """Return the persisted completion time for the last successful VACUUM."""
@@ -2126,9 +2777,17 @@ class Store:
 
     def _apply_usage_tombstones(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> tuple[int, int, tuple[tuple[object, ...], ...]]:
+    ) -> tuple[int, int, tuple[tuple[object, ...], ...], tuple[float, ...]]:
+        """Also return the observed instants of the atoms actually DELETED.
+
+        The caller needs the range to invalidate, and it is this function -- the only code that
+        knows which tombstones matched a stored atom -- that can name it. Returning it here removes
+        the caller's need to index a prepared tuple at all: that indexing read the last field,
+        which is `thread_id`, so a tombstone-only append invalidated nothing.
+        """
         accepted = duplicate = 0
         accepted_values: list[tuple[object, ...]] = []
+        deleted_observed_at: list[float] = []
         for values in prepared:
             key = values[:5]
             previous = connection.execute(
@@ -2149,7 +2808,10 @@ class Store:
             )
             accepted += 1
             accepted_values.append(values)
-        return accepted, duplicate, tuple(accepted_values)
+            # `previous[0]` is the stored atom's own observed instant, and the equality check above
+            # has already proven it equals the tombstone's, so this is the deleted fact's time.
+            deleted_observed_at.append(float(previous[0]))
+        return accepted, duplicate, tuple(accepted_values), tuple(deleted_observed_at)
 
     def _apply_unavailable_spans(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
@@ -2227,9 +2889,10 @@ class Store:
             usage_accepted, usage_attribution_conflicts, accepted_usage = self._apply_usage_atoms(
                 connection, prepared_usage,
             )
-            tombstones_accepted, tombstones_duplicate, accepted_tombstones = self._apply_usage_tombstones(
-                connection, prepared_tombstones,
-            )
+            (
+                tombstones_accepted, tombstones_duplicate, accepted_tombstones,
+                tombstoned_observed_at,
+            ) = self._apply_usage_tombstones(connection, prepared_tombstones)
             unavailable_accepted = self._apply_unavailable_spans(
                 connection, prepared_unavailable,
             )
@@ -2246,6 +2909,96 @@ class Store:
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
                     (generation,),
                 )
+                # Same transaction as the facts that caused it. The observed range is taken from
+                # what was ACCEPTED, not from what was offered: a rejected duplicate changes no
+                # aggregate and must not invalidate a bucket that is still correct.
+                # Timestamp positions are DERIVED from `_COLUMNS`, the single owner of each
+                # table's column order, rather than written out here. Hand-indexing three
+                # different tuple layouts would be a fourth copy of that contract and would break
+                # silently the next time one of them gains a column.
+                #
+                # Prepared is a superset of accepted, so a batch containing rejected duplicates
+                # invalidates slightly more than it strictly must. That direction is deliberate:
+                # over-invalidating costs one rebuild from authoritative facts, while
+                # under-invalidating leaves a contradicted bucket being served as current.
+                # POINT facts contribute instants; INTERVAL facts contribute spans. Coverage
+                # epochs and unavailable spans are intervals, and flattening them to their two
+                # endpoints left every interior bucket falsely clean while marking an exclusive end
+                # the change never touched.
+                mutated: list[float] = []
+                for table, rows in (
+                    ("observations", prepared_observations),
+                    ("usage_atoms", prepared_usage),
+                ):
+                    index = _COLUMNS[table].index("observed_at")
+                    mutated.extend(float(row[index]) for row in rows if row[index] is not None)
+                changed_intervals: list[tuple[float, float | None]] = []
+                for table, rows in (
+                    ("coverage_epochs", prepared_coverage),
+                    ("unavailable_spans", prepared_unavailable),
+                ):
+                    start_index = _COLUMNS[table].index("started_at")
+                    end_index = _COLUMNS[table].index("ended_at")
+                    for row in rows:
+                        if row[start_index] is None:
+                            continue
+                        # `ended_at is None` is an OPEN epoch running to the present, carried as an
+                        # unbounded interval rather than collapsed to its start.
+                        changed_intervals.append((
+                            float(row[start_index]),
+                            None if row[end_index] is None else float(row[end_index]),
+                        ))
+                # From the deletion owner, which is the only code that knows which tombstones
+                # actually matched a stored atom. Not conditional on `mutated` being empty either:
+                # a batch that both appends and tombstones contradicts BOTH ranges.
+                mutated.extend(tombstoned_observed_at)
+                if retention_prune is not None and retention_prune.changed and retention_cutoff is not None:
+                    # A SEPARATE range, not merged into `mutated`. The retention prune deletes the
+                    # OLDEST facts while the offered rows are the newest, so a single min..max span
+                    # covering both would invalidate the entire store on every retention append.
+                    # Recording the deleted range on its own invalidates exactly the buckets whose
+                    # facts are gone. Before this, the append-time prune recorded nothing at all.
+                    _record_invalidations(
+                        connection,
+                        (0.0, float(retention_cutoff)),
+                        end_exclusive=True,
+                        reason="retention_prune",
+                        source_generation=generation,
+                        now=float(retention_cutoff),
+                    )
+                    _retire_unactionable_invalidations(connection)
+                if changed_intervals:
+                    # Through the one interval-to-slot owner: exactly the published buckets whose
+                    # half-open span intersects a changed half-open span, interior included and
+                    # exclusive end excluded.
+                    _record_invalidations(
+                        connection,
+                        (0.0, 0.0),
+                        reason="fact_mutation",
+                        source_generation=generation,
+                        now=max(
+                            (span[1] if span[1] is not None else span[0])
+                            for span in changed_intervals
+                        ),
+                        slots=_slots_intersecting_intervals(connection, changed_intervals),
+                    )
+                if mutated:
+                    # `created_at` is the observed instant that caused the staleness, not a wall
+                    # clock read: this module deliberately takes every timestamp as data so a store
+                    # has no ambient clock dependency, and the causing instant is the more useful
+                    # value anyway when reconciling a late write against its bucket.
+                    # EXACT INSTANTS, not `(min, max)`. Collapsing a batch to a span and
+                    # clamping it to the ring horizon anchored on the NEWEST instant, so a sparse
+                    # batch carrying one old fact and one far-future fact invalidated the future
+                    # end and left the old contradicted bucket serving stale data.
+                    _record_invalidations(
+                        connection,
+                        (0.0, 0.0),
+                        reason="fact_mutation",
+                        source_generation=generation,
+                        now=max(mutated),
+                        instants=mutated,
+                    )
         return AppendResult(
             generation,
             observations_accepted,
@@ -2655,6 +3408,21 @@ class Store:
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
                     (generation,),
                 )
+                # Same transaction as the deletion. `prune` advanced the generation and recorded
+                # NOTHING, so a nightly prune left every published bucket below the cutoff serving
+                # totals for facts that no longer exist and nothing ever asked for a rebuild.
+                _record_invalidations(
+                    connection,
+                    (0.0, cutoff),
+                    end_exclusive=True,
+                    reason="retention_prune",
+                    source_generation=generation,
+                    now=cutoff,
+                )
+                # AFTER recording, in the same transaction. Ordering matters: a real contradiction
+                # recorded above for a still-populated slot must be inserted before this sweep can
+                # consider anything, and this only ever removes rows whose slot no longer exists.
+                _retire_unactionable_invalidations(connection)
         # Recorded only after the transaction commits: a prune that failed must
         # stay due, or one bad night silently becomes a skipped day.
         self._record_pruned_at(now)

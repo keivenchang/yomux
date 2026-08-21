@@ -102,10 +102,21 @@ def resolve_yolomux_roots(
     return paths
 
 
+# The ONE owner of the stats schema version and its derived filenames.
+#
+# It lives here rather than in `stats_current.storage` because `storage` imports this module, so
+# the dependency can only run one way. It was previously a hardcoded "stats-v7.sqlite3" literal in
+# `runtime_socket_candidates`, which is a divergent copy of the same fact: bumping the schema left
+# the socket digest computed from a filename the product no longer uses, so the socket-length
+# preflight validated a path that would never exist.
+STATS_SCHEMA_VERSION = 8
+STATS_DATABASE_FILENAME = f"stats-v{STATS_SCHEMA_VERSION}.sqlite3"
+
+
 def runtime_socket_candidates(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> tuple[Path, ...]:
     """Enumerate every product-owned Unix socket before rooted directories exist."""
     resolved_identity = identity or current_host_identity()
-    database = paths.state_dir / HOST_PARTITION_DIRNAME / resolved_identity.stable_host_id / "stats-v7.sqlite3"
+    database = paths.state_dir / HOST_PARTITION_DIRNAME / resolved_identity.stable_host_id / STATS_DATABASE_FILENAME
     digest = hashlib.sha256(str(database).encode("utf-8")).hexdigest()[:16]
     return rooted_socket_candidates(paths.runtime_dir, stats_digest=digest)
 
