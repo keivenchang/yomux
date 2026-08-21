@@ -94,12 +94,10 @@ def _stats_stream_state(server: IsolatedDevServer, *, timeout: float = 3.0) -> t
     """Return (status, first-event-name) from /api/stats-stream, reading just the first SSE event.
 
     A statsd that is down returns a plain non-200 JSON body; a recovered statsd returns HTTP 200
-    `text/event-stream` whose first event is `delta` or `ready`.
+    `text/event-stream` whose first event is the snapshot acknowledgement.
     """
 
-    # The delta stream takes an EXACT numeric cursor (no AUTO): range/resolution must be a supported
-    # pair (300 s @ 1 s is), plus a fresh after_cache_generation/after_revision of 0.
-    query = "range_seconds=300&resolution_seconds=1&client_id=a1-recovery&after_cache_generation=0&after_revision=0"
+    query = "range_seconds=300&resolution=1&client_id=a1-recovery&since_generation=0"
     connection = HTTPConnection("127.0.0.1", server.port, timeout=timeout)
     try:
         connection.request("GET", f"/api/stats-stream?{query}")
@@ -213,18 +211,9 @@ def test_a1_statsd_self_recovers_from_a_poisoned_invalid_pid_record_end_to_end(
         )
         server.assert_serving()
 
-        # Demand stats: this is what drives `ensure_started` -> `_remove_stale_record`, which reclaims
-        # the poisoned record (record-only unlink) and spawns a fresh statsd.
-        status, _headers, snapshot = server.request(
-            "/api/stats-snapshot?range_seconds=300&resolution=AUTO&client_id=a1-recovery"
-        )
-        assert status != HTTPStatus.INTERNAL_SERVER_ERROR, (status, snapshot, server.output[-20:])
-
-        # /api/stats-stream reaches ready: an HTTP 200 event stream. A recovered statsd answers with
-        # a `ready` (NOT_MODIFIED), a `delta` (new data), or a `repair` (the cursor was stale but
-        # statsd IS serving and holds a current cache generation to compare against). A statsd still
-        # bricked by the poison cannot produce any of these -- it returns a non-200 unavailable body.
-        serving_events = ("delta", "ready", "repair")
+        # The one snapshot-and-live request drives `ensure_started` -> `_remove_stale_record`, which
+        # reclaims the poisoned record and, once statsd is serving, begins with one acknowledgement.
+        serving_events = ("ack",)
         stream_status = 0
         stream_event = ""
         deadline = time.monotonic() + RECOVERY_TIMEOUT_SECONDS

@@ -17,7 +17,7 @@ from tests.terminal_state_guard import TERMINAL_STATE_CONTRACTS
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STATS_SNAPSHOT_ENDPOINT = "/api/stats-snapshot"
+STATS_SNAPSHOT_ENDPOINT = "/api/stats-stream"
 
 
 def _shipped_javascript_sources() -> dict[Path, str]:
@@ -41,7 +41,7 @@ def test_every_stats_snapshot_endpoint_use_routes_through_the_current_owner():
     )
     classifications = [classify_stats_snapshot_use(use) for use in uses]
 
-    assert uses, "the shipped current stats client must own the snapshot endpoint"
+    assert uses, "the shipped current stats client must own the snapshot-and-live endpoint"
     assert classifications.count("current-owner") == 1
     assert [
         f"{use.path}:{use.line}:{use.function}"
@@ -54,7 +54,7 @@ def test_stats_snapshot_owner_guard_rejects_a_new_direct_caller():
     sources = _shipped_javascript_sources()
     sources[Path("synthetic/direct_stats_caller.js")] = """
 async function refreshStatsDirectly() {
-  return fetch('/api/stats-snapshot?range_seconds=300');
+  return fetch('/api/stats-stream?range_seconds=300');
 }
 """
 
@@ -73,9 +73,9 @@ def test_stats_snapshot_owner_guard_rejects_an_arrow_caller_between_named_functi
     sources = {
         Path("static_src/js/yolomux/84_stats_current.js"): """
 function fetchSnapshot() {
-  return fetch('/api/stats-snapshot?owner=1');
+  return fetch('/api/stats-stream?owner=1');
 }
-const directArrow = () => fetch('/api/stats-snapshot?bypass=1');
+const directArrow = () => fetch('/api/stats-stream?bypass=1');
 function closeStream() {}
 """
     }

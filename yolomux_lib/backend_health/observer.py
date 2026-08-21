@@ -747,11 +747,10 @@ class ObservationCycle:
     duration_seconds: float
     states: Mapping[str, tuple[str, str]]
     probe_outcomes: Mapping[str, str]
-    # (resource, state, reason_code, recovery_outcome). The recovery outcome is part of the
-    # STABLE SIGNATURE because "a retry was issued" and "recovery is blocked because the peer is
-    # upgrade-fenced" are health facts a user must be able to see; without it the retained row
-    # would only ever record the outcome that happened to coincide with a state change.
-    signature: tuple[tuple[str, str, str, str], ...]
+    # (resource, state, reason_code, recovery_outcome, pid, process_start_identity). Recovery and
+    # process identity are part of the STABLE SIGNATURE because both can change while the service
+    # remains ready. Omitting identity hid fast daemon restarts and froze the retained epoch.
+    signature: tuple[tuple[str, str, str, str, int, str], ...]
     published: bool = False
     revision: int = 0
     persisted: bool = False
@@ -832,7 +831,7 @@ class BackendHealthObserver:
         # instead of an absent one, and a recovery to `ready` still has to debounce.
         self._accepted: dict[str, tuple[str, str]] = {name: _INITIAL_HEALTH for name in self.inventory}
         self._candidates: dict[str, tuple[tuple[str, str], int]] = {}
-        self._published_signature: tuple[tuple[str, str, str], ...] | None = None
+        self._published_signature: tuple[tuple[str, str, str, str, int, str], ...] | None = None
         self._observations = 0
         self._cycle_failures = 0
         self._last_cycle_error = ""
@@ -1044,12 +1043,12 @@ class BackendHealthObserver:
         ).collect()
 
         observed: dict[str, tuple[str, str]] = {}
-        identities: dict[str, tuple[int, str]] = {}
+        observed_identities: dict[str, tuple[int, str]] = {}
         collected: dict[str, Mapping[str, Any]] = {}
         for row in snapshot.rows:
             observed[row.service] = observed_health(row.fields, outcomes.get(row.service, PROBE_FAILED))
             pid = row.pid if row.pid > 0 else 0
-            identities[row.service] = (pid, str(self._identity_source(pid) or "") if pid > 0 else "")
+            observed_identities[row.service] = (pid, str(self._identity_source(pid) or "") if pid > 0 else "")
             collected[row.service] = row.fields
 
         with self._lock:
@@ -1064,9 +1063,28 @@ class BackendHealthObserver:
         retries = tuple(sorted(name for name, decision in decisions.items() if decision.attempted))
 
         with self._lock:
+            published_identities = {
+                name: (pid, start_identity)
+                for name, _state, _reason, _recovery, pid, start_identity in (self._published_signature or ())
+            }
+            accepted_identities = {
+                name: (
+                    observed_identities.get(name, (0, ""))
+                    if observed.get(name) == health
+                    else published_identities.get(name, (0, ""))
+                )
+                for name, health in accepted.items()
+            }
             signature = tuple(
                 sorted(
-                    (name, state, reason, recovery.get(name, RECOVERY_NONE))
+                    (
+                        name,
+                        state,
+                        reason,
+                        recovery.get(name, RECOVERY_NONE),
+                        accepted_identities.get(name, (0, ""))[0],
+                        accepted_identities.get(name, (0, ""))[1],
+                    )
                     for name, (state, reason) in accepted.items()
                 )
             )
@@ -1097,7 +1115,7 @@ class BackendHealthObserver:
         # failures with zero events published still reported `alive=true`, eight completed
         # cycles, a two-second cycle age and a single consecutive failure. The supervisor in
         # `_run` counts the raise; nothing here may claim the cycle finished before then.
-        published = self._publish_change(cycle, accepted, identities, signature, recovery)
+        published = self._publish_change(cycle, accepted, accepted_identities, signature, recovery)
         self._record_cycle_completed()
         return published
 
@@ -1192,7 +1210,7 @@ class BackendHealthObserver:
         cycle: ObservationCycle,
         accepted: Mapping[str, tuple[str, str]],
         identities: Mapping[str, tuple[int, str]],
-        signature: tuple[tuple[str, str, str, str], ...],
+        signature: tuple[tuple[str, str, str, str, int, str], ...],
         recovery: Mapping[str, str],
     ) -> ObservationCycle:
         observations = tuple(

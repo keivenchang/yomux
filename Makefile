@@ -15,7 +15,7 @@ setup: check-python ## Install runtime deps (+ yoagent) and build the static bun
 	$(PYTHON) -m pip install -e ".[yoagent]"
 	$(PYTHON) tools/static_build.py
 
-dev: check-python ## Like setup, plus dev/test deps (pytest-xdist)
+dev: check-python ## Like setup, plus the complete dev/test gate toolchain
 	$(PYTHON) -m pip install -e ".[yoagent,dev]"
 	$(PYTHON) tools/static_build.py
 

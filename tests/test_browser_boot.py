@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import json
+import shlex
 import subprocess
 from urllib.parse import urlencode
 
@@ -486,6 +487,61 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
             )
         )
 
+    def wait_for_terminal_acknowledgment(acknowledgment_path, expected, stage):
+        try:
+            return WebDriverWait(browser, 12).until(
+                lambda _driver: (
+                    text if acknowledgment_path.is_file()
+                    and (text := acknowledgment_path.read_text(encoding="utf-8")) == expected
+                    else False
+                ),
+                message=f"focused real xterm did not deliver native input after {stage}",
+            )
+        except TimeoutException as exc:
+            state = browser.execute_script(
+                """
+                const item = terminals.get(arguments[0]), buffer = item?.term?.buffer?.active;
+                return {
+                  buffer: buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '',
+                  phases: jsDebugEvents.filter(event => event.type === 'terminal_mobile_input_trace').map(event => event.phase),
+                  socketState: item?.socket?.readyState ?? -1,
+                  textareaValue: item?.term?.textarea?.value || '',
+                };
+                """,
+                session,
+            )
+            state["acknowledgmentPath"] = str(acknowledgment_path)
+            state["acknowledgmentExists"] = acknowledgment_path.is_file()
+            state["acknowledgmentValue"] = (
+                acknowledgment_path.read_text(encoding="utf-8", errors="replace")
+                if acknowledgment_path.is_file()
+                else ""
+            )
+            pane_capture = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-S", "-100", "-t", f"{session}:")
+            state["tmuxPane"] = pane_capture.stdout
+            raise AssertionError(f"focused real xterm input state after {stage}: {state}") from exc
+
+    def dispatch_terminal_enter():
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
+        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
+
+    def arm_terminal_line_acknowledgment(name, prefix=""):
+        ready_path = tmp_path / f"{name}.ready"
+        acknowledgment_path = tmp_path / f"{name}.ack"
+        command = (
+            f"printf ready > {shlex.quote(ready_path.name)}; "
+            f"IFS= read -r terminal_value; "
+            f"printf '%s%s\\n' {shlex.quote(prefix)} \"$terminal_value\" > {shlex.quote(acknowledgment_path.name)}"
+        )
+        browser.execute_cdp_cmd("Input.insertText", {"text": command})
+        dispatch_terminal_enter()
+        assert wait_for_terminal_acknowledgment(
+            ready_path,
+            "ready",
+            f"{name} line receiver readiness",
+        ) == "ready"
+        return acknowledgment_path
+
     def tap_terminal_and_send(stage, touch_id):
         point = terminal_point(session)
         browser.execute_script("document.body.tabIndex = -1; document.body.focus();")
@@ -509,42 +565,11 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         assert 120 <= pane_geometry["height"] <= pane_geometry["viewportHeight"] + 1, pane_geometry
         pane_heights.append({"stage": stage, **pane_geometry})
         stage_marker = f"{marker}-{stage}"
-        browser.execute_cdp_cmd("Input.insertText", {"text": f"echo {stage_marker}"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        try:
-            output = WebDriverWait(browser, 12).until(
-                lambda driver: (
-                    text if (text := driver.execute_script(
-                        """
-                        const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
-                        const text = buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
-                        return text.split('\\n').filter(line => line.trim() === arguments[1]).length === 1 ? text : '';
-                        """,
-                        session,
-                        stage_marker,
-                    )) else False
-                ),
-                message=f"focused real xterm did not deliver native text after {stage}",
-            )
-        except TimeoutException as exc:
-            state = browser.execute_script(
-                """
-                const item = terminals.get(arguments[0]), buffer = item?.term?.buffer?.active;
-                return {
-                  buffer: buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '',
-                  phases: jsDebugEvents.filter(event => event.type === 'terminal_mobile_input_trace').map(event => event.phase),
-                  socketState: item?.socket?.readyState ?? -1,
-                  textareaValue: item?.term?.textarea?.value || '',
-                };
-                """,
-                session,
-            )
-            pane_capture = run_isolated_tmux(runtime.tmux, "capture-pane", "-p", "-S", "-100", "-t", f"{session}:")
-            state["tmuxPane"] = pane_capture.stdout
-            raise AssertionError(f"focused real xterm input state after {stage}: {state}") from exc
-        assert sum(line.strip() == stage_marker for line in output.splitlines()) == 1, output
-        return output
+        acknowledgment_path = tmp_path / f"input-{touch_id}.ack"
+        command = f"printf '%s\\n' {shlex.quote(stage_marker)} > {shlex.quote(acknowledgment_path.name)}"
+        browser.execute_cdp_cmd("Input.insertText", {"text": command})
+        dispatch_terminal_enter()
+        return wait_for_terminal_acknowledgment(acknowledgment_path, f"{stage_marker}\n", stage)
 
     def touch_tab(target_session, touch_id):
         point = WebDriverWait(browser, 8).until(
@@ -773,50 +798,49 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
         )
         assert marker in tap_terminal_and_send("after-rotation", 14)
 
-        browser.execute_cdp_cmd("Input.insertText", {"text": "printf 'mobile-native-input-xx"})
+        native_input_acknowledgment = arm_terminal_line_acknowledgment("backspace")
+        browser.execute_cdp_cmd("Input.insertText", {"text": "mobile-native-input-xx"})
         for _ in range(2):
             browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8})
             browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Backspace", "code": "Backspace", "windowsVirtualKeyCode": 8, "nativeVirtualKeyCode": 8})
-        browser.execute_cdp_cmd("Input.insertText", {"text": "ok\\n'"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        output = WebDriverWait(browser, 12).until(
-            lambda driver: (
-                text if (text := driver.execute_script(
-                    """
-                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
-                    const text = buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
-                    return text.split('\\n').some(line => line.trim() === arguments[1]) ? text : '';
-                    """,
-                    session,
-                    "mobile-native-input-ok",
-                )) else False
-            ),
-            message="focused real xterm did not deliver mobile-style text, Backspace, and Return to the PTY",
-        )
-        assert sum(line.strip() == "mobile-native-input-ok" for line in output.splitlines()) == 1 and "mobile-native-input-xxok" not in output, output
+        browser.execute_cdp_cmd("Input.insertText", {"text": "ok"})
+        dispatch_terminal_enter()
+        assert wait_for_terminal_acknowledgment(
+            native_input_acknowledgment,
+            "mobile-native-input-ok\n",
+            "mobile-style text, Backspace, and Return",
+        ) == "mobile-native-input-ok\n"
 
-        browser.execute_cdp_cmd("Input.insertText", {"text": "printf 'mobile-native-ime-"})
+        native_ime_acknowledgment = arm_terminal_line_acknowledgment("ime", "mobile-native-ime-")
+        composition_trace_start = browser.execute_script("return jsDebugEvents.length;")
         browser.execute_cdp_cmd("Input.imeSetComposition", {"text": "漢", "selectionStart": 1, "selectionEnd": 1})
         browser.execute_cdp_cmd("Input.insertText", {"text": "漢"})
-        browser.execute_cdp_cmd("Input.insertText", {"text": "\\n'"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        ime_output = WebDriverWait(browser, 12).until(
-            lambda driver: (
-                text if (text := driver.execute_script(
-                    """
-                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
-                    return buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
-                    """,
-                    session,
-                )).count("mobile-native-ime-漢") == 2 else False
+        committed_composition = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                const events = jsDebugEvents.slice(arguments[0])
+                  .filter(event => event.type === 'terminal_mobile_input_trace');
+                const compositionEnd = events.findIndex(event => event.phase === 'compositionend');
+                if (compositionEnd < 0) return null;
+                const committed = events.slice(compositionEnd + 1)
+                  .find(event => event.phase === 'on-data' && event.bytes === arguments[1]);
+                return committed || null;
+                """,
+                composition_trace_start,
+                len("漢".encode("utf-8")),
             ),
-            message="focused real xterm did not commit one IME composition to the PTY",
+            message="xterm did not emit the committed IME bytes after compositionend",
         )
-        assert ime_output.count("mobile-native-ime-漢") == 2, ime_output
+        assert committed_composition["bytes"] == len("漢".encode("utf-8")), committed_composition
+        dispatch_terminal_enter()
+        assert wait_for_terminal_acknowledgment(
+            native_ime_acknowledgment,
+            "mobile-native-ime-漢\n",
+            "one committed IME composition",
+        ) == "mobile-native-ime-漢\n"
 
         paste_marker = "mobile-native-paste"
+        native_paste_acknowledgment = arm_terminal_line_acknowledgment("paste")
         paste_dispatched = browser.execute_script(
             """
             const textarea = terminals.get(arguments[0])?.term?.textarea;
@@ -825,7 +849,7 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
             return textarea?.dispatchEvent(new ClipboardEvent('paste', {clipboardData: transfer, bubbles: true, cancelable: true})) ?? false;
             """,
             session,
-            f"printf '{paste_marker}\\n'",
+            paste_marker,
         )
         assert isinstance(paste_dispatched, bool)
         WebDriverWait(browser, 5).until(
@@ -834,21 +858,12 @@ def test_real_xterm_mobile_input_survives_pan_preview_pane_accessory_keyboard_an
             ),
             message="clipboard payload did not reach xterm's native paste event",
         )
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13, "text": "\r", "unmodifiedText": "\r"})
-        browser.execute_cdp_cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13})
-        paste_output = WebDriverWait(browser, 12).until(
-            lambda driver: (
-                text if (text := driver.execute_script(
-                    """
-                    const buffer = terminals.get(arguments[0])?.term?.buffer?.active;
-                    return buffer ? Array.from({length: buffer.length}, (_, index) => buffer.getLine(index)?.translateToString(true) || '').join('\\n') : '';
-                    """,
-                    session,
-                )).count(paste_marker) == 2 else False
-            ),
-            message="focused real xterm did not deliver one paste through xterm's native event path",
-        )
-        assert paste_output.count(paste_marker) == 2, paste_output
+        dispatch_terminal_enter()
+        assert wait_for_terminal_acknowledgment(
+            native_paste_acknowledgment,
+            f"{paste_marker}\n",
+            "one paste through xterm's native event path",
+        ) == f"{paste_marker}\n"
         trace_phases = browser.execute_script(
             """
             return jsDebugEvents
