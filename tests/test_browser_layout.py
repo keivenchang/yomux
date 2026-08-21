@@ -1887,18 +1887,20 @@ def test_current_stats_cpu_renders_areas_below_the_emphasized_yolomux_line(brows
             if (!graph || typeof debugGraphApplyServerRecord !== 'function') return {ready: false};
             setDebugGraphChartVisible('cpu', true);
             clearJsDebugGraphData();
-            const entries = [
-              ['python', 40], ['node', 25], ['rustc', 20], ['chromium', 15], ['bash', 10], ['tmux', 5],
-            ];
+            debugRuntimeState.graphRangeSeconds = 300;
+            debugRuntimeState.graphResolutionOverrideSeconds = 1;
             const servingPort = location.port || (location.protocol === 'https:' ? '443' : '80');
-            debugGraphApplyServerRecord({
-              start: Math.floor(Date.now() / 1000) - 1,
-              duration: 1,
-              system_cpu_total_percent: 60,
-              system_cpu_count: 1,
-              servers: {[`port:${servingPort}`]: {label: `port:${servingPort}`, cpu_total_percent: 35, cpu_count: 1}},
-              host_metrics: {cpu_processes: Object.fromEntries(entries.map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}]))},
-            });
+            const startedAt = Math.floor(Date.now() / 1000) - 3;
+            const processSamples = [
+              {python: 40, node: 25, rustc: 20, chromium: 15, bash: 10, tmux: 5},
+              {node: 30, rustc: 25, chromium: 20, go: 10, bash: 5},
+              {python: 35, node: 20, rustc: 15, chromium: 10, bash: 5},
+            ];
+            processSamples.forEach((values, index) => debugGraphApplyServerRecord({
+              start: startedAt + index, duration: 1, system_cpu_total_percent: 60 + index, system_cpu_count: 1,
+              servers: {[`port:${servingPort}`]: {label: `port:${servingPort}`, cpu_total_percent: 35 + index, cpu_count: 1}},
+              host_metrics: {cpu_processes: Object.fromEntries(Object.entries(values).map(([key, value]) => [key, {label: key, total_percent: value, samples: 1}]))},
+            }));
             refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
             const card = graph.querySelector('[data-js-debug-chart="cpu"]');
             const area = card?.querySelector('[data-js-debug-area-series^="cpuBinary:"]');
@@ -1915,38 +1917,36 @@ def test_current_stats_cpu_renders_areas_below_the_emphasized_yolomux_line(brows
             const yolomuxLine = card?.querySelector('[data-js-debug-series^="cpu:port:"]');
             const systemLegend = card?.querySelector('[data-js-debug-legend="systemCpu"] .js-debug-legend-line .js-debug-line');
             const yolomuxLegend = card?.querySelector('[data-js-debug-legend^="cpu:port:"] .js-debug-legend-line .js-debug-line');
-            const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])]
-              .map(node => node.dataset.jsDebugLegend);
-            const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])]
-              .map(node => node.dataset.jsDebugSeries);
+            const legendOrder = [...(card?.querySelectorAll('[data-js-debug-legend]') || [])].map(node => node.dataset.jsDebugLegend);
+            const linePaintOrder = [...(card?.querySelectorAll('.js-debug-line-chart [data-js-debug-series]') || [])].map(node => node.dataset.jsDebugSeries);
+            const areaSeries = [...new Set(areas.map(node => node.dataset.jsDebugAreaSeries))];
+            const areaPoints = node => [...String(node.getAttribute('d') || '').matchAll(/[ML] (-?[0-9]+(?:[.][0-9]+)?),(-?[0-9]+(?:[.][0-9]+)?)/g)].map(match => [Number(match[1]), Number(match[2])]);
+            const areaHasSlope = node => ((points) => points.slice(1).some((point, index) => Math.abs(point[0] - points[index][0]) > 0.01 && Math.abs(point[1] - points[index][1]) > 0.01))(areaPoints(node));
             document.body.className = originalBodyClass;
             return {
-              ready: true,
-              title: card?.querySelector('.js-debug-chart-title')?.textContent.trim(),
-              kind: card?.dataset.jsDebugChartKind,
-              stacked: card?.dataset.jsDebugChartStacked,
-              areas: areas.map(node => node.dataset.jsDebugAreaSeries),
-              colors: areas.map(node => node.style.getPropertyValue('--js-debug-series-color').trim()),
-              lightOpacity,
-              darkOpacity,
-              areaLegendBlocks,
+              ready: true, title: card?.querySelector('.js-debug-chart-title')?.textContent.trim(), kind: card?.dataset.jsDebugChartKind, stacked: card?.dataset.jsDebugChartStacked,
+              areas: areaSeries,
+              colors: areaSeries.map(key => areas.find(node => node.dataset.jsDebugAreaSeries === key)?.style.getPropertyValue('--js-debug-series-color').trim()),
+              areaRunCounts: Object.fromEntries(areaSeries.map(key => [key, areas.filter(node => node.dataset.jsDebugAreaSeries === key).length])),
+              areaShapeModes: areas.map(node => node.dataset.jsDebugAreaShape), areaHasSlope: areas.map(areaHasSlope),
+              areaHasWidth: areas.map(node => ((xs) => Math.max(...xs) - Math.min(...xs) > 0.01)(areaPoints(node).map(point => point[0]))),
+              stackedAreas: areas.every(node => node.dataset.jsDebugAreaStacked), areaStrokeWidths: areas.map(node => getComputedStyle(node).strokeWidth),
+              lightOpacity, darkOpacity, areaLegendBlocks,
               systemLegendWidth: systemLegend ? getComputedStyle(systemLegend).strokeWidth : '',
               yolomuxLegendWidth: yolomuxLegend ? getComputedStyle(yolomuxLegend).strokeWidth : '',
               systemLineWidth: systemLine ? getComputedStyle(systemLine).strokeWidth : '',
               yolomuxLineWidth: yolomuxLine ? getComputedStyle(yolomuxLine).strokeWidth : '',
               yolomuxEmphasized: yolomuxLine?.classList.contains('js-debug-line--current-process') || false,
-              legendOrder,
-              linePaintOrder,
-              systemPattern: systemLine?.dataset.jsDebugLinePattern,
-              yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
+              legendOrder, linePaintOrder, systemPattern: systemLine?.dataset.jsDebugLinePattern, yolomuxPattern: yolomuxLine?.dataset.jsDebugLinePattern,
             };
         """
     )
-    assert result.get("ready") is True, result
-    assert result["title"] == "CPU (8 logical CPUs / 4 physical cores)", result
-    assert result["kind"] == "area" and result["stacked"] == "true", result
+    assert result.get("ready") is True and result["title"] == "CPU (8 logical CPUs / 4 physical cores)" and result["kind"] == "area" and result["stacked"] == "true", result
     assert result["areas"] == ["cpuBinary:python", "cpuBinary:node", "cpuBinary:rustc", "cpuBinary:chromium"], result
     assert len(set(result["colors"])) == 4 and all(result["colors"]), result
+    assert result["areaRunCounts"] == {"cpuBinary:python": 2, "cpuBinary:node": 1, "cpuBinary:rustc": 1, "cpuBinary:chromium": 1}, result
+    assert result["areaShapeModes"] == ["linear"] * 5 and result["stackedAreas"] is True, result
+    assert sum(result["areaHasSlope"]) >= 3 and all(result["areaHasWidth"]) and result["areaStrokeWidths"] == ["1.1px"] * 5, result
     assert result["lightOpacity"] == result["darkOpacity"] == "0.52", result
     assert result["areaLegendBlocks"] == [{"width": "18px", "height": "6px"}] * 4, result
     assert result["systemLegendWidth"] == "1.5px", result
@@ -2364,8 +2364,41 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             };
           };
           class FixtureEventSource {
-            addEventListener() {}
-            close() {}
+            constructor(input) {
+              this.url = String(input);
+              this.listeners = new Map();
+              this.closed = false;
+              queueMicrotask(() => {
+                if (this.closed) return;
+                const url = new URL(this.url, location.href);
+                const resolution = Number(url.searchParams.get('resolution'));
+                requests.push(resolution);
+                if (resolution === 300 && ++targetAttempts <= 4) {
+                  this.emit('pending', {status: 'pending', retry_after_seconds: 1});
+                  return;
+                }
+                const accepted = snapshot(resolution, resolution === 60 ? 1 : 2);
+                this.emit('ack', {
+                  cache_generation: accepted.cache_generation,
+                  chunk_count: 1,
+                  not_modified: false,
+                  range_seconds: accepted.range_seconds,
+                  requested_resolution: accepted.requested_resolution,
+                  resolution_seconds: accepted.resolution_seconds,
+                });
+                this.emit('snapshot', accepted);
+                this.emit('ready', {cache_generation: accepted.cache_generation, revision: 0});
+              });
+            }
+            addEventListener(name, callback) {
+              const listeners = this.listeners.get(name) || [];
+              listeners.push(callback);
+              this.listeners.set(name, listeners);
+            }
+            emit(name, payload) {
+              for (const callback of this.listeners.get(name) || []) callback({data: JSON.stringify(payload)});
+            }
+            close() { this.closed = true; }
           }
           const cpuDurations = () => [...new Set(
             [...jsDebugGraphBuckets.values()]

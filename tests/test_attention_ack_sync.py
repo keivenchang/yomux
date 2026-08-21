@@ -10,6 +10,7 @@ import pytest
 from yolomux_lib import app as app_module
 from yolomux_lib import common
 from yolomux_lib import statusd_protocol
+from yolomux_lib.app import ATTENTION_ACK_KEY_MAX_LENGTH
 from yolomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 
 
@@ -539,3 +540,117 @@ def test_attention_ack_timestamp_only_reack_does_not_report_changed(monkeypatch,
 
     with app.attention_ack_lock:
         assert app.attention_ack_keys[key] == now + 10
+
+
+def test_attention_ack_key_unchanged_for_an_ordinary_short_signature(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+
+    key = app.attention_ack_key("prompt", "1", "short question?")
+
+    assert len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH
+    _prefix, _host, value = key.split(":", 2)
+    assert json.loads(value) == ["prompt", "1", "short question?"]
+
+
+def test_attention_ack_key_bounds_a_long_ascii_signature_and_the_server_accepts_it(monkeypatch, tmp_path, make_app):
+    # Forces the original bug red: before the fix, `attention_ack_key` returned this oversized
+    # key unchanged, and `acknowledge_attention` silently dropped it -- 400 with no keys acked.
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    long_signature = "Do you want to proceed with this action? " * 30  # forces the key over 512 bytes
+
+    key = app.attention_ack_key("prompt", "1", long_signature)
+
+    assert len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH
+    result, status = app.acknowledge_attention({"keys": [key]})
+    assert status == HTTPStatus.OK
+    assert result["ok"] is True
+    assert result["acknowledged"] == [key]
+
+
+def test_attention_ack_key_bounds_a_long_signature_on_the_agent_window_path_and_preserves_routing(monkeypatch, tmp_path, make_app):
+    # The prompt path above is not the only producer: the agent-window status path (the actual
+    # `attention_ack_key("agent-window", session, window_index, pane, kind, state, signature, ...)`
+    # call site) builds keys with a longer, differently-shaped `parts` tuple and is what actually
+    # fires for a long pending approval/needs-input prompt in a real tmux pane -- the exact case
+    # that produced the original 400 loop. Also proves the routing parts a caller parses back out
+    # of the key (kind/session/window/pane/agent-kind/state) survive unchanged; only the trailing
+    # free-text signature is digested.
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    long_signature = "Approve running `rm -rf` on the following paths, listed one per line below: " * 20
+
+    key = app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", long_signature)
+
+    assert len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH
+    _prefix, _host, value = key.split(":", 2)
+    parts = json.loads(value)
+    assert parts[:6] == ["agent-window", "1", "0", "%1", "claude", "approval"]
+    assert parts[6] != long_signature  # the oversized trailing part was digested, not preserved verbatim
+    assert app.attention_ack_key("agent-window", "1", "0", "%1", "claude", "approval", long_signature) == key, (
+        "the digest is deterministic: the identical long signature always collapses to the identical key"
+    )
+    result, status = app.acknowledge_attention({"keys": [key]})
+    assert status == HTTPStatus.OK
+    assert result["acknowledged"] == [key]
+
+
+def test_attention_ack_key_bounds_a_long_multibyte_signature_by_utf8_bytes(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    # CJK text: each character is 3 UTF-8 bytes but 1 Python `len()` character, so a character-length
+    # check (the original bug) would pass this through unbounded in bytes.
+    long_signature = "你好请确认是否继续执行这个操作" * 20
+
+    key = app.attention_ack_key("prompt", "1", long_signature)
+
+    assert len(key.encode("utf-8")) <= ATTENTION_ACK_KEY_MAX_LENGTH
+    result, status = app.acknowledge_attention({"keys": [key]})
+    assert status == HTTPStatus.OK
+    assert result["acknowledged"] == [key]
+
+
+def test_attention_ack_key_does_not_collide_for_two_long_signatures_sharing_a_prefix(monkeypatch, tmp_path, make_app):
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    shared_prefix = "Do you want to proceed with this destructive action on the resource? " * 10
+
+    key_one = app.attention_ack_key("prompt", "1", shared_prefix + "yes, delete the database")
+    key_two = app.attention_ack_key("prompt", "1", shared_prefix + "yes, delete the backup instead")
+
+    assert key_one != key_two
+    result, status = app.acknowledge_attention({"keys": [key_one, key_two]})
+    assert status == HTTPStatus.OK
+    assert sorted(result["acknowledged"]) == sorted([key_one, key_two])
+
+
+def test_attention_ack_key_is_stable_across_processes_on_the_same_host(monkeypatch, tmp_path, make_app):
+    # Two `make_app()` instances model two ports/processes on one host (same stable_host_id).
+    patch_shared_path(monkeypatch, tmp_path)
+    first = make_app()
+    second = make_app()
+    long_signature = "Approve this multi-step plan before continuing? " * 30
+
+    first_key = first.attention_ack_key("prompt", "1", long_signature)
+    second_key = second.attention_ack_key("prompt", "1", long_signature)
+
+    assert first_key == second_key
+
+
+def test_acknowledge_attention_rejects_by_utf8_bytes_not_python_character_length(monkeypatch, tmp_path, make_app):
+    # A pure-ASCII key of exactly the byte/char limit must be accepted; one byte over must be
+    # rejected -- proving the boundary is enforced in UTF-8 bytes, matching what
+    # `attention_ack_key` itself bounds against.
+    patch_shared_path(monkeypatch, tmp_path)
+    app = make_app()
+    at_limit = "a" * ATTENTION_ACK_KEY_MAX_LENGTH
+    over_limit = "a" * (ATTENTION_ACK_KEY_MAX_LENGTH + 1)
+
+    ok_result, ok_status = app.acknowledge_attention({"keys": [at_limit]})
+    assert ok_status == HTTPStatus.OK
+    assert ok_result["acknowledged"] == [at_limit]
+
+    bad_result, bad_status = app.acknowledge_attention({"keys": [over_limit]})
+    assert bad_status == HTTPStatus.BAD_REQUEST
+    assert "acknowledged" not in bad_result

@@ -123,18 +123,31 @@ def test_stats_authentication_expiry_paints_signed_out_and_stops_real_browser_po
     browser.execute_async_script(
         r"""
         const done = arguments[arguments.length - 1];
-        const nativeFetch = globalThis.fetch.bind(globalThis);
-        const fixture = {snapshotRequests: 0, startedAt: Date.now()};
-        globalThis.fetch = (input, ...rest) => {
-          const url = new URL(typeof input === 'string' ? input : input?.url || '', location.href);
-          if (url.pathname === '/api/stats-snapshot') {
-            fixture.snapshotRequests += 1;
-            return Promise.resolve(new Response(JSON.stringify({code: 'authentication_required'}), {
-              status: 401,
-              headers: {'Content-Type': 'application/json'},
-            }));
+        const nativeEventSource = globalThis.EventSource;
+        const fixture = {streamRequests: 0, startedAt: Date.now(), nativeEventSource};
+        globalThis.EventSource = class AuthenticationFixtureEventSource {
+          constructor() {
+            this.listeners = new Map();
+            this.closed = false;
+            fixture.streamRequests += 1;
+            queueMicrotask(() => {
+              if (!this.closed) this.emit('unavailable', {
+                code: 'authentication_required',
+                reason: 'authentication_required',
+                status_code: 401,
+                terminal: true,
+              });
+            });
           }
-          return nativeFetch(input, ...rest);
+          addEventListener(name, callback) {
+            const listeners = this.listeners.get(name) || [];
+            listeners.push(callback);
+            this.listeners.set(name, listeners);
+          }
+          emit(name, payload) {
+            for (const callback of this.listeners.get(name) || []) callback({data: JSON.stringify(payload)});
+          }
+          close() { this.closed = true; }
         };
         jsDebugCurrentStatsClientState.client?.stop?.();
         jsDebugCurrentStatsClientState.client = null;
@@ -153,7 +166,7 @@ def test_stats_authentication_expiry_paints_signed_out_and_stops_real_browser_po
             if (!fixture || Date.now() - fixture.startedAt < 1200) return false;
             const status = document.querySelector('#status');
             return {
-              snapshotRequests: fixture.snapshotRequests,
+              streamRequests: fixture.streamRequests,
               applicationClient: jsDebugCurrentStatsClientState.client === fixture.client,
               authenticationState: document.body?.dataset?.authenticationState || '',
               statusText: status?.textContent || '',
@@ -162,40 +175,17 @@ def test_stats_authentication_expiry_paints_signed_out_and_stops_real_browser_po
             """
         )
     )
-    browser.execute_script("globalThis.__statsAuthenticationFixture.client.stop();")
+    browser.execute_script(
+        "globalThis.__statsAuthenticationFixture.client.stop(); "
+        "globalThis.EventSource = globalThis.__statsAuthenticationFixture.nativeEventSource;"
+    )
 
-    assert result["snapshotRequests"] == 1, result
+    assert result["streamRequests"] == 1, result
     assert result["applicationClient"] is True, result
     assert result["authenticationState"] == "signed-out", result
     assert result["statusText"] == "Authentication required.", result
     assert result["statusRole"] == "alert", result
-    retired = browser.execute_script(
-        """
-        const failures = jsDebugFailureEvents();
-        if (failures.length !== 1) return {failures, barrier: jsDebugCurrentObservationReceiptBarrier()};
-        const failure = failures[0];
-        const retiredKeys = new Set(
-          [...jsDebugCurrentObservationState.receipts.values()]
-            .filter(receipt => receipt.eventId === failure.id)
-            .map(receipt => receipt.key),
-        );
-        for (let index = jsDebugEvents.length - 1; index >= 0; index -= 1) {
-          if (jsDebugEvents[index]?.id === failure.id) jsDebugEvents.splice(index, 1);
-        }
-        jsDebugCurrentObservationState.queue = jsDebugCurrentObservationState.queue.filter(entry => {
-          if (!retiredKeys.has(entry.key)) return true;
-          jsDebugCurrentObservationState.keys.delete(entry.key);
-          return false;
-        });
-        for (const key of retiredKeys) jsDebugCurrentObservationState.receipts.delete(key);
-        persistJsDebugCurrentObservationReceipts();
-        return {failure: {...failure}, barrier: jsDebugCurrentObservationReceiptBarrier()};
-        """
-    )
-    assert retired["failure"]["type"] == "api", retired
-    assert retired["failure"]["endpoint"] == "/api/stats-snapshot", retired
-    assert retired["failure"]["status"] == 401, retired
-    assert retired["barrier"]["quiescent"] is True, retired
+    assert browser.execute_script("return jsDebugFailureEvents();") == []
 
 
 def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, tmp_path):
@@ -214,8 +204,8 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           const matrix = [
             [300, 1, [1, 10]],
             [900, 10, [10, 60]],
-            [3600, 60, [60, 300]],
-            [14400, 60, [60, 300]],
+            [3600, 300, [60, 300]],
+            [14400, 300, [60, 300]],
             [86400, 300, [300]],
           ];
           const capabilities = {
@@ -293,31 +283,71 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
             if (url.pathname === '/api/stats-capabilities') {
               return {status: 200, json: async () => structuredClone(capabilities)};
             }
-            if (url.pathname !== '/api/stats-snapshot') {
-              return {status: 404, json: async () => ({})};
-            }
-            const rangeSeconds = Number(url.searchParams.get('range_seconds'));
-            const requestedText = url.searchParams.get('resolution');
-            const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
-            const capability = capabilities.ranges.find(row => row.range_seconds === rangeSeconds);
-            const resolutionSeconds = requestedResolution === 'AUTO'
-              ? capability.auto_resolution_seconds
-              : requestedResolution;
-            const accepted = snapshot(rangeSeconds, requestedResolution, resolutionSeconds);
-            requests.push({
-              rangeSeconds,
-              requestedResolution,
-              resolutionSeconds,
-              sinceGeneration: Number(url.searchParams.get('since_generation')),
-              bucketCount: accepted.buckets.length,
-              windowStart: accepted.window_start,
-              windowEnd: accepted.window_end,
-            });
-            return {status: 200, json: async () => structuredClone(accepted)};
+            return {status: 404, json: async () => ({})};
           };
           class FixtureEventSource {
-            addEventListener() {}
-            close() {}
+            constructor(input) {
+              this.url = String(input);
+              this.listeners = new Map();
+              this.closed = false;
+              queueMicrotask(() => {
+                if (this.closed) return;
+                const url = new URL(this.url, location.href);
+                const rangeSeconds = Number(url.searchParams.get('range_seconds'));
+                const requestedText = url.searchParams.get('resolution');
+                const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
+                const capability = capabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+                const resolutionSeconds = requestedResolution === 'AUTO'
+                  ? capability.auto_resolution_seconds
+                  : requestedResolution;
+                const accepted = snapshot(rangeSeconds, requestedResolution, resolutionSeconds);
+                const retainedKeys = [...jsDebugGraphBuckets.keys()];
+                const scrollOwner = document.querySelector('.js-debug-graph-view');
+                const retainedScrollLeft = Number(scrollOwner?.scrollLeft) || 0;
+                const requestEvidence = {
+                  rangeSeconds,
+                  requestedResolution,
+                  resolutionSeconds,
+                  sinceGeneration: Number(url.searchParams.get('since_generation')),
+                  bucketCount: accepted.buckets.length,
+                  windowStart: accepted.window_start,
+                  windowEnd: accepted.window_end,
+                };
+                requests.push(requestEvidence);
+                const splitIndex = Math.floor(accepted.buckets.length / 2);
+                const chunks = [accepted.buckets.slice(0, splitIndex), accepted.buckets.slice(splitIndex)].map((buckets, chunkIndex) => ({
+                  ...accepted,
+                  chunk_index: chunkIndex,
+                  chunk_count: 2,
+                  chunk_start: buckets[0].start,
+                  chunk_end: buckets.at(-1).start + buckets.at(-1).duration,
+                  buckets,
+                }));
+                this.emit('ack', {
+                  cache_generation: accepted.cache_generation,
+                  chunk_count: 2,
+                  not_modified: false,
+                  range_seconds: rangeSeconds,
+                  requested_resolution: requestedResolution,
+                  resolution_seconds: resolutionSeconds,
+                });
+                this.emit('snapshot', chunks[0]);
+                requestEvidence.retainedAfterFirstChunk = JSON.stringify([...jsDebugGraphBuckets.keys()]) === JSON.stringify(retainedKeys);
+                requestEvidence.scrollAfterFirstChunk = Number(scrollOwner?.scrollLeft) || 0;
+                requestEvidence.retainedScrollLeft = retainedScrollLeft;
+                this.emit('snapshot', chunks[1]);
+                this.emit('ready', {cache_generation: accepted.cache_generation, revision: 0});
+              });
+            }
+            addEventListener(name, callback) {
+              const listeners = this.listeners.get(name) || [];
+              listeners.push(callback);
+              this.listeners.set(name, listeners);
+            }
+            emit(name, payload) {
+              for (const callback of this.listeners.get(name) || []) callback({data: JSON.stringify(payload)});
+            }
+            close() { this.closed = true; }
           }
           const waitForGeneration = async (rangeSeconds, resolutionSeconds) => {
             await window.__yolomuxTestWaitFor(
@@ -340,6 +370,8 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           const widen = async (fromRange, fromResolution, toRange, toResolution) => {
             await warm(fromRange, fromResolution);
             const before = requests.length;
+            const scrollOwner = document.querySelector('.js-debug-graph-view');
+            if (scrollOwner) scrollOwner.scrollLeft = Math.max(0, scrollOwner.scrollWidth - scrollOwner.clientWidth) / 2;
             setDebugGraphRange(toRange);
             const loadingState = jsDebugHistoryReadinessStateName();
             await waitForGeneration(toRange, toResolution);
@@ -388,8 +420,8 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
           await waitForGeneration(900, 10);
 
           const transitions = [];
-          transitions.push(await widen(900, 10, 14400, 60));
-          transitions.push(await widen(300, 1, 3600, 60));
+          transitions.push(await widen(900, 10, 14400, 300));
+          transitions.push(await widen(300, 1, 3600, 300));
           transitions.push(await widen(3600, 60, 86400, 300));
           await warm(900, 10);
           await warm(300, 1);
@@ -423,6 +455,8 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
         assert request["sinceGeneration"] == 0, transition
         assert request["resolutionSeconds"] == transition["toResolution"], transition
         assert request["bucketCount"] == expected_buckets, transition
+        assert request["retainedAfterFirstChunk"] is True, transition
+        assert request["scrollAfterFirstChunk"] == request["retainedScrollLeft"], transition
         assert transition["paintedBucketCount"] == expected_buckets, transition
         assert transition["paintedStart"] == request["windowStart"], transition
         assert transition["paintedEnd"] == request["windowEnd"], transition
@@ -811,7 +845,7 @@ def test_hidden_stats_panel_receives_push_then_opens_from_cached_generation(
     )
     assert hidden["rangeSeconds"] == 300 and hidden["resolutionSeconds"] == 1, hidden
     assert hidden["requestCounts"]["/api/stats-capabilities"] == 1, hidden
-    assert hidden["requestCounts"]["/api/stats-snapshot"] >= 1, hidden
+    assert hidden["requestCounts"]["/api/stats-snapshot"] == 0, hidden
     assert hidden["requestCounts"]["/api/stats-retry"] == 0, hidden
     assert hidden["requestCounts"]["/api/stats-stream"] == 1, hidden
     observed_at = int(time.time())
@@ -1057,20 +1091,20 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
         "/api/stats-capabilities", "/api/stats-snapshot", "/api/stats-retry", "/api/stats-stream",
     }, healthy_counts
     assert healthy_counts["/api/stats-capabilities"] >= 2, healthy_counts
-    assert healthy_counts["/api/stats-snapshot"] >= 1, healthy_counts
+    assert healthy_counts["/api/stats-snapshot"] == 0, healthy_counts
     assert healthy_counts["/api/stats-retry"] == 0, healthy_counts
     assert healthy_counts["/api/stats-stream"] >= 1, healthy_counts
     stream_base = authenticated_e2e_browser.driver.execute_script(
         """
         const client = jsDebugCurrentStatsClientState?.client;
-        client?.stop?.();
         const controller = client?.controller?.();
-        controller?.setVisible?.(true);
         const generation = controller?.generation?.();
         const presentation = controller?.presentation?.();
+        const evidence = client?.streamEvidence?.();
         return generation && presentation ? {
           generation: structuredClone(generation),
           revision: presentation.delta_revision,
+          streamEpoch: evidence?.streamEpoch,
         } : null;
         """
     )
@@ -1120,53 +1154,28 @@ def test_stats_stream_failure_is_durable_latched_and_recovers_only_after_a_real_
         )
 
     monkeypatch.setattr(runtime.app.stats_current_http, "delta_stream", accepted_delta_stream)
-    accepted_push = authenticated_e2e_browser.driver.execute_async_script(
-        """
-            const done = arguments[arguments.length - 1];
+    accepted_push = WebDriverWait(authenticated_e2e_browser.driver, 8, poll_frequency=0.05).until(
+        lambda driver: driver.execute_script(
+            """
             const client = jsDebugCurrentStatsClientState?.client;
             const controller = client?.controller?.();
-            const query = new URLSearchParams({
-              range_seconds: String(arguments[0]),
-              resolution_seconds: String(arguments[1]),
-              client_id: 'browser-durability-push',
-              after_cache_generation: String(arguments[2]),
-              after_revision: String(arguments[3]),
-            });
-            const source = new EventSource(`/api/stats-stream?${query}`, {withCredentials: true});
-            let settled = false;
-            const finish = value => {
-              if (settled) return;
-              settled = true;
-              clearTimeout(watchdog);
-              source.close();
-              done(value);
+            const generation = controller?.generation?.();
+            const evidence = client?.streamEvidence?.();
+            if (generation?.source_generation !== arguments[0] || evidence?.acceptedDeltaSequence < 1) return false;
+            return {
+              accepted: true,
+              sourceGeneration: generation.source_generation,
+              failureLatched: jsDebugCurrentStatsClientState.failureLatched,
+              streamEpoch: evidence.streamEpoch,
             };
-            const watchdog = setTimeout(() => finish({accepted: false, reason: 'streamed delta timeout'}), 5000);
-            source.addEventListener('delta', event => {
-              let accepted = false;
-              let reason = '';
-              try {
-                accepted = controller.acceptDelta(JSON.parse(event.data));
-              } catch (error) {
-                reason = String(error?.message || error);
-              }
-              finish({
-                accepted,
-                reason,
-                sourceGeneration: controller.generation()?.source_generation,
-                failureLatched: jsDebugCurrentStatsClientState.failureLatched,
-              });
-            });
-            source.addEventListener('error', () => finish({accepted: false, reason: 'streamed delta error'}));
-        """,
-        generation["range_seconds"],
-        generation["resolution_seconds"],
-        generation["cache_generation"],
-        stream_base["revision"],
+            """,
+            streamed_source_generation,
+        )
     )
     assert accepted_push["accepted"] is True, accepted_push
     assert accepted_push["sourceGeneration"] == streamed_source_generation, accepted_push
     assert accepted_push["failureLatched"] is False, accepted_push
+    assert accepted_push["streamEpoch"] == stream_base["streamEpoch"], accepted_push
     accepted_failures = authenticated_e2e_browser.driver.execute_script(
         """
             const generation = jsDebugCurrentStatsClientState?.client?.controller?.()?.generation?.();
@@ -1404,7 +1413,7 @@ def test_real_stats_interval_options_return_after_range_round_trip_and_reload(au
     assert "1" not in round_trip["widened"]["options"], round_trip
     assert round_trip["widened"]["selected"] == "0", round_trip
     assert round_trip["widened"]["generation"]["requested_resolution"] == "AUTO", round_trip
-    assert round_trip["widened"]["generation"]["resolution_seconds"] == 60, round_trip
+    assert round_trip["widened"]["generation"]["resolution_seconds"] == 300, round_trip
     assert round_trip["returned"]["options"] == round_trip["before"]["options"], round_trip
     assert round_trip["returned"]["selected"] == "0", round_trip
     assert round_trip["returned"]["generation"]["requested_resolution"] == "AUTO", round_trip

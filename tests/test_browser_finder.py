@@ -1426,6 +1426,25 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             expected: firstTreeRows[firstTreeRows.length - 1].dataset.path,
             tabStops: firstTreeRows.filter(row => row.tabIndex === 0).map(row => row.dataset.path),
           };
+          // Regression: collapsing then re-expanding a directory row inside a git-diff commit's file
+          // tree must keep aria-expanded (and the child rows) in sync with the diff viewer's own
+          // per-tab collapsedSet, not some unrelated global collapse tracker.
+          const dirSelector = '.file-tree-row[data-path="' + nested + '"][data-kind="dir"]';
+          const childSelector = '.file-tree-row[data-git-diff-commit-path="' + historicalPath + '"]';
+          const dirRowBefore = firstFileTree.querySelector(dirSelector);
+          if (!dirRowBefore) throw new Error('diff file-tree dir row missing: ' + nested);
+          const dirToggle = {
+            expandedBefore: dirRowBefore.getAttribute('aria-expanded'),
+            childPresentBefore: firstFileTree.querySelector(childSelector) != null,
+          };
+          dirRowBefore.click();
+          await waitFor(() => firstFileTree.querySelector(dirSelector)?.getAttribute('aria-expanded') === 'false');
+          dirToggle.expandedAfterCollapse = firstFileTree.querySelector(dirSelector)?.getAttribute('aria-expanded') || '';
+          dirToggle.childPresentAfterCollapse = firstFileTree.querySelector(childSelector) != null;
+          firstFileTree.querySelector(dirSelector).click();
+          await waitFor(() => firstFileTree.querySelector(childSelector) != null);
+          dirToggle.expandedAfterReexpand = firstFileTree.querySelector(dirSelector)?.getAttribute('aria-expanded') || '';
+          dirToggle.childPresentAfterReexpand = firstFileTree.querySelector(childSelector) != null;
           const changedRows = Object.fromEntries(Array.from(firstDetail.querySelectorAll('.file-tree-row[data-git-diff-commit-path]')).map(row => [
               row.dataset.gitDiffCommitPath,
               {
@@ -1626,6 +1645,7 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
             commitRoving,
             focusAfterAsync,
             fileRoving,
+            dirToggle,
             expanded: Array.from(rootPanel.querySelectorAll('.git-diff-commit-row')).map(row => row.getAttribute('aria-expanded')),
             messages: [firstDetail, secondDetail].map(detail => detail.querySelector('.git-diff-commit-message')?.textContent || ''),
             refs: firstDetail.querySelector('.git-diff-commit-refs')?.textContent || '',
@@ -1704,6 +1724,14 @@ def test_finder_diff_repo_history_opens_ref_pinned_current_editor(browser, tmp_p
     assert metrics["focusAfterAsync"] == sha_b, metrics
     assert metrics["fileRoving"]["focused"] == metrics["fileRoving"]["expected"], metrics
     assert metrics["fileRoving"]["tabStops"] == [metrics["fileRoving"]["expected"]], metrics
+    assert metrics["dirToggle"] == {
+        "expandedBefore": "true",
+        "childPresentBefore": True,
+        "expandedAfterCollapse": "false",
+        "childPresentAfterCollapse": False,
+        "expandedAfterReexpand": "true",
+        "childPresentAfterReexpand": True,
+    }, metrics["dirToggle"]
     assert metrics["expanded"] == ["true", "true"], metrics
     assert metrics["messages"] == ["Merge exact history\n\nBody text", "Older ordinary change\n\nSecond body"], metrics
     assert "FROM bbbbbbbbb" in metrics["refs"] and "TO aaaaaaaaa" in metrics["refs"] and "first parent" in metrics["refs"], metrics

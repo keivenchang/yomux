@@ -15,11 +15,22 @@ const lifecycleScopeSource = coreSource.slice(
 ).replace('function createLifecycleScope(', 'const createLifecycleScope = function (') + ';';
 
 function loadNamespace() {
-  const context = vm.createContext({console});
+  const context = vm.createContext({console, AbortController});
   vm.runInContext(lifecycleScopeSource, context, {filename: '10_core_utils.js:createLifecycleScope'});
   vm.runInContext(transportLifecycleSource, context, {filename: '09_transport_lifecycle.js'});
   vm.runInContext(source, context, {filename: '84_stats_current.js'});
-  return context.YOLOmuxStatsCurrent;
+  const namespace = context.YOLOmuxStatsCurrent;
+  return {
+    ...namespace,
+    createBrowserClient(options = {}) {
+      if (options.EventSource && Object.hasOwn(options, 'fetch')) options.EventSource.fetchImpl = options.fetch;
+      return namespace.createBrowserClient(options);
+    },
+    mount(element, options = {}) {
+      if (options.EventSource && Object.hasOwn(options, 'fetch')) options.EventSource.fetchImpl = options.fetch;
+      return namespace.mount(element, options);
+    },
+  };
 }
 
 function loadController(options) { return loadNamespace().createController(options); }
@@ -28,11 +39,11 @@ function capabilities() {
   const matrix = [
     [300, 1, [1, 10]],
     [900, 10, [10, 60]],
-    [1800, 10, [10, 60]],
-    [3600, 60, [60, 300]],
-    [7200, 60, [60, 300]],
-    [14400, 60, [60, 300]],
-    [28800, 60, [60, 300]],
+    [1800, 60, [10, 60]],
+    [3600, 300, [60, 300]],
+    [7200, 300, [60, 300]],
+    [14400, 300, [60, 300]],
+    [28800, 300, [60, 300]],
     [57600, 300, [300]],
     [86400, 300, [300]],
   ];
@@ -130,6 +141,27 @@ function snapshot({range = 300, requested = 'AUTO', resolution = 1, cache = 1, s
   };
 }
 
+function snapshotChunk(full, chunkIndex, chunkCount) {
+  const firstBucket = Math.floor(chunkIndex * full.buckets.length / chunkCount);
+  const finalBucket = Math.floor((chunkIndex + 1) * full.buckets.length / chunkCount);
+  const selectedBuckets = full.buckets.slice(firstBucket, finalBucket);
+  const chunkStart = selectedBuckets[0].start;
+  const chunkEnd = selectedBuckets.at(-1).start + full.resolution_seconds;
+  return {
+    ...full,
+    chunk_index: chunkIndex,
+    chunk_count: chunkCount,
+    chunk_start: chunkStart,
+    chunk_end: chunkEnd,
+    buckets: selectedBuckets,
+    no_data: full.no_data.flatMap(span => (
+      span.end > chunkStart && span.start < chunkEnd
+        ? [{...span, start: Math.max(span.start, chunkStart), end: Math.min(span.end, chunkEnd)}]
+        : []
+    )),
+  };
+}
+
 function delta({
   range = 300,
   resolution = 1,
@@ -195,13 +227,18 @@ class FakeClock {
 
 class FakeEventSource {
   static instances = [];
+  static fetchImpl = null;
+  static autoRespond = true;
 
   constructor(url, options) {
     this.url = url;
     this.options = options;
     this.listeners = new Map();
     this.closeCount = 0;
-    FakeEventSource.instances.push(this);
+    this.constructor.instances.push(this);
+    if (this.constructor.autoRespond !== false && typeof this.constructor.fetchImpl === 'function') {
+      queueMicrotask(() => this.respondFromLegacySnapshotMock());
+    }
   }
 
   addEventListener(name, callback) {
@@ -222,6 +259,72 @@ class FakeEventSource {
   emit(name, data = '') {
     for (const callback of this.listeners.get(name) || []) callback({data});
   }
+
+  async respondFromLegacySnapshotMock() {
+    if (this.closeCount || !this.url.startsWith('/api/stats-stream')) return;
+    const parsed = new URL(this.url, 'http://stats.test');
+    parsed.pathname = '/api/stats-snapshot';
+    let result;
+    try {
+      result = await this.constructor.fetchImpl(`${parsed.pathname}${parsed.search}`, {background: true});
+    } catch (_error) {
+      this.emit('error');
+      return;
+    }
+    if (this.closeCount) return;
+    const payload = await result.json();
+    if (result.status === 200) {
+      const value = payload?.state === 'ready' && payload?.data ? payload.data : payload;
+      this.emit('ack', JSON.stringify({
+        cache_generation: value.cache_generation,
+        chunk_count: value.chunk_count || 1,
+        not_modified: false,
+        range_seconds: value.range_seconds,
+        requested_resolution: value.requested_resolution,
+        resolution_seconds: value.resolution_seconds,
+      }));
+      this.emit('snapshot', JSON.stringify(value));
+      this.emit('ready', JSON.stringify({cache_generation: value.cache_generation, revision: 0}));
+      return;
+    }
+    if (result.status === 304) {
+      const cacheGeneration = Number(parsed.searchParams.get('since_generation')) || 0;
+      const resolution = parsed.searchParams.get('resolution');
+      this.emit('ack', JSON.stringify({
+        cache_generation: cacheGeneration,
+        chunk_count: 1,
+        not_modified: true,
+        range_seconds: Number(parsed.searchParams.get('range_seconds')),
+        requested_resolution: resolution === 'AUTO' ? 'AUTO' : Number(resolution),
+        resolution_seconds: 1,
+      }));
+      this.emit('ready', JSON.stringify({cache_generation: cacheGeneration, revision: 0}));
+      return;
+    }
+    if (result.status === 202) this.emit('pending', JSON.stringify(payload));
+    else if (result.status === 426) this.emit('upgrade_required', JSON.stringify(payload));
+    else this.emit('unavailable', JSON.stringify(payload || {reason: `HTTP ${result.status}`}));
+  }
+}
+
+class ManualEventSource extends FakeEventSource {
+  static instances = [];
+  static autoRespond = false;
+}
+
+function emitSnapshotSequence(stream, fullOrChunks) {
+  const chunks = Array.isArray(fullOrChunks) ? fullOrChunks : [fullOrChunks];
+  const first = chunks[0];
+  stream.emit('ack', JSON.stringify({
+    cache_generation: first.cache_generation,
+    chunk_count: chunks.length,
+    not_modified: false,
+    range_seconds: first.range_seconds,
+    requested_resolution: first.requested_resolution,
+    resolution_seconds: first.resolution_seconds,
+  }));
+  for (const chunk of chunks) stream.emit('snapshot', JSON.stringify(chunk));
+  stream.emit('ready', JSON.stringify({cache_generation: first.cache_generation, revision: 0}));
 }
 
 class FakePageLifecycle {
@@ -324,21 +427,22 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
     bucket.series[name] = seriesValue(value, start);
     bucket.source = {first_timestamp: start, last_timestamp: start, count: 1};
   };
+  const secondStart = resolution === 1 ? 10 : resolution;
   put(0, 'cpu_percent:host', 10);
   put(resolution, 'cpu_percent:host', 20);
   put(0, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 100);
-  put(10, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 900);
+  put(secondStart, 'agent_tokens_per_minute:122_frontend-crates|0|%17|codex', 900);
   put(0, 'agent_tokens_per_minute:122_frontend-crates|1|%18|claude', 50);
-  put(10, 'agent_tokens_per_minute:122_frontend-crates|1|%18|claude', 100);
+  put(secondStart, 'agent_tokens_per_minute:122_frontend-crates|1|%18|claude', 100);
   put(0, 'model_tokens_per_minute:output:gpt', 80);
-  put(10, 'model_tokens_per_minute:output:gpt', 800);
+  put(secondStart, 'model_tokens_per_minute:output:gpt', 800);
   put(0, 'model_tokens_per_minute:input:gpt', 5000);
   put(0, 'cost_micro_usd', 250000);
-  put(10, 'cost_micro_usd', 50000);
+  put(secondStart, 'cost_micro_usd', 50000);
   put(0, 'api_list_cost_micro_usd', 500000);
-  put(10, 'api_list_cost_micro_usd', 100000);
+  put(secondStart, 'api_list_cost_micro_usd', 100000);
   put(0, 'usage_tokens', 1000);
-  put(10, 'usage_tokens', 200);
+  put(secondStart, 'usage_tokens', 200);
   const modelKey = '0123456789abcdef01234567';
   const agentKey = '89abcdef0123456789abcdef';
   const evidenceKey = 'fedcba9876543210fedcba98';
@@ -423,10 +527,7 @@ function chartMarkup(html, chartId) {
 }
 
 async function flushPromises() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let index = 0; index < 20; index += 1) await Promise.resolve();
 }
 
 const tests = [];
@@ -1391,16 +1492,18 @@ test('a refused range keeps the live stream open instead of manufacturing a stal
   const result = client.select(1234, 'AUTO');
   assert.equal(result.range_seconds, 300, 'the refused range leaves the served selection alone');
   assert.equal(failures.length, 1, 'the refusal itself is the only record');
+  await clock.advance(500);
   assert.equal(FakeEventSource.instances.length, 2, 'the stream closed for the refused switch is reopened');
-  assert.equal(FakeEventSource.instances[1].url, FakeEventSource.instances[0].url);
+  assert.equal(FakeEventSource.instances[1].url, FakeEventSource.instances[0].url.replace('since_generation=0', 'since_generation=1'));
   const reopened = FakeEventSource.instances[1];
+  const deliveredBeforeHeartbeats = client.streamEvidence().deliverySequence;
   for (let beat = 0; beat < 5; beat += 1) {
     await clock.advance(1000);
     reopened.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
   }
   // The failure owner latches after the refusal, so delivery evidence — not the
   // failure count — is what proves the old view kept receiving server frames.
-  assert.equal(client.streamEvidence().deliverySequence, 5, 'the reopened stream keeps delivering');
+  assert.equal(client.streamEvidence().deliverySequence, deliveredBeforeHeartbeats + 5, 'the reopened stream keeps delivering');
   assert.equal(client.streamEvidence().streamOpen, true);
   client.stop();
 });
@@ -1425,6 +1528,7 @@ test('quiet-stream ready heartbeats are liveness, and only real silence is a sta
   await clock.advance(0);
   assert.equal(FakeEventSource.instances.length, 1);
   const stream = FakeEventSource.instances[0];
+  const deliveredBeforeHeartbeats = client.streamEvidence().deliverySequence;
 
   // The server emits one frame per resolved cadence: a delta when the view moved,
   // otherwise a `ready` heartbeat. Ten unmodified cadences are a provably alive
@@ -1433,7 +1537,7 @@ test('quiet-stream ready heartbeats are liveness, and only real silence is a sta
     await clock.advance(1000);
     stream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
   }
-  assert.equal(client.streamEvidence().deliverySequence, 10, 'every heartbeat was delivered and validated');
+  assert.equal(client.streamEvidence().deliverySequence, deliveredBeforeHeartbeats + 10, 'every heartbeat was delivered and validated');
   assert.deepStrictEqual(failures, [], 'a heartbeat-quiet healthy stream never reports a stall');
 
   // Silence, not quiet: the server stops delivering entirely.
@@ -1718,34 +1822,17 @@ test('only an echoed 1s resolution requests seconds on the X axis', () => {
 });
 
 test('browser transport uses one authenticated current stream and exact snapshot repair', async () => {
-  FakeEventSource.instances = [];
+  ManualEventSource.instances = [];
   const clock = new FakeClock();
   const fetches = [];
-  let current300Generation = 1;
-  const fetchImpl = async (url, options) => {
-    fetches.push({url, options});
+  const fetchImpl = async (url, options, internalOptions) => {
+    fetches.push({url, options, internalOptions});
     if (url === '/api/stats-capabilities') return response(200, capabilities());
-    const parsed = new URL(url, 'http://stats.test');
-    assert.equal(parsed.pathname, '/api/stats-snapshot');
-    const range = Number(parsed.searchParams.get('range_seconds'));
-    const requestedText = parsed.searchParams.get('resolution');
-    const requested = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
-    const resolution = requested === 'AUTO' ? (range === 300 ? 1 : 10) : requested;
-    const since = Number(parsed.searchParams.get('since_generation'));
-    if (range === 900 && since === 3) {
-      return response(304);
-    }
-    return response(200, snapshot({
-      range,
-      requested,
-      resolution,
-      cache: range === 300 ? current300Generation : 3,
-      sourceGeneration: range === 300 ? current300Generation : 3,
-    }));
+    throw new Error(`unexpected browser fetch: ${url}`);
   };
   const client = loadNamespace().createBrowserClient({
     fetch: fetchImpl,
-    EventSource: FakeEventSource,
+    EventSource: ManualEventSource,
     clientId: 'browser-current',
     savedRange: 300,
     savedResolution: 1,
@@ -1758,31 +1845,26 @@ test('browser transport uses one authenticated current stream and exact snapshot
   await firstStart;
   await clock.advance(0);
   assert.equal(fetches.filter(item => item.url === '/api/stats-capabilities').length, 1);
-  assert.equal(fetches[1].url, [
-    '/api/stats-snapshot?range_seconds=300&resolution=1',
-    'client_id=browser-current&since_generation=0',
-  ].join('&'));
-  for (const call of fetches) {
-    assert.equal(call.options.method, 'GET');
-    assert.equal(call.options.credentials, 'same-origin');
-    assert.equal(call.options.cache, 'no-store');
-    assert.equal(call.options.headers.Accept, 'application/json');
-  }
-  assert.equal(FakeEventSource.instances.length, 1);
-  const initialStream = FakeEventSource.instances[0];
+  assert.equal(fetches.length, 1, 'history does not use fetch or Promise.all fan-out');
+  assert.equal(fetches[0].internalOptions, undefined, 'capability reads have no expected non-2xx status');
+  assert.equal(fetches[0].options.method, 'GET');
+  assert.equal(ManualEventSource.instances.length, 1);
+  const initialStream = ManualEventSource.instances[0];
   assert.equal(initialStream.options.withCredentials, true);
   assert.equal(initialStream.url, [
-    '/api/stats-stream?range_seconds=300&resolution_seconds=1',
-    'client_id=browser-current&after_cache_generation=1&after_revision=0',
+    '/api/stats-stream?range_seconds=300&resolution=1',
+    'client_id=browser-current&since_generation=0',
   ].join('&'));
+  emitSnapshotSequence(initialStream, snapshot({requested: 1, cache: 1, sourceGeneration: 1}));
+  await flushPromises();
   assert.deepStrictEqual({...client.streamEvidence()}, {
-    running: true, visible: true, healthy: true, streamOpen: true, streamEpoch: 2,
-    deliverySequence: 0, acceptedDeltaSequence: 0, lastDeliveryKind: '', lastDeliveryAtMs: 0,
-    lastDeliveryEpoch: 0, rangeSeconds: 300, resolutionSeconds: 1, sourceGeneration: 1,
+    running: true, visible: true, healthy: true, streamOpen: true, streamEpoch: 3,
+    deliverySequence: 3, acceptedDeltaSequence: 0, lastDeliveryKind: 'ready', lastDeliveryAtMs: 0,
+    lastDeliveryEpoch: 3, rangeSeconds: 300, resolutionSeconds: 1, sourceGeneration: 1,
     cacheGeneration: 1, deltaRevision: 0,
-  }, 'native open and initial snapshot are readiness, not server-frame delivery proof');
+  }, 'ack, snapshot, and ready arrive on the same stream that stays live');
   initialStream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
-  assert.equal(client.streamEvidence().deliverySequence, 1, 'a validated ready frame proves quiet-stream delivery');
+  assert.equal(client.streamEvidence().deliverySequence, 4, 'a validated ready frame proves quiet-stream delivery');
   assert.equal(client.streamEvidence().lastDeliveryKind, 'ready');
   const cachedInitialGeneration = client.controller().generation();
   client.select(300, 1);
@@ -1799,52 +1881,242 @@ test('browser transport uses one authenticated current stream and exact snapshot
       ...original.buckets[2], series: {cpu: seriesValue(99, original.buckets[2].start)},
     }],
   })));
-  current300Generation = 2;
   assert.equal(client.controller().generation().cache_generation, 2);
   assert.equal(client.controller().presentation().delta_revision, 1);
-  assert.equal(client.streamEvidence().deliverySequence, 2);
+  assert.equal(client.streamEvidence().deliverySequence, 5);
   assert.equal(client.streamEvidence().acceptedDeltaSequence, 1);
   assert.equal(client.streamEvidence().lastDeliveryKind, 'delta');
   assert.equal(client.streamEvidence().cacheGeneration, 2);
-  assert.equal(FakeEventSource.instances.length, 1, 'accepted deltas do not reopen the live stream');
+  assert.equal(ManualEventSource.instances.length, 1, 'accepted deltas do not reopen the live stream');
 
   initialStream.emit('error');
   initialStream.emit('error');
   assert.equal(initialStream.closeCount, 1, 'the failed native reconnect owner is closed once');
   await clock.advance(100);
-  assert.equal(fetches.filter(item => item.url.includes('range_seconds=300') && item.url.includes('since_generation=0')).length, 1, 'a transport reconnect retains its accepted snapshot generation');
-  assert.equal(fetches.filter(item => item.url.includes('range_seconds=300') && item.url.includes('since_generation=2')).length, 1, 'a transport reconnect repairs incrementally instead of refetching history');
-  assert.equal(FakeEventSource.instances.length, 2, 'one incremental repair reopens one stream');
-  assert.ok(FakeEventSource.instances[1].url.endsWith('after_cache_generation=2&after_revision=0'));
+  assert.equal(fetches.length, 1, 'a reconnect still has no parallel history fetch');
+  assert.equal(ManualEventSource.instances.length, 2, 'one incremental repair reopens one stream');
+  assert.ok(ManualEventSource.instances[1].url.endsWith('since_generation=2'));
+  ManualEventSource.instances[1].emit('ack', JSON.stringify({
+    cache_generation: 2, chunk_count: 1, not_modified: true,
+    range_seconds: 300, requested_resolution: 1, resolution_seconds: 1,
+  }));
+  ManualEventSource.instances[1].emit('ready', JSON.stringify({cache_generation: 2, revision: 0}));
+  await flushPromises();
 
   client.select(900, 10);
-  assert.equal(FakeEventSource.instances[1].closeCount, 1);
-  client.setVisible(true);
-  await client.start();
+  assert.equal(ManualEventSource.instances[1].closeCount, 1);
   await clock.advance(0);
-  assert.ok(fetches.at(-1).url.includes('range_seconds=900&resolution=10'));
-  assert.equal(FakeEventSource.instances.length, 3);
-  assert.ok(FakeEventSource.instances[2].url.includes('range_seconds=900&resolution_seconds=10'));
+  assert.equal(ManualEventSource.instances.length, 3);
+  assert.ok(ManualEventSource.instances[2].url.includes('range_seconds=900&resolution=10'));
+  emitSnapshotSequence(ManualEventSource.instances[2], snapshot({
+    range: 900, requested: 10, resolution: 10, cache: 3, sourceGeneration: 3,
+  }));
+  await flushPromises();
 
   client.setVisible(false);
-  assert.equal(FakeEventSource.instances[2].closeCount, 1);
-  FakeEventSource.instances[2].emit('repair');
+  assert.equal(ManualEventSource.instances[2].closeCount, 1);
+  ManualEventSource.instances[2].emit('repair');
   await clock.advance(0);
-  assert.equal(FakeEventSource.instances.length, 3, 'closed-stream events cannot create duplicates');
+  assert.equal(ManualEventSource.instances.length, 3, 'closed-stream events cannot create duplicates');
   client.setVisible(true);
   await clock.advance(0);
-  assert.equal(FakeEventSource.instances.length, 4, 'visibility repair creates one current stream');
+  assert.equal(ManualEventSource.instances.length, 4, 'visibility repair creates one current stream');
+  ManualEventSource.instances[3].emit('ack', JSON.stringify({
+    cache_generation: 3, chunk_count: 1, not_modified: true,
+    range_seconds: 900, requested_resolution: 10, resolution_seconds: 10,
+  }));
+  ManualEventSource.instances[3].emit('ready', JSON.stringify({cache_generation: 3, revision: 0}));
+  await flushPromises();
   await client.start();
-  assert.equal(FakeEventSource.instances.length, 4, 'duplicate start keeps the active stream');
+  assert.equal(ManualEventSource.instances.length, 4, 'duplicate start keeps the active stream');
   assert.equal(fetches.filter(item => item.url === '/api/stats-capabilities').length, 1);
 
   client.stop();
-  assert.equal(FakeEventSource.instances[3].closeCount, 1);
+  assert.equal(ManualEventSource.instances[3].closeCount, 1);
   await client.start();
-  assert.equal(FakeEventSource.instances.length, 5, 'restart reuses capabilities and the accepted cursor');
+  await clock.advance(100);
+  assert.equal(ManualEventSource.instances.length, 5, 'restart reuses capabilities and the accepted cursor');
   assert.equal(fetches.filter(item => item.url === '/api/stats-capabilities').length, 1);
   client.stop();
-  assert.ok(fetches.every(item => !item.url.includes('/api/stats-delta')));
+  assert.equal(fetches.length, 1);
+});
+
+test('eleven 1s deltas stay on one SSE and retain unchanged buckets in memory', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const fullGenerations = [];
+  const incrementalDeliveries = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    throw new Error(`unexpected browser fetch: ${url}`);
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: ManualEventSource,
+    clientId: 'eleven-second-tail',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock,
+      onGeneration: generation => fullGenerations.push(generation),
+      onDelta: (generation, update) => incrementalDeliveries.push({generation, update}),
+    },
+  });
+
+  await client.start();
+  await clock.advance(0);
+  const stream = ManualEventSource.instances[0];
+  emitSnapshotSequence(stream, snapshot({requested: 1, cache: 1, sourceGeneration: 1}));
+  await flushPromises();
+  const retainedBucket = client.controller().generation().buckets.find(bucket => bucket.start === 20);
+
+  for (let second = 1; second <= 11; second += 1) {
+    const active = client.controller().generation();
+    const previousTail = active.buckets.at(-1);
+    const closedTail = {...previousTail, open: false};
+    const newStart = active.window_end;
+    const newTail = {
+      start: newStart,
+      duration: 1,
+      series: {cpu: seriesValue(100 + second, newStart)},
+      source: {first_timestamp: newStart, last_timestamp: newStart, count: 1},
+      open: true,
+    };
+    stream.emit('delta', JSON.stringify(delta({
+      sourceGeneration: second + 1,
+      base: second,
+      cache: second + 1,
+      revision: second,
+      bucketReplacements: [closedTail, newTail],
+      tombstones: [{kind: 'bucket', start: active.window_start, duration: 1}],
+    })));
+    stream.emit('ready', JSON.stringify({cache_generation: second + 1, revision: second}));
+  }
+
+  const active = client.controller().generation();
+  assert.equal(ManualEventSource.instances.length, 1, 'the initial request remains the only EventSource');
+  assert.equal(stream.closeCount, 0, 'the live stream remains open after the ten-second boundary');
+  assert.equal(fullGenerations.length, 1, 'ack/snapshot readiness publishes one full generation');
+  assert.equal(incrementalDeliveries.length, 11, 'later frames use only the incremental callback');
+  assert.equal(client.streamEvidence().acceptedDeltaSequence, 11);
+  assert.equal(client.streamEvidence().deliverySequence, 25, 'one ack, one snapshot, initial ready, then eleven delta/ready pairs');
+  assert.strictEqual(active.buckets.find(bucket => bucket.start === 20), retainedBucket, 'unchanged bucket objects remain resident');
+  assert.equal(active.buckets.length, 300);
+  assert.equal(active.window_start, 11);
+  assert.equal(active.window_end, 311);
+  assert.deepEqual(
+    incrementalDeliveries.map(item => [item.update.buckets.length, item.update.tombstones.length]),
+    Array.from({length: 11}, () => [2, 1]),
+    'each callback carries only changed and tombstoned identities',
+  );
+  client.stop();
+});
+
+test('one 8h SSE publishes one complete generation after four private snapshot chunks', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const generations = [];
+  const states = [];
+  const full = snapshot({range: 28800, requested: 300, resolution: 300, cache: 41, sourceGeneration: 37});
+  full.no_data = [{
+    family: 'cpu', source_id: 'host', start: 7100, end: 7300,
+    epoch: 'host-1', reason: 'collector_gap', source_cadence_seconds: 10,
+  }];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      throw new Error(`unexpected history fetch: ${url} ${String(options)}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: 'chunked-eight-hours',
+    savedRange: 28800,
+    savedResolution: 300,
+    onState: state => states.push(state),
+    controllerOptions: {
+      clock,
+      repairBaseMs: 100,
+      repairMaxMs: 400,
+      onGeneration: generation => generations.push(generation),
+    },
+  });
+
+  await client.start();
+  await clock.advance(0);
+  assert.equal(ManualEventSource.instances.length, 1, 'history and live deltas share one EventSource');
+  const stream = ManualEventSource.instances[0];
+  assert.ok(stream.url.includes('range_seconds=28800&resolution=300'));
+  const chunks = [0, 1, 2, 3].map(index => snapshotChunk(full, index, 4));
+  stream.emit('ack', JSON.stringify({
+    cache_generation: 41, chunk_count: 4, not_modified: false,
+    range_seconds: 28800, requested_resolution: 300, resolution_seconds: 300,
+  }));
+  for (const chunk of chunks) {
+    stream.emit('snapshot', JSON.stringify(chunk));
+    assert.equal(client.controller().generation(), null, 'partial data stays private until ready');
+    assert.equal(generations.length, 0, 'no renderer generation is published between chunks');
+  }
+  stream.emit('ready', JSON.stringify({cache_generation: 41, revision: 0}));
+  await flushPromises();
+
+  assert.equal(generations.length, 1, 'ready atomically publishes one complete generation');
+  assert.equal(generations[0].buckets.length, full.buckets.length);
+  assert.deepEqual(client.controller().generation().buckets, full.buckets, 'chunked and whole-window buckets are equivalent');
+  assert.deepEqual(client.controller().generation().no_data, full.no_data, 'chunked and whole-window gaps are equivalent');
+  assert.equal(states.at(-1), 'ready');
+  assert.equal(ManualEventSource.instances.length, 1);
+  stream.emit('ready', JSON.stringify({cache_generation: 41, revision: 0}));
+  assert.equal(client.streamEvidence().streamOpen, true, 'the snapshot stream remains the live stream');
+  client.stop();
+});
+
+test('switching selection closes one in-flight SSE and stale chunks cannot publish', async () => {
+  ManualEventSource.instances = [];
+  const clock = new FakeClock();
+  const full = snapshot({range: 28800, requested: 300, resolution: 300, cache: 41, sourceGeneration: 37});
+  const generations = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      throw new Error(`unexpected history fetch: ${url}`);
+    },
+    EventSource: ManualEventSource,
+    clientId: 'cancel-chunk-selection',
+    savedRange: 28800,
+    savedResolution: 300,
+    controllerOptions: {
+      clock,
+      repairBaseMs: 100,
+      repairMaxMs: 400,
+      onGeneration: generation => generations.push(generation),
+    },
+  });
+
+  await client.start();
+  await clock.advance(0);
+  const oldStream = ManualEventSource.instances[0];
+  oldStream.emit('ack', JSON.stringify({
+    cache_generation: 41, chunk_count: 4, not_modified: false,
+    range_seconds: 28800, requested_resolution: 300, resolution_seconds: 300,
+  }));
+  oldStream.emit('snapshot', JSON.stringify(snapshotChunk(full, 0, 4)));
+  assert.equal(generations.length, 0);
+  client.select(300, 1);
+  await flushPromises();
+  await clock.advance(0);
+  assert.equal(oldStream.closeCount, 1, 'one selection transition closes the one history stream');
+  oldStream.emit('snapshot', JSON.stringify(snapshotChunk(full, 1, 4)));
+  oldStream.emit('ready', JSON.stringify({cache_generation: 41, revision: 0}));
+  assert.equal(generations.length, 0, 'no stale chunk publishes after the selection changes');
+  const newStream = ManualEventSource.instances[1];
+  emitSnapshotSequence(newStream, snapshot({requested: 1, resolution: 1, cache: 50, sourceGeneration: 50}));
+  await flushPromises();
+  assert.equal(client.controller().generation().range_seconds, 300);
+  assert.equal(client.controller().generation().cache_generation, 50);
+  assert.equal(ManualEventSource.instances.length, 2);
+  assert.ok(newStream.url.includes('range_seconds=300&resolution=1'));
+  client.stop();
+  await flushPromises();
+  assert.equal(clock.timers.size, 0, 'stopping after cancellation cannot leave a repair timer');
 });
 
 test('snapshot authentication failure retires the client instead of polling at repair cadence', async () => {
@@ -1871,7 +2143,8 @@ test('snapshot authentication failure retires the client instead of polling at r
   await client.start();
   await clock.advance(0);
   assert.equal(snapshotFetches, 1, 'the first 401 is the only snapshot request');
-  assert.equal(FakeEventSource.instances.length, 0, 'no stats stream opens without an authenticated snapshot');
+  assert.equal(FakeEventSource.instances.length, 1, 'authentication is rejected on the one stats SSE request');
+  assert.equal(FakeEventSource.instances[0].closeCount, 1, 'the rejected stream is retired immediately');
   await clock.advance(60_000);
   assert.equal(snapshotFetches, 1, 'terminal authentication cannot re-enter the repair timer');
   assert.deepEqual(states, ['loading', 'signed-out']);
@@ -1941,7 +2214,7 @@ test('a stream failure whose repair receives 401 closes the stream and stops rep
   assert.equal(FakeEventSource.instances[0].closeCount, 1);
   await clock.advance(60_000);
   assert.equal(snapshotFetches, 2, 'the repair 401 retires rather than reopening the stream');
-  assert.equal(FakeEventSource.instances.length, 1);
+  assert.equal(FakeEventSource.instances.length, 2, 'the fenced stream is replaced once after recovery');
   assert.equal(states.at(-1), 'signed-out');
   assert.equal(terminalFailures.length, 1);
 });
@@ -2105,8 +2378,9 @@ test('a genuine mid-session stream failure stays a warning-level transport failu
   const survivedRetirements = [];
   const surviving = await startRetirementClient(survived, {failures: survivedFailures, retirements: survivedRetirements});
   survived.emit('beforeunload');
+  const deliveredBeforeSurvival = surviving.client.streamEvidence().deliverySequence;
   FakeEventSource.instances[0].emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
-  assert.equal(surviving.client.streamEvidence().deliverySequence, 1, 'the surviving document is demonstrably still transporting');
+  assert.equal(surviving.client.streamEvidence().deliverySequence, deliveredBeforeSurvival + 1, 'the surviving document is demonstrably still transporting');
   FakeEventSource.instances[0].emit('error');
   assert.equal(survivedRetirements.length, 0, 'a delivery clears the unload latch so the next failure is not blinded');
   assert.deepEqual(survivedFailures.map(entry => entry.message), ['YO!stats stream unavailable']);
@@ -2189,22 +2463,19 @@ test('browser readiness times out, retries while visible, and stays latched unti
 });
 
 test('browser readiness bounds a hung initial snapshot and retries the whole client', async () => {
-  FakeEventSource.instances = [];
+  ManualEventSource.instances = [];
   const clock = new FakeClock();
   const failures = [];
   let capabilitiesCalls = 0;
-  let snapshotCalls = 0;
   const client = loadNamespace().createBrowserClient({
     fetch: async url => {
       if (url === '/api/stats-capabilities') {
         capabilitiesCalls += 1;
         return response(200, capabilities());
       }
-      snapshotCalls += 1;
-      if (snapshotCalls === 1) return new Promise(() => {});
-      return response(200, snapshot({requested: 1, cache: 2, sourceGeneration: 2}));
+      throw new Error(`unexpected history fetch: ${url}`);
     },
-    EventSource: FakeEventSource,
+    EventSource: ManualEventSource,
     clientId: 'browser-snapshot-readiness',
     savedRange: 300,
     savedResolution: 1,
@@ -2217,15 +2488,17 @@ test('browser readiness bounds a hung initial snapshot and retries the whole cli
   });
   await client.start();
   await clock.advance(0);
-  assert.equal(snapshotCalls, 1);
+  assert.equal(ManualEventSource.instances.length, 1);
   await clock.advance(100);
   assert.equal(failures.length, 1, 'a hung initial snapshot is one bounded initialization failure');
+  assert.equal(ManualEventSource.instances[0].closeCount, 1);
   await clock.advance(50);
   assert.equal(capabilitiesCalls, 2, 'readiness retry reconstructs the whole client contract');
   await clock.advance(0);
-  assert.equal(snapshotCalls, 2);
+  assert.equal(ManualEventSource.instances.length, 2);
+  emitSnapshotSequence(ManualEventSource.instances[1], snapshot({requested: 1, cache: 2, sourceGeneration: 2}));
+  await flushPromises();
   assert.equal(client.controller().generation().cache_generation, 2);
-  assert.equal(FakeEventSource.instances.length, 1);
   client.stop();
 });
 
@@ -2321,28 +2594,15 @@ test('five typed stream repairs for a 24h selection each settle through one snap
 });
 
 test('valid pending snapshots honor the server retry hint until exact 2h/300s data is ready', async () => {
-  FakeEventSource.instances = [];
+  ManualEventSource.instances = [];
   const clock = new FakeClock();
   const states = [];
-  const snapshotUrls = [];
-  let snapshotCalls = 0;
   const client = loadNamespace().createBrowserClient({
     fetch: async url => {
       if (url === '/api/stats-capabilities') return response(200, capabilities());
-      snapshotUrls.push(url);
-      snapshotCalls += 1;
-      if (snapshotCalls <= 2) {
-        return response(202, {status: 'pending', retry_after_seconds: 1});
-      }
-      return response(200, snapshot({
-        range: 7200,
-        requested: 300,
-        resolution: 300,
-        cache: 9,
-        sourceGeneration: 9,
-      }));
+      throw new Error(`unexpected history fetch: ${url}`);
     },
-    EventSource: FakeEventSource,
+    EventSource: ManualEventSource,
     clientId: 'pending-exact-300',
     savedRange: 7200,
     savedResolution: 300,
@@ -2351,32 +2611,33 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
   });
 
   await client.start();
-  await clock.advance(100);
+  await clock.advance(0);
+  ManualEventSource.instances[0].emit('pending', JSON.stringify({status: 'pending', retry_after_seconds: 1}));
   await flushPromises();
-  await flushPromises();
-  assert.equal(snapshotCalls, 1);
+  assert.equal(ManualEventSource.instances.length, 1);
   assert.equal([...clock.timers.values()].filter(timer => timer.at - clock.time === 1000).length, 1, 'one controller timer owns the pending retry');
   assert.equal(clock.nextDelay(), 1000, 'the valid server hint replaces offline backoff');
   assert.equal(client.controller().generation(), null);
   await clock.advance(999);
-  assert.equal(snapshotCalls, 1, 'pending does not poll before the server asks');
+  assert.equal(ManualEventSource.instances.length, 1, 'pending does not reconnect before the server asks');
   await clock.advance(1);
+  assert.equal(ManualEventSource.instances.length, 2);
+  ManualEventSource.instances[1].emit('pending', JSON.stringify({status: 'pending', retry_after_seconds: 1}));
   await flushPromises();
-  await flushPromises();
-  assert.equal(snapshotCalls, 2);
   assert.equal([...clock.timers.values()].filter(timer => timer.at - clock.time === 1000).length, 1, 'a repeated pending response still owns one timer');
   assert.equal(clock.nextDelay(), 1000, 'repeated pending does not grow exponential backoff');
   await clock.advance(1000);
-  await flushPromises();
+  assert.equal(ManualEventSource.instances.length, 3);
+  emitSnapshotSequence(ManualEventSource.instances[2], snapshot({
+    range: 7200, requested: 300, resolution: 300, cache: 9, sourceGeneration: 9,
+  }));
   await flushPromises();
 
-  assert.equal(snapshotCalls, 3);
   assert.equal(client.controller().generation().range_seconds, 7200);
   assert.equal(client.controller().generation().resolution_seconds, 300);
   assert.ok(states.includes('pending'));
   assert.equal(states.at(-1), 'ready');
-  assert.equal(FakeEventSource.instances.length, 1, 'success opens one stream without a second request owner');
-  assert.ok(snapshotUrls.every(url => url.includes('range_seconds=7200&resolution=300')));
+  assert.ok(ManualEventSource.instances.every(stream => stream.url.includes('range_seconds=7200&resolution=300')));
   client.stop();
 });
 
@@ -2458,7 +2719,7 @@ test('terminal 503 reason reaches state and explicit retry restarts snapshot and
   await flushPromises();
   assert.equal(fetches.find(item => item.url === '/api/stats-retry').options.method, 'POST');
   assert.equal(states.at(-1).state, 'ready');
-  assert.equal(FakeEventSource.instances.length, 1);
+  assert.equal(FakeEventSource.instances.length, 2, 'the failed stream plus the explicit-retry stream are both observable');
   client.stop();
 });
 
@@ -2507,7 +2768,7 @@ test('recoverable stale-daemon read 426 posts one automatic recovery and repairs
   await flushPromises();
   await flushPromises();
   assert.equal(states.at(-1).state, 'ready');
-  assert.equal(FakeEventSource.instances.length, 1);
+  assert.equal(FakeEventSource.instances.length, 2, 'the fenced stream is replaced once after recovery');
   client.stop();
 });
 
@@ -2685,19 +2946,23 @@ test('mount owns exact capability controls and renders sparse current series wit
   assert.equal(root.scrollTop, 73);
   assert.ok(root.content.innerHTML.includes('data-point-count="2"'), 'presentation motion does not add points');
 
+  const acceptedBeforeRangeChange = root.content.innerHTML;
   root.change({statsCurrentRange: ''}, '900');
   assert.ok(root.status.innerHTML.includes('data-stats-current-state="loading"'));
-  assert.equal(root.content.innerHTML, '');
+  assert.equal(root.content.innerHTML, acceptedBeforeRangeChange, 'range loading keeps the accepted chart visible until ready');
   const changedResolutionControl = root.controls.innerHTML.match(
     /<select data-stats-current-resolution[\s\S]*?<\/select>/,
   )[0];
   assert.ok(changedResolutionControl.includes('AUTO (10s)'));
+  assert.ok(changedResolutionControl.includes('value="AUTO" selected'));
   assert.ok(changedResolutionControl.includes('value="10"'));
   assert.ok(changedResolutionControl.includes('value="60"'));
   assert.equal(changedResolutionControl.includes('value="1"'), false);
   assert.equal(changedResolutionControl.includes('value="300"'), false);
 
+  await flushPromises();
   await clock.advance(0);
+  await flushPromises();
   assert.ok(root.content.innerHTML.includes('data-axis-seconds="false"'));
   assert.match(root.content.innerHTML, />\d{2}:\d{2}<\/text>/);
   for (const row of capabilities().ranges) {
@@ -2710,6 +2975,7 @@ test('mount owns exact capability controls and renders sparse current series wit
     ));
     assert.deepStrictEqual(values, ['AUTO', ...row.explicit_resolution_seconds]);
     assert.ok(control.includes(`AUTO (${row.auto_resolution_seconds}s)`));
+    assert.match(control, /<option value="AUTO" selected>/);
   }
   mounted.destroy();
   assert.equal(root.innerHTML, '');

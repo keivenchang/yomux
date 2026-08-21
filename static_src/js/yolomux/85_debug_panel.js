@@ -66,6 +66,13 @@ function debugGraphApplyServerRecord(record) {
   debugGraphApplyServerCostSummary(bucket, record.cost_summary);
 }
 
+function debugGraphDeleteServerRecord(startSeconds, durationSeconds) {
+  const startMs = Number(startSeconds) * 1000;
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durationSeconds) * 1000);
+  if (!Number.isFinite(startMs) || !Number.isFinite(durationMs) || durationMs <= 0) return false;
+  return jsDebugGraphBuckets.delete(`${startMs}:${durationMs}`);
+}
+
 // Cost projection stays attached to the existing stats bucket. The pricing owner supplies
 // integer micro-USD amounts, so this view never introduces a float-based cost cache or a
 // second time-range selection path.
@@ -424,6 +431,10 @@ function debugGraphExactResolutionChoices(rangeSeconds) {
       && bucketCount <= jsDebugGraphOverridePointCap
       && !(range === 3600 && resolution === 10);
   });
+}
+
+function debugGraphDefaultResolutionForRange(_rangeSeconds) {
+  return 0;
 }
 
 function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs = Date.now()) {
@@ -1334,8 +1345,12 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
-      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
-        .some(item => Number(item?.samples || 0) > 0),
+      // Same fix as the CPU/memory per-process series below: absence requires a real census of
+      // this exact device, not merely "some GPU device somewhere had data this bucket".
+      familyHasData: bucket => {
+        const source = bucket?.hostMetrics?.gpuDevices;
+        return source instanceof Map && source.size > 0 && !(Number(source.get(deviceId)?.samples || 0) > 0);
+      },
       displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
@@ -1415,9 +1430,18 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
     value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
     hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
     sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
-    familyHasData: bucket => cpu
-      ? Number(bucket?.systemCpuCount || 0) > 0
-      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    // A held per-process gauge may only be cleared by a real census of THIS process family that
+    // did not include this process -- not by "the system-memory/CPU family had any data this
+    // bucket", which is true on almost every bucket regardless of whether THIS sparse process was
+    // re-sampled. That conflation cleared the hold on ordinary system-memory-only buckets, so a
+    // process with 5-minute sample cadence held for a beat then dropped to a synthetic zero every
+    // bucket in between -- the sawtooth in the Memory pressure chart. Absence must come from the
+    // same per-process map this series reads (`bucket.hostMetrics[mapName]`): non-empty (a real
+    // census ran this bucket) and missing this exact `hostProcessId` (that census did not find it).
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.[mapName];
+      return source instanceof Map && source.size > 0 && !source.has(hostProcessId);
+    },
     ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
   }));
 }
@@ -1506,7 +1530,12 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
+    // Same fix as the CPU/memory per-process series: absence requires a real census that covered
+    // THIS service and did not find it, not merely "some service had data this bucket".
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.serviceLoad;
+      return source instanceof Map && source.size > 0 && !(Number(source.get(key)?.cpuSamples || 0) > 0);
+    },
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }
@@ -2260,53 +2289,43 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
 function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
-  const pointIndexes = values
-    .map((_value, index) => index)
-    .filter(index => !hasDataValues || hasDataValues[index] === true);
-  if (!pointIndexes.length) return '';
-  const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
-  // Split the fill into runs broken ONLY at genuine no-data ranges, so a
-  // covered-but-coarser span fills continuously (matching the line) while a real
-  // recorded hole stays an honest gap under its red no-data band.
   const observedValues = debugGraphSeriesPlotObservedValues(series);
-  const runs = [];
-  let run = [];
-  let previousEndMs = NaN;
-  for (const index of pointIndexes) {
-    const startMs = debugGraphSeriesTimeMs(series, index);
+  const cells = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (hasDataValues && hasDataValues[index] !== true) continue;
+    const rawStartMs = debugGraphSeriesTimeMs(series, index);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(series.durations?.[index]) || jsDebugGraphRawBucketMs);
-    // Drop a HELD (non-observed) point that lands inside a genuine no-data range so
-    // the fill never leaks into a real hole; a real measurement is always kept.
+    const nextStartMs = debugGraphSeriesTimeMs(series, index + 1);
+    const rawEndMs = Number.isFinite(nextStartMs) && nextStartMs > rawStartMs ? Math.min(rawStartMs + durationMs, nextStartMs) : rawStartMs + durationMs;
+    const cell = {index, startMs: Math.max(Number(domain?.startMs) || rawStartMs, rawStartMs), endMs: Math.min(Number(domain?.endMs) || rawEndMs, rawEndMs)};
+    if (!Number.isFinite(cell.startMs) || !Number.isFinite(cell.endMs) || cell.endMs <= cell.startMs) continue;
     const observed = !observedValues || observedValues[index] === true;
-    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, startMs, Number.isFinite(startMs) ? startMs + durationMs : startMs + 1)) {
-      if (run.length) { runs.push(run); run = []; }
-      continue;
-    }
-    if (run.length && debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, startMs)) {
-      runs.push(run);
-      run = [];
-    }
-    run.push(index);
-    previousEndMs = Number.isFinite(startMs) ? startMs + durationMs : NaN;
+    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, cell.startMs, cell.endMs)) continue;
+    cells.push(cell);
+  }
+  if (!cells.length) return '';
+  // Connect observed bucket centers, but split an absent sample or genuine outage.
+  const runs = []; let run = [], previousEndMs = NaN, previousIndex = -2;
+  for (const cell of cells) {
+    if (run.length && (cell.index > previousIndex + 1 || debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, cell.startMs))) { runs.push(run); run = []; }
+    run.push(cell);
+    previousEndMs = cell.endMs;
+    previousIndex = cell.index;
   }
   if (run.length) runs.push(run);
   const stacked = lowerValues ? ` data-js-debug-area-stacked="${esc(series.key)}"` : '';
-  const plotCurrent = values.at(-1);
-  const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
-  return runs.map(runIndexes => {
-    const upperPoints = runIndexes.map(index => debugGraphPointForValue(values[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
-    const lowerPoints = lowerValues
-      ? runIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
-      : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
-    const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
-    const path = [
-      `M ${firstLower[0]},${firstLower[1]}`,
-      ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
-      ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
-      'Z',
-    ].join(' ');
-    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
+  return runs.map(runCells => {
+    const firstCell = runCells[0];
+    const lastCell = runCells.at(-1);
+    const centerMs = cell => cell.startMs + (cell.endMs - cell.startMs) / 2;
+    const upperPoints = [debugGraphPointForValue(values[firstCell.index], firstCell.startMs, chartMax, domain), ...runCells.map(cell => debugGraphPointForValue(values[cell.index], centerMs(cell), chartMax, domain)), debugGraphPointForValue(values[lastCell.index], lastCell.endMs, chartMax, domain)];
+    const lowerPoints = [debugGraphPointForValue(lowerValues ? lowerValues[lastCell.index] : 0, lastCell.endMs, chartMax, domain), ...runCells.slice().reverse().map(cell => debugGraphPointForValue(lowerValues ? lowerValues[cell.index] : 0, centerMs(cell), chartMax, domain)), debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain)];
+    const firstLower = debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain);
+    const plotCurrent = values[lastCell.index];
+    const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
+    const path = [`M ${firstLower[0]},${firstLower[1]}`, ...upperPoints.map(point => `L ${point[0]},${point[1]}`), ...lowerPoints.map(point => `L ${point[0]},${point[1]}`), 'Z'].join(' ');
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}" data-js-debug-area-shape="linear"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}" stroke="var(--js-debug-series-color, var(--accent-sky-strong))" stroke-linejoin="round" stroke-width="1.1" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
   }).join('');
 }
 
@@ -4266,6 +4285,20 @@ function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true}
   return true;
 }
 
+function paintJsDebugCurrentStatsDelta(snapshot, delta, {forceGraphRefresh = true} = {}) {
+  if (!snapshot || !delta || !jsDebugStatsPanelVisible()) return false;
+  const key = jsDebugCurrentStatsGenerationKey(snapshot);
+  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) return false;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = key;
+  try {
+    applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh});
+  } catch (error) {
+    if (jsDebugCurrentStatsClientState.pendingGenerationKey === key) jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+    throw error;
+  }
+  return true;
+}
+
 function ensureJsDebugCurrentStatsClient() {
   if (jsDebugCurrentStatsClientState.client) return jsDebugCurrentStatsClientState.client;
   if (typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient !== 'function') return null;
@@ -4283,6 +4316,9 @@ function ensureJsDebugCurrentStatsClient() {
       onPushProof: acceptJsDebugCurrentStatsPushProof,
       onGeneration(snapshot) {
         paintJsDebugCurrentStatsGeneration(snapshot);
+      },
+      onDelta(snapshot, delta) {
+        paintJsDebugCurrentStatsDelta(snapshot, delta);
       },
     },
     onState(state, error) {
@@ -4848,21 +4884,22 @@ function jsDebugCurrentCoverageIntervals(snapshot, family) {
   return intervals;
 }
 
-function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
-  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
-  clearJsDebugGraphData();
-  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
-  const requestInterval = {startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds};
+function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false} = {}) {
+  const requestIntervals = [{startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds}];
   jsDebugHistoryReadiness.phase = 'ready';
   jsDebugHistoryReadiness.reason = '';
   jsDebugHistoryReadiness.overlayVisible = false;
-  jsDebugHistoryReadiness.requestCoverageIntervals = [requestInterval];
-  jsDebugHistoryReadiness.coverageIntervals = [requestInterval];
+  jsDebugHistoryReadiness.requestCoverageIntervals = requestIntervals;
+  jsDebugHistoryReadiness.coverageIntervals = requestIntervals;
   jsDebugHistoryReadiness.storeCoverageIntervals = Object.fromEntries(
     ['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'browser'].map(family => [family, jsDebugCurrentCoverageIntervals(snapshot, family)]),
   );
-  jsDebugHistoryReadiness.loadedStartSeconds = snapshot.window_start;
-  jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
+  jsDebugHistoryReadiness.loadedStartSeconds = requestIntervals.length
+    ? Math.min(...requestIntervals.map(interval => interval.startSeconds))
+    : snapshot.window_end;
+  jsDebugHistoryReadiness.loadedEndSeconds = requestIntervals.length
+    ? Math.max(...requestIntervals.map(interval => interval.endSeconds))
+    : snapshot.window_start;
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
   debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
@@ -4873,6 +4910,31 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   resolveDebugGraphResolutionChange(jsDebugHistoryReadiness);
   if (firstSample) armJsDebugStatsPolling();
   scheduleJsDebugPanelRefresh({force: forceGraphRefresh, immediate: true});
+}
+
+function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
+  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
+  clearJsDebugGraphData();
+  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
+  updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
+}
+
+function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
+  const buckets = Array.isArray(delta?.buckets) ? delta.buckets : [];
+  const tombstones = Array.isArray(delta?.tombstones) ? delta.tombstones : [];
+  tombstones.forEach(tombstone => {
+    if (tombstone?.kind === 'bucket') debugGraphDeleteServerRecord(tombstone.start, tombstone.duration);
+  });
+  const latest = Array.isArray(snapshot?.buckets) ? snapshot.buckets.at(-1) : null;
+  buckets.forEach(bucket => {
+    debugGraphDeleteServerRecord(bucket.start, bucket.duration);
+    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(
+      bucket,
+      bucket.start === latest?.start && bucket.duration === latest?.duration,
+      snapshot.cost_report,
+    ));
+  });
+  updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
 async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
@@ -7422,6 +7484,9 @@ function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
+  debugRuntimeState.graphResolutionOverrideSeconds = debugGraphDefaultResolutionForRange(
+    debugRuntimeState.graphRangeSeconds,
+  );
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;

@@ -12369,8 +12369,46 @@ function stateDef(key) {
   return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
+// Must match the server's own bound (`ATTENTION_ACK_KEY_MAX_LENGTH` in app.py) -- the server
+// enforces this same limit in UTF-8 bytes on every key it receives, including this client-local
+// fallback shape, and rejects the whole batch with 400 when every key in it is oversized.
+const ATTENTION_ACK_KEY_MAX_BYTES = 512;
+
+function attentionAcknowledgementUtf8ByteLength(text) {
+  return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(text).length : String(text).length;
+}
+
+// A synchronous, dependency-free 64-bit-ish digest (two FNV-1a lanes). `crypto.subtle.digest` is
+// async and this key must resolve in the same tick its caller already runs in; this is a local
+// dedup identifier, not a security boundary, so a strong non-cryptographic hash is sufficient.
+function attentionAcknowledgementSyncDigest(text) {
+  let lane1 = 0x811c9dc5;
+  let lane2 = 0x1000193;
+  const value = String(text);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    lane1 = Math.imul(lane1 ^ code, 0x01000193) >>> 0;
+    lane2 = Math.imul(lane2 ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${lane1.toString(16).padStart(8, '0')}${lane2.toString(16).padStart(8, '0')}`;
+}
+
 function attentionAcknowledgementKey(parts = []) {
-  return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+  const encoded = (Array.isArray(parts) ? parts : []).map(part => String(part || ''));
+  const value = JSON.stringify(encoded);
+  if (!encoded.length || attentionAcknowledgementUtf8ByteLength(value) <= ATTENTION_ACK_KEY_MAX_BYTES) return value;
+  // Oversized: this is normally free-text prompt/question signature text, which has no length
+  // cap of its own and is always appended last by every caller. Digest only that trailing part
+  // -- deterministically, so the identical long value always collapses to the identical short
+  // key (idempotent, not lossy-truncated, which would let two different long values that share a
+  // prefix collide) -- and leave the leading structured parts (kind/session/window markers a
+  // caller may parse back out via `attentionAcknowledgementKeySession`) untouched.
+  const digested = encoded.slice();
+  digested[digested.length - 1] = attentionAcknowledgementSyncDigest(encoded[encoded.length - 1]);
+  const digestedValue = JSON.stringify(digested);
+  if (attentionAcknowledgementUtf8ByteLength(digestedValue) <= ATTENTION_ACK_KEY_MAX_BYTES) return digestedValue;
+  // Extremely defensive: more than one oversized part. Digest everything.
+  return JSON.stringify(encoded.map(part => attentionAcknowledgementSyncDigest(part)));
 }
 
 function attentionAcknowledgementKeySession(key) {
@@ -12387,7 +12425,7 @@ function attentionAcknowledgementRecord(key, create = false) {
   if (!value) return null;
   let record = attentionAcknowledgementRecords.get(value) || null;
   if (!record && create) {
-    record = {recordedAt: null, timer: null, pending: false};
+    record = {recordedAt: null, timer: null, pending: false, rejected: false};
     attentionAcknowledgementRecords.set(value, record);
   }
   return record;
@@ -12407,7 +12445,12 @@ function pruneAttentionAcknowledgementRecords() {
 }
 
 function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
-  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  // A permanently-rejected record must survive release: it is the only thing stopping the next
+  // idle-record sweep from immediately forgetting that this exact key was already told no, which
+  // would let the retry loop it exists to prevent start right back up. It still leaves through the
+  // ordinary bounded size eviction in `pruneAttentionAcknowledgementRecords`, same as every other
+  // record -- this is not a second unbounded container, just a longer-lived entry in the one owner.
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true || record.rejected === true) return false;
   attentionAcknowledgementRecords.delete(String(key || ''));
   return true;
 }
@@ -12518,6 +12561,15 @@ async function submitAttentionAcknowledgementKeys(keys) {
     applyAttentionAcknowledgementResponse({...payload, acknowledged});
   } catch (error) {
     console.warn('attention acknowledgement failed', error);
+    // A 400 means the server permanently refused this exact key (malformed/oversized), not a
+    // transient failure -- resubmitting it forever would only reproduce the same 400 forever.
+    // Mark it on the SAME bounded record every other acknowledgement field lives on (never a
+    // second parallel container -- see the "parallel acknowledgement containers cannot return"
+    // guard in layout_restore.test.js); this is a backstop, not a substitute for keeping keys
+    // valid in the first place (see `attentionAcknowledgementKey`'s own bounding).
+    if (Number(error?.status) === 400) {
+      for (const key of keys) attentionAcknowledgementRecord(key, true).rejected = true;
+    }
   } finally {
     for (const key of keys) {
       const record = attentionAcknowledgementRecord(key);
@@ -12536,7 +12588,9 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true
+    && attentionAcknowledgementRecord(key)?.rejected !== true
+    && !attentionAcknowledgementKeyIsRecorded(key));
   if (!pending.length) return true;
   for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
   pruneAttentionAcknowledgementRecords();
@@ -21466,6 +21520,10 @@ function scheduleFileExplorerRepoInfoEnrichment(parentPath, entries, options = {
     if (!state.resolved.has(path) && (!state.inFlight.has(path) || options.refresh === true)) state.pending.add(path);
   }
   if (!state.pending.size || state.frame !== null || state.inFlight.size) return false;
+  if (options.immediate === true) {
+    void enrichFileExplorerRepoInfoEntries();
+    return true;
+  }
   const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : callback => setTimeout(callback, 0);
   state.frame = schedule(() => {
     state.frame = null;
@@ -22424,15 +22482,8 @@ async function refreshFileExplorerRepoDisplay(path, options = {}) {
     setFileExplorerRepoSummary(normalized, null);
     return;
   }
-  try {
-    const info = await fetchFilePathInfo(normalized);
-    if (normalizeDirectoryPath(fileExplorerRoot || normalized) !== normalized) return;
-    const repo = info.repo || null;
-    if (repo) cacheFileExplorerRepoInfo(normalized, repo);
-    setFileExplorerRepoSummary(normalized, repo);
-  } catch (_) {
-    setFileExplorerRepoSummary(normalized, null);
-  }
+  setFileExplorerRepoSummary(normalized, null);
+  scheduleFileExplorerRepoInfoEnrichment(normalized, [], {includeRoot: true, immediate: true});
 }
 
 // Rich git info shown in a styled hover popover for a repo dir (replaces the native title tooltip).
@@ -23759,10 +23810,18 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
   const differMode = options.differMode === true;
   const compact = options.compact === true;
   const currentDirectory = activeFinderDirectoryPath();
-  const expanded = entry.kind === 'dir' && fileTreeDirectoryExpanded(fullPath, {
-    differMode,
-    autoExpand: options.autoExpand,
-  });
+  // renderTreeChildren already computed dirExpanded from its own collapsedSet/expandedSet (the diff
+  // viewer's toggle state, e.g.) to decide child recursion; route that same value through here instead
+  // of recomputing via the global fileTreeDirectoryExpanded, which has no knowledge of collapsedSet and
+  // would desync the row's aria-expanded/disclosure state from the Set that actually drives collapse.
+  const expanded = entry.kind === 'dir' && (
+    typeof options.dirExpanded === 'boolean'
+      ? options.dirExpanded
+      : fileTreeDirectoryExpanded(fullPath, {
+        differMode,
+        autoExpand: options.autoExpand,
+      })
+  );
   const loadedChildListing = options.entriesByDir instanceof Map
     && options.entriesByDir.has(normalizeDirectoryPath(fullPath));
   const pendingExpansion = !differMode && entry.kind === 'dir' && (
@@ -23808,6 +23867,16 @@ function buildFileTreeRowState(fullPath, entry, depth, options = {}) {
     relDir,
     imagePreviewEligible: entry.kind === 'file' && previewMediaKindForPath(entry.name) === 'image' && Number(entry.size || 0) <= MAX_FILE_PREVIEW_BYTES,
   };
+}
+
+function scheduleFileTreeRowActivation(row, fullPath, entry, event) {
+  const token = {};
+  row.__fileTreePendingActivation = token;
+  setTimeout(() => {
+    if (row.__fileTreePendingActivation !== token) return;
+    row.__fileTreePendingActivation = null;
+    onFileTreeRowClick(row, fullPath, entry, event);
+  }, 0);
 }
 
 function bindFinderRowHandlers(row, state) {
@@ -23871,7 +23940,7 @@ function bindFinderRowHandlers(row, state) {
     if (event.detail > 1) return;
     row.__fileTreePointerActivated = true;
     setTimeout(() => { row.__fileTreePointerActivated = false; }, 0);
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.onclick = event => {
     if (row.__fileTreeSuppressClick) {
@@ -23893,7 +23962,7 @@ function bindFinderRowHandlers(row, state) {
     }
     event.stopPropagation();
     if (event.detail > 1) return;
-    onFileTreeRowClick(row, fullPath, entry, event);
+    scheduleFileTreeRowActivation(row, fullPath, entry, event);
   };
   row.ondblclick = event => {
     event.preventDefault();
@@ -23904,6 +23973,14 @@ function bindFinderRowHandlers(row, state) {
   row.oncontextmenu = event => {
     event.preventDefault();
     event.stopPropagation();
+    // Observed on macOS: a trackpad/Control-click secondary click can report `button: 0` on the
+    // pointerdown/pointerup pair even though `contextmenu` also fires correctly. That false
+    // button-0 reading lets onpointerup's own activation call run BEFORE this handler ever sees
+    // the gesture, so a same-tick suppression flag here is too late. onpointerup instead defers
+    // its activation by one macrotask via scheduleFileTreeRowActivation; cancel that here, since
+    // contextmenu always dispatches synchronously before that deferred tick can run.
+    row.__fileTreeSuppressClick = true;
+    row.__fileTreePendingActivation = null;
     closeFileImagePreview();
     showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
   };
@@ -24079,7 +24156,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
     const hasRenderedChildren = entry.kind === 'dir' && (
       Boolean(childContainerForRow(row, fullPath)) || Array.isArray(childEntries)
     );
-    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
+    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren, dirExpanded});
     nextNodes.push(row);
     if (entry.kind === 'dir' && dirExpanded) {
       const existingChildContainer = childContainerForRow(row, fullPath);
@@ -26388,6 +26465,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   closeSessionContextMenu();
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const selectedPaths = fileTreeActionPaths(fullPath);
   const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
@@ -48488,6 +48571,10 @@ function bindPreferencesPanel(panel) {
     'window_start', 'window_end', 'generated_at', 'source_generation', 'cache_generation',
     'rightmost_open', 'buckets', 'no_data', 'cost_report', 'usage_atom_backfill',
   ];
+  const SNAPSHOT_CHUNK_FIELDS = [
+    ...SNAPSHOT_FIELDS,
+    'chunk_index', 'chunk_count', 'chunk_start', 'chunk_end',
+  ];
   const DELTA_FIELDS = [
     'protocol_version', 'range_seconds', 'resolution_seconds', 'source_generation',
     'base_cache_generation', 'cache_generation', 'revision', 'buckets', 'no_data', 'tombstones',
@@ -48546,6 +48633,7 @@ function bindPreferencesPanel(panel) {
   const CURRENT_COST_MAX_AGENTS = 16;
   const CURRENT_COST_MAX_EVIDENCE = 32;
   const CURRENT_STATS_PENDING_RETRY_MAX_SECONDS = 60;
+  const CURRENT_STATS_MAX_SNAPSHOT_CHUNKS = 64;
   const DELTA_REJECTION_PHASE_CODES = Object.freeze({
     envelope: 'e',
     key: 'k',
@@ -48600,6 +48688,7 @@ function bindPreferencesPanel(panel) {
       clearTimeout: timer => clearTimeout(timer),
     };
     const onGeneration = options.onGeneration || (() => {});
+    const onDelta = options.onDelta || onGeneration;
     const onRepairNeeded = options.onRepairNeeded || (() => {});
     const onRepairComplete = options.onRepairComplete || (() => {});
     const onViewport = options.onViewport || (() => {});
@@ -48618,6 +48707,7 @@ function bindPreferencesPanel(panel) {
     let selection = normalizeSelection(capabilities, options.savedRange, options.savedResolution);
     let activeGeneration = null;
     let running = false;
+    let explicitlyStopped = false;
     let visible = true;
     let zoomedStatic = false;
     let tickTimer = null;
@@ -48637,14 +48727,20 @@ function bindPreferencesPanel(panel) {
     let lastGenerationAdvanceAtMs = null;
     const selectionSnapshots = new Map();
 
-    function concreteResolution() {
-      return selection.resolution === 'AUTO'
-        ? selection.capability.auto_resolution_seconds
-        : selection.resolution;
+    function resolutionSecondsFor(value) {
+      return value.resolution === 'AUTO' ? value.capability.auto_resolution_seconds : value.resolution;
     }
 
+    function concreteResolution() {
+      return resolutionSecondsFor(selection);
+    }
+
+    // Data identity is (range_seconds, resolved resolution_seconds), not the raw AUTO/explicit
+    // spelling: AUTO and its concrete equivalent (e.g. AUTO resolving to 300s for a 3600s range,
+    // then an explicit 300 pick) must share one cache entry or a same-data reselect refetches
+    // for no reason.
     function selectionSnapshotKey(value = selection) {
-      return `${value.range_seconds}/${value.resolution}`;
+      return `${value.range_seconds}/${resolutionSecondsFor(value)}`;
     }
 
     function buildRequest() {
@@ -48809,7 +48905,7 @@ function bindPreferencesPanel(panel) {
         return false;
       }
       activeDeltaRevision = delta.revision;
-      publish(candidate, false);
+      publish(candidate, false, delta);
       failureOwner.acceptPushProof();
       onPushProof(activeGeneration);
       clearRepair();
@@ -48846,7 +48942,7 @@ function bindPreferencesPanel(panel) {
         : required;
     }
 
-    function publish(value, authoritativeWindow) {
+    function publish(value, authoritativeWindow, delta = null) {
       const candidate = freezeJson(value);
       activeGeneration = candidate;
       lastGenerationAdvanceAtMs = clock.now();
@@ -48860,7 +48956,8 @@ function bindPreferencesPanel(panel) {
           : Math.max(presentationWindowEnd ?? candidate.window_end, candidate.window_end);
         anchorPresentation(nextEnd);
       }
-      onGeneration(candidate);
+      if (delta) onDelta(candidate, freezeJson(delta));
+      else onGeneration(candidate);
     }
 
     function reportFailure(message) {
@@ -49010,6 +49107,7 @@ function bindPreferencesPanel(panel) {
     }
 
     function scheduleRepair(immediate = false) {
+      if (explicitlyStopped) return;
       const firstRequest = !repairNeeded;
       repairNeeded = true;
       if (firstRequest) onRepairNeeded();
@@ -49101,7 +49199,12 @@ function bindPreferencesPanel(panel) {
       if (cached) {
         activeDeltaRevision = cached.deltaRevision;
         zoomedStatic = false;
-        publish(cached.generation, true);
+        // The cached generation may carry a stale requested_resolution spelling (AUTO reused
+        // under its concrete number, or vice versa) from whichever fetch first populated this
+        // key; relabel it to the selection that was just made so the UI picker and any observer
+        // that reads requested_resolution reflect the active pick, not the original fetch's
+        // request. No network refetch and no chart rebuild: only this label/state converges.
+        publish({...cached.generation, requested_resolution: selection.resolution}, true);
         scheduleTick();
         return currentSelection();
       }
@@ -49233,12 +49336,14 @@ function bindPreferencesPanel(panel) {
       setZoomedStatic,
       start() {
         if (running) return;
+        explicitlyStopped = false;
         running = true;
         if (lastGenerationAdvanceAtMs === null) lastGenerationAdvanceAtMs = clock.now();
         scheduleTick();
         if (!activeGeneration) scheduleRepair(true);
       },
       stop() {
+        explicitlyStopped = true;
         running = false;
         resetTickTimer();
         clearRepair();
@@ -49263,6 +49368,7 @@ function bindPreferencesPanel(panel) {
     const onState = options.onState || (() => {});
     const onTerminalAuthentication = options.onTerminalAuthentication || (() => {});
     const userOnGeneration = controllerOptions.onGeneration || (() => {});
+    const userOnDelta = controllerOptions.onDelta || userOnGeneration;
     const userOnRepairNeeded = controllerOptions.onRepairNeeded || (() => {});
     const userOnRepairComplete = controllerOptions.onRepairComplete || (() => {});
     const failureOwner = createTransportFailureOwner(controllerOptions.onFailure, controllerOptions.onRetirement);
@@ -49354,6 +49460,7 @@ function bindPreferencesPanel(panel) {
     }
 
     function resetUnreadyClient() {
+      cancelSnapshotRequest();
       closeStream();
       if (controller) controller.stop();
       controller = null;
@@ -49367,6 +49474,7 @@ function bindPreferencesPanel(panel) {
       running = false;
       readinessEpoch += 1;
       clearReadinessTimer();
+      cancelSnapshotRequest();
       closeStream();
       if (controller) {
         controller.setVisible(false);
@@ -49428,30 +49536,222 @@ function bindPreferencesPanel(panel) {
       return capabilitiesPromise;
     }
 
-    async function fetchSnapshot(request) {
-      let value;
+    function cancelSnapshotRequest() {
+      lifecycleScope?.release('snapshot-request');
+    }
+
+    function snapshotStreamError(payload, kind) {
+      const reason = String(payload?.reason || payload?.error || `stats snapshot ${kind}`).trim();
+      const error = new Error(reason || `stats snapshot ${kind}`);
+      error.reason = reason;
+      error.code = String(payload?.code || '').trim();
+      error.status = Number(payload?.status_code)
+        || (error.code === 'authentication_required' || error.reason === 'authentication_required' ? 401 : 0);
+      error.terminalAuthentication = isCurrentStatsTerminalAuthentication(error);
+      error.terminal = payload?.terminal === true;
+      if (kind === 'pending') {
+        const retryAfterSeconds = Number(payload?.retry_after_seconds);
+        error.pending = true;
+        error.retryAfterMs = Number.isSafeInteger(retryAfterSeconds)
+          && retryAfterSeconds >= 1
+          && retryAfterSeconds <= CURRENT_STATS_PENDING_RETRY_MAX_SECONDS
+          ? retryAfterSeconds * 1000
+          : 1000;
+      }
+      if (kind === 'upgrade_required') {
+        error.versionFence = true;
+        error.recoverableReadFence = payload?.terminal !== true;
+        error.requiredProtocolVersion = Number(payload?.required_protocol_version) || 0;
+        error.requiredSchemaGeneration = Number(payload?.required_schema_generation) || 0;
+        error.requiredBuild = String(payload?.required_build || '');
+      }
+      return error;
+    }
+
+    function fetchSnapshot(request) {
+      const scope = ensureLifecycleScope();
+      closeStream();
+      const url = exactUrl('/api/stats-stream', [
+        ['range_seconds', request.range_seconds],
+        ['resolution', request.resolution],
+        ['client_id', request.client_id],
+        ['since_generation', request.since_generation],
+      ]);
+      const epoch = streamEpoch + 1;
+      let candidate;
       try {
-        value = await fetchJson(fetchImpl, exactUrl('/api/stats-snapshot', [
-          ['range_seconds', request.range_seconds],
-          ['resolution', request.resolution],
-          ['client_id', request.client_id],
-          ['since_generation', request.since_generation],
-        ]), true, {background: true});
+        candidate = new EventSourceImpl(url, {withCredentials: true});
       } catch (error) {
-        if (retireForTerminalAuthentication(error)) throw error;
-        if (error?.recoverableReadFence === true) await recoverReadFence(error);
-        onState(error.pending === true ? 'pending' : 'error', error);
-        throw error;
+        return Promise.reject(error);
       }
-      if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
-        throw new Error('snapshot cannot be not-modified before an initial generation');
-      }
-      return value;
+      streamEpoch = epoch;
+      streamTransportToken = transportLifecycle.begin();
+      scope.ownStream('stream', candidate);
+
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let acknowledgement = null;
+        let fullSnapshot = null;
+        let assembly = null;
+
+        const current = () => scope.current()
+          && scope.value('stream') === candidate
+          && streamEpoch === epoch;
+        const finish = value => {
+          if (settled) return;
+          settled = true;
+          scope.relinquish('snapshot-request', cancel);
+          resolve(value);
+        };
+        const fail = async error => {
+          if (settled) return false;
+          settled = true;
+          scope.relinquish('snapshot-request', cancel);
+          closeStream();
+          if (retireForTerminalAuthentication(error)) {
+            reject(error);
+            return true;
+          }
+          if (error?.recoverableReadFence === true) await recoverReadFence(error);
+          onState(error?.pending === true ? 'pending' : 'error', error);
+          reject(error);
+          return true;
+        };
+        const cancel = () => {
+          if (settled) return;
+          const error = new Error('snapshot request was cancelled');
+          error.cancelled = true;
+          settled = true;
+          reject(error);
+        };
+        const handleTypedStreamError = (event, kind) => {
+          try {
+            const error = snapshotStreamError(JSON.parse(event.data), kind);
+            if (!settled) void fail(error);
+            else routeStreamFailure(candidate, epoch);
+          } catch (error) {
+            if (!settled) void fail(error);
+            else routeStreamFailure(candidate, epoch);
+          }
+        };
+        scope.replace('snapshot-request', cancel, callback => callback());
+
+        scope.ownEvent('stream-ack', candidate, 'ack', event => {
+          if (!current() || settled) return;
+          try {
+            const value = JSON.parse(event.data);
+            exactFields(value, ['cache_generation', 'chunk_count', 'not_modified', 'range_seconds', 'requested_resolution', 'resolution_seconds'], 'snapshot ack');
+            generationNumber(value.cache_generation, 'snapshot ack cache_generation');
+            positiveInteger(value.chunk_count, 'snapshot ack chunk_count');
+            if (typeof value.not_modified !== 'boolean'
+                || value.chunk_count > CURRENT_STATS_MAX_SNAPSHOT_CHUNKS
+                || (value.not_modified && value.chunk_count !== 1)
+                || value.range_seconds !== request.range_seconds
+                || String(value.requested_resolution) !== String(request.resolution)) throw new Error('snapshot ack does not match the active request');
+            acknowledgement = Object.freeze(value);
+            recordStreamDelivery('ack', epoch);
+          } catch (error) {
+            void fail(error);
+          }
+        });
+        scope.ownEvent('stream-snapshot', candidate, 'snapshot', event => {
+          if (!current() || settled) return;
+          try {
+            if (!acknowledgement || acknowledgement.not_modified) throw new Error('snapshot data arrived without a matching ack');
+            const value = JSON.parse(event.data);
+            if (snapshotChunkPayload(value)) {
+              if (value.chunk_count !== acknowledgement.chunk_count) throw new Error('snapshot chunk count does not match the ack');
+              if (!assembly) assembly = createSnapshotChunkAssembly(value, request, controller?.capabilities()?.max_buckets);
+              else assembly.accept(value);
+            } else {
+              if (acknowledgement.chunk_count !== 1 || assembly || fullSnapshot) throw new Error('snapshot stream mixed full and chunked data');
+              fullSnapshot = value;
+            }
+            recordStreamDelivery('snapshot', epoch);
+          } catch (error) {
+            void fail(error);
+          }
+        });
+        scope.ownEvent('stream-delta', candidate, 'delta', event => {
+          if (!current()) return;
+          if (!settled) {
+            void fail(new Error('stats delta arrived before snapshot readiness'));
+            return;
+          }
+          try {
+            if (controller.acceptDelta(JSON.parse(event.data))) {
+              recordStreamDelivery('delta', epoch, {acceptedDelta: true});
+            }
+          } catch (_error) {
+            routeStreamFailure(candidate, epoch);
+          }
+        });
+        scope.ownEvent('stream-ready', candidate, 'ready', event => {
+          if (!current()) return;
+          try {
+            const ready = JSON.parse(event.data);
+            exactFields(ready, ['cache_generation', 'revision'], 'ready');
+            generationNumber(ready.cache_generation, 'ready.cache_generation');
+            if (!Number.isSafeInteger(ready.revision) || ready.revision < 0) throw new Error('ready revision is invalid');
+            if (!settled) {
+              if (!acknowledgement || ready.cache_generation !== acknowledgement.cache_generation || ready.revision !== 0) {
+                throw new Error('initial ready cursor does not match snapshot ack');
+              }
+              let value;
+              if (acknowledgement.not_modified) value = SNAPSHOT_NOT_MODIFIED;
+              else if (assembly) value = assembly.snapshot();
+              else if (fullSnapshot) value = fullSnapshot;
+              else throw new Error('initial ready arrived without snapshot data');
+              if (value !== SNAPSHOT_NOT_MODIFIED && value.cache_generation !== ready.cache_generation) {
+                throw new Error('snapshot data does not match the ready cursor');
+              }
+              if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
+                throw new Error('snapshot cannot be not-modified before an initial generation');
+              }
+              recordStreamDelivery('ready', epoch);
+              finish(value);
+              return;
+            }
+            const generation = controller.generation();
+            const presentation = controller.presentation();
+            if (!generation
+                || ready.cache_generation !== generation.cache_generation
+                || ready.revision !== presentation?.delta_revision) {
+              throw new Error('ready cursor does not match current generation');
+            }
+            recordStreamDelivery('ready', epoch);
+            controller.noteStreamHeartbeat();
+          } catch (error) {
+            if (!settled) void fail(error);
+            else routeStreamFailure(candidate, epoch);
+          }
+        });
+        scope.ownEvent('stream-pending', candidate, 'pending', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'pending');
+        });
+        scope.ownEvent('stream-upgrade-required', candidate, 'upgrade_required', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'upgrade_required');
+        });
+        scope.ownEvent('stream-repair', candidate, 'repair', () => {
+          if (!settled) void fail(new Error('snapshot stream requested repair before readiness'));
+          else routeStreamRepair(candidate, epoch);
+        });
+        scope.ownEvent('stream-unavailable', candidate, 'unavailable', event => {
+          if (!current()) return;
+          handleTypedStreamError(event, 'unavailable');
+        });
+        scope.ownEvent('stream-error', candidate, 'error', () => {
+          if (!settled) void fail(new Error('YO!stats stream unavailable before snapshot readiness'));
+          else routeStreamTransportError(candidate, epoch);
+        });
+      });
     }
 
     function closeStream() {
       streamEpoch += 1;
-      for (const eventName of ['delta', 'ready', 'repair', 'unavailable', 'error']) {
+      for (const eventName of ['ack', 'snapshot', 'delta', 'ready', 'pending', 'upgrade-required', 'repair', 'unavailable', 'error']) {
         lifecycleScope?.release(`stream-${eventName}`);
       }
       lifecycleScope?.release('stream');
@@ -49483,62 +49783,6 @@ function bindPreferencesPanel(panel) {
       controller.handleReconnect({requiresFullSnapshot: false});
     }
 
-    function openStream() {
-      const scope = ensureLifecycleScope();
-      if (!running || !visible || scope.value('stream') || !controller?.generation()) return;
-      const request = controller.deltaRequest();
-      const url = exactUrl('/api/stats-stream', [
-        ['range_seconds', request.range_seconds],
-        ['resolution_seconds', request.resolution_seconds],
-        ['client_id', request.client_id],
-        ['after_cache_generation', request.after_cache_generation],
-        ['after_revision', request.after_revision],
-      ]);
-      const epoch = streamEpoch + 1;
-      let candidate;
-      try {
-        candidate = new EventSourceImpl(url, {withCredentials: true});
-      } catch (error) {
-        controller.handleTransportFailure(`YO!stats stream unavailable: ${String(error?.message || error)}`);
-        return;
-      }
-      streamEpoch = epoch;
-      streamTransportToken = transportLifecycle.begin();
-      scope.ownStream('stream', candidate);
-      scope.ownEvent('stream-delta', candidate, 'delta', event => {
-        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
-        try {
-          if (controller.acceptDelta(JSON.parse(event.data))) {
-            recordStreamDelivery('delta', epoch, {acceptedDelta: true});
-          }
-        } catch (_error) {
-          routeStreamFailure(candidate, epoch);
-        }
-      });
-      scope.ownEvent('stream-ready', candidate, 'ready', event => {
-        if (!scope.current() || scope.value('stream') !== candidate || streamEpoch !== epoch) return;
-        try {
-          const ready = JSON.parse(event.data);
-          exactFields(ready, ['cache_generation', 'revision'], 'ready');
-          generationNumber(ready.cache_generation, 'ready.cache_generation');
-          if (!Number.isSafeInteger(ready.revision) || ready.revision < 0) throw new Error('ready revision is invalid');
-          const generation = controller.generation();
-          const presentation = controller.presentation();
-          if (!generation
-              || ready.cache_generation !== generation.cache_generation
-              || ready.revision !== presentation?.delta_revision) {
-            throw new Error('ready cursor does not match current generation');
-          }
-          recordStreamDelivery('ready', epoch);
-          controller.noteStreamHeartbeat();
-        } catch (_error) {
-          routeStreamFailure(candidate, epoch);
-        }
-      });
-      scope.ownEvent('stream-repair', candidate, 'repair', () => routeStreamRepair(candidate, epoch));
-      scope.ownEvent('stream-unavailable', candidate, 'unavailable', () => routeStreamFailure(candidate, epoch));
-      scope.ownEvent('stream-error', candidate, 'error', () => routeStreamTransportError(candidate, epoch));
-    }
 
     async function activate(epoch) {
       if (typeof fetchImpl !== 'function') throw new Error('browser fetch is unavailable');
@@ -49558,7 +49802,11 @@ function bindPreferencesPanel(panel) {
             markHealthy(epoch);
             onState('ready');
             userOnGeneration(generation);
-            openStream();
+          },
+          onDelta(generation, delta) {
+            markHealthy(epoch);
+            onState('ready');
+            userOnDelta(generation, delta);
           },
           onRepairNeeded() {
             closeStream();
@@ -49567,14 +49815,15 @@ function bindPreferencesPanel(panel) {
           onRepairComplete(generation) {
             onState('ready');
             userOnRepairComplete(generation);
-            openStream();
           },
         });
       }
       if (running) {
         controller.setVisible(visible);
         controller.start();
-        openStream();
+        if (controller.generation() && !lifecycleScope?.value('stream')) {
+          controller.handleReconnect({requiresFullSnapshot: false});
+        }
       }
       return controller;
     }
@@ -49582,10 +49831,13 @@ function bindPreferencesPanel(panel) {
     function beginActivation() {
       if (!running || !visible) return Promise.resolve(controller);
       if (startPromise) return startPromise;
+      ensureLifecycleScope();
       if (controller) {
         controller.setVisible(visible);
         controller.start();
-        openStream();
+        if (controller.generation() && !lifecycleScope?.value('stream')) {
+          controller.handleReconnect({requiresFullSnapshot: false});
+        }
         return Promise.resolve(controller);
       }
       const epoch = readinessEpoch + 1;
@@ -49643,6 +49895,7 @@ function bindPreferencesPanel(panel) {
         const changed = before.range_seconds !== Number(rangeSeconds)
           || String(before.resolution) !== String(resolution);
         if (changed) closeStream();
+        if (changed) cancelSnapshotRequest();
         const result = controller.select(rangeSeconds, resolution);
         // The controller refuses a range this server does not serve and stays on
         // `before`. Do not persist a selection it refused, and reopen the stream we
@@ -49655,7 +49908,7 @@ function bindPreferencesPanel(panel) {
           savedResolution = resolution;
         }
         if (!controller.generation()) closeStream();
-        else if (changed && kept) openStream();
+        else if (changed) controller.handleReconnect({requiresFullSnapshot: false});
         if (!running) controller.stop();
         return result;
       },
@@ -49664,10 +49917,16 @@ function bindPreferencesPanel(panel) {
         const nextVisible = value === true;
         if (visible === nextVisible) return;
         visible = nextVisible;
-        if (!visible) closeStream();
+        if (!visible) {
+          cancelSnapshotRequest();
+          closeStream();
+        }
         if (controller) {
           controller.setVisible(visible);
           if (!running) controller.stop();
+          else if (visible && controller.generation() && !lifecycleScope?.value('stream')) {
+            controller.handleReconnect({requiresFullSnapshot: false});
+          }
         }
         if (visible && running && !controller && !startPromise && lifecycleScope?.value('readiness-timer') === null) {
           void beginActivation().catch(() => {});
@@ -49675,6 +49934,7 @@ function bindPreferencesPanel(panel) {
       },
       async retry() {
         onState('loading');
+        cancelSnapshotRequest();
         await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'}).catch(error => {
           onState('error', error);
           throw error;
@@ -49714,6 +49974,7 @@ function bindPreferencesPanel(panel) {
     if (!['stats', 'cost'].includes(view)) throw new Error('view must be stats or cost');
     const suppliedControllerOptions = options.controllerOptions || {};
     const suppliedOnGeneration = suppliedControllerOptions.onGeneration || (() => {});
+    const suppliedOnDelta = suppliedControllerOptions.onDelta || suppliedOnGeneration;
     const suppliedOnViewport = suppliedControllerOptions.onViewport || (() => {});
     let client = null;
     let destroyed = false;
@@ -49749,6 +50010,10 @@ function bindPreferencesPanel(panel) {
         ...suppliedControllerOptions,
         onGeneration(generation) {
           suppliedOnGeneration(generation);
+          if (renderVisible) renderer.render(generation, client.controller().presentation());
+        },
+        onDelta(generation, delta) {
+          suppliedOnDelta(generation, delta);
           if (renderVisible) renderer.render(generation, client.controller().presentation());
         },
         onViewport(frame) {
@@ -49899,7 +50164,7 @@ function bindPreferencesPanel(panel) {
       }
     }
 
-    function render(nextGeneration, frame = nextGeneration) {
+    function paintGeneration(nextGeneration, frame = nextGeneration, ready = true) {
       latestGeneration = nextGeneration;
       latestFrame = frame || nextGeneration;
       if (capabilities) {
@@ -49918,7 +50183,11 @@ function bindPreferencesPanel(panel) {
         view === 'stats' ? visibleGroups : null,
       );
       if (view === 'cost' && costModalOpen) paintCostModal();
-      setStatus('ready');
+      setStatus(ready ? 'ready' : 'loading');
+    }
+
+    function render(nextGeneration, frame = nextGeneration) {
+      paintGeneration(nextGeneration, frame, true);
     }
 
     function paintCostModal(force = false) {
@@ -50142,10 +50411,11 @@ function bindPreferencesPanel(panel) {
         const rangeSeconds = Number(target.value);
         const capability = capabilities.ranges.find(row => row.range_seconds === rangeSeconds);
         if (!capability) return;
+        const resolution = 'AUTO';
         selection = Object.freeze({
           range_seconds: rangeSeconds,
-          resolution: 'AUTO',
-          resolution_seconds: capability.auto_resolution_seconds,
+          resolution,
+          resolution_seconds: resolution === 'AUTO' ? capability.auto_resolution_seconds : resolution,
         });
       } else if (Object.prototype.hasOwnProperty.call(target.dataset, 'statsCurrentResolution')) {
         const capability = capabilities.ranges.find(row => row.range_seconds === selection.range_seconds);
@@ -50164,7 +50434,7 @@ function bindPreferencesPanel(panel) {
       }
       zoomed = false;
       paintControls();
-      setStatus('loading', true);
+      setStatus('loading');
       options.onSelect(selection.range_seconds, selection.resolution);
     }
 
@@ -50668,7 +50938,8 @@ function bindPreferencesPanel(panel) {
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
       yolomuxBackgroundRead: requestOptions.background === true,
-    }));
+      ...(requestOptions.signal ? {signal: requestOptions.signal} : {}),
+    }), allowNotModified ? Object.freeze({quietStatuses: Object.freeze([304])}) : undefined);
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
     let failurePayload = null;
     if (response?.status !== 200 && response?.status !== 304 && typeof response?.json === 'function') {
@@ -50835,6 +51106,135 @@ function bindPreferencesPanel(panel) {
     if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
     const parsed = Number(value);
     return String(parsed) === value && Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function snapshotChunkPayload(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+      && ['chunk_index', 'chunk_count', 'chunk_start', 'chunk_end'].some(field => (
+        Object.prototype.hasOwnProperty.call(value, field)
+      ));
+  }
+
+  function validateSnapshotChunk(chunk, request, maxBuckets) {
+    const fields = Object.prototype.hasOwnProperty.call(chunk || {}, 'usage_atom_backfill')
+      ? SNAPSHOT_CHUNK_FIELDS
+      : SNAPSHOT_CHUNK_FIELDS.filter(field => field !== 'usage_atom_backfill');
+    exactFields(chunk, fields, 'snapshot chunk');
+    if (
+      chunk.protocol_version !== CURRENT_STATS_WIRE_PROTOCOL_VERSION
+      || chunk.range_seconds !== request.range_seconds
+      || String(chunk.requested_resolution) !== String(request.resolution)
+    ) throw new Error('snapshot chunk key does not match the active request');
+    const concrete = positiveInteger(chunk.resolution_seconds, 'snapshot chunk resolution_seconds');
+    generationNumber(chunk.source_generation, 'snapshot chunk source_generation');
+    generationNumber(chunk.cache_generation, 'snapshot chunk cache_generation');
+    const windowStart = generationNumber(chunk.window_start, 'snapshot chunk window_start');
+    const windowEnd = generationNumber(chunk.window_end, 'snapshot chunk window_end');
+    if (windowEnd - windowStart !== request.range_seconds) throw new Error('snapshot chunk window is not exact');
+    const chunkCount = positiveInteger(chunk.chunk_count, 'snapshot chunk_count');
+    if (chunkCount < 2 || chunkCount > CURRENT_STATS_MAX_SNAPSHOT_CHUNKS) throw new Error('snapshot chunk_count is outside the wire limit');
+    const chunkIndex = generationNumber(chunk.chunk_index, 'snapshot chunk_index');
+    if (chunkIndex >= chunkCount) throw new Error('snapshot chunk_index lies outside the request');
+    const chunkStart = generationNumber(chunk.chunk_start, 'snapshot chunk_start');
+    const chunkEnd = generationNumber(chunk.chunk_end, 'snapshot chunk_end');
+    if (!(windowStart <= chunkStart && chunkStart < chunkEnd && chunkEnd <= windowEnd)) throw new Error('snapshot chunk bounds lie outside the full window');
+    if ((chunkStart - windowStart) % concrete || (chunkEnd - windowStart) % concrete) throw new Error('snapshot chunk bounds are not bucket aligned');
+    if (chunkIndex === 0 && chunkStart !== windowStart) throw new Error('first snapshot chunk does not start the full window');
+    if (chunkIndex === chunkCount - 1 && chunkEnd !== windowEnd) throw new Error('final snapshot chunk does not end the full window');
+    if (!Number.isFinite(chunk.generated_at) || chunk.generated_at < 0) {
+      throw new Error('snapshot chunk generated_at is invalid');
+    }
+    if (typeof chunk.rightmost_open !== 'boolean') throw new Error('snapshot chunk open state is invalid');
+    validateBuckets(chunk.buckets, concrete, maxBuckets, true, chunkStart, chunkEnd);
+    if (chunk.buckets.length !== (chunkEnd - chunkStart) / concrete) throw new Error('snapshot chunk buckets do not fill its exact bounds');
+    validateNoData(chunk.no_data, chunkStart, chunkEnd);
+    validateCostReport(chunk.cost_report);
+    const finalOpen = chunk.buckets.at(-1)?.open === true;
+    if (finalOpen !== (chunkIndex === chunkCount - 1 && chunk.rightmost_open)) {
+      throw new Error('snapshot chunk open state disagrees');
+    }
+  }
+
+  function snapshotChunkSharedValue(chunk) {
+    return Object.fromEntries(Object.entries(chunk).filter(([field]) => (
+      !['chunk_index', 'chunk_count', 'chunk_start', 'chunk_end', 'buckets', 'no_data'].includes(field)
+    )));
+  }
+
+  function mergeSnapshotChunkNoData(chunks) {
+    const spans = chunks.flatMap(chunk => chunk.no_data).map(span => ({...span})).sort(compareNoData);
+    const merged = [];
+    for (const span of spans) {
+      const previous = merged.at(-1);
+      const sameSource = previous
+        && previous.end === span.start
+        && ['family', 'source_id', 'epoch', 'reason', 'source_cadence_seconds'].every(field => (
+          previous[field] === span[field]
+        ));
+      if (sameSource) previous.end = span.end;
+      else merged.push(span);
+    }
+    return merged;
+  }
+
+  function createSnapshotChunkAssembly(firstChunk, request, maxBuckets = 600) {
+    validateSnapshotChunk(firstChunk, request, maxBuckets);
+    const shared = freezeJson(snapshotChunkSharedValue(firstChunk));
+    const chunks = new Map();
+
+    function accept(chunk) {
+      validateSnapshotChunk(chunk, request, maxBuckets);
+      if (!sameJson(snapshotChunkSharedValue(chunk), shared)) {
+        throw new Error('snapshot chunks do not share one immutable generation');
+      }
+      if (chunk.chunk_count !== firstChunk.chunk_count) throw new Error('snapshot chunks disagree on chunk_count');
+      const existing = chunks.get(chunk.chunk_index);
+      if (existing) {
+        if (!sameJson(existing, chunk)) throw new Error('duplicate snapshot chunk changed in flight');
+        return false;
+      }
+      for (const accepted of chunks.values()) {
+        if (chunk.chunk_start < accepted.chunk_end && chunk.chunk_end > accepted.chunk_start) {
+          throw new Error('snapshot chunks overlap');
+        }
+      }
+      chunks.set(chunk.chunk_index, freezeJson(chunk));
+      return true;
+    }
+
+    function orderedChunks() {
+      return [...chunks.values()].sort((left, right) => left.chunk_index - right.chunk_index);
+    }
+
+    function assembledSnapshot() {
+      const ordered = orderedChunks();
+      return freezeJson({
+        ...shared,
+        buckets: ordered.flatMap(chunk => chunk.buckets),
+        no_data: mergeSnapshotChunkNoData(ordered),
+      });
+    }
+
+    accept(firstChunk);
+    return Object.freeze({
+      accept,
+      snapshot() {
+        if (chunks.size !== firstChunk.chunk_count) throw new Error('snapshot chunks are incomplete');
+        const ordered = orderedChunks();
+        if (ordered[0].chunk_start !== firstChunk.window_start || ordered.at(-1).chunk_end !== firstChunk.window_end) {
+          throw new Error('snapshot chunks do not cover the full window');
+        }
+        for (let index = 1; index < ordered.length; index += 1) {
+          if (ordered[index - 1].chunk_end !== ordered[index].chunk_start) throw new Error('snapshot chunks are not contiguous');
+        }
+        const candidate = assembledSnapshot();
+        validateSnapshot(candidate, {
+          range_seconds: request.range_seconds,
+          resolution: request.resolution,
+        }, firstChunk.resolution_seconds, maxBuckets);
+        return candidate;
+      },
+    });
   }
 
   function validateSnapshot(snapshot, selection, concrete, maxBuckets) {
@@ -54498,6 +54898,13 @@ function debugGraphApplyServerRecord(record) {
   debugGraphApplyServerCostSummary(bucket, record.cost_summary);
 }
 
+function debugGraphDeleteServerRecord(startSeconds, durationSeconds) {
+  const startMs = Number(startSeconds) * 1000;
+  const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durationSeconds) * 1000);
+  if (!Number.isFinite(startMs) || !Number.isFinite(durationMs) || durationMs <= 0) return false;
+  return jsDebugGraphBuckets.delete(`${startMs}:${durationMs}`);
+}
+
 // Cost projection stays attached to the existing stats bucket. The pricing owner supplies
 // integer micro-USD amounts, so this view never introduces a float-based cost cache or a
 // second time-range selection path.
@@ -54856,6 +55263,10 @@ function debugGraphExactResolutionChoices(rangeSeconds) {
       && bucketCount <= jsDebugGraphOverridePointCap
       && !(range === 3600 && resolution === 10);
   });
+}
+
+function debugGraphDefaultResolutionForRange(_rangeSeconds) {
+  return 0;
 }
 
 function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs = Date.now()) {
@@ -55766,8 +56177,12 @@ function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
       value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, gpuDeviceId: deviceId}),
       sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, gpuDeviceId: deviceId})?.samples || 0),
-      familyHasData: bucket => [...(bucket?.hostMetrics?.gpuDevices?.values?.() || [])]
-        .some(item => Number(item?.samples || 0) > 0),
+      // Same fix as the CPU/memory per-process series below: absence requires a real census of
+      // this exact device, not merely "some GPU device somewhere had data this bucket".
+      familyHasData: bucket => {
+        const source = bucket?.hostMetrics?.gpuDevices;
+        return source instanceof Map && source.size > 0 && !(Number(source.get(deviceId)?.samples || 0) > 0);
+      },
       displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
     }));
 }
@@ -55847,9 +56262,18 @@ function debugGraphHostProcessSeriesDefs(buckets, metric) {
     value: bucket => debugGraphHostMetricBucketValue(bucket, {hostMetric: metric, hostProcessId}),
     hasData: bucket => debugGraphHostMetricBucketHasData(bucket, {hostMetric: metric, hostProcessId}),
     sampleCount: bucket => Number(debugGraphHostMetricBucketItem(bucket, {hostMetric: metric, hostProcessId})?.samples || 0),
-    familyHasData: bucket => cpu
-      ? Number(bucket?.systemCpuCount || 0) > 0
-      : Number(bucket?.hostMetrics?.systemMemoryCount || 0) > 0,
+    // A held per-process gauge may only be cleared by a real census of THIS process family that
+    // did not include this process -- not by "the system-memory/CPU family had any data this
+    // bucket", which is true on almost every bucket regardless of whether THIS sparse process was
+    // re-sampled. That conflation cleared the hold on ordinary system-memory-only buckets, so a
+    // process with 5-minute sample cadence held for a beat then dropped to a synthetic zero every
+    // bucket in between -- the sawtooth in the Memory pressure chart. Absence must come from the
+    // same per-process map this series reads (`bucket.hostMetrics[mapName]`): non-empty (a real
+    // census ran this bucket) and missing this exact `hostProcessId` (that census did not find it).
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.[mapName];
+      return source instanceof Map && source.size > 0 && !source.has(hostProcessId);
+    },
     ...(cpu ? {cpuBinary: true} : {displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge}),
   }));
 }
@@ -55938,7 +56362,12 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
     },
     hasData: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0) > 0,
     sampleCount: bucket => Number(bucket?.hostMetrics?.serviceLoad?.get?.(key)?.cpuSamples || 0),
-    familyHasData: bucket => debugGraphVisibleServiceLoadItems([bucket]).length > 0,
+    // Same fix as the CPU/memory per-process series: absence requires a real census that covered
+    // THIS service and did not find it, not merely "some service had data this bucket".
+    familyHasData: bucket => {
+      const source = bucket?.hostMetrics?.serviceLoad;
+      return source instanceof Map && source.size > 0 && !(Number(source.get(key)?.cpuSamples || 0) > 0);
+    },
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.tenSecondGauge,
   }));
 }
@@ -56692,53 +57121,43 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
 function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
   const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
-  const pointIndexes = values
-    .map((_value, index) => index)
-    .filter(index => !hasDataValues || hasDataValues[index] === true);
-  if (!pointIndexes.length) return '';
-  const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
-  // Split the fill into runs broken ONLY at genuine no-data ranges, so a
-  // covered-but-coarser span fills continuously (matching the line) while a real
-  // recorded hole stays an honest gap under its red no-data band.
   const observedValues = debugGraphSeriesPlotObservedValues(series);
-  const runs = [];
-  let run = [];
-  let previousEndMs = NaN;
-  for (const index of pointIndexes) {
-    const startMs = debugGraphSeriesTimeMs(series, index);
+  const cells = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (hasDataValues && hasDataValues[index] !== true) continue;
+    const rawStartMs = debugGraphSeriesTimeMs(series, index);
     const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(series.durations?.[index]) || jsDebugGraphRawBucketMs);
-    // Drop a HELD (non-observed) point that lands inside a genuine no-data range so
-    // the fill never leaks into a real hole; a real measurement is always kept.
+    const nextStartMs = debugGraphSeriesTimeMs(series, index + 1);
+    const rawEndMs = Number.isFinite(nextStartMs) && nextStartMs > rawStartMs ? Math.min(rawStartMs + durationMs, nextStartMs) : rawStartMs + durationMs;
+    const cell = {index, startMs: Math.max(Number(domain?.startMs) || rawStartMs, rawStartMs), endMs: Math.min(Number(domain?.endMs) || rawEndMs, rawEndMs)};
+    if (!Number.isFinite(cell.startMs) || !Number.isFinite(cell.endMs) || cell.endMs <= cell.startMs) continue;
     const observed = !observedValues || observedValues[index] === true;
-    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, startMs, Number.isFinite(startMs) ? startMs + durationMs : startMs + 1)) {
-      if (run.length) { runs.push(run); run = []; }
-      continue;
-    }
-    if (run.length && debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, startMs)) {
-      runs.push(run);
-      run = [];
-    }
-    run.push(index);
-    previousEndMs = Number.isFinite(startMs) ? startMs + durationMs : NaN;
+    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, cell.startMs, cell.endMs)) continue;
+    cells.push(cell);
+  }
+  if (!cells.length) return '';
+  // Connect observed bucket centers, but split an absent sample or genuine outage.
+  const runs = []; let run = [], previousEndMs = NaN, previousIndex = -2;
+  for (const cell of cells) {
+    if (run.length && (cell.index > previousIndex + 1 || debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, cell.startMs))) { runs.push(run); run = []; }
+    run.push(cell);
+    previousEndMs = cell.endMs;
+    previousIndex = cell.index;
   }
   if (run.length) runs.push(run);
   const stacked = lowerValues ? ` data-js-debug-area-stacked="${esc(series.key)}"` : '';
-  const plotCurrent = values.at(-1);
-  const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
-  return runs.map(runIndexes => {
-    const upperPoints = runIndexes.map(index => debugGraphPointForValue(values[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
-    const lowerPoints = lowerValues
-      ? runIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
-      : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
-    const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
-    const path = [
-      `M ${firstLower[0]},${firstLower[1]}`,
-      ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
-      ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
-      'Z',
-    ].join(' ');
-    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
+  return runs.map(runCells => {
+    const firstCell = runCells[0];
+    const lastCell = runCells.at(-1);
+    const centerMs = cell => cell.startMs + (cell.endMs - cell.startMs) / 2;
+    const upperPoints = [debugGraphPointForValue(values[firstCell.index], firstCell.startMs, chartMax, domain), ...runCells.map(cell => debugGraphPointForValue(values[cell.index], centerMs(cell), chartMax, domain)), debugGraphPointForValue(values[lastCell.index], lastCell.endMs, chartMax, domain)];
+    const lowerPoints = [debugGraphPointForValue(lowerValues ? lowerValues[lastCell.index] : 0, lastCell.endMs, chartMax, domain), ...runCells.slice().reverse().map(cell => debugGraphPointForValue(lowerValues ? lowerValues[cell.index] : 0, centerMs(cell), chartMax, domain)), debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain)];
+    const firstLower = debugGraphPointForValue(lowerValues ? lowerValues[firstCell.index] : 0, firstCell.startMs, chartMax, domain);
+    const plotCurrent = values[lastCell.index];
+    const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
+    const path = [`M ${firstLower[0]},${firstLower[1]}`, ...upperPoints.map(point => `L ${point[0]},${point[1]}`), ...lowerPoints.map(point => `L ${point[0]},${point[1]}`), 'Z'].join(' ');
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}" data-js-debug-area-shape="linear"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}" stroke="var(--js-debug-series-color, var(--accent-sky-strong))" stroke-linejoin="round" stroke-width="1.1" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
   }).join('');
 }
 
@@ -58698,6 +59117,20 @@ function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true}
   return true;
 }
 
+function paintJsDebugCurrentStatsDelta(snapshot, delta, {forceGraphRefresh = true} = {}) {
+  if (!snapshot || !delta || !jsDebugStatsPanelVisible()) return false;
+  const key = jsDebugCurrentStatsGenerationKey(snapshot);
+  if (key && [jsDebugCurrentStatsClientState.paintedGenerationKey, jsDebugCurrentStatsClientState.pendingGenerationKey].includes(key)) return false;
+  jsDebugCurrentStatsClientState.pendingGenerationKey = key;
+  try {
+    applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh});
+  } catch (error) {
+    if (jsDebugCurrentStatsClientState.pendingGenerationKey === key) jsDebugCurrentStatsClientState.pendingGenerationKey = '';
+    throw error;
+  }
+  return true;
+}
+
 function ensureJsDebugCurrentStatsClient() {
   if (jsDebugCurrentStatsClientState.client) return jsDebugCurrentStatsClientState.client;
   if (typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient !== 'function') return null;
@@ -58715,6 +59148,9 @@ function ensureJsDebugCurrentStatsClient() {
       onPushProof: acceptJsDebugCurrentStatsPushProof,
       onGeneration(snapshot) {
         paintJsDebugCurrentStatsGeneration(snapshot);
+      },
+      onDelta(snapshot, delta) {
+        paintJsDebugCurrentStatsDelta(snapshot, delta);
       },
     },
     onState(state, error) {
@@ -59280,21 +59716,22 @@ function jsDebugCurrentCoverageIntervals(snapshot, family) {
   return intervals;
 }
 
-function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
-  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
-  clearJsDebugGraphData();
-  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
-  const requestInterval = {startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds};
+function updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh = false} = {}) {
+  const requestIntervals = [{startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds}];
   jsDebugHistoryReadiness.phase = 'ready';
   jsDebugHistoryReadiness.reason = '';
   jsDebugHistoryReadiness.overlayVisible = false;
-  jsDebugHistoryReadiness.requestCoverageIntervals = [requestInterval];
-  jsDebugHistoryReadiness.coverageIntervals = [requestInterval];
+  jsDebugHistoryReadiness.requestCoverageIntervals = requestIntervals;
+  jsDebugHistoryReadiness.coverageIntervals = requestIntervals;
   jsDebugHistoryReadiness.storeCoverageIntervals = Object.fromEntries(
     ['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'browser'].map(family => [family, jsDebugCurrentCoverageIntervals(snapshot, family)]),
   );
-  jsDebugHistoryReadiness.loadedStartSeconds = snapshot.window_start;
-  jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
+  jsDebugHistoryReadiness.loadedStartSeconds = requestIntervals.length
+    ? Math.min(...requestIntervals.map(interval => interval.startSeconds))
+    : snapshot.window_end;
+  jsDebugHistoryReadiness.loadedEndSeconds = requestIntervals.length
+    ? Math.max(...requestIntervals.map(interval => interval.endSeconds))
+    : snapshot.window_start;
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
   debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
@@ -59305,6 +59742,31 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   resolveDebugGraphResolutionChange(jsDebugHistoryReadiness);
   if (firstSample) armJsDebugStatsPolling();
   scheduleJsDebugPanelRefresh({force: forceGraphRefresh, immediate: true});
+}
+
+function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
+  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
+  clearJsDebugGraphData();
+  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
+  updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
+}
+
+function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
+  const buckets = Array.isArray(delta?.buckets) ? delta.buckets : [];
+  const tombstones = Array.isArray(delta?.tombstones) ? delta.tombstones : [];
+  tombstones.forEach(tombstone => {
+    if (tombstone?.kind === 'bucket') debugGraphDeleteServerRecord(tombstone.start, tombstone.duration);
+  });
+  const latest = Array.isArray(snapshot?.buckets) ? snapshot.buckets.at(-1) : null;
+  buckets.forEach(bucket => {
+    debugGraphDeleteServerRecord(bucket.start, bucket.duration);
+    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(
+      bucket,
+      bucket.start === latest?.start && bucket.duration === latest?.duration,
+      snapshot.cost_report,
+    ));
+  });
+  updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
 async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
@@ -61854,6 +62316,9 @@ function setDebugGraphRange(value, {render = true} = {}) {
   loadJsDebugStatsUiPreferences();
   jsDebugGraphZoomDomain = null;
   debugRuntimeState.graphRangeSeconds = normalizedJsDebugGraphRange(value);
+  debugRuntimeState.graphResolutionOverrideSeconds = debugGraphDefaultResolutionForRange(
+    debugRuntimeState.graphRangeSeconds,
+  );
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
   if (!render) return;
