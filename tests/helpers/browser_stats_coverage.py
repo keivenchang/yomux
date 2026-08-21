@@ -163,6 +163,47 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         this.listeners = new Map();
         this.closed = false;
         window.__statsFixture.eventSources.push(this);
+        queueMicrotask(() => {
+          if (this.closed) return;
+          const parsed = new URL(String(this.url), location.href);
+          const rangeSeconds = Number(parsed.searchParams.get('range_seconds'));
+          const requestedText = parsed.searchParams.get('resolution');
+          const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
+          const row = capabilities.ranges.find(item => item.range_seconds === rangeSeconds);
+          const resolutionSeconds = requestedResolution === 'AUTO' ? row.auto_resolution_seconds : requestedResolution;
+          const snapshotKey = `${rangeSeconds}/${requestedResolution}`;
+          const sinceGeneration = Number(parsed.searchParams.get('since_generation')) || 0;
+          const cached = window.__statsFixture.snapshots.get(snapshotKey);
+          if (cached && sinceGeneration >= cached.cache_generation) {
+            this.emit('ack', {
+              cache_generation: cached.cache_generation,
+              chunk_count: 1,
+              not_modified: true,
+              range_seconds: rangeSeconds,
+              requested_resolution: requestedResolution,
+              resolution_seconds: resolutionSeconds,
+            });
+            this.emit('ready', {cache_generation: cached.cache_generation, revision: 0});
+            return;
+          }
+          let snapshot = exactSnapshot(rangeSeconds, requestedResolution, resolutionSeconds);
+          if (typeof window.__statsFixture.snapshotTransform === 'function') {
+            snapshot = window.__statsFixture.snapshotTransform(structuredClone(snapshot));
+          }
+          window.__statsFixture.lastSnapshot = snapshot;
+          window.__statsFixture.snapshots.set(snapshotKey, structuredClone(snapshot));
+          window.__statsFixture.snapshotRequests.push({url: parsed.pathname + parsed.search, snapshot});
+          this.emit('ack', {
+            cache_generation: snapshot.cache_generation,
+            chunk_count: 1,
+            not_modified: false,
+            range_seconds: rangeSeconds,
+            requested_resolution: requestedResolution,
+            resolution_seconds: resolutionSeconds,
+          });
+          this.emit('snapshot', snapshot);
+          this.emit('ready', {cache_generation: snapshot.cache_generation, revision: 0});
+        });
       }
       addEventListener(name, callback) {
         const listeners = this.listeners.get(name) || [];
@@ -175,6 +216,38 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       }
     }
 
+    class NetworkFixtureEventSource {
+      constructor(url, options) {
+        const fixture = window.__statsFixture;
+        const source = fixture.openNetworkEventSource(url, options);
+        const requestUrl = new URL(String(url), location.href);
+        const operation = `sse-init:${requestUrl.pathname}${requestUrl.search}`;
+        let settleInitialization;
+        const initialization = new Promise(resolve => { settleInitialization = resolve; });
+        const settle = () => {
+          if (!settleInitialization) return;
+          const resolve = settleInitialization;
+          settleInitialization = null;
+          resolve();
+        };
+        fixture.eventSources.push(source);
+        fixture.trackFinite(operation, initialization);
+        source.addEventListener('snapshot', event => {
+          const snapshot = JSON.parse(event.data);
+          fixture.snapshotRequests.push({url: requestUrl.pathname + requestUrl.search, snapshot});
+        });
+        for (const name of ['ready', 'pending', 'upgrade_required', 'unavailable', 'error']) {
+          source.addEventListener(name, settle);
+        }
+        const nativeClose = source.close.bind(source);
+        source.close = () => {
+          settle();
+          nativeClose();
+        };
+        return source;
+      }
+    }
+
     window.__statsFixture = {
       capabilities,
       clock: new FixtureClock(),
@@ -182,12 +255,15 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       nextFiniteOperationId: 1,
       finiteOperations: new Map(),
       snapshotRequests: [],
+      snapshots: new Map(),
+      snapshotTransform: null,
       eventSources: [],
       generationEvents: [],
       lastGeneration: null,
       lastSnapshot: null,
       mounted: null,
     };
+    window.__statsFixture.openNetworkEventSource = (url, options) => new window.EventSource(url, options);
 
     window.__statsFixture.trackFinite = (label, promise) => {
       const id = `${window.__statsFixture.nextFiniteOperationId++}:${label}`;
@@ -205,28 +281,15 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       const url = new URL(String(input), location.href);
       if (window.__statsNetworkFetch) {
         const response = await window.fetch(input, {credentials: 'same-origin', cache: 'no-store'});
-        if (response.status !== 200 || !['/api/stats-capabilities', '/api/stats-snapshot'].includes(url.pathname)) {
+        if (response.status !== 200 || url.pathname !== '/api/stats-capabilities') {
           return response;
         }
         const payload = await response.json();
-        if (url.pathname === '/api/stats-capabilities') {
-          window.__statsFixture.capabilities = payload;
-        } else {
-          window.__statsFixture.lastSnapshot = payload;
-          window.__statsFixture.snapshotRequests.push({url: url.pathname + url.search, snapshot: payload});
-        }
+        window.__statsFixture.capabilities = payload;
         return {status: 200, json: async () => structuredClone(payload)};
       }
       if (url.pathname === '/api/stats-capabilities') return {status: 200, json: async () => capabilities};
-      if (url.pathname !== '/api/stats-snapshot') return {status: 404, json: async () => ({})};
-      const rangeSeconds = Number(url.searchParams.get('range_seconds'));
-      const requestedText = url.searchParams.get('resolution');
-      const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
-      const row = capabilities.ranges.find(item => item.range_seconds === rangeSeconds);
-      const resolutionSeconds = requestedResolution === 'AUTO' ? row.auto_resolution_seconds : requestedResolution;
-      const snapshot = exactSnapshot(rangeSeconds, requestedResolution, resolutionSeconds);
-      window.__statsFixture.snapshotRequests.push({url: url.pathname + url.search, snapshot});
-      return {status: 200, json: async () => snapshot};
+      return {status: 404, json: async () => ({})};
     })());
 
     window.__statsFixture.start = view => window.__statsFixture.trackFinite(`start:${view}`, (async () => {
@@ -237,11 +300,12 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         savedRange: 300,
         savedResolution: 1,
         fetch: window.__statsFixture.fetch,
-        EventSource: FixtureEventSource,
+        EventSource: window.__statsNetworkFetch ? NetworkFixtureEventSource : FixtureEventSource,
         controllerOptions: {
           clock: window.__statsFixture.clock,
           onGeneration: generation => {
             window.__statsFixture.lastGeneration = generation;
+            window.__statsFixture.lastSnapshot = generation;
             window.__statsFixture.generationEvents.push({
               cacheGeneration: generation.cache_generation,
               dataset: JSON.stringify(generation),
@@ -265,13 +329,13 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       const root = document.getElementById('stats-root');
       const range = root.querySelector('[data-stats-current-range]');
       if (Number(range.value) !== rangeSeconds) {
-        const beforeRange = window.__statsFixture.snapshotRequests.length;
+        const beforeRange = window.__statsFixture.generationEvents.length;
         range.value = String(rangeSeconds);
         range.dispatchEvent(new Event('change', {bubbles: true}));
         await window.__statsFixture.clock.advance(0);
         await window.__yolomuxTestWaitFor(
-          () => window.__statsFixture.snapshotRequests.slice(beforeRange).some(item => (
-            item.snapshot.range_seconds === rangeSeconds && item.snapshot.requested_resolution === 'AUTO'
+          () => window.__statsFixture.generationEvents.slice(beforeRange).some(item => (
+            JSON.parse(item.dataset).range_seconds === rangeSeconds
           )),
           {description: `current stats ${rangeSeconds}/AUTO range generation`}
         );

@@ -176,7 +176,18 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
     service.latest_generation["same"] = 2
     service._supersede_stale_queued("same", 2)
     expired = service._queue_record("text_facts", {"text": "expired"}, "freshness", 1, "expired", deadline_at=time.monotonic() - 1.0)
-    running = service._queue_record("text_facts", {"text": "hang"}, "freshness", 1, "hang", deadline_at=time.monotonic() - 1.0)
+    # Past the BACKSTOP, not merely past the deadline. This row asserts a RUNNING record is
+    # terminalized; a running job now carries its deadline into its worker and owns the terminal
+    # state for JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS, so only work that never answers is
+    # terminalized blind. `expired` above stays a bare deadline on purpose: queued expiry is exact.
+    running = service._queue_record(
+        "text_facts",
+        {"text": "hang"},
+        "freshness",
+        1,
+        "hang",
+        deadline_at=time.monotonic() - jobd.JOBD_RUNNING_DEADLINE_BACKSTOP_SECONDS - 1.0,
+    )
     running.status = "running"
     running.future = Future()
     waiting = service._queue_record("text_facts", {"text": "wait"}, "freshness", 1, "wait")

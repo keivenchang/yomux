@@ -6,6 +6,7 @@ import base64
 import contextlib
 import copy
 import difflib
+import fcntl
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import re
 import selectors
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -73,13 +75,26 @@ def _git_with_pinned_repo_process(
             )
         )
     )
-    args_with_repo = ["git", "-C", str(repo.descriptor_path()), *args]
+    # `/dev/fd/<n>` on Darwin is a devfs character-special node: it duplicates a REGULAR file
+    # descriptor for streaming (`cat < /dev/fd/3`), but a DIRECTORY descriptor exposed there
+    # cannot be chdir'd, opendir'd, or used as a path prefix at all (`Not a directory` /
+    # `No such file or directory` for every nested lookup) -- unlike Linux's `/proc/self/fd/<n>`,
+    # which is a real symlink into the mount namespace and supports both. There is no path string
+    # that substitutes for "the directory already open at this fd" on Darwin; the only correct
+    # primitive is `fchdir(fd)`, which resolves the same identity the descriptor pin already
+    # guarantees (no re-open, no re-resolution, so this does not reopen the TOCTOU window that
+    # `SafePathHandle.descriptor_path()` deliberately closed -- see its docstring on why a
+    # `F_GETPATH`-resolved name was rejected there). `preexec_fn` runs once, post-fork, pre-exec,
+    # doing exactly one syscall, which is the documented safe-minimal use of that hook.
+    use_fchdir_cwd = sys.platform == "darwin"
+    repo_cwd_args = [] if use_fchdir_cwd else ["-C", str(repo.descriptor_path())]
+    popen_extra_kwargs: dict[str, Any] = {"preexec_fn": lambda: os.fchdir(repo.descriptor)} if use_fchdir_cwd else {}
+    args_with_repo = ["git", *repo_cwd_args, *args]
     process_env = None
     if git_dir_handle is not None:
         args_with_repo = [
             "git",
-            "-C",
-            str(repo.descriptor_path()),
+            *repo_cwd_args,
             "-c",
             "advice.graftFileDeprecated=false",
             *args,
@@ -90,7 +105,7 @@ def _git_with_pinned_repo_process(
             if not key.startswith("GIT_")
         }
         process_env["GIT_DIR"] = git_directory or str(git_dir_handle.descriptor_path())
-        process_env["GIT_WORK_TREE"] = str(repo.descriptor_path())
+        process_env["GIT_WORK_TREE"] = "." if use_fchdir_cwd else str(repo.descriptor_path())
         process_env["GIT_COMMON_DIR"] = git_common_directory or str(
             (git_common_dir_handle or git_dir_handle).descriptor_path()
         )
@@ -106,6 +121,21 @@ def _git_with_pinned_repo_process(
             process_env["GIT_OBJECT_DIRECTORY"] = git_object_directory
         if shallow_file_path is not None:
             process_env["GIT_SHALLOW_FILE"] = shallow_file_path
+    if use_fchdir_cwd:
+        # `/dev/fd/<n>` on Darwin is `dup()` semantics: every reader shares ONE underlying file
+        # offset (Linux's `/proc/self/fd/<n>` instead reopens fresh at 0 for each reader). Pack
+        # files are exposed to the child via a symlink to `/dev/fd/<n>` and this same descriptor
+        # is reused across multiple subprocess invocations within one pinned scope (current-head,
+        # then history, then per-commit reads, ...); without rewinding, the first git process to
+        # read a pack exhausts the shared offset and every later git process sees EOF immediately
+        # -- reported by git as "not a GIT packfile" for a file that is perfectly intact. Rewind
+        # every regular-file descriptor before each invocation; directory descriptors (reached via
+        # fchdir, not read) reject SEEK_SET and are skipped.
+        for descriptor in descriptors:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+            except OSError:
+                continue
     if max_output_bytes is not None:
         output_limit = max(1, int(max_output_bytes))
         stderr_limit = 64 * 1024
@@ -115,6 +145,7 @@ def _git_with_pinned_repo_process(
             stderr=subprocess.PIPE,
             pass_fds=descriptors,
             env=process_env,
+            **popen_extra_kwargs,
         )
         if process.stdout is None or process.stderr is None:
             process.kill()
@@ -195,6 +226,7 @@ def _git_with_pinned_repo_process(
         text=not binary,
         pass_fds=descriptors,
         env=process_env,
+        **popen_extra_kwargs,
     )
 
 
@@ -250,13 +282,17 @@ def _git_at_path(args: list[str], cwd: Path, timeout: float) -> subprocess.Compl
             descriptor = None
     if descriptor is None:
         return git(args, cwd=str(cwd), timeout=timeout)
+    # Same Darwin `/dev/fd` directory limitation as `_git_with_pinned_repo_process` above: `-C
+    # <fd-path>` cannot chdir on Darwin, so fchdir the fd directly in the child instead.
+    use_fchdir_cwd = sys.platform == "darwin"
     return subprocess.run(
-        ["git", "-C", str(cwd), *args],
+        ["git", *([] if use_fchdir_cwd else ["-C", str(cwd)]), *args],
         capture_output=True,
         timeout=timeout,
         check=False,
         text=True,
         pass_fds=(descriptor,),
+        **({"preexec_fn": lambda: os.fchdir(descriptor)} if use_fchdir_cwd else {}),
     )
 
 
@@ -624,7 +660,19 @@ def invalidate_repo_info_paths(paths_to_invalidate: list[Path] | tuple[Path, ...
 
 def git_repo_info(repo: Path, include_status: bool = True, timeout: float | None = None) -> dict[str, Any]:
     """Return repo badges within the caller's whole-operation timeout, if supplied."""
-    root = str(repo.expanduser().resolve(strict=False))
+    # Finder listing passes a pinned `/dev/fd/N`/`/proc/self/fd/N` descriptor path here (see
+    # `listing.py`'s `inspection_path`) so `_directory_is_repo`'s existence check is fd-safe. On
+    # Linux `.resolve()` follows the `/proc/self/fd/N` symlink back to the true directory; Darwin's
+    # `/dev/fd/N` is a devfs node, not a symlink, so `root` stayed literally `/dev/fd/N/...` there.
+    # `_REPO_INFO_CACHE` is a PROCESS-WIDE cache keyed on `root` -- an unresolved fd-string key is
+    # not just wrong for display, it is actively unsafe as a cache key, since the OS recycles low
+    # fd numbers quickly: two unrelated repos opened at different times can reuse the same fd
+    # number and collide onto the identical cache key, serving one repo's cached branch/status
+    # for a completely different repo. `git_control_files_signature` below also opens `root` by
+    # plain name (not fd-relative), which silently found nothing under an unresolvable fd-string
+    # path either. Resolve once, up front, and use the resolved path everywhere in this function.
+    repo = paths._darwin_devfs_live_realpath(repo.expanduser().resolve(strict=False))
+    root = str(repo)
     cache_key = (root, bool(include_status))
     now = time.monotonic()
     deadline = None if timeout is None else now + max(0.0, float(timeout))
@@ -1135,14 +1183,32 @@ def _ensure_no_git_alternate_objects(objects_handle: paths.SafePathHandle) -> No
 
 def _traversable_descriptor_file(handle: paths.SafePathHandle) -> str:
     expected = (handle.stat_result.st_dev, handle.stat_result.st_ino)
-    for root in (Path("/proc/self/fd"), Path("/dev/fd")):
-        candidate = root / str(handle.descriptor)
+    candidate = Path("/dev/fd") / str(handle.descriptor)
+    if sys.platform == "darwin":
+        # `/dev/fd/<n>` is synthesized by devfs on macOS: stat()-ing the node itself reports
+        # devfs's own st_dev, not the underlying filesystem's, so it can never match `expected`
+        # even though the fd is legitimate (ino always matches; dev never does). F_GETPATH resolves
+        # the fd back to its real filesystem path so the identity check compares apples to apples;
+        # the returned candidate is still the fd-relative `/dev/fd/<n>` path, not the resolved one,
+        # so callers keep the same rename-proof reference `/proc/self/fd` gives on Linux.
         try:
-            current = os.stat(candidate)
-        except OSError:
-            continue
-        if (current.st_dev, current.st_ino) == expected:
-            return str(candidate)
+            raw = fcntl.fcntl(handle.descriptor, fcntl.F_GETPATH, b"\0" * 1024)
+            resolved = raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+            current = os.stat(resolved)
+        except (OSError, UnicodeDecodeError):
+            pass
+        else:
+            if (current.st_dev, current.st_ino) == expected:
+                return str(candidate)
+    else:
+        for root in (Path("/proc/self/fd"), Path("/dev/fd")):
+            candidate = root / str(handle.descriptor)
+            try:
+                current = os.stat(candidate)
+            except OSError:
+                continue
+            if (current.st_dev, current.st_ino) == expected:
+                return str(candidate)
     raise _history_error(
         "Git control-file descriptors cannot be exposed on this platform",
         key="fs.error.operationFailed",

@@ -2221,6 +2221,17 @@ async function runLayoutRestoreSuite() {
     assert.equal(/const attentionAlertTimers = new Map\(\)|function replaceSessionMetadata[\s\S]*?toastRecords,/.test(source), false, 'toast records are not split into a parallel timer map or passed through session-key rekeying');
     assert.ok(source.includes('const attentionAcknowledgementRecords = new Map();'), 'acknowledgement cache, timer, and pending state share one key record');
     assert.equal(/const (?:promptAttentionClears|attentionAcknowledgementTimers) = new Map\(\)|const attentionAcknowledgementPendingKeys = new Set\(\)/.test(source), false, 'parallel acknowledgement containers cannot return');
+    // General form of the same rule: NO top-level `attentionAcknowledgement*` (or
+    // `promptAttention*`) Map/Set may exist besides the one canonical `attentionAcknowledgementRecords`
+    // owner -- catches any future differently-named parallel container (e.g. a permanently-rejected
+    // key set), not just the two specific historical names above.
+    assert.deepEqual(
+      [...source.matchAll(/^const ((?:attentionAcknowledgement|promptAttention)\w*) = new (?:Map|Set)\(\);/gm)]
+        .map(match => match[1])
+        .filter(name => name !== 'attentionAcknowledgementRecords'),
+      [],
+      'no parallel attention-acknowledgement Map/Set may exist beside attentionAcknowledgementRecords',
+    );
     assert.ok(/function clearSessionEphemeralRuntimeState\(session\)[\s\S]*tmuxWindowNavigationRecords\.delete\(session\)[\s\S]*terminalTmuxInputStates\.delete\(session\)[\s\S]*altScreenWheelRemainder\.delete\(session\)[\s\S]*clearAgentWindowActivityRecordsForSession\(session\)[\s\S]*clearSessionAttentionAcknowledgementRecords\(session\)/.test(source), 'one detach helper clears every in-flight session runtime family');
     assert.equal((source.match(/pendingPaneViewStateCaptures\.delete\(session\)/g) || []).length, 1, 'pending pane-view captures have one session lifecycle owner');
     assert.ok(/function detachSessionUi\(session\)[\s\S]*pendingPaneViewStateCaptures\.delete\(session\)[\s\S]*function clearSessionUiState/.test(source), 'detach owns pending pane-view capture cleanup before durable session state is cleared or migrated');
@@ -2960,7 +2971,7 @@ async function runLayoutRestoreSuite() {
     const firstTimer = api.attentionAcknowledgementRecordForTest(firstKey).timer;
     assert.equal(api.acknowledgeAttentionKeysForTest([firstKey], {delayMs: 25, localOnly: true}), true);
     assert.equal(timers.size, timerCountBefore + 1, 'repeated delayed acknowledgement reuses its record timer');
-    assert.deepEqual(api.attentionAcknowledgementRecordForTest(firstKey), {recordedAt: null, timer: firstTimer, pending: false});
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(firstKey), {recordedAt: null, timer: firstTimer, pending: false, rejected: false});
     const staleTimer = timers.get(firstTimer).callback;
 
     api.acknowledgeAttentionKeysForTest([secondKey], {delayMs: 25, localOnly: true});
@@ -2968,7 +2979,7 @@ async function runLayoutRestoreSuite() {
     api.clearSessionAttentionAcknowledgementRecordsForTest('1');
     assert.deepEqual(cleared, [firstTimer], 'session cleanup cancels only its delayed acknowledgement');
     assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null);
-    assert.deepEqual(api.attentionAcknowledgementRecordForTest(secondKey), {recordedAt: null, timer: secondTimer, pending: false});
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(secondKey), {recordedAt: null, timer: secondTimer, pending: false, rejected: false});
     staleTimer();
     assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null, 'a stale cleared timer cannot recreate its session record');
 
@@ -2989,13 +3000,57 @@ async function runLayoutRestoreSuite() {
     let resolveFetch;
     api.setFetchForTest(() => new Promise(resolve => { resolveFetch = resolve; }));
     assert.equal(api.postAttentionAcknowledgementKeysForTest([key], {localOnly: false}), true);
-    assert.deepEqual(api.attentionAcknowledgementRecordForTest(key), {recordedAt: null, timer: null, pending: true});
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(key), {recordedAt: null, timer: null, pending: true, rejected: false});
     api.stopSessionUiForTest('1');
     assert.equal(api.attentionAcknowledgementRecordForTest(key), null);
     resolveFetch(jsonResponse({acknowledged: [key]}));
     await flushAsyncWork();
     await flushAsyncWork();
     assert.equal(api.attentionAcknowledgementRecordForTest(key), null, 'the resolved request filters keys whose session detached while it was in flight');
+  });
+
+  await testAsync('a permanent 400 suppresses repeat POSTs of the same key while a transient failure still retries', async () => {
+    // Forces the retry-loop bug red before the fix: a permanently-invalid key (the server will
+    // never accept it) must not be resubmitted on every later acknowledgement attempt, while an
+    // ordinary transient failure (network blip, 5xx) must still be retried -- this is a backstop
+    // against a still-malformed key, not a general "stop retrying acknowledgements" switch.
+    const api = loadYolomux('', ['1']);
+    const rejectedKey = '["prompt","1","permanently-rejected"]';
+    const transientKey = '["prompt","1","transient-failure"]';
+    let rejectedCalls = 0;
+    let transientCalls = 0;
+    api.setFetchForTest((url, options) => {
+      if (!String(url).includes('/api/attention-ack')) return Promise.resolve(jsonResponse({}));
+      const body = JSON.parse(options?.body || '{}');
+      if (Array.isArray(body.keys) && body.keys.includes(rejectedKey)) {
+        rejectedCalls += 1;
+        return Promise.resolve(jsonResponse({error: 'attention acknowledgement keys required'}, 400));
+      }
+      transientCalls += 1;
+      return Promise.reject(new Error('network blip'));
+    });
+
+    assert.equal(api.postAttentionAcknowledgementKeysForTest([rejectedKey], {localOnly: false}), true);
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(rejectedCalls, 1);
+    assert.equal(api.attentionAcknowledgementRecordForTest(rejectedKey)?.rejected, true, 'a 400 marks the key rejected on its one shared record');
+
+    // A second acknowledgement attempt for the SAME rejected key must not POST again.
+    assert.equal(api.postAttentionAcknowledgementKeysForTest([rejectedKey], {localOnly: false}), true);
+    await flushAsyncWork();
+    assert.equal(rejectedCalls, 1, 'a permanently-rejected key is not resubmitted');
+
+    // A transient failure (not a 400) must NOT be marked rejected, and must retry on the next attempt.
+    assert.equal(api.postAttentionAcknowledgementKeysForTest([transientKey], {localOnly: false}), true);
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(transientCalls, 1);
+    assert.notEqual(api.attentionAcknowledgementRecordForTest(transientKey)?.rejected, true, 'a transient failure does not mark the key rejected');
+    assert.equal(api.postAttentionAcknowledgementKeysForTest([transientKey], {localOnly: false}), true);
+    await flushAsyncWork();
+    await flushAsyncWork();
+    assert.equal(transientCalls, 2, 'a transient failure is retried on the next acknowledgement attempt');
   });
 
   test('upload result entries and cleanup timer share one session record', () => {

@@ -2533,8 +2533,46 @@ function stateDef(key) {
   return {...base, label: t(`state.${resolvedKey}`), short: base.hasShort ? t(`state.short.${resolvedKey}`) : ''};
 }
 
+// Must match the server's own bound (`ATTENTION_ACK_KEY_MAX_LENGTH` in app.py) -- the server
+// enforces this same limit in UTF-8 bytes on every key it receives, including this client-local
+// fallback shape, and rejects the whole batch with 400 when every key in it is oversized.
+const ATTENTION_ACK_KEY_MAX_BYTES = 512;
+
+function attentionAcknowledgementUtf8ByteLength(text) {
+  return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(text).length : String(text).length;
+}
+
+// A synchronous, dependency-free 64-bit-ish digest (two FNV-1a lanes). `crypto.subtle.digest` is
+// async and this key must resolve in the same tick its caller already runs in; this is a local
+// dedup identifier, not a security boundary, so a strong non-cryptographic hash is sufficient.
+function attentionAcknowledgementSyncDigest(text) {
+  let lane1 = 0x811c9dc5;
+  let lane2 = 0x1000193;
+  const value = String(text);
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    lane1 = Math.imul(lane1 ^ code, 0x01000193) >>> 0;
+    lane2 = Math.imul(lane2 ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `${lane1.toString(16).padStart(8, '0')}${lane2.toString(16).padStart(8, '0')}`;
+}
+
 function attentionAcknowledgementKey(parts = []) {
-  return JSON.stringify((Array.isArray(parts) ? parts : []).map(part => String(part || '')));
+  const encoded = (Array.isArray(parts) ? parts : []).map(part => String(part || ''));
+  const value = JSON.stringify(encoded);
+  if (!encoded.length || attentionAcknowledgementUtf8ByteLength(value) <= ATTENTION_ACK_KEY_MAX_BYTES) return value;
+  // Oversized: this is normally free-text prompt/question signature text, which has no length
+  // cap of its own and is always appended last by every caller. Digest only that trailing part
+  // -- deterministically, so the identical long value always collapses to the identical short
+  // key (idempotent, not lossy-truncated, which would let two different long values that share a
+  // prefix collide) -- and leave the leading structured parts (kind/session/window markers a
+  // caller may parse back out via `attentionAcknowledgementKeySession`) untouched.
+  const digested = encoded.slice();
+  digested[digested.length - 1] = attentionAcknowledgementSyncDigest(encoded[encoded.length - 1]);
+  const digestedValue = JSON.stringify(digested);
+  if (attentionAcknowledgementUtf8ByteLength(digestedValue) <= ATTENTION_ACK_KEY_MAX_BYTES) return digestedValue;
+  // Extremely defensive: more than one oversized part. Digest everything.
+  return JSON.stringify(encoded.map(part => attentionAcknowledgementSyncDigest(part)));
 }
 
 function attentionAcknowledgementKeySession(key) {
@@ -2551,7 +2589,7 @@ function attentionAcknowledgementRecord(key, create = false) {
   if (!value) return null;
   let record = attentionAcknowledgementRecords.get(value) || null;
   if (!record && create) {
-    record = {recordedAt: null, timer: null, pending: false};
+    record = {recordedAt: null, timer: null, pending: false, rejected: false};
     attentionAcknowledgementRecords.set(value, record);
   }
   return record;
@@ -2571,7 +2609,12 @@ function pruneAttentionAcknowledgementRecords() {
 }
 
 function releaseIdleAttentionAcknowledgementRecord(key, record = attentionAcknowledgementRecord(key)) {
-  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true) return false;
+  // A permanently-rejected record must survive release: it is the only thing stopping the next
+  // idle-record sweep from immediately forgetting that this exact key was already told no, which
+  // would let the retry loop it exists to prevent start right back up. It still leaves through the
+  // ordinary bounded size eviction in `pruneAttentionAcknowledgementRecords`, same as every other
+  // record -- this is not a second unbounded container, just a longer-lived entry in the one owner.
+  if (!record || record.recordedAt !== null || record.timer !== null || record.pending === true || record.rejected === true) return false;
   attentionAcknowledgementRecords.delete(String(key || ''));
   return true;
 }
@@ -2682,6 +2725,15 @@ async function submitAttentionAcknowledgementKeys(keys) {
     applyAttentionAcknowledgementResponse({...payload, acknowledged});
   } catch (error) {
     console.warn('attention acknowledgement failed', error);
+    // A 400 means the server permanently refused this exact key (malformed/oversized), not a
+    // transient failure -- resubmitting it forever would only reproduce the same 400 forever.
+    // Mark it on the SAME bounded record every other acknowledgement field lives on (never a
+    // second parallel container -- see the "parallel acknowledgement containers cannot return"
+    // guard in layout_restore.test.js); this is a backstop, not a substitute for keeping keys
+    // valid in the first place (see `attentionAcknowledgementKey`'s own bounding).
+    if (Number(error?.status) === 400) {
+      for (const key of keys) attentionAcknowledgementRecord(key, true).rejected = true;
+    }
   } finally {
     for (const key of keys) {
       const record = attentionAcknowledgementRecord(key);
@@ -2700,7 +2752,9 @@ function postAttentionAcknowledgementKeys(keys, options = {}) {
     applyAttentionAcknowledgementResponse({acknowledged: unique});
     return true;
   }
-  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true && !attentionAcknowledgementKeyIsRecorded(key));
+  const pending = unique.filter(key => attentionAcknowledgementRecord(key)?.pending !== true
+    && attentionAcknowledgementRecord(key)?.rejected !== true
+    && !attentionAcknowledgementKeyIsRecorded(key));
   if (!pending.length) return true;
   for (const key of pending) attentionAcknowledgementRecord(key, true).pending = true;
   pruneAttentionAcknowledgementRecords();

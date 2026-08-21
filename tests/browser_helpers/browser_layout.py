@@ -2480,16 +2480,32 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           if (this.url.startsWith('/api/stats-stream?')) {
             const streamUrl = new URL(this.url, location.origin);
             const rangeSeconds = Number(streamUrl.searchParams.get('range_seconds'));
-            const resolutionSeconds = Number(streamUrl.searchParams.get('resolution_seconds'));
+            const requestedText = streamUrl.searchParams.get('resolution') || 'AUTO';
+            const requestedResolution = requestedText === 'AUTO' ? 'AUTO' : Number(requestedText);
+            const capability = window.__fixtureStatsCapabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+            const resolutionSeconds = requestedResolution === 'AUTO'
+              ? capability?.auto_resolution_seconds
+              : requestedResolution;
             const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
-            let cacheGeneration = Number(streamUrl.searchParams.get('after_cache_generation'));
-            let revision = Number(streamUrl.searchParams.get('after_revision'));
+            let cacheGeneration = model.cacheGeneration;
+            let revision = 0;
             const cadenceSeconds = Math.min(
               resolutionSeconds,
               window.__fixtureStatsCapabilities.max_live_cadence_seconds,
             );
             setTimeout(() => {
-              if (!this.closed) this.emit('ready', {cache_generation: cacheGeneration, revision});
+              if (this.closed) return;
+              const snapshot = fixtureStatsSnapshot(model, requestedResolution);
+              this.emit('ack', {
+                cache_generation: cacheGeneration,
+                chunk_count: 1,
+                not_modified: false,
+                range_seconds: rangeSeconds,
+                requested_resolution: requestedResolution,
+                resolution_seconds: resolutionSeconds,
+              });
+              this.emit('snapshot', snapshot);
+              this.emit('ready', {cache_generation: cacheGeneration, revision});
             }, 0);
             this.statsTimer = setInterval(() => {
               if (this.closed) return;
@@ -2568,7 +2584,32 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           open,
         };
       }
+      function fixtureStatsSnapshot(model, requestedResolution) {
+        const bucketCount = model.rangeSeconds / model.resolutionSeconds;
+        return {
+          protocol_version: 2,
+          range_seconds: model.rangeSeconds,
+          requested_resolution: requestedResolution,
+          resolution_seconds: model.resolutionSeconds,
+          window_start: model.windowStart,
+          window_end: model.windowEnd,
+          generated_at: model.windowEnd,
+          source_generation: model.sourceGeneration,
+          cache_generation: model.cacheGeneration,
+          rightmost_open: true,
+          buckets: Array.from({length: bucketCount}, (_unused, index) => {
+            const start = model.windowStart + index * model.resolutionSeconds;
+            return fixtureStatsBucket(start, model.resolutionSeconds, index === bucketCount - 1);
+          }),
+          no_data: [],
+          cost_report: fixtureStatsCostReport(),
+        };
+      }
       function fixtureStatsDelta(model, baseCacheGeneration, revision) {
+        const retiredStart = model.windowStart;
+        const previousTailStart = model.windowEnd - model.resolutionSeconds;
+        model.windowStart += model.resolutionSeconds;
+        model.windowEnd += model.resolutionSeconds;
         model.sourceGeneration = Math.max(model.sourceGeneration + 1, baseCacheGeneration + 1);
         model.cacheGeneration = baseCacheGeneration + 1;
         return {
@@ -2579,9 +2620,12 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
           base_cache_generation: baseCacheGeneration,
           cache_generation: model.cacheGeneration,
           revision,
-          buckets: [fixtureStatsBucket(model.windowEnd - model.resolutionSeconds, model.resolutionSeconds, true)],
+          buckets: [
+            fixtureStatsBucket(previousTailStart, model.resolutionSeconds, false),
+            fixtureStatsBucket(model.windowEnd - model.resolutionSeconds, model.resolutionSeconds, true),
+          ],
           no_data: [],
-          tombstones: [],
+          tombstones: [{kind: 'bucket', start: retiredStart, duration: model.resolutionSeconds}],
           cost_report: fixtureStatsCostReport(),
         };
       }
@@ -3002,24 +3046,7 @@ def render_browser_boot_scenario(scenario: BrowserBootScenario) -> str:
             return jsonResponse({error: 'unsupported fixture stats selection'}, 400);
           }
           const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
-          return jsonResponse({
-            protocol_version: 2,
-            range_seconds: rangeSeconds,
-            requested_resolution: requestedResolution === 'AUTO' ? 'AUTO' : resolutionSeconds,
-            resolution_seconds: resolutionSeconds,
-            window_start: model.windowStart,
-            window_end: model.windowEnd,
-            generated_at: model.windowEnd,
-            source_generation: model.sourceGeneration,
-            cache_generation: model.cacheGeneration,
-            rightmost_open: true,
-            buckets: Array.from({length: rangeSeconds / resolutionSeconds}, (_unused, index) => {
-              const start = model.windowStart + index * resolutionSeconds;
-              return fixtureStatsBucket(start, resolutionSeconds, index === rangeSeconds / resolutionSeconds - 1);
-            }),
-            no_data: [],
-            cost_report: fixtureStatsCostReport(),
-          });
+          return jsonResponse(fixtureStatsSnapshot(model, requestedResolution === 'AUTO' ? 'AUTO' : resolutionSeconds));
         }
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});

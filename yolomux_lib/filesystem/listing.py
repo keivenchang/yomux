@@ -194,8 +194,9 @@ def _entry_info(
                     include_status=False,
                     timeout=remaining,
                 )
-                info["repo"]["root"] = str(resolved or path)
-                info["repo"]["name"] = (resolved or path).name
+                display_root = paths._darwin_devfs_live_realpath(resolved) if resolved is not None else path
+                info["repo"]["root"] = str(display_root)
+                info["repo"]["name"] = display_root.name
                 _record_elapsed(performance_details, "repo_info_ms", started)
             else:
                 repo = repo_info_cache.get(repo_key)
@@ -206,8 +207,9 @@ def _entry_info(
                         include_status=False,
                         timeout=remaining,
                     )
-                    repo["root"] = str(resolved or path)
-                    repo["name"] = (resolved or path).name
+                    display_root = paths._darwin_devfs_live_realpath(resolved) if resolved is not None else path
+                    repo["root"] = str(display_root)
+                    repo["name"] = display_root.name
                     _record_elapsed(performance_details, "repo_info_ms", started)
                     repo_info_cache[repo_key] = repo
                 info["repo"] = repo
@@ -288,7 +290,14 @@ def _visible_directory_names(
     directory_descriptor = None
     try:
         requested_parent = requested_path or path
-        resolved_parent = paths._normalized_scope_path(path)
+        # `path` is this scan's pinned root, expressed as its `/dev/fd/N`/`/proc/self/fd/N`
+        # descriptor path. On Linux `_normalized_scope_path` already resolves it to the true
+        # directory by following the `/proc/self/fd/N` symlink; on Darwin `/dev/fd/N` isn't a
+        # symlink, so without this it stays raw, and every child's `resolved` built from it below
+        # (used for both display fields AND `_path_is_secret`'s directory-component matching)
+        # would silently defeat secret-directory detection for a child whose parent was swapped
+        # after this exact descriptor's own authorization. See `_darwin_devfs_live_realpath`.
+        resolved_parent = paths._darwin_devfs_live_realpath(paths._normalized_scope_path(path))
         descriptor_parent = path.parent
         if descriptor_parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
             directory_descriptor = os.open(

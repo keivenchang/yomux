@@ -292,7 +292,7 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
         })
         assert status == 200 and observations["accepted"] == 1
         stream_request = Request(
-            f"{base_url}/api/stats-stream?range_seconds=86400&resolution_seconds=300&client_id=stats-24h-correctness&after_cache_generation={snapshot['cache_generation']}&after_revision=0",
+            f"{base_url}/api/stats-stream?range_seconds=86400&resolution=300&client_id=stats-24h-correctness&since_generation=0",
         )
         stream_started = time.perf_counter()
         with urlopen(stream_request, timeout=10) as stream:
@@ -317,9 +317,9 @@ def exercise_combined_observations_and_transcripts(monkeypatch, tmp_path: Path) 
             return invoke
 
         monkeypatch.setattr(app.stats_current_http, "snapshot", delayed(app.stats_current_http.snapshot))
+        monkeypatch.setattr(app.stats_current_http, "snapshot_stream", delayed(app.stats_current_http.snapshot_stream))
         monkeypatch.setattr(app.stats_current_http, "capabilities", delayed(app.stats_current_http.capabilities))
         monkeypatch.setattr(app.stats_current_http, "retry", delayed(app.stats_current_http.retry))
-        monkeypatch.setattr(app.stats_current_http, "delta_stream", delayed(app.stats_current_http.delta_stream))
         monkeypatch.setattr(app, "record_current_browser_observations", delayed(app.record_current_browser_observations))
         injected_calls = (
             ("stats-snapshot", "/api/stats-snapshot?range_seconds=86400&resolution=300&client_id=stats-24h-correctness", None),

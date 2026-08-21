@@ -18324,3 +18324,47 @@ def test_authenticated_kill_session_api_removes_only_the_exact_private_socket_ta
     # `gate_tmux` owns teardown: it inventories this remaining pane by PID/start identity, kills
     # this exact private server, waits for process exit, and removes the socket directory.
     assert tmux_runtime.socket_path.exists()
+
+
+def _partial_delete_failure(deleted_paths):
+    return {
+        "job": {
+            "failure": {
+                "status": 409,
+                "filesystem_error": {
+                    "error": "recursive delete stopped at /tmp/tree/03.txt",
+                    "status": 409,
+                    "partial": True,
+                    "delete_reason": "deadline_exceeded",
+                    "failed_path": "/tmp/tree/03.txt",
+                    "deleted_paths": list(deleted_paths),
+                },
+            },
+        },
+    }
+
+
+def test_a_partial_recursive_delete_reaches_the_requester_with_the_paths_it_removed():
+    deleted = ["/tmp/tree/01.txt", "/tmp/tree/02.txt"]
+
+    translated = app_module.TmuxWebtermApp.typed_filesystem_operation_failure(_partial_delete_failure(deleted))
+
+    assert translated is not None
+    error, status = translated
+    assert status == HTTPStatus.CONFLICT
+    assert error["partial"] is True
+    assert error["delete_reason"] == "deadline_exceeded"
+    assert error["failed_path"] == "/tmp/tree/03.txt"
+    # The exact list, not a count and not a truncation: each path needs its own invalidation.
+    assert error["deleted_paths"] == deleted
+    assert error["terminal"] is True
+
+
+def test_the_translated_partial_delete_does_not_alias_the_worker_payload():
+    """The caller may hold this result; mutating it must not reach back into the failure record."""
+    failure = _partial_delete_failure(["/tmp/tree/01.txt"])
+
+    error, _status = app_module.TmuxWebtermApp.typed_filesystem_operation_failure(failure)
+    error["deleted_paths"].append("/tmp/tree/99.txt")
+
+    assert failure["job"]["failure"]["filesystem_error"]["deleted_paths"] == ["/tmp/tree/01.txt"]

@@ -10,6 +10,7 @@ import json
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -276,40 +277,129 @@ def validated_child_name(raw_name: str) -> str:
     return name
 
 
+class PartialDeleteError(paths.FilesystemError):
+    """A recursive delete made a visible change before it stopped.
+
+    A caller must not report this as an ordinary failed delete: the deleted paths need cache and
+    search invalidation, and the full failed path is needed to distinguish a stopped walk from a
+    request that was refused before it changed anything.
+    """
+
+    def __init__(self, reason: str, failed_path: Path, deleted_paths: list[str]):
+        super().__init__(
+            f"recursive delete stopped at {failed_path}",
+            status=409,
+            message_key="fs.error.operationFailed",
+            message_params={"path": str(failed_path), "reason": str(reason)},
+        )
+        self.reason = str(reason)
+        self.failed_path = str(failed_path)
+        self.deleted_paths = list(deleted_paths)
+
+    def payload(self, **fields: Any) -> Any:
+        return super().payload(
+            **fields,
+            partial=bool(self.deleted_paths),
+            delete_reason=self.reason,
+            failed_path=self.failed_path,
+            deleted_paths=list(self.deleted_paths),
+        )
+
+
+def _raise_if_delete_stopped(
+    requested_path: Path,
+    deleted_paths: list[str],
+    *,
+    cancel_event: Any | None,
+    deadline_monotonic: float | None,
+) -> None:
+    """Cooperatively stop before another destructive recursive-delete step."""
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise PartialDeleteError("cancelled", requested_path, deleted_paths)
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise PartialDeleteError("deadline_exceeded", requested_path, deleted_paths)
+
+
 def _delete_directory_contents(
     directory_fd: int,
     requested_directory: Path,
     resolved_directory: Path,
+    *,
+    deleted_paths: list[str],
+    cancel_event: Any | None,
+    deadline_monotonic: float | None,
 ) -> None:
     """Delete descendants through pinned directory descriptors so every generation is observable."""
 
+    _raise_if_delete_stopped(
+        requested_directory,
+        deleted_paths,
+        cancel_event=cancel_event,
+        deadline_monotonic=deadline_monotonic,
+    )
     with os.scandir(directory_fd) as entries:
         for entry in sorted(entries, key=lambda item: item.name.lower()):
             requested_child = requested_directory / entry.name
             resolved_child = resolved_directory / entry.name
-            paths.name_observed("delete_path", requested_child)
-            entry_stat = entry.stat(follow_symlinks=False)
-            if stat.S_ISDIR(entry_stat.st_mode):
-                with paths.safe_child(
-                    directory_fd,
-                    requested_child,
-                    resolved_child,
-                    flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-                    operation="delete_path",
-                    observe_name=False,
-                ) as child:
-                    _delete_directory_contents(
-                        child.descriptor,
+            _raise_if_delete_stopped(
+                requested_child,
+                deleted_paths,
+                cancel_event=cancel_event,
+                deadline_monotonic=deadline_monotonic,
+            )
+            try:
+                paths.name_observed("delete_path", requested_child)
+                entry_stat = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    with paths.safe_child(
+                        directory_fd,
                         requested_child,
                         resolved_child,
+                        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                        operation="delete_path",
+                        observe_name=False,
+                    ) as child:
+                        _delete_directory_contents(
+                            child.descriptor,
+                            requested_child,
+                            resolved_child,
+                            deleted_paths=deleted_paths,
+                            cancel_event=cancel_event,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                    _raise_if_delete_stopped(
+                        requested_child,
+                        deleted_paths,
+                        cancel_event=cancel_event,
+                        deadline_monotonic=deadline_monotonic,
                     )
-                os.rmdir(entry.name, dir_fd=directory_fd)
-            else:
-                paths.authority_pinned("delete_path", requested_child)
-                os.unlink(entry.name, dir_fd=directory_fd)
+                    os.rmdir(entry.name, dir_fd=directory_fd)
+                else:
+                    paths.authority_pinned("delete_path", requested_child)
+                    _raise_if_delete_stopped(
+                        requested_child,
+                        deleted_paths,
+                        cancel_event=cancel_event,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    os.unlink(entry.name, dir_fd=directory_fd)
+            except PartialDeleteError:
+                raise
+            except (OSError, paths.FilesystemError) as error:
+                if deleted_paths:
+                    raise PartialDeleteError("entry_failed", requested_child, deleted_paths) from error
+                raise
+            deleted_paths.append(str(requested_child))
 
 
-def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
+def delete_path(
+    raw_path: str,
+    *,
+    recursive: bool = False,
+    cancel_event: Any | None = None,
+    deadline_monotonic: float | None = None,
+) -> dict[str, Any]:
     """Delete one authorized entry, bounded by default and recursive only when asked.
 
     ONE function and ONE signature for both classes, because both must keep the same authorization
@@ -346,20 +436,37 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
                     raise
                 return {"path": str(path), "deleted": False, "kind": "dir", "pending": "subtree"}
             return {"path": str(path), "deleted": True, "kind": "dir"}
-        with paths.safe_child(
-            handle.descriptor,
-            path,
-            handle.namespace_target,
-            flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
-            operation="delete_path",
-            observe_name=False,
-        ) as target:
-            _delete_directory_contents(
-                target.descriptor,
+        deleted_paths: list[str] = []
+        try:
+            with paths.safe_child(
+                handle.descriptor,
                 path,
                 handle.namespace_target,
+                flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                operation="delete_path",
+                observe_name=False,
+            ) as target:
+                _delete_directory_contents(
+                    target.descriptor,
+                    path,
+                    handle.namespace_target,
+                    deleted_paths=deleted_paths,
+                    cancel_event=cancel_event,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            _raise_if_delete_stopped(
+                path,
+                deleted_paths,
+                cancel_event=cancel_event,
+                deadline_monotonic=deadline_monotonic,
             )
-        os.rmdir(handle.name, dir_fd=handle.descriptor)
+            os.rmdir(handle.name, dir_fd=handle.descriptor)
+        except PartialDeleteError:
+            raise
+        except (OSError, paths.FilesystemError) as error:
+            if deleted_paths:
+                raise PartialDeleteError("entry_failed", path, deleted_paths) from error
+            raise
         return {"path": str(path), "deleted": True, "kind": "dir"}
 
 

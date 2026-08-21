@@ -28,6 +28,28 @@ WATCHD_MAX_PATHS = 256
 # generation and worker are preserved) rather than silently truncated, so the count passed
 # to ``watchfiles_watch`` can never exceed it.
 WATCHD_MAX_NATIVE_REGISTRATIONS = 512
+
+
+def watchd_failure_detail(error_code: str, response: dict) -> str:
+    """Render the operator-actionable measurements a typed watchd refusal carries, if any.
+
+    A capacity refusal is the one typed watchd failure that is about the REQUEST rather than about
+    the daemon: the daemon is healthy and the union is simply too large. Its response is also the
+    only one carrying numbers the operator can act on, and "a limit was exceeded" without the
+    over-subscription is the same as not reporting it -- narrowing a watched root needs the size.
+
+    This lives beside ``WATCHD_MAX_NATIVE_REGISTRATIONS`` because the daemon that raises the refusal
+    owns how it reads, and every client boundary renders it the same way from one place.
+    """
+    if error_code != "native_capacity_exceeded":
+        return ""
+    requested = response.get("native_registration_paths")
+    limit = response.get("native_registration_limit")
+    if not isinstance(requested, int) or not isinstance(limit, int):
+        return ""
+    return f": {requested} native registrations exceeds limit {limit}"
+
+
 WATCHD_MAX_CHANGED_PATHS = 256
 WATCHD_MAX_WAIT_SECONDS = 30.0
 WATCHD_DESCRIPTOR_TTL_SECONDS = 90.0

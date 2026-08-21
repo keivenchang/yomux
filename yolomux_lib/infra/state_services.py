@@ -63,6 +63,10 @@ class ClientEventWatcherRecord:
     watchd_failure_delivery: str = ""
     watchd_failure_action: str = ""
     watchd_failure_error_code: str = ""
+    # Operator-actionable measurements belonging to the FIRST failure of an episode, captured with
+    # the code rather than re-read at publish time: a later failure in the same episode can carry
+    # different numbers, and the episode reports the one it opened on.
+    watchd_failure_error_detail: str = ""
     watchd_failure_published: bool = False
     wake_event: threading.Event = field(default_factory=threading.Event)
     stop_event: threading.Event = field(default_factory=threading.Event)

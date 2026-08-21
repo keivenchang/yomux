@@ -2086,7 +2086,16 @@ def test_watchd_descriptor_sync_records_the_daemon_generation(monkeypatch):
 
 @pytest.mark.parametrize(
     ("action", "error_code"),
-    (("acquire", "unknown_lease"), ("upsert", "stale_generation"), ("remove", "upgrade_required"), ("wait_revision", "deadline_expired")),
+    (
+        ("acquire", "unknown_lease"),
+        ("upsert", "stale_generation"),
+        ("remove", "upgrade_required"),
+        ("wait_revision", "deadline_expired"),
+        # The cap refusal is the ONLY typed watchd failure the daemon raises about its own
+        # capacity rather than about transport or generation, and it was the one code the client
+        # boundary rewrote to `service_unavailable`.
+        ("upsert", "native_capacity_exceeded"),
+    ),
 )
 def test_watchd_failure_preserves_fixed_action_and_error_code(monkeypatch, action, error_code):
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
@@ -2106,6 +2115,66 @@ def test_watchd_failure_preserves_fixed_action_and_error_code(monkeypatch, actio
 
         assert emitted[0][1]["event"] == f"watchd_{action}_failure"
         assert f"({error_code})" in emitted[0][0][2]
+
+
+def test_watchd_capacity_refusal_reaches_the_operator_with_its_measured_counts(monkeypatch):
+    """The cap refusal carries the only numbers that make it actionable, and they were discarded.
+
+    `watchd.py` refuses an upsert whose union would exceed WATCHD_MAX_NATIVE_REGISTRATIONS and
+    returns `native_registration_paths` and `native_registration_limit` alongside the typed code.
+    The client boundary logged neither: the code was rewritten to `service_unavailable` because it
+    was missing from WATCHD_FAILURE_CODES, and the counts were never read at all. An operator was
+    told the daemon was unavailable when it was in fact healthy and refusing a specific, measurable
+    over-subscription they could act on by narrowing a watched root.
+    """
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord()
+    webapp.client_watch_service.event_watcher_record = record
+    emitted = []
+    monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
+    response = {
+        "ok": False,
+        "error": "native registration capacity exceeded",
+        "error_code": "native_capacity_exceeded",
+        "native_registration_paths": 514,
+        "native_registration_limit": WATCHD_MAX_NATIVE_REGISTRATIONS,
+        "watch_generation": 7,
+        "active_watch_generation": 6,
+    }
+
+    now = iter((10.0, 12.1))
+    with monkeypatch.context() as m:
+        m.setattr(app_module.time, "monotonic", lambda: next(now))
+        webapp.publish_watchd_failure(record, response, action="upsert")
+        webapp.publish_watchd_failure(record, response, action="upsert")
+
+    message = emitted[0][0][2]
+    assert "native_capacity_exceeded" in message
+    assert "service_unavailable" not in message
+    # The exact measured pair, not a rounded or truncated restatement.
+    assert "514" in message and str(WATCHD_MAX_NATIVE_REGISTRATIONS) in message
+    assert record.watchd_failure_error_code == "native_capacity_exceeded"
+    # A capacity refusal is NOT retryable-by-waiting: the daemon is healthy and the request is too
+    # large, so it must read as a failure rather than as a transport retry.
+    assert emitted[0][0][0] == "error"
+
+
+def test_an_unknown_watchd_error_code_is_still_collapsed_to_service_unavailable(monkeypatch):
+    """Negative control: admitting the cap code must not turn the allowlist into a passthrough."""
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord()
+    webapp.client_watch_service.event_watcher_record = record
+    emitted = []
+    monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
+
+    now = iter((10.0, 12.1))
+    with monkeypatch.context() as m:
+        m.setattr(app_module.time, "monotonic", lambda: next(now))
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": "totally_invented_code"}, action="upsert")
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": "totally_invented_code"}, action="upsert")
+
+    assert "(service_unavailable)" in emitted[0][0][2]
+    assert "totally_invented_code" not in emitted[0][0][2]
 
 
 def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):

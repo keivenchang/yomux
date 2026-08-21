@@ -236,7 +236,14 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             assert cell["axisSeconds"] == ("true" if cell["concrete"] == 1 else "false"), cell
         status = client.status()
         assert status["warm"] == {"ready": expected_cells, "total": expected_cells, "percent": 100.0}
-        assert status["requests"]["snapshot"] >= expected_cells
+        # Data identity is (range_seconds, resolved resolution_seconds): AUTO and the explicit
+        # value it resolves to share one already-fetched generation, so distinct network requests
+        # equal the distinct concrete resolutions offered per range, not every UI selection made.
+        expected_requests = sum(
+            len(stats_resolution.explicit_resolutions(range_seconds))
+            for range_seconds in stats_resolution.RANGE_SECONDS
+        )
+        assert status["requests"]["snapshot"] >= expected_requests
 
         follower_client = stats_client.StatsCurrentClient(socket_path, database)
         exact_request = {

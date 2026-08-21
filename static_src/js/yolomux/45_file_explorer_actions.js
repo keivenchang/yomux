@@ -181,6 +181,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   closeSessionContextMenu();
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
+  // The repo-info hover popover (branch/SHA/dirty) has its own show/hide timers and open-state
+  // tracked on the row; hiding only the popover DOM node leaves that state armed, so a still-hot
+  // pointermove over the row can reopen it right behind the context menu. Route through its own
+  // controller when bound so timers and state are reset the same way any other dismissal is.
+  row?.__yolomuxRepoHoverController?.closeNow?.();
+  hideFileTreeRepoPopover();
   if (!fileExplorerSelectedPaths.has(fullPath)) selectFileTreePath(fullPath);
   const selectedPaths = fileTreeActionPaths(fullPath);
   const infos = await Promise.all(selectedPaths.map(path => fetchFilePathInfo(path).catch(error => {
