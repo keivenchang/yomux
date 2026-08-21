@@ -16,6 +16,7 @@ from yolomux_lib.stats_current import MIN_WRITER_BUILD
 from yolomux_lib.stats_current import MIN_WRITER_PROTOCOL
 from yolomux_lib.stats_current import MigrationReconciliation
 from yolomux_lib.stats_current import RETENTION_SECONDS
+from yolomux_lib.stats_current.storage import _RING_TABLES
 from yolomux_lib.stats_current import SCHEMA_VERSION
 from yolomux_lib.stats_current import CoverageEpoch
 from yolomux_lib.stats_current import Observation
@@ -83,6 +84,9 @@ def test_schema_contains_only_original_facts_and_current_metadata(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
             )
         }
+        # Schema 8 creates the ring extension with the database rather than on request, so the
+        # exact shape is the fact tables PLUS the ring kernel. Listing both explicitly keeps this a
+        # closed set: an unexpected table still fails here rather than being absorbed by a wildcard.
         assert tables == {
             "coverage_epochs",
             "migration_reconciliation",
@@ -90,12 +94,21 @@ def test_schema_contains_only_original_facts_and_current_metadata(tmp_path):
             "schema_meta",
             "unavailable_spans",
             "usage_atoms",
+            "aggregate_publication",
+            "aggregate_rings",
+            "aggregate_ring_slots",
+            "ring_replay_cursor",
+            "ring_invalidations",
         }
         assert connection.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
         assert connection.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        # Only the FACT tables are pinned here. `_validate_ring_schema` is the single owner of the
+        # ring extension's exact columns and already fails closed on any drift, so restating them
+        # would create a second copy of one contract.
         columns = {
             table: tuple(row[1] for row in connection.execute(f"PRAGMA table_info({table})"))
             for table in tables
+            if table not in _RING_TABLES
         }
         assert columns == {
             "coverage_epochs": (

@@ -135,6 +135,15 @@ def delta_request(
 
 
 class FakeStore:
+    def pending_invalidation_cells(self):
+        """Explicit part of the store interface the service depends on.
+
+        Declared rather than absent: the service previously probed for this with `getattr` and
+        silently skipped a store without it, which hid the fact that a double did not model the
+        ledger at all. A double with no ledger returns an empty tuple, which is a real answer.
+        """
+        return ()
+
     def __init__(self):
         self.source_generation = 0
         self.reads = 0
@@ -294,20 +303,20 @@ def test_store_open_is_deferred_until_generic_runtime_owns_the_lock(tmp_path, mo
     assert service._next_vacuum_at == 3_610.0
 
 
-def test_worker_open_failure_stops_the_listener(tmp_path):
-    def fail_open(*_args, **_kwargs):
-        raise OSError("reader unavailable")
+def test_worker_publisher_open_failure_is_serialized_and_stops_the_listener(tmp_path):
+    """The worker's mutating Store.open shares the listener's write owner."""
 
+    def fail_open(*_args, **_kwargs):
+        assert service.work_lock.locked()
+        raise OSError("reader unavailable")
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
-        reader_opener=fail_open,
+        store_opener=fail_open,
+        reader_opener=lambda *_args, **_kwargs: FakeStore(),
     )
-
     service._worker_loop()
-
-    assert service.stop_event.is_set() is True
-    assert service._failed_builds == 1
+    assert service.stop_event.is_set() is True and service._failed_builds == 1
 
 
 def test_worker_reader_skips_diagnostics_but_pruning_publisher_retains_them(tmp_path):
@@ -1231,6 +1240,75 @@ def test_snapshot_returns_pending_or_cached_preencoded_protocol_wire(tmp_path):
         "cache_generation": metadata["cache_generation"],
     }
     assert same_binary == newer_binary == b""
+
+
+def test_oversized_snapshot_is_served_as_generation_pinned_size_derived_chunks(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    generation = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), ()),
+        source_generation=1,
+        cache_generation=41,
+        generated_at=100_000,
+        observed_until=100_000,
+    )
+    entries = service._encode_generation(generation)
+    assert service._publish(generation, entries) is True
+    full_body = entries[(7200, 300, None)].binary
+    full = protocol.validate_snapshot(json.loads(full_body))
+    monkeypatch.setattr(service_module, "STATS_SNAPSHOT_INLINE_MAX_BYTES", 1)
+    monkeypatch.setattr(
+        service_module,
+        "STATS_SNAPSHOT_CHUNK_TARGET_BYTES",
+        math.ceil(len(full_body) / 4),
+    )
+    request = {
+        "range_seconds": "7200",
+        "resolution": "300",
+        "client_id": "a" * 64,
+    }
+
+    first_metadata, first_body = service._snapshot(request)
+    first = protocol.validate_snapshot_chunk(json.loads(first_body))
+    assert first_metadata["chunk_index"] == 0
+    assert first_metadata["chunk_count"] == 4
+    assert first_metadata["chunk_generation"] == first["cache_generation"]
+    assert len(first_body) <= service_module.LOCAL_RPC_MAX_BINARY_BYTES
+
+    advanced = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 2, 0), (), (), (), (), ()),
+        source_generation=2,
+        cache_generation=42,
+        generated_at=100_001,
+        observed_until=100_001,
+    )
+    assert service._publish(advanced, service._encode_generation(advanced)) is True
+
+    chunks = [first]
+    for chunk_index in range(1, first_metadata["chunk_count"]):
+        chunk_metadata, chunk_body = service._snapshot({
+            **request,
+            "chunk_index": str(chunk_index),
+            "chunk_generation": str(first["cache_generation"]),
+        })
+        chunk = protocol.validate_snapshot_chunk(json.loads(chunk_body))
+        assert chunk_metadata["chunk_index"] == chunk_index
+        assert chunk_metadata["cache_generation"] == first["cache_generation"]
+        assert len(chunk_body) <= service_module.LOCAL_RPC_MAX_BINARY_BYTES
+        chunks.append(chunk)
+    assert [bucket for chunk in chunks for bucket in chunk["buckets"]] == full["buckets"]
+    assert all(chunk["cost_report"] == full["cost_report"] for chunk in chunks)
+
+    pending, pending_body = service._snapshot({
+        **request,
+        "chunk_index": "1",
+        "chunk_generation": str(first["cache_generation"] - 1),
+    })
+    assert pending["status"] == "pending"
+    assert "generation advanced" in pending["reason"]
+    assert pending_body == b""
 
 
 def test_incremental_encode_slices_only_cells_published_at_this_cadence(tmp_path, monkeypatch):
@@ -2891,6 +2969,36 @@ def test_genuine_idle_exit_restarts_and_cold_warms_the_same_database(tmp_path):
         second.work_event.set()
         second_thread.join(timeout=3)
         assert second_thread.is_alive() is False
+
+
+def test_the_worker_thread_owns_the_handle_its_startup_repair_publishes_through(tmp_path):
+    """The first real build must reach readiness WITHOUT recording a failure.
+
+    FORCED RED before the fix: `_repair_startup_owed_slots` reached for `self.writer`, which the
+    LISTENER thread opened. sqlite3 connections are thread-owned, so reading the durable ledger
+    from the worker raised `ProgrammingError`. It was caught as a build failure -- after the cache
+    was published, before `cache_ready_event` was set -- so this service never announced readiness
+    at all. Asserting readiness alone is not enough: the previous run recovered on a LATER build
+    whenever more work arrived, which hid a failing build behind an eventually-ready service.
+    """
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        idle_seconds=30.0,
+    )
+    thread = threading.Thread(target=service.run, daemon=True)
+    thread.start()
+    try:
+        assert service.cache_ready_event.wait(10), service._status()
+        build = service._status()["build"]
+        assert build["failed"] == 0, build
+        assert build["last_failure"] == "", build
+        assert build["full"] >= 1, build
+    finally:
+        service.stop_event.set()
+        service.work_event.set()
+        thread.join(timeout=5)
+        assert thread.is_alive() is False
 
 
 def test_new_lease_reaps_dead_process_owners_instead_of_leaking_capacity(tmp_path):

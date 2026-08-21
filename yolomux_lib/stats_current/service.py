@@ -24,7 +24,7 @@ from types import MappingProxyType
 
 from yolomux_lib import common
 from yolomux_lib.control import send_yolomux_control_request
-from yolomux_lib.local_services.rpc import safe_socket_path
+from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES, safe_socket_path
 from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yolomux_lib.local_services.runtime import acquire_client_lease, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import run_local_rpc_service
@@ -104,6 +104,10 @@ MAX_BROWSER_QUEUE_EXEMPLARS = 8
 MAX_BROWSER_QUEUE_DIMENSIONS = 16
 BROWSER_QUEUE_HISTOGRAM_BOUNDS_MS = (25, 100, 250, 1_000, 3_000, 10_000)
 MAX_USAGE_CONFLICTS = 32
+STATS_SNAPSHOT_CHUNK_TARGET_BYTES = min(1024 * 1024, LOCAL_RPC_MAX_BINARY_BYTES)
+STATS_SNAPSHOT_INLINE_MAX_BYTES = STATS_SNAPSHOT_CHUNK_TARGET_BYTES
+SNAPSHOT_CHUNK_BATCH_TTL_SECONDS = 60.0
+MAX_SNAPSHOT_CHUNK_BATCHES = 4
 
 FENCE_FIELDS = frozenset("action protocol_version schema_generation".split())
 OBSERVATION_FIELDS = frozenset("event_id family source_id observed_at epoch_id owner_generation payload".split())
@@ -281,6 +285,15 @@ class DecoratedSnapshotBody:
     base_digest: bytes
     status_signature: tuple[object, ...]
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotChunkBatchRecord:
+    key: CacheKey
+    cache_generation: int
+    chunks: tuple[CacheEntry, ...]
+    created_at: float
+    expires_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -1154,7 +1167,7 @@ class StatsCurrentService:
         reader_opener: Callable[..., storage.Store] = storage.Store.open_reader,
         full_builder: Callable[..., materializer.Generation] = materializer.build_generation,
         incremental_builder: Callable[..., materializer.Generation] = materializer.update_generation,
-        encoder: Callable[[protocol.SnapshotWire | protocol.DeltaWire], bytes] = _json_bytes,
+        encoder: Callable[[protocol.SnapshotWire | protocol.SnapshotChunkWire | protocol.DeltaWire], bytes] = _json_bytes,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         randomizer: Callable[[], float] = random.random,
@@ -1304,6 +1317,7 @@ class StatsCurrentService:
         self._usage_atom_backfill: dict[str, object] | None = None
         self._snapshot_body_decoration_lock = threading.Lock()
         self._snapshot_body_decoration_cache: DecoratedSnapshotBody | None = None
+        self._snapshot_chunk_batches: dict[tuple[CacheKey, int], SnapshotChunkBatchRecord] = {}
         self._snapshot_body_decoration_builds = 0
         self._snapshot_body_decoration_hits = 0
         self._migration_state = "pending"
@@ -1701,6 +1715,10 @@ class StatsCurrentService:
             for layer in candidate.layers
         }
         persisted: dict[tuple[int, int], bool] = {}
+        # The durable restart work list. A cell whose bucket carries an unapplied invalidation is
+        # KNOWN-CONTRADICTED, so the filter below must not drop it as already-persisted: the whole
+        # point of the ledger is that this restart is the thing that owes it a rebuild.
+        invalidated: set[tuple[int, int]] = set()
         ring_generation = 0
         for layer in candidate.layers:
             window = ring_writer.read_ring_window(
@@ -1716,6 +1734,9 @@ class StatsCurrentService:
                 (row.resolution_seconds, row.bucket_start): row.complete
                 for row in window.rows
             })
+            invalidated.update(
+                (layer.resolution, bucket_start) for bucket_start in window.pending_invalidations
+            )
         if ring_generation <= 0:
             return cells
         buckets = {
@@ -1725,6 +1746,11 @@ class StatsCurrentService:
         }
         retained = set()
         for cell in cells:
+            if (cell.resolution, cell.start) in invalidated:
+                # Unconditional: a contradicted bucket is retained whatever the persisted slot
+                # says, because the persisted slot is exactly what is wrong.
+                retained.add(cell)
+                continue
             selected = buckets.get((cell.resolution, cell.start))
             if selected is None:
                 continue
@@ -1747,6 +1773,153 @@ class StatsCurrentService:
             ):
                 retained.add(cell)
         return frozenset(retained)
+
+    def _repair_startup_owed_slots(self, publisher: storage.Store | None) -> None:
+        """Answer every slot the durable ledger owes, before readiness is announced.
+
+        Separate from `repair_pending_ring_slots` only in that it is the BUILD OWNER's ordering
+        step: it exists so cache publication, exact pending-slot republication, ledger retirement
+        and the readiness signal happen in that order under one owner, rather than readiness racing
+        a repair that the worker performed afterwards.
+
+        `publisher` is the CALLING THREAD's writable handle. sqlite3 connections are thread-owned,
+        and `self.writer` belongs to the listener thread, so reaching for it from the worker raised
+        `ProgrammingError` inside the build. That error was caught as a build failure, which meant
+        the very first build after every restart failed AT the repair -- after the cache had been
+        published but BEFORE `cache_ready_event` was set. A process with no further work then never
+        announced readiness at all, and one with work only became ready on its second build.
+
+        A WRITABLE owner or nothing. The build's `reader` was previously accepted as a last resort,
+        which could never work: the repair republishes, and `publish_ring_buckets` refuses a
+        read-only store outright. With no writer there is simply nothing this process can repair.
+        """
+        # STARTUP-owed only. Running this on every build reset the flush deadline each time and
+        # collapsed the RING_FLUSH_SECONDS coalescing window, so the ring published before it was
+        # complete and the first page load rendered `incomplete_persisted_bucket` with zero cost --
+        # the same symptom, caused by the repair instead of cured by it.
+        #
+        # `_ring_publications` counts what THIS process has published, so it is zero exactly while
+        # a restart still owes the buckets a previous process left pending.
+        if self._ring_publications:
+            return
+        owner = publisher if publisher is not None else self.writer
+        if owner is None:
+            return
+        self.repair_pending_ring_slots(owner)
+
+    def _retire_unrebuildable_owed_cells(
+        self,
+        ring_writer: storage.Store,
+        pending: tuple[tuple[int, int, int], ...],
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Settle owed cells the current generation cannot rebuild, and return the rest.
+
+        THE FIRST INCORRECT TRANSITION this closes: after a restart whose wall clock has advanced,
+        an owed 1-second cell is still physically present in its ring slot but its bucket has left
+        the materializer's candidate window. Startup repair stages it, `_ring_writes` finds no
+        candidate bucket, `_flush_ring_if_due` writes nothing, and the ledger row survives every
+        later pass -- so `read_ring_window` hid that bucket permanently while the contradicted
+        payload sat in the slot.
+
+        Only a cell whose resolution the candidate DID materialize is judged here. A resolution
+        with no materialized layer means this generation has no opinion about that window at all,
+        which is not the same as "outside it", and treating it as unrebuildable would clear the
+        ring on a cold or partial build.
+
+        The clear and the retirement are one storage-owner transaction, never two steps here.
+        """
+        with self.cache_lock:
+            candidate = None if self._cache is None else self._cache.generation
+        if candidate is None:
+            return pending
+        rebuildable = {
+            (layer.resolution, bucket.start)
+            for layer in candidate.layers
+            for bucket in layer.buckets
+        }
+        materialized_resolutions = {
+            layer.resolution for layer in candidate.layers if layer.buckets
+        }
+        unrebuildable = tuple(
+            row for row in pending
+            if row[0] in materialized_resolutions
+            and (row[0], row[1]) not in rebuildable
+        )
+        if not unrebuildable:
+            return pending
+        ring_writer.retire_unrebuildable_ring_cells(unrebuildable)
+        unrebuildable_identities = frozenset(unrebuildable)
+        return tuple(row for row in pending if row not in unrebuildable_identities)
+
+    def repair_pending_ring_slots(
+        self,
+        publisher: storage.Store | None = None,
+    ) -> storage.RingPublication | None:
+        """Rebuild exactly the buckets the durable ledger still owes, without waiting for cadence.
+
+        THE MISSING TRANSITION after `c611891d2`. Recording an invalidation made
+        `read_ring_window` hide that bucket, but the thing that answers an invalidation is a
+        republication, and republication is driven by `_pending_ring_dirty` -- which lives in
+        memory and does not survive a restart. So after a restart the ledger said "these buckets
+        owe a rebuild" and nothing was left that could hear it: the right edge stayed hidden
+        forever and a served page rendered a permanent gap with zero cost.
+
+        This seeds the SAME in-memory dirty set from the durable ledger and hands it to the SAME
+        publication owner. No second builder, cache, ledger, or publication path.
+
+        Bounded by exact slots, not a full-ring rebuild: only the cells the ledger names are
+        staged, and `_ring_writes` writes only those. The flush deadline is brought forward rather
+        than removed, because a page that has just restarted cannot wait a whole flush interval to
+        stop showing a gap -- and waiting is what the periodic cadence is for, not what correctness
+        should depend on.
+        """
+        ring_writer = self.writer if publisher is None else publisher
+        if ring_writer is None or self._cache is None:
+            return None
+        pending = ring_writer.pending_invalidation_cells()
+        if not pending:
+            return None
+        # An owed cell that has aged out of the materializer's candidate window can never be
+        # rebuilt: staging it produces no write, so no publication answers it and the row stays
+        # pending forever while the read path hides the slot. Settle those as honest gaps FIRST,
+        # preserving the observed ledger generation through the storage transaction. A second
+        # publisher can settle or replace the row after this snapshot, and stale startup work must
+        # then become a no-op instead of clearing or republishing over the newly published slot.
+        pending = self._retire_unrebuildable_owed_cells(ring_writer, pending)
+        cells = frozenset(
+            materializer.DirtyCell(resolution_seconds, bucket_start)
+            for resolution_seconds, bucket_start, _generation in pending
+        )
+        if not cells:
+            return None
+        # TRACED FIRST INCORRECT TRANSITION: at restart `_stage_ring_candidate` has already staged
+        # the WHOLE ring -- measured 1248 cells -- so merely bringing the deadline forward made the
+        # repair publish all 1248 immediately instead of the 4 cells actually owed. That turns a
+        # bounded repair into a forced full-ring publication of a generation that has not settled,
+        # which is what pushed the restart's right edge out as incomplete.
+        #
+        # So the repair publishes EXACTLY the owed cells: the rest of the staged set is set aside
+        # for the duration and restored afterwards, so the ordinary cadence still owns it and
+        # `_restart_ring_cells` still gets to decide the first steady-state publication.
+        with self.work_lock:
+            deferred = self._pending_ring_dirty - cells
+            self._pending_ring_dirty = set(cells)
+            self._ring_source_generation = max(
+                self._ring_source_generation,
+                max(generation for _r, _b, generation in pending),
+            )
+            previous_deadline = self._next_ring_flush_at
+            self._next_ring_flush_at = self.monotonic()
+        try:
+            published = self._flush_ring_if_due(publisher)
+        finally:
+            with self.work_lock:
+                # Whatever the repair did not consume goes back to the ordinary cadence, with its
+                # original deadline, so startup repair cannot reset the steady-state window.
+                self._pending_ring_dirty |= deferred
+                if self._pending_ring_dirty and self._next_ring_flush_at is None:
+                    self._next_ring_flush_at = previous_deadline
+        return published
 
     def _flush_ring_if_due(
         self,
@@ -1827,12 +2000,13 @@ class StatsCurrentService:
             # sqlite3 connections are thread-owned. This connection belongs to
             # the elected statsd worker; work_lock still serializes it with the
             # listener thread's append/prune connection.
-            publisher = self.store_opener(
-                self.database_path,
-                writer_protocol=storage.MIN_WRITER_PROTOCOL,
-                writer_build=storage.MIN_WRITER_BUILD,
-                include_browser_diagnostics=True,
-            )
+            with self.work_lock:
+                publisher = self.store_opener(
+                    self.database_path,
+                    writer_protocol=storage.MIN_WRITER_PROTOCOL,
+                    writer_build=storage.MIN_WRITER_BUILD,
+                    include_browser_diagnostics=True,
+                )
         except (OSError, sqlite3.Error, storage.StatsCurrentError) as error:
             self._record_build_failure(error)
             if reader is not None:
@@ -1852,7 +2026,9 @@ class StatsCurrentService:
                 self._collect_host_facts_if_due(publisher)
                 work = self._take_work(scheduled=True)
                 if work is not None:
-                    self._build_once(reader, *work)
+                    # The worker's OWN writable handle. sqlite3 connections are thread-owned, and
+                    # the startup repair inside this build publishes and retires ledger rows.
+                    self._build_once(reader, *work, publisher=publisher)
                 self._flush_ring_if_due(publisher)
         finally:
             try:
@@ -2129,7 +2305,8 @@ class StatsCurrentService:
             self._record_failure("host_collector", error)
 
     def _build_once(self, reader: storage.Store, full: bool,
-                    dirty: frozenset[materializer.DirtyCell], coverage_refresh: bool = False) -> None:
+                    dirty: frozenset[materializer.DirtyCell], coverage_refresh: bool = False,
+                    publisher: storage.Store | None = None) -> None:
         started = self.monotonic()
         used_full = full
         self._building = True
@@ -2247,6 +2424,13 @@ class StatsCurrentService:
                 self._encodes_skipped_idle += 1
             if self._publish(candidate, encoded, resolutions=resolutions):
                 self._stage_ring_candidate(previous, candidate)
+                # BEFORE the readiness signal, not after. Running this in the worker after
+                # `_build_once` returned meant readiness was announced with durable invalidations
+                # still pending -- measured at 139 outstanding when `cache_ready_event` was set --
+                # so the first cold request after a restart saw ready=True and still read a gap.
+                # Ready has to mean every consumer-visible owner for this generation is
+                # established, and an owed slot is exactly such an owner.
+                self._repair_startup_owed_slots(publisher)
                 # Ready means every consumer-visible owner for this generation has been
                 # established. Setting the event inside _publish let a waiter advance an
                 # injected monotonic clock before ring staging chose its flush deadline.
@@ -2937,9 +3121,6 @@ class StatsCurrentService:
 
         expected_cursor = (candidate.source_generation, candidate.cache_generation)
         with self.cache_lock:
-            for key in tuple(self._ring_views):
-                if key[1] in resolutions:
-                    self._ring_views.pop(key, None)
             self._ring_published_cursors.update({
                 resolution_seconds: expected_cursor
                 for resolution_seconds in resolutions
@@ -2947,6 +3128,12 @@ class StatsCurrentService:
             for key, entry in entries.items():
                 if self._entry_cursor(entry) != expected_cursor:
                     continue
+                # A pending invalidation can make one persisted view unavailable
+                # while its exact warm cursor is still authoritative. Replace a
+                # view only after its new persisted wire is readable; clearing all
+                # resolution siblings first strands an established SSE cursor
+                # because the warm owner intentionally did not duplicate its
+                # retained chain in _delta_entries.
                 previous_state = previous_states[key]
                 previous = bases.get(key)
                 if (
@@ -3570,6 +3757,21 @@ class StatsCurrentService:
             )
             if window.ring_generation <= 0:
                 return RingSnapshotRead(None, "ring_unfilled")
+            if window.pending_invalidations:
+                # TRACED FIRST INCORRECT TRANSITION for the restart landing: a browser posting its
+                # own telemetry invalidates the right-edge bucket at every resolution. At 60s that
+                # is the SAME bucket the seeded usage atom lives in, so `read_ring_window` reported
+                # it missing (correctly -- the slot is contradicted) and this owner substituted a
+                # `_ring_gap_bucket` zero. The page then rendered a cost total of 0 for a store
+                # that holds 12 tokens, and `no_data` blamed `incomplete_persisted_bucket`.
+                #
+                # A contradicted bucket that the materializer can still rebuild is NOT an honest
+                # gap: the honest gap is reserved for a slot no generation can rebuild, and that
+                # slot is cleared, so it leaves no pending row behind. While a row is still
+                # pending, the storage contract is that the bucket routes to the MATERIALIZER --
+                # so this owner declines the whole persisted view and lets the live cache answer,
+                # rather than fabricating a zero the store's own facts disagree with.
+                return RingSnapshotRead(None, "ring_contradicted")
             decoded = tuple(_decode_ring_bucket(row) for row in window.rows)
             latest = max(
                 decoded,
@@ -4150,10 +4352,189 @@ class StatsSnapshotProjector:
                     "cache_generation": cache_generation,
                 }, b"", "not_modified")
             body = self._snapshot_body_with_backfill_status(entry.binary)
+            chunk_key: CacheKey = (
+                parsed.range_seconds,
+                parsed.resolution,
+                private_source_id,
+            )
+            retained_batch = StatsSnapshotProjector._retained_snapshot_chunk_batch(
+                self,
+                chunk_key,
+                parsed.chunk_generation,
+                newer_than=parsed.since_generation,
+            )
+            if parsed.chunk_generation is not None and retained_batch is None and parsed.chunk_generation != cache_generation:
+                self._snapshot_pending += 1
+                return finish(
+                    protocol.pending_response(
+                        parsed,
+                        1,
+                        "snapshot generation advanced while chunks were loading",
+                    ),
+                    b"",
+                    "chunk_generation_advanced",
+                )
+            chunk_index = parsed.chunk_index
+            if chunk_index is not None or len(body) > STATS_SNAPSHOT_INLINE_MAX_BYTES:
+                batch = retained_batch or StatsSnapshotProjector._snapshot_chunk_batch(
+                    self,
+                    chunk_key,
+                    entry,
+                    body,
+                )
+                if chunk_index is not None and chunk_index >= len(batch.chunks):
+                    return finish(
+                        protocol.unsupported_response(
+                            "chunk_index lies outside the retained snapshot batch",
+                            parsed.range_seconds,
+                        ),
+                        b"",
+                        "unsupported",
+                    )
+                selected = batch.chunks[chunk_index or 0]
+                self._snapshot_bytes += len(selected.binary)
+                return finish(selected.metadata, selected.binary, "chunk")
             self._snapshot_bytes += len(body)
             return finish(entry.metadata, body, "hit")
         finally:
             self._record_request_latency("snapshot", started)
+
+    def _retained_snapshot_chunk_batch(
+        self,
+        key: CacheKey,
+        generation: int | None,
+        *,
+        newer_than: int | None = None,
+    ) -> SnapshotChunkBatchRecord | None:
+        now = self.monotonic()
+        with self.cache_lock:
+            self._snapshot_chunk_batches = {
+                batch_key: batch
+                for batch_key, batch in self._snapshot_chunk_batches.items()
+                if batch.expires_at > now
+            }
+            candidates = [
+                batch
+                for (batch_key, batch_generation), batch in self._snapshot_chunk_batches.items()
+                if batch_key == key
+                and (generation is None or batch_generation == generation)
+                and (newer_than is None or batch_generation > newer_than)
+            ]
+            return max(candidates, key=lambda batch: batch.cache_generation, default=None)
+
+    def _snapshot_chunk_batch(
+        self,
+        key: CacheKey,
+        entry: CacheEntry,
+        body: bytes,
+    ) -> SnapshotChunkBatchRecord:
+        snapshot = json.loads(body)
+        cache_generation = int(snapshot["cache_generation"])
+        existing = StatsSnapshotProjector._retained_snapshot_chunk_batch(
+            self,
+            key,
+            cache_generation,
+        )
+        if existing is not None:
+            return existing
+        bucket_count = len(snapshot.get("buckets", ()))
+        if bucket_count < 2:
+            raise ValueError("oversized snapshot does not contain enough buckets to split")
+        chunk_limit = min(bucket_count, protocol.MAX_SNAPSHOT_CHUNKS)
+        chunk_count = min(
+            chunk_limit,
+            max(2, math.ceil(len(body) / STATS_SNAPSHOT_CHUNK_TARGET_BYTES)),
+        )
+        while True:
+            encoded_chunks = []
+            for chunk_index in range(chunk_count):
+                chunk = _snapshot_chunk_wire(snapshot, chunk_index, chunk_count)
+                encoded_chunks.append((chunk, self.encoder(chunk)))
+            largest = max(len(binary) for _chunk, binary in encoded_chunks)
+            if largest <= LOCAL_RPC_MAX_BINARY_BYTES:
+                break
+            if chunk_count >= chunk_limit:
+                raise ValueError("one snapshot chunk exceeds the local RPC response limit")
+            chunk_count = min(
+                chunk_limit,
+                max(chunk_count + 1, math.ceil(chunk_count * largest / LOCAL_RPC_MAX_BINARY_BYTES)),
+            )
+        chunks = [
+            CacheEntry(MappingProxyType({
+                **entry.metadata,
+                "bytes": len(binary),
+                "chunk_index": chunk["chunk_index"],
+                "chunk_count": chunk["chunk_count"],
+                "chunk_generation": chunk["cache_generation"],
+            }), binary)
+            for chunk, binary in encoded_chunks
+        ]
+        now = self.monotonic()
+        candidate = SnapshotChunkBatchRecord(
+            key,
+            cache_generation,
+            tuple(chunks),
+            now,
+            now + SNAPSHOT_CHUNK_BATCH_TTL_SECONDS,
+        )
+        with self.cache_lock:
+            batch_key = (key, cache_generation)
+            current = self._snapshot_chunk_batches.get(batch_key)
+            if current is not None and current.expires_at > now:
+                return current
+            self._snapshot_chunk_batches[batch_key] = candidate
+            while len(self._snapshot_chunk_batches) > MAX_SNAPSHOT_CHUNK_BATCHES:
+                oldest = min(
+                    self._snapshot_chunk_batches,
+                    key=lambda item: self._snapshot_chunk_batches[item].created_at,
+                )
+                self._snapshot_chunk_batches.pop(oldest, None)
+        return candidate
+
+
+def _snapshot_chunk_wire(
+    snapshot: Mapping[str, object],
+    chunk_index: int,
+    chunk_count: int,
+) -> dict[str, object]:
+    """Project one size-derived exact slice without creating a second snapshot owner."""
+
+    base = {name: snapshot[name] for name in protocol.SNAPSHOT_FIELDS}
+    validated = protocol.validate_snapshot(base)
+    bucket_count = len(validated["buckets"])
+    if isinstance(chunk_count, bool) or not isinstance(chunk_count, int) or not 2 <= chunk_count <= min(bucket_count, protocol.MAX_SNAPSHOT_CHUNKS):
+        raise ValueError("snapshot chunk count lies outside the supported bounds")
+    if isinstance(chunk_index, bool) or not isinstance(chunk_index, int) or not 0 <= chunk_index < chunk_count:
+        raise ValueError("snapshot chunk index lies outside the requested range")
+    first_bucket = chunk_index * bucket_count // chunk_count
+    final_bucket = (chunk_index + 1) * bucket_count // chunk_count
+    chunk_start = validated["buckets"][first_bucket]["start"]
+    chunk_end = validated["buckets"][final_bucket - 1]["start"] + validated["resolution_seconds"]
+    chunk: dict[str, object] = {
+        **{name: validated[name] for name in protocol.SNAPSHOT_FIELDS - {"buckets", "no_data"}},
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "chunk_start": chunk_start,
+        "chunk_end": chunk_end,
+        "buckets": [
+            bucket
+            for bucket in validated["buckets"]
+            if chunk_start <= int(bucket["start"]) < chunk_end
+        ],
+        "no_data": [
+            {
+                **span,
+                "start": max(chunk_start, span["start"]),
+                "end": min(chunk_end, span["end"]),
+            }
+            for span in validated["no_data"]
+            if span["end"] > chunk_start and span["start"] < chunk_end
+        ],
+    }
+    protocol.validate_snapshot_chunk(chunk)
+    if "usage_atom_backfill" in snapshot:
+        chunk["usage_atom_backfill"] = snapshot["usage_atom_backfill"]
+    return chunk
 
 
 class StatsDeltaProjector:

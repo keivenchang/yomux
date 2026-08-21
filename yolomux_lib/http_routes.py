@@ -383,7 +383,7 @@ def get_stats_delta(request: Any, parsed: Any, route: Route) -> None:
 
 def get_stats_stream(request: Any, parsed: Any, route: Route) -> None:
     del route
-    request.stream_stats_current_delta(
+    request.stream_stats_current(
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )

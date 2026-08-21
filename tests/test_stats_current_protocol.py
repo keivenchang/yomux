@@ -149,6 +149,26 @@ def test_query_values_are_strict(params: dict[str, object]):
         protocol.parse_snapshot_request(defaults | params)
 
 
+def test_snapshot_chunk_cursor_is_paired_bounded_and_generation_pinned():
+    parsed = request(
+        "28800",
+        "AUTO",
+        chunk_index="7",
+        chunk_generation="41",
+    )
+    assert parsed.chunk_index == 7
+    assert parsed.chunk_generation == 41
+    for changes in (
+        {"chunk_index": "1"},
+        {"chunk_generation": "41"},
+        {"chunk_index": str(protocol.MAX_SNAPSHOT_CHUNKS), "chunk_generation": "41"},
+        {"chunk_index": "0", "chunk_generation": "0"},
+    ):
+        with pytest.raises(protocol.UnsupportedRequest):
+            request("28800", "AUTO", **changes)
+    assert request("300", "AUTO", chunk_index="0", chunk_generation="41").chunk_index == 0
+
+
 @pytest.mark.parametrize("field", [*sorted(protocol.RETIRED_REQUEST_FIELDS), "mystery"])
 def test_retired_and_unknown_fields_are_rejected(field: str):
     with pytest.raises(protocol.UnsupportedRequest):
@@ -162,6 +182,37 @@ def test_snapshot_exact_shape_and_valid_content():
         rightmost_open=True,
     )
     assert protocol.validate_snapshot(value) is value
+
+
+def test_snapshot_chunk_is_one_exact_size_derived_slice_of_one_immutable_full_window():
+    value = {
+        **snapshot(
+            range_seconds=7200,
+            requested_resolution=300,
+            resolution_seconds=300,
+            window_end=7200,
+            rightmost_open=True,
+        ),
+        "chunk_index": 2,
+        "chunk_count": 3,
+        "chunk_start": 4800,
+        "chunk_end": 7200,
+        "buckets": [
+            bucket(start, 300, open_=start == 6900)
+            for start in range(4800, 7200, 300)
+        ],
+        "no_data": [no_data(4800, 4900)],
+    }
+    assert protocol.validate_snapshot_chunk(value) is value
+    for field, replacement in (
+        ("chunk_count", protocol.MAX_SNAPSHOT_CHUNKS + 1),
+        ("chunk_start", 4700),
+        ("chunk_end", 6900),
+    ):
+        invalid = copy.deepcopy(value)
+        invalid[field] = replacement
+        with pytest.raises(protocol.ProtocolValidationError):
+            protocol.validate_snapshot_chunk(invalid)
 
 
 def test_cost_report_is_strict_complete_json_safe_and_never_fabricates_reasoning():

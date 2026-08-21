@@ -49,10 +49,14 @@ class SnapshotHttpResult:
 
 
 @dataclass(frozen=True, slots=True)
-class DeltaStreamResult:
+class StatsStreamResult:
     status: HTTPStatus
     metadata: Mapping[str, object]
     body: bytes = b""
+
+
+# Retain the old import name while callers migrate to the shared snapshot/delta result.
+DeltaStreamResult = StatsStreamResult
 
 
 def _unavailable(
@@ -186,16 +190,32 @@ class StatsHttpForwarder:
         return dict(self._startup_failure() or {"ok": True, "status": "ready"})
 
     def snapshot(self, raw_query: str, *, authenticated_username: str) -> SnapshotHttpResult:
+        result = self.snapshot_stream(
+            raw_query,
+            authenticated_username=authenticated_username,
+        )
+        if result.status == HTTPStatus.OK:
+            return SnapshotHttpResult(result.status, body=result.body)
+        if result.status == HTTPStatus.NOT_MODIFIED:
+            return SnapshotHttpResult(result.status)
+        return SnapshotHttpResult(result.status, payload=result.metadata)
+
+    def snapshot_stream(
+        self,
+        raw_query: str,
+        *,
+        authenticated_username: str,
+    ) -> StatsStreamResult:
         try:
             requested = parse_http_snapshot_query(raw_query)
         except protocol.UnsupportedRequest as error:
-            return SnapshotHttpResult(HTTPStatus.BAD_REQUEST, payload=error.response)
+            return StatsStreamResult(HTTPStatus.BAD_REQUEST, error.response)
         startup_failure = self._startup_failure()
         if startup_failure is not None:
             if _transient_not_ready(startup_failure):
-                return SnapshotHttpResult(
+                return StatsStreamResult(
                     HTTPStatus.ACCEPTED,
-                    payload=protocol.pending_response(
+                    protocol.pending_response(
                         requested,
                         1,
                         "statsd is refreshing",
@@ -207,7 +227,7 @@ class StatsHttpForwarder:
                 or startup_failure.get("error_code") == "upgrade_required"
                 else HTTPStatus.FAILED_DEPENDENCY
             )
-            return SnapshotHttpResult(status, payload=startup_failure)
+            return StatsStreamResult(status, startup_failure)
 
         request = protocol.SnapshotRequest(
             requested.range_seconds,
@@ -219,30 +239,32 @@ class StatsHttpForwarder:
                 requested.client_id,
             ),
             requested.since_generation,
+            requested.chunk_index,
+            requested.chunk_generation,
         )
         metadata, body = self.client.snapshot(request)
         state = metadata.get("status")
 
         if _transient_not_ready(metadata) and not body:
-            return SnapshotHttpResult(
+            return StatsStreamResult(
                 HTTPStatus.ACCEPTED,
-                payload=protocol.pending_response(
+                protocol.pending_response(
                     request,
                     1,
                     "statsd is refreshing",
                 ),
             )
         if metadata.get("ok") is True and metadata.get("not_modified") is True and not body:
-            return SnapshotHttpResult(HTTPStatus.NOT_MODIFIED)
+            return StatsStreamResult(HTTPStatus.NOT_MODIFIED, metadata)
         if metadata.get("ok") is True and body and metadata.get("content_type") == "application/json":
-            return SnapshotHttpResult(HTTPStatus.OK, body=body)
+            return StatsStreamResult(HTTPStatus.OK, metadata, body)
         if state == "pending" and not body:
-            return SnapshotHttpResult(HTTPStatus.ACCEPTED, payload=metadata)
+            return StatsStreamResult(HTTPStatus.ACCEPTED, metadata)
         if state == "unsupported" and not body:
-            return SnapshotHttpResult(HTTPStatus.BAD_REQUEST, payload=metadata)
+            return StatsStreamResult(HTTPStatus.BAD_REQUEST, metadata)
         if (state == "upgrade_required" or metadata.get("error_code") == "upgrade_required") and not body:
-            return SnapshotHttpResult(HTTPStatus.UPGRADE_REQUIRED, payload=metadata)
-        return SnapshotHttpResult(HTTPStatus.FAILED_DEPENDENCY, payload=_unavailable())
+            return StatsStreamResult(HTTPStatus.UPGRADE_REQUIRED, metadata)
+        return StatsStreamResult(HTTPStatus.FAILED_DEPENDENCY, _unavailable())
 
     def delta(self, raw_query: str, *, authenticated_username: str) -> SnapshotHttpResult:
         result = self.delta_stream(

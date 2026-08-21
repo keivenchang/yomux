@@ -1263,7 +1263,7 @@ def test_every_exact_matrix_slice_has_the_requested_data_resolution_and_bound():
     for range_seconds in RANGES:
         allowed = stats_resolution.explicit_resolutions(range_seconds)
         assert allowed
-        assert resolve_resolution(range_seconds, "AUTO") == allowed[0]
+        assert resolve_resolution(range_seconds, "AUTO") == stats_resolution.auto_resolution(range_seconds)
         for requested in ("AUTO", *allowed):
             result = slice_generation(generation, range_seconds, requested)
             assert result.resolution == resolve_resolution(range_seconds, requested)

@@ -23,7 +23,9 @@ from yolomux_lib.stats_current import storage
 
 RING_CAPACITIES = {1: 300, 10: 180, 60: 480, 300: 288}
 TOTAL_RING_SLOTS = 1_248
-RING_TABLES = ("aggregate_publication", "aggregate_rings", "aggregate_ring_slots")
+# Derived from the production owner rather than restated. This was a hand-maintained copy of the
+# same list, so schema 8's two new tables made it silently wrong in five places at once.
+RING_TABLES = tuple(sorted(storage._RING_TABLES))
 
 
 def _ring_table_names(store: storage.Store) -> set[str]:
@@ -31,9 +33,9 @@ def _ring_table_names(store: storage.Store) -> set[str]:
     return {
         str(row[0])
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'aggregate_%'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         )
-    }
+    } & set(storage._RING_TABLES)
 
 
 def _ring_counts(store: storage.Store) -> dict[int, int]:
@@ -427,9 +429,20 @@ def test_ring_capacities_and_minimum_density_derive_the_current_view_matrix() ->
         assert resolution.explicit_resolutions(range_seconds) == derived
 
 
+
+def _ring_publication_generation(store: storage.Store) -> int:
+    return int(
+        store._connection()
+        .execute("SELECT ring_generation FROM aggregate_publication WHERE singleton = 1")
+        .fetchone()[0]
+    )
+
 def test_fixed_slot_row_count_survives_one_hour_of_ingest(tmp_path: Path) -> None:
     with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
-        assert _ring_table_names(store) == set()
+        # Schema 8 creates the ring extension with the database. It stopped being an opt-in a
+        # caller had to remember, because the durability kernel is absent exactly when a crash
+        # needs it if its creation is optional.
+        assert _ring_table_names(store) == set(storage._RING_TABLES)
         store.initialize_ring_storage()
         assert _ring_counts(store) == RING_CAPACITIES
         store.initialize_ring_storage()
@@ -672,10 +685,13 @@ def test_leader_writer_coalesces_ingest_for_ten_seconds_and_matches_materializer
         service.writer = store
         service._build_once(store, True, frozenset())
 
-        assert _ring_table_names(store) == set()
+        # The TABLES exist from open in schema 8; what must still be absent before the flush
+        # deadline is any PUBLICATION. That is the behaviour this row actually guards.
+        assert _ring_table_names(store) == set(storage._RING_TABLES)
+        assert _ring_publication_generation(store) == 0
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS - 0.001
         assert service._flush_ring_if_due() is None
-        assert _ring_table_names(store) == set()
+        assert _ring_publication_generation(store) == 0
 
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS
         seeded = service._flush_ring_if_due()
@@ -917,6 +933,69 @@ def test_persisted_ring_snapshot_advances_at_warm_materializer_cadence_before_ri
     assert len({item["cache_generation"] for item in delivered}) == 3
     assert service._delta_repairs == 0
     assert service._ring_publications == 1
+
+
+def test_live_cursor_survives_contradicted_ring_handoff_beyond_delta_retention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        database,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    with storage.Store.open(database) as store:
+        service.writer = store
+        service._build_once(store, True, frozenset())
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        assert service._flush_ring_if_due() is not None
+
+        _metadata, binary = service.handle_with_binary(_snapshot_request(
+            requested_resolution=resolution.AUTO,
+            client_id="continuous-sse-cursor",
+        ))
+        snapshot = protocol.validate_snapshot(json.loads(binary))
+        cursor = snapshot["cache_generation"]
+        revision_number = 0
+
+        for delivery in range(1, 12):
+            wall_now[0] += 1.0
+            dirty = frozenset({materializer.DirtyCell(1, math.floor(wall_now[0]))})
+            service._build_once(store, False, dirty)
+            assert service._cache is not None
+
+            if delivery == 6:
+                monkeypatch.setattr(
+                    service,
+                    "_read_ring_snapshot",
+                    lambda *_args, **_kwargs: service_module.RingSnapshotRead(
+                        None, "ring_contradicted",
+                    ),
+                )
+                service._publish_ring_views(
+                    store,
+                    service._cache.generation,
+                    frozenset({1}),
+                )
+                monkeypatch.undo()
+
+            delta_metadata, delta_binary = service.handle_with_binary(_delta_request(
+                client_id="continuous-sse-cursor",
+                after_cache_generation=cursor,
+                after_revision=revision_number,
+            ))
+            delta = protocol.validate_delta(json.loads(delta_binary))
+            assert delta_metadata["base_cache_generation"] == cursor
+            cursor = delta["cache_generation"]
+            revision_number = delta["revision"]
+
+    assert revision_number == 11
+    assert service._delta_repairs == 0
 
 
 def test_public_delta_keeps_the_exact_served_base_across_same_cursor_ring_republication(
@@ -1891,8 +1970,11 @@ def test_snapshot_distinguishes_zero_cold_and_one_lap_stale_slots(
         stale_start = cached["window_end"] - 2
         connection = store._connection()
         connection.execute(
+            # `payload_version` is part of the empty-slot shape in schema 8, and the CHECK enforces
+            # it: a cold slot is fully cold or it is not cold at all.
             "UPDATE aggregate_ring_slots SET bucket_start = NULL, bucket_json = NULL, "
-            "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0 "
+            "complete = 0, source_generation = 0, ring_generation = 0, published_at = 0, "
+            "payload_version = 0 "
             "WHERE resolution_seconds = 1 AND slot_index = ?",
             (cold_start % resolution.RING_CAPACITIES[1],),
         )
@@ -2050,11 +2132,14 @@ def test_materializer_worker_wakes_itself_at_the_ring_flush_deadline(
         assert service._status()["ring_writer"]["publications"] == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Deferred, not in current release scope: schema v8 shadow creation and byte-preserving v7 coexistence are intentionally unbuilt",
-)
 def test_schema_v8_creation_leaves_v7_database_untouched(tmp_path: Path) -> None:
+    """v8 is a SIDE-BY-SIDE format, so creating it must not touch the v7 file at all.
+
+    `DATABASE_FILENAME` embeds the schema version, so a v8 build addresses `stats-v8.sqlite3` and an
+    existing `stats-v7.sqlite3` is not opened, not written, and not even WAL-touched -- an opened
+    SQLite file grows `-wal`/`-shm` sidecars, so their absence is the evidence that nothing looked
+    at it. That is the whole rollback boundary: the v7 build keeps running against its own file.
+    """
     assert storage.SCHEMA_VERSION == 8
     assert storage.DATABASE_FILENAME == "stats-v8.sqlite3"
     previous = tmp_path / "stats-v7.sqlite3"
@@ -2082,3 +2167,118 @@ def test_downtime_is_a_gap_and_is_not_synthesized_as_quiet_zero(tmp_path: Path) 
 
     assert window.rows == ()
     assert set(window.missing_bucket_starts) == set(range(6_360, 7_260, 60))
+
+
+# --- publication generation versus store generation ------------------------------------------
+# `publish_ring_buckets` and `append_batch` commit in SEPARATE transactions: facts land with a
+# bumped `schema_meta.source_generation`, and the ring follows up to RING_FLUSH_SECONDS later.
+# Until now `read_ring_window` returned only the generation the ring was published FROM, so no
+# consumer could tell a ring that is one flush behind from one that is answering for a store that
+# no longer exists. Both readings were invisible in exactly the same way.
+
+
+def _store_generation(store: storage.Store) -> int:
+    return int(
+        store._connection()
+        .execute("SELECT source_generation FROM schema_meta WHERE singleton = 1")
+        .fetchone()[0]
+    )
+
+
+def _set_store_generation(store: storage.Store, value: int) -> None:
+    connection = store._connection()
+    connection.execute(
+        "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1", (value,)
+    )
+    connection.commit()
+
+
+def test_a_caught_up_ring_reports_no_publication_lag(tmp_path: Path) -> None:
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.source_generation == window.store_source_generation
+    assert window.publication_lag == 0
+
+
+def test_a_ring_behind_the_store_is_measured_and_still_served(tmp_path: Path) -> None:
+    """The ORDINARY steady state, and it must not be refused.
+
+    Publication coalesces on RING_FLUSH_SECONDS, so the store is routinely ahead. Refusing on any
+    difference would disable the cold-cache ring path permanently and force every restart back
+    through a whole-window materializer build -- the exact cost the ring exists to avoid.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        _set_store_generation(store, _store_generation(store) + 7)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.publication_lag == 7
+    assert window.rows, "a lagging ring is still authoritative for the buckets it did publish"
+
+
+def test_a_publication_ahead_of_the_store_is_measured_rather_than_assumed_impossible(tmp_path: Path) -> None:
+    """A publication generation LEADING the store is not rejected here, and that is deliberate.
+
+    In production `service._flush_ring_if_due` publishes `candidate.source_generation`, which comes
+    from `snapshot.schema.source_generation` -- the store's own value -- so a leading publication
+    would indeed mean the raw store moved backward. But `publish_ring_buckets` takes the generation
+    as a CALLER-SUPPLIED argument and does not derive it, so the storage layer is not the owner of
+    that invariant, and this suite's own fixtures publish decoupled literals against a fresh store.
+    Enforcing it here would have forced eight pinned ring invariants to change to satisfy a rule
+    this layer does not own. The pair is measured instead, so the service layer that DOES own the
+    provenance can act on it once a durable cursor exists to say what the correct response is.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=9, published_at=1_000.0)
+        window = store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.source_generation == 9
+    assert window.store_source_generation == 0
+    # `publication_lag` clamps at zero rather than reporting a negative distance, so a caller that
+    # only reads the lag cannot mistake this state for "behind".
+    assert window.publication_lag == 0
+
+
+def test_the_generation_pair_survives_a_crash_boundary_reopen(tmp_path: Path) -> None:
+    """Facts durable, publication stale: the exact separate-transaction crash boundary.
+
+    A crash between `append_batch`'s commit and the next `_flush_ring_if_due` leaves the store
+    ahead of the ring. After reopen the pair must still be readable and still describe that
+    distance, because a cold cache serves this ring before the materializer warms.
+    """
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        _set_store_generation(store, _store_generation(store) + 3)
+
+    with storage.Store.open(database) as reopened:
+        window = reopened.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert window.publication_lag == 3
+    assert window.store_source_generation == 3
+    assert window.rows, "the published bucket survives the reopen"
+
+
+def test_a_missing_schema_metadata_row_refuses_the_ring_read(tmp_path: Path) -> None:
+    """Negative control for the pair: with no store generation there is nothing to compare against.
+
+    Serving a ring whose counterpart cannot be read would reintroduce exactly the blind state this
+    pair removes, so the read fails closed rather than defaulting the missing side to zero.
+    """
+    with storage.Store.open(tmp_path / storage.DATABASE_FILENAME) as store:
+        store.initialize_ring_storage()
+        _publish(store, _bucket(60, 7_140), source_generation=_store_generation(store), published_at=1_000.0)
+        connection = store._connection()
+        connection.execute("DELETE FROM schema_meta WHERE singleton = 1")
+        connection.commit()
+
+        with pytest.raises(storage.SchemaMismatchError) as raised:
+            store.read_ring_window(range_seconds=3_600, resolution_seconds=60, window_end=7_200)
+
+    assert "schema metadata row is missing" in str(raised.value)

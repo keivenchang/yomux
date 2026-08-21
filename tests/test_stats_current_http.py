@@ -81,6 +81,23 @@ def test_success_forwards_the_preencoded_body_and_binds_private_client_identity(
     )
 
 
+def test_hour_chunk_cursor_reaches_the_same_bound_snapshot_client():
+    adapter, client = forwarder(
+        {"ok": True, "content_type": "application/json", "cache_generation": 41},
+        b'{"chunk_index":7}',
+    )
+
+    result = adapter.snapshot(
+        "range_seconds=28800&resolution=AUTO&client_id=browser-secret&since_generation=0&chunk_index=7&chunk_generation=41",
+        authenticated_username="alice",
+    )
+
+    assert result.status == HTTPStatus.OK
+    assert client.requests[0].chunk_index == 7
+    assert client.requests[0].chunk_generation == 41
+    assert client.requests[0].since_generation == 0
+
+
 def test_capabilities_are_serialized_only_by_the_canonical_server_policy():
     adapter, _client = forwarder({"ok": True})
 
@@ -529,16 +546,19 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
         def __init__(self):
             self.calls = 0
 
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
         def delta_stream(self, _query, *, authenticated_username):
             assert authenticated_username == "alice"
             self.calls += 1
-            if self.calls == 1:
-                return http.DeltaStreamResult(
-                    HTTPStatus.NOT_MODIFIED,
-                    {"ok": True, "not_modified": True, "cache_generation": 10},
-                )
             current[0] += 0.4
-            if self.calls == 2:
+            if self.calls == 1:
                 return http.DeltaStreamResult(
                     HTTPStatus.NOT_MODIFIED,
                     {"ok": True, "not_modified": True, "cache_generation": 10},
@@ -563,10 +583,9 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
         write_sse_json=lambda name, payload: events.append((name, payload)),
     )
 
-    server.Handler.stream_stats_current_delta(
+    server.Handler.stream_stats_current(
         request,
-        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
-        "after_cache_generation=10&after_revision=0",
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
         authenticated_username="alice",
     )
 
@@ -606,6 +625,14 @@ def test_established_stream_keeps_cursor_open_across_transient_materialization_l
                 ),
             ))
 
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
+
         def delta_stream(self, _query, *, authenticated_username):
             assert authenticated_username == "alice"
             return next(self.results)
@@ -625,30 +652,30 @@ def test_established_stream_keeps_cursor_open_across_transient_materialization_l
         write_sse_json=lambda name, payload: events.append((name, payload)),
     )
 
-    server.Handler.stream_stats_current_delta(
+    server.Handler.stream_stats_current(
         request,
-        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
-        "after_cache_generation=10&after_revision=0",
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=0",
         authenticated_username="alice",
     )
 
-    assert [name for name, _payload in events] == ["ready", "ready", "repair"]
+    assert [name for name, _payload in events] == [
+        "ack", "snapshot", "ready", "ready", "ready", "repair",
+    ]
     assert not [event for event in events if event[0] == "unavailable"]
 
 
-def test_stream_initial_repair_is_a_typed_sse_terminal_not_a_bare_http_conflict():
+def test_stream_initial_snapshot_failure_is_a_typed_sse_terminal_not_bare_http():
     events = []
     writes = []
 
     class Forwarder:
-        def delta_stream(self, _query, *, authenticated_username):
+        def snapshot_stream(self, _query, *, authenticated_username):
             assert authenticated_username == "alice"
-            return http.DeltaStreamResult(
-                HTTPStatus.CONFLICT,
+            return http.StatsStreamResult(
+                HTTPStatus.FAILED_DEPENDENCY,
                 {
-                    "status": "repair_required",
-                    "reason": "delta cursor is outside the retained exact chain",
-                    "cache_generation": 12,
+                    "status": "unavailable",
+                    "reason": "statsd unavailable",
                 },
             )
 
@@ -663,25 +690,24 @@ def test_stream_initial_repair_is_a_typed_sse_terminal_not_a_bare_http_conflict(
         write_sse_json=lambda name, payload: events.append((name, payload)),
     )
 
-    server.Handler.stream_stats_current_delta(
+    server.Handler.stream_stats_current(
         request,
-        "range_seconds=86400&resolution_seconds=300&client_id=browser-a&"
-        "after_cache_generation=10&after_revision=0",
+        "range_seconds=86400&resolution=300&client_id=browser-a&since_generation=0",
         authenticated_username="alice",
     )
 
     assert writes[0] == ("status", HTTPStatus.OK)
+    assert ("header", "Connection", "close") in writes
     assert not [entry for entry in writes if entry[0] == "json"]
     assert events == [
-        ("repair", {
-            "status": "repair_required",
-            "reason": "delta cursor is outside the retained exact chain",
-            "cache_generation": 12,
+        ("unavailable", {
+            "status": "unavailable",
+            "reason": "statsd unavailable",
         }),
     ]
 
 
-def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recovery():
+def test_stream_initial_not_modified_opens_one_sse_and_emits_ack_then_ready():
     events = []
     writes = []
 
@@ -694,6 +720,14 @@ def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recov
             self.stream_calls = 0
             self.snapshot_calls = 0
 
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.snapshot_calls += 1
+            return http.StatsStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
         def delta_stream(self, _query, *, authenticated_username):
             assert authenticated_username == "alice"
             self.stream_calls += 1
@@ -701,10 +735,6 @@ def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recov
                 HTTPStatus.NOT_MODIFIED,
                 {"ok": True, "not_modified": True, "cache_generation": 10},
             )
-
-        def snapshot(self, *_args, **_kwargs):
-            self.snapshot_calls += 1
-            raise AssertionError("an established current stream must not recover by snapshot")
 
     forwarder = Forwarder()
     request = SimpleNamespace(
@@ -721,10 +751,9 @@ def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recov
         write_sse_json=lambda name, payload: events.append((name, payload)),
     )
 
-    server.Handler.stream_stats_current_delta(
+    server.Handler.stream_stats_current(
         request,
-        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
-        "after_cache_generation=10&after_revision=0",
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=10",
         authenticated_username="alice",
     )
 
@@ -732,9 +761,19 @@ def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recov
         ("status", HTTPStatus.OK),
     ]
     assert not [item for item in writes if item[0] == "json"]
-    assert events == [("ready", {"cache_generation": 10, "revision": 0})]
-    assert forwarder.stream_calls == 1
-    assert forwarder.snapshot_calls == 0
+    assert events == [
+        ("ack", {
+            "cache_generation": 10,
+            "chunk_count": 1,
+            "not_modified": True,
+            "range_seconds": 300,
+                "requested_resolution": 1,
+            "resolution_seconds": 1,
+        }),
+        ("ready", {"cache_generation": 10, "revision": 0}),
+    ]
+    assert forwarder.stream_calls == 0
+    assert forwarder.snapshot_calls == 1
 
 
 def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
@@ -754,6 +793,14 @@ def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
     class Forwarder:
         def __init__(self):
             self.calls = 0
+
+        def snapshot_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.StatsStreamResult(
+                HTTPStatus.OK,
+                {"ok": True, "cache_generation": 10},
+                b'{"snapshot":true}',
+            )
 
         def delta_stream(self, _query, *, authenticated_username):
             assert authenticated_username == "alice"
@@ -784,11 +831,10 @@ def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
         write_sse_json=lambda _name, _payload: None,
     )
     stream_thread = threading.Thread(
-        target=server.Handler.stream_stats_current_delta,
+        target=server.Handler.stream_stats_current,
         args=(
             request,
-            "range_seconds=86400&resolution_seconds=300&client_id=browser-a&"
-            "after_cache_generation=10&after_revision=0",
+            "range_seconds=86400&resolution=300&client_id=browser-a&since_generation=0",
         ),
         kwargs={"authenticated_username": "alice"},
         daemon=True,
@@ -801,7 +847,7 @@ def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
 
     assert not stream_thread.is_alive()
     assert waits == pytest.approx([60.0], abs=0.1)
-    assert forwarder.calls == 1
+    assert forwarder.calls == 0
     assert parent_shutdown_calls == [True]
 
 

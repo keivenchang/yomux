@@ -46,7 +46,7 @@ def auto_resolution(range_seconds: int) -> int:
         raise ValueError(f"range_seconds must be positive, got {range_seconds!r}")
     offered = explicit_resolutions(range_seconds)
     if offered:
-        return offered[0]
+        return offered[0] if range_seconds <= 15 * 60 else offered[-1]
     for resolution, slot_count in RING_CAPACITIES.items():
         if range_seconds / resolution <= slot_count:
             return resolution
