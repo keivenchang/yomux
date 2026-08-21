@@ -197,6 +197,9 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
     crashed.future.set_exception(BrokenProcessPool("worker died"))
 
     class BrokenExecutor:
+        def __init__(self):
+            self._processes = {}
+
         def shutdown(self, **_kwargs):
             return None
 
