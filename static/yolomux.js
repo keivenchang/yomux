@@ -23962,7 +23962,7 @@ function bindFinderRowHandlers(row, state) {
     }
     event.stopPropagation();
     if (event.detail > 1) return;
-    scheduleFileTreeRowActivation(row, fullPath, entry, event);
+    void onFileTreeRowClick(row, fullPath, entry, event);
   };
   row.ondblclick = event => {
     event.preventDefault();
@@ -23980,6 +23980,7 @@ function bindFinderRowHandlers(row, state) {
     // its activation by one macrotask via scheduleFileTreeRowActivation; cancel that here, since
     // contextmenu always dispatches synchronously before that deferred tick can run.
     row.__fileTreeSuppressClick = true;
+    setTimeout(() => { row.__fileTreeSuppressClick = false; }, 0);
     row.__fileTreePendingActivation = null;
     closeFileImagePreview();
     showFileTreeContextMenu(row, fullPath, entry, event.clientX, event.clientY, {surface: 'finder'});
