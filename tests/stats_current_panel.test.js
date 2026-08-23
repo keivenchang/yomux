@@ -2445,14 +2445,53 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
       {buckets: [{start: 60, duration: 60}]},
     );
     const latestBucketAfterRound3 = jsDebugGraphBuckets.get('60000:60000');
+    const round3Flagged = latestBucketAfterRound3.costSummary.rangeReport;
+    const round3ModelCount = latestBucketAfterRound3.costSummary.models.length;
+    const round3TotalTokens = latestBucketAfterRound3.costSummary.totalTokenQuantity;
+
+    // Round 4 (found by a SECOND independent audit of the round-3 fix): a bucket can become
+    // latest WITHOUT being touched at all this round -- not just "not yet created" (round 2)
+    // and not "touched and merged by jsDebugCurrentBucketRecord" (round 3), but "already exists,
+    // already has its OWN per-bucket cost components from an earlier round, and this round's
+    // delta skips it entirely". The reconcile patch branch must merge those pre-existing
+    // components with the new range-level ones, not silently replace the bucket's own
+    // components with only the range ones.
+    applyJsDebugCurrentDelta(
+      {buckets: [{start: 90, duration: 60}], cost_report: null},
+      {buckets: [{start: 90, duration: 60}]},
+    );
+    // jsDebugCurrentBucketRecord derives components from real per-bucket series/model-rate
+    // data, which this unit test has no need to fabricate -- set the bucket's own already-
+    // applied costSummary directly, exactly as a prior real per-bucket cost tick would have
+    // left it, so the reconcile patch branch under test has real prior components to merge.
+    const bucket90 = jsDebugGraphBuckets.get('90000:60000');
+    bucket90.costSummary = {
+      totalMicroUsd: 40, apiListMicroUsd: 40, totalTokenQuantity: 3, rangeReport: false,
+      components: [{provider: 'anthropic', model: 'claude-5', micro_usd: 40}], models: [], sources: [],
+    };
+    const richRangeCost2 = {
+      priced: {}, unpriced: {}, total_tokens: 11, total_micro_usd: 900,
+      evidence: [{provider: 'google', model: 'gemini-3', tokens: 11, micro_usd: 900}],
+      models: [], agents: [],
+    };
+    applyJsDebugCurrentDelta(
+      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}, {start: 90, duration: 60}], cost_report: richRangeCost2},
+      {buckets: []},
+    );
+    const latestBucketAfterRound4 = jsDebugGraphBuckets.get('90000:60000');
+
     result = {
       afterRound1,
       oldBucketStillFlagged: jsDebugGraphBuckets.get('0:60000').costSummary.rangeReport,
       newBucketFabricated,
       flaggedBucketCount,
-      round3Flagged: latestBucketAfterRound3.costSummary.rangeReport,
-      round3ModelCount: latestBucketAfterRound3.costSummary.models.length,
-      round3TotalTokens: latestBucketAfterRound3.costSummary.totalTokenQuantity,
+      round3Flagged,
+      round3ModelCount,
+      round3TotalTokens,
+      round4Flagged: latestBucketAfterRound4.costSummary.rangeReport,
+      round4ComponentCount: latestBucketAfterRound4.costSummary.components.length,
+      round4ComponentModels: latestBucketAfterRound4.costSummary.components.map(row => row.model).sort().join(','),
+      round4TotalTokens: latestBucketAfterRound4.costSummary.totalTokenQuantity,
     };
   `, context);
   assert.equal(context.result.afterRound1, true, 'the only bucket must carry the range-cost flag after round 1');
@@ -2462,6 +2501,10 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
   assert.equal(context.result.round3Flagged, true, 'the bucket the delta itself touches, when it is the latest, must still end up flagged');
   assert.equal(context.result.round3ModelCount, 1, 'exactly one model row -- reconciling on top of the per-bucket loop\'s own merge must never duplicate range components');
   assert.equal(context.result.round3TotalTokens, 7, 'the top-line total must reflect the real range total, not a doubled one');
+  assert.equal(context.result.round4Flagged, true, 'a pre-existing bucket that only just became latest without being touched must still end up flagged');
+  assert.equal(context.result.round4ComponentCount, 2, 'the bucket\'s own prior component and the new range component must both survive -- neither dropped nor duplicated');
+  assert.equal(context.result.round4ComponentModels, 'claude-5,gemini-3', 'the bucket\'s own component must be merged with the range component, not replaced by it');
+  assert.equal(context.result.round4TotalTokens, 11, 'the top-line total must reflect the new range total');
 });
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {

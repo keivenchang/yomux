@@ -59781,7 +59781,15 @@ function debugGraphReconcileRangeCostOwner(latest, rangeCost) {
   // patch always overwrites totalMicroUsd/etc outright, but the per-model cost breakdown
   // would double). Skipping when already-flagged this round is the exact, minimal fix.
   if (latestBucket.costSummary?.rangeReport === true) return;
-  debugGraphApplyServerCostSummary(latestBucket, jsDebugCurrentCostSummary(rangeCost));
+  // This bucket was NOT touched this round (the guard above returned early for that case),
+  // so its existing costSummary.components are still its own untouched, un-merged bucket-local
+  // rows from an earlier round -- unlike jsDebugCurrentCostSummary(rangeCost) alone, which
+  // carries only the range-level rows. Dropping the bucket's own components here (as an earlier
+  // version of this patch did) silently lost that bucket's per-model cost breakdown the moment
+  // it became latest without being re-touched (found by a second independent audit).
+  const ownComponents = latestBucket.costSummary?.components || [];
+  const rangeSummary = jsDebugCurrentCostSummary(rangeCost);
+  debugGraphApplyServerCostSummary(latestBucket, {...rangeSummary, components: [...ownComponents, ...rangeSummary.components]});
 }
 
 function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
