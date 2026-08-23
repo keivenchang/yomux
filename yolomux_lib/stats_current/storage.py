@@ -1539,6 +1539,42 @@ def pending_invalidation_cells(
     )
 
 
+def _coverage_change_interval(
+    previous: tuple[object, ...], current: tuple[object, ...],
+) -> tuple[float, float | None]:
+    """The exact range an in-place coverage-epoch update contradicts.
+
+    `previous`/`current` are `(started_at, ended_at, native_cadence_seconds,
+    owner_generation)`. Start and cadence are immutable here -- the caller has already
+    rejected any change to them -- so the only coverage the row can gain or lose is at
+    its END.
+
+    * Extending a closed epoch from `p` to `c` newly claims `[p, c)`. Everything before
+      `p` was already claimed by the same epoch at the same cadence and is untouched.
+    * Closing an open epoch at `c` retracts the unbounded tail, so `[c, +inf)` changes.
+    * A bare `owner_generation` change re-attributes the whole extent, which is rare
+      (one per statsd restart) and is reported in full rather than guessed at.
+    """
+
+    started = float(current[0])
+    previous_end = None if previous[1] is None else float(previous[1])
+    current_end = None if current[1] is None else float(current[1])
+    if previous[3] != current[3]:
+        # Generation re-attributes the current extent, while closing a previously
+        # open epoch also retracts its tail. The union is unbounded whenever either
+        # side is open; otherwise it is the whole updated extent.
+        return (started, None if previous_end is None or current_end is None else current_end)
+    if previous_end == current_end:
+        return (started, current_end)
+    if previous_end is None:
+        # Was `[started, +inf)`, now ends at `current_end`: the retracted tail changed.
+        return (float(current_end), None)
+    if current_end is None:
+        # Reopening is rejected upstream; report the full extent rather than assume.
+        return (started, None)
+    return (previous_end, current_end)
+
+
 def _slots_intersecting_intervals(
     connection: sqlite3.Connection, intervals: Iterable[tuple[float, float | None]],
 ) -> set[tuple[int, int]]:
@@ -2700,8 +2736,25 @@ class Store:
 
     def _apply_coverage_epochs(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> int:
+    ) -> tuple[int, tuple[tuple[float, float | None], ...]]:
+        """Apply coverage rows and return only the time ranges they actually changed.
+
+        The returned ranges -- not the offered rows -- are what invalidates published
+        buckets. A live collector re-offers its OPEN epoch every cadence tick with
+        `ended_at` advanced by one cadence, so the row's full extent is its whole
+        lifetime while the real change is the last tick. Reporting the extent made a
+        single 1-second extension of a 31.8-hour `cpu` epoch invalidate all 1,248
+        populated ring slots instead of the four buckets it touched, measured on a live
+        7220 store. The ring was therefore 100% dirty at every append and no slot was
+        ever reusable. Readiness is only announced after `_repair_startup_owed_slots`
+        republishes every pending slot, so a ledger that refilled to the full ring once
+        per second could never drain: statsd sat at 73% CPU and the browser reported
+        `current stats readiness timed out after 10000ms`, which is why no graph, cost,
+        or token panel could load.
+        """
+
         changed = 0
+        intervals: list[tuple[float, float | None]] = []
         for values in prepared:
             key = values[:3]
             previous = connection.execute(
@@ -2722,6 +2775,10 @@ class Store:
                     "native_cadence_seconds, owner_generation) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
                 )
                 changed += 1
+                # A brand-new epoch claims its whole extent for the first time.
+                intervals.append((
+                    float(current[0]), None if current[1] is None else float(current[1]),
+                ))
             elif tuple(previous) != current:
                 if previous[0] != current[0] or previous[2] != current[2]:
                     raise StorageValidationError("coverage epoch start and cadence are immutable")
@@ -2734,7 +2791,11 @@ class Store:
                     "WHERE family = ? AND source_id = ? AND epoch_id = ?", (current[1], current[3], *key),
                 )
                 changed += 1
-        return changed
+                intervals.append(_coverage_change_interval(previous, current))
+            # An identical re-offer changed nothing, so it contradicts no published
+            # bucket and contributes no interval. This is the common case: it is what
+            # every healthy collector does on every tick.
+        return changed, tuple(intervals)
 
     def _apply_usage_atoms(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
@@ -2815,8 +2876,16 @@ class Store:
 
     def _apply_unavailable_spans(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> int:
+    ) -> tuple[int, tuple[tuple[float, float | None], ...]]:
+        """Apply spans and return the ranges they actually added.
+
+        A span is keyed by its exact endpoints, so an accepted row is always new and
+        always contradicts its whole range. A re-offered identical row stored nothing
+        and must not invalidate a bucket that is still correct.
+        """
+
         accepted = 0
+        intervals: list[tuple[float, float | None]] = []
         for values in prepared:
             previous = connection.execute(
                 "SELECT native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
@@ -2840,9 +2909,10 @@ class Store:
                     "native_cadence_seconds, reason, owner_generation) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", values,
                 )
                 accepted += 1
+                intervals.append((float(values[3]), float(values[4])))
             elif tuple(previous) != values[5:]:
                 raise StorageValidationError("unavailable span identity conflicts with stored data")
-        return accepted
+        return accepted, tuple(intervals)
 
     def append_batch(
         self,
@@ -2885,7 +2955,9 @@ class Store:
                 connection, prepared_observations,
             )
             _append_browser_diagnostics(connection, accepted_observations)
-            coverage_changed = self._apply_coverage_epochs(connection, prepared_coverage)
+            coverage_changed, coverage_intervals = self._apply_coverage_epochs(
+                connection, prepared_coverage,
+            )
             usage_accepted, usage_attribution_conflicts, accepted_usage = self._apply_usage_atoms(
                 connection, prepared_usage,
             )
@@ -2893,7 +2965,7 @@ class Store:
                 tombstones_accepted, tombstones_duplicate, accepted_tombstones,
                 tombstoned_observed_at,
             ) = self._apply_usage_tombstones(connection, prepared_tombstones)
-            unavailable_accepted = self._apply_unavailable_spans(
+            unavailable_accepted, unavailable_intervals = self._apply_unavailable_spans(
                 connection, prepared_unavailable,
             )
             if retention_cutoff is not None:
@@ -2932,22 +3004,18 @@ class Store:
                 ):
                     index = _COLUMNS[table].index("observed_at")
                     mutated.extend(float(row[index]) for row in rows if row[index] is not None)
-                changed_intervals: list[tuple[float, float | None]] = []
-                for table, rows in (
-                    ("coverage_epochs", prepared_coverage),
-                    ("unavailable_spans", prepared_unavailable),
-                ):
-                    start_index = _COLUMNS[table].index("started_at")
-                    end_index = _COLUMNS[table].index("ended_at")
-                    for row in rows:
-                        if row[start_index] is None:
-                            continue
-                        # `ended_at is None` is an OPEN epoch running to the present, carried as an
-                        # unbounded interval rather than collapsed to its start.
-                        changed_intervals.append((
-                            float(row[start_index]),
-                            None if row[end_index] is None else float(row[end_index]),
-                        ))
+                # INTERVAL facts report what they CHANGED, not their stored extent. The
+                # appliers above are the only code that can tell an extension from an
+                # identical re-offer, so they own this and `prepared_*` is deliberately
+                # not consulted: a live collector re-offers the same epoch row every
+                # tick, and reading the offered extent invalidated the epoch's entire
+                # lifetime -- the whole published ring -- once per second.
+                # `ended_at is None` is still an OPEN claim running to the present and is
+                # carried as an unbounded interval rather than collapsed to its start.
+                changed_intervals: list[tuple[float, float | None]] = [
+                    *coverage_intervals,
+                    *unavailable_intervals,
+                ]
                 # From the deletion owner, which is the only code that knows which tombstones
                 # actually matched a stored atom. Not conditional on `mutated` being empty either:
                 # a batch that both appends and tombstones contradicts BOTH ranges.

@@ -225,6 +225,9 @@ class StatsCurrentTranscriptUsageScanner:
             checkpoints: dict[str, _FileCheckpoint] = {}
             self._active_checkpoints = checkpoints
             normalized = self._normalized_rows(rows)
+            direct_sources = {
+                source for _key, _kind, _path, source in normalized
+            }
             views = self._family_views(normalized)
             choices = self._file_choices(views)
             repair_active, repair_choices, repair_root_ids = self._legacy_fork_repair_choices(normalized)
@@ -259,7 +262,11 @@ class StatsCurrentTranscriptUsageScanner:
             seen_tombstones: set[tuple[str, str, str, str, str]] = set()
             repair_scan_bytes = 0
             repair_scan_records = 0
-            ordered_sources = self._ordered_sources(choices, inspections)
+            ordered_sources = self._ordered_sources(
+                choices,
+                inspections,
+                direct_sources,
+            )
             proposed_next_source = self._next_source
             last_source_index: int | None = None
             try:
@@ -540,12 +547,19 @@ class StatsCurrentTranscriptUsageScanner:
         self,
         choices: Mapping[str, _FileChoice],
         inspections: Mapping[str, _Inspection],
+        direct_sources: set[str],
     ) -> list[str]:
-        """Keep live tails current, then rotate fairly through historical backlog."""
+        """Keep live tails current, then rotate all historical work fairly.
+
+        A brand-new direct Codex roster transcript has no durable EOF checkpoint yet, so
+        its unread bytes need the same priority as a previously completed file that
+        started growing. Partially consumed files keep their historical cursor position,
+        and Claude's newest-project ordering remains the owner for its cold candidates.
+        Backlog and repair share one cursor tier so either can resume after a bounded scan.
+        """
 
         live: list[str] = []
-        repair: list[str] = []
-        backlog: list[str] = []
+        historical: list[str] = []
         for source in sorted(
             choices,
             key=lambda item: (choices[item].cold_priority, item),
@@ -566,20 +580,28 @@ class StatsCurrentTranscriptUsageScanner:
                 observed_size = max(0, int(durable.state.get("size") or 0))
                 if not isinstance(prior_eof, int) and offset > 0 and offset == observed_size:
                     prior_eof = offset
+            repair_only = choices[source].repair_only
             if (
                 inspection is not None
                 and isinstance(prior_eof, int)
                 and int(inspection.stat.st_size) > prior_eof
             ):
                 live.append(source)
-            elif choices[source].repair_only:
-                repair.append(source)
+            elif (
+                inspection is not None
+                and source in direct_sources
+                and not repair_only
+                and choices[source].kind == "codex"
+                and offset == 0
+                and observed_size == 0
+                and int(inspection.stat.st_size) > offset
+            ):
+                live.append(source)
             else:
-                backlog.append(source)
+                historical.append(source)
         return [
             *self._rotate_sources(live),
-            *self._rotate_sources(repair),
-            *self._rotate_sources(backlog),
+            *self._rotate_sources(historical),
         ]
 
     def _rotate_sources(self, sources: list[str]) -> list[str]:

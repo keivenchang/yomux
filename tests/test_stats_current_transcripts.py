@@ -324,7 +324,7 @@ def test_orphan_fork_repair_rolls_back_and_resumes_after_cold_restart(
     root_path = root
     monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
     rows = [{"key": "root", "kind": "codex", "transcript": str(root)}]
-    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=4)
+    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=5)
     marker = scanner._legacy_fork_repair_marker()
 
     unacknowledged = scanner.scan(rows)
@@ -342,7 +342,7 @@ def test_orphan_fork_repair_rolls_back_and_resumes_after_cold_restart(
     with session_files._TRANSCRIPT_SCAN_CACHE_GUARD:
         session_files._TRANSCRIPT_SCAN_CACHE.clear()
 
-    resumed_scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=4)
+    resumed_scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=5)
     resumed = resumed_scanner.scan(rows)
     assert resumed.items == ()
     assert resumed_scanner.status()["legacy_fork_repair"]["complete"] is False

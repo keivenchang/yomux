@@ -2211,6 +2211,7 @@
     "tests/test_stats_current_usage.py": 225,
     "tests/test_stats_replay_ledger.py": 1850,
     "tests/test_stats_resolution.py": 140,
+    "tests/test_statsd_ring_invalidation_storm.py": 412,
     "tests/test_stats_v7_to_v8_migration.py": 595,
     "tests/test_statusd.py": 1785,
     "tests/test_statusd_protocol.py": 86,
