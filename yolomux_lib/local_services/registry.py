@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import ctypes
 import ctypes.util
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -44,7 +46,9 @@ from ..infra.worktree_writer import child_process_artifact_environment
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request
+from .rpc import retry_local_service_prehandler_busy
 from .rpc import safe_socket_path
+from .runtime import local_service_exception_cause
 from .runtime import redact_local_service_text
 from .protocol_types import Clock
 
@@ -58,6 +62,15 @@ LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
 LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
+LOCAL_SERVICE_RETIRE_GRACE_SECONDS = 0.5
+# A retired generation that ignores SIGTERM (wedged, not merely slow) must still be force-terminated
+# rather than left running forever under a caller-shared root -- matches shutdown_owned_local_services'
+# same escalation contract for the multi-service path.
+LOCAL_SERVICE_RETIRE_FORCE_SECONDS = 2.0
+# jobd accepts request deadlines up to 120 seconds and gives an executing worker a two-second
+# cooperative-stop backstop. Registry cannot import jobd without creating a cycle, so keep the
+# replacement-side bound explicit and leave one second for the broker to publish terminal state.
+LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS = 123.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
@@ -68,6 +81,66 @@ _LAUNCH_CONTEXT: dict[str, int] = {}
 _TRANSPORT_DIAGNOSTICS_LOCK = threading.Lock()
 _TRANSPORT_TEARDOWNS_TOTAL = 0
 _TRANSPORT_TEARDOWNS_BY_EXCEPTION: dict[str, int] = {}
+
+
+def local_service_transport_error(error: OSError | LocalRpcError) -> str:
+    """Classify one local transport exception for shared retry policy."""
+
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, OSError) and error.errno == errno.ENOENT:
+        return "absent"
+    if isinstance(error, OSError) and error.errno == errno.ECONNREFUSED:
+        return "refused"
+    return "rpc"
+
+
+def jobd_retirement_state(
+    response: Mapping[str, Any],
+    *,
+    service_name: str,
+    service_pid: int,
+    protocol_version: int,
+    source_epoch: str,
+    shutdown_handshake: bool,
+) -> str:
+    """Return one exact jobd identity's stopped or draining retirement state."""
+
+    response_pid = response.get("pid")
+    response_version = response.get("version")
+    response_source_epoch = response.get("source_epoch")
+    if (
+        service_name != "jobd"
+        or response.get("ok") is not True
+        or isinstance(response_pid, bool)
+        or not isinstance(response_pid, int)
+        or response_pid != service_pid
+        or isinstance(response_version, bool)
+        or not isinstance(response_version, int)
+        or response_version != protocol_version
+        or (
+            source_epoch
+            and (
+                not isinstance(response_source_epoch, str)
+                or response_source_epoch != source_epoch
+            )
+        )
+    ):
+        return ""
+    if shutdown_handshake:
+        draining = response.get("draining")
+        if response.get("shutdown") is not True or not isinstance(draining, bool):
+            return ""
+        return "draining" if draining else "stopped"
+    active_records = response.get("active_records")
+    queues = response.get("queues")
+    if not isinstance(active_records, list) or not isinstance(queues, dict):
+        return ""
+    draining = bool(active_records) or any(
+        not isinstance(count, bool) and isinstance(count, int) and count > 0
+        for count in queues.values()
+    )
+    return "draining" if draining else "stopped"
 
 
 def record_transport_teardown(exception_type: str = "unknown") -> None:
@@ -632,6 +705,46 @@ def untracked_local_service_processes(
     return rows
 
 
+def verified_orphan_diagnostics(
+    service_dir: Path,
+    table: dict[int, ProcessTableEntry] | None = None,
+) -> list[dict[str, Any]]:
+    """Return one typed, bounded diagnostic row per ambiguous survivor.
+
+    Every candidate this finds already lacks a ledger record (that is what
+    ``untracked_local_service_processes`` proves), so identity can never be
+    fully verified and no signal or unlink is authorized -- see Rejected
+    Shortcuts in ``DOIT.p1.e5.backend-lifetime-supervision.md`` ("do not add
+    a broad host sweeper... let a process count its own connection as
+    external demand" and "no signal without authority"). This is the bounded
+    host-local repair path's diagnostic half: it must never remain silent
+    about an ambiguous survivor, but it may only ever report one, never act
+    on it beyond reporting.
+
+    Retained age since first observation is the caller's job (e.g. the
+    status owner's persistent state across supervision passes) -- a single
+    process-table snapshot carries no wall-clock-comparable birth time
+    (``ProcessTableEntry.start_time`` is an opaque platform tick counter,
+    not an epoch), so this function reports identity only, not age.
+    """
+    if table is None:
+        table = bounded_process_table()
+    tracked = tracked_local_service_groups(service_dir, table)
+    untracked = untracked_local_service_processes(service_dir, table, tracked)
+    return [
+        {
+            "pid": int(candidate["pid"]),
+            "ppid": candidate.get("ppid"),
+            "pgid": candidate.get("pgid"),
+            "socket": candidate.get("socket"),
+            "attempted_action": "none",
+            "result": "reported_only",
+            "reason": "untracked_no_ledger_record",
+        }
+        for candidate in untracked
+    ]
+
+
 def stale_local_service_groups_of_dead_launcher(
     port: int,
     service_dir: Path,
@@ -673,12 +786,9 @@ def shutdown_owned_local_services(
         for group in tracked_local_service_groups(service_dir, initial)
         if group["launcher_port"] == int(port) and group["launcher_pid"] == owner_pid
     ]
-    members = {
-        pid: (initial[pid].start_time, initial[pid].pgid)
-        for group in groups
-        for pid in group["member_pids"]
-        if pid in initial
-    }
+    member_records: dict[int, dict[str, Any]] = {}
+    for group in groups:
+        member_records.update(group["member_records"])
     term_targets = [int(group["pid"]) for group in groups]
     signalled: list[int] = []
     for pid in term_targets:
@@ -691,9 +801,8 @@ def shutdown_owned_local_services(
         sleep(max(0.0, float(grace_seconds)))
     survivors = table_reader()
     terminated: list[int] = []
-    for pid, (start_time, pgid) in sorted(members.items()):
-        entry = survivors.get(pid)
-        if entry is None or entry.start_time != start_time or entry.pgid != pgid:
+    for pid, record in sorted(member_records.items()):
+        if not process_record_diagnostic(record, table=survivors).current:
             continue
         try:
             kill(pid, signal.SIGKILL)
@@ -908,6 +1017,15 @@ class LocalServiceRegistry:
         self._upgrade_required: dict[str, Any] | None = None
         self._process_diagnostic: dict[str, Any] = {}
         self._runtime_locks_pruned = False
+        # Set the first time this exact registry object durably publishes a
+        # record. If the directory later vanishes underneath it (fixture
+        # teardown, an external cleanup pass), a later write from THIS SAME
+        # owner must never silently resurrect the directory -- that would be
+        # a fresh registry object, not this one, taking authority it never
+        # proved. A different LocalServiceRegistry instance (adoption,
+        # retirement of an incompatible generation) still starts with this
+        # False and may create the directory on its own first write.
+        self._record_directory_confirmed = False
 
     @property
     def failures(self) -> int:
@@ -1098,10 +1216,37 @@ class LocalServiceRegistry:
         value = read_json_file(self.record_path, {})
         return value if isinstance(value, dict) else {}
 
-    def _write_record(self, record: dict[str, Any]) -> None:
+    def _write_record(self, record: dict[str, Any]) -> bool:
+        if self._record_directory_confirmed and not self.record_path.parent.exists():
+            # This exact owner already proved it published here once; the
+            # directory disappearing since is a teardown/removal, not a
+            # first-start race. Refuse instead of `mkdir`-ing a fresh
+            # directory back into existence and writing a record no caller
+            # asked this owner to re-create.
+            self._record_refusal_reason = redact_local_service_text(
+                f"{self.spec.name} service record directory was removed after this owner already "
+                "published into it; refusing to resurrect it"
+            )
+            return False
         self.record_path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(self.record_path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", mode=0o600)
+        try:
+            atomic_write_text(self.record_path, json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", mode=0o600)
+        except OSError as exc:
+            # The directory can vanish between the mkdir above and the final
+            # os.replace/chmod inside atomic_write_text (e.g. a test fixture
+            # tearing down its own tmp_path, or a concurrent cleanup pass).
+            # This is a same-process synchronous write race with no child
+            # process involved; refuse through the same typed refusal surface
+            # _publish_record already uses for a validation failure, rather
+            # than letting a raw OSError escape ensure_started().
+            self._record_refusal_reason = redact_local_service_text(
+                f"{self.spec.name} service record write failed after its directory changed underneath it "
+                f"({type(exc).__name__}: {exc})"
+            )
+            return False
         self._process_diagnostic = {}
+        self._record_directory_confirmed = True
+        return True
 
     def _record_process_diagnostic(self, record: dict[str, Any]) -> LocalProcessDiagnostic:
         diagnostic = process_record_diagnostic(record, host_identity=self.host_identity)
@@ -1224,7 +1369,14 @@ class LocalServiceRegistry:
         record = self._read_record()
         record_pid = int(record.get("pid") or 0)
         diagnostic = self._record_process_diagnostic(record)
+        record_source_epoch = record.get("source_epoch")
+        retained_source_epoch = (
+            record_source_epoch
+            if isinstance(record_source_epoch, str) and record_source_epoch
+            else ""
+        )
         shutdown_protocol_version: int | None = None
+        legacy_idle_confirmed = False
         if older_upgrade and not service_pid:
             recorded_protocol_value = record.get("protocol_version")
             if (
@@ -1241,14 +1393,27 @@ class LocalServiceRegistry:
             ):
                 return False
             legacy_status = self._request("status", timeout=0.2, protocol_version=recorded_protocol_version)
-            if (
-                legacy_status.get("ok") is not True
-                or int(legacy_status.get("pid") or 0) != record_pid
-                or int(legacy_status.get("version") or 0) != recorded_protocol_version
-            ):
+            legacy_identity_matches = (
+                legacy_status.get("ok") is True
+                and int(legacy_status.get("pid") or 0) == record_pid
+                and int(legacy_status.get("version") or 0) == recorded_protocol_version
+            )
+            if not legacy_identity_matches:
                 return False
+            if self.spec.name == "jobd":
+                legacy_retirement_state = jobd_retirement_state(
+                    legacy_status,
+                    service_name=self.spec.name,
+                    service_pid=record_pid,
+                    protocol_version=recorded_protocol_version,
+                    source_epoch=retained_source_epoch,
+                    shutdown_handshake=False,
+                )
+                if legacy_retirement_state != "stopped":
+                    return False
             service_pid = record_pid
             shutdown_protocol_version = recorded_protocol_version
+            legacy_idle_confirmed = True
         if (
             (not response.get("ok") and not older_upgrade and not newer_reclaimable)
             or not service_pid
@@ -1257,14 +1422,98 @@ class LocalServiceRegistry:
             return True
         if record_pid != service_pid or not diagnostic.current:
             return False
+        retained_start_identity = recorded_start_identity(record)
+        if not retained_start_identity:
+            return False
+        response_source_epoch = response.get("source_epoch")
+        if isinstance(response_source_epoch, str) and response_source_epoch:
+            if retained_source_epoch and response_source_epoch != retained_source_epoch:
+                return False
+            retained_source_epoch = response_source_epoch
+        retirement_protocol_version = shutdown_protocol_version or self.spec.protocol_version
+        shutdown_payload = (
+            {
+                "retirement_handshake": True,
+                "expected_source_epoch": retained_source_epoch,
+            }
+            if self.spec.name == "jobd"
+            else None
+        )
         if shutdown_protocol_version is None:
-            self._request("shutdown", timeout=0.25)
+            shutdown_response = self._request(
+                "shutdown",
+                shutdown_payload,
+                timeout=0.25,
+            )
         else:
-            self._request("shutdown", timeout=0.25, protocol_version=shutdown_protocol_version)
-        deadline = self.clock() + 0.5
-        while pid_is_alive(service_pid) and self.clock() < deadline:
+            shutdown_response = self._request(
+                "shutdown",
+                shutdown_payload,
+                timeout=0.25,
+                protocol_version=shutdown_protocol_version,
+            )
+        grace_seconds = LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+        retirement_state = jobd_retirement_state(
+            shutdown_response,
+            service_name=self.spec.name,
+            service_pid=service_pid,
+            protocol_version=retirement_protocol_version,
+            source_epoch=retained_source_epoch,
+            shutdown_handshake=True,
+        )
+        if (
+            legacy_idle_confirmed
+            and shutdown_response.get("ok") is True
+            and shutdown_response.get("shutdown") is True
+        ):
+            retirement_state = "stopped"
+        if (
+            self.spec.name == "jobd"
+            and isinstance(shutdown_response.get("draining"), bool)
+            and not retirement_state
+        ):
+            return False
+        if retirement_state == "draining":
+            grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
+        if (
+            self.spec.name == "jobd"
+            and not retirement_state
+            and shutdown_response.get("ok") is True
+            and shutdown_response.get("shutdown") is True
+            and self._record_process_diagnostic(record).current
+        ):
+            drain_status = self._request(
+                "status",
+                timeout=0.2,
+                protocol_version=retirement_protocol_version,
+            )
+            status_state = jobd_retirement_state(
+                drain_status,
+                service_name=self.spec.name,
+                service_pid=service_pid,
+                protocol_version=retirement_protocol_version,
+                source_epoch=retained_source_epoch,
+                shutdown_handshake=False,
+            )
+            if drain_status.get("ok") is True and not status_state:
+                return False
+            if status_state == "draining":
+                grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
+
+        def retained_process_state() -> str:
+            live_start_identity = process_start_identity(service_pid)
+            if live_start_identity == retained_start_identity and pid_is_alive(service_pid):
+                return "current"
+            return "replaced" if pid_is_alive(service_pid) else "exited"
+
+        deadline = self.clock() + grace_seconds
+        process_state = retained_process_state()
+        while process_state == "current" and self.clock() < deadline:
             self.sleep(0.03)
-        if pid_is_alive(service_pid):
+            process_state = retained_process_state()
+        if process_state == "replaced":
+            return False
+        if process_state == "current":
             diagnostic = self._record_process_diagnostic(record)
             if not diagnostic.current:
                 return False
@@ -1274,10 +1523,33 @@ class LocalServiceRegistry:
                 pass
             except PermissionError:
                 return False
-            deadline = self.clock() + 0.5
-            while pid_is_alive(service_pid) and self.clock() < deadline:
+            deadline = self.clock() + LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+            process_state = retained_process_state()
+            while process_state == "current" and self.clock() < deadline:
                 self.sleep(0.03)
-        if pid_is_alive(service_pid) or self._remove_stale_record() is not True:
+                process_state = retained_process_state()
+            if process_state == "replaced":
+                return False
+            if process_state == "current":
+                # SIGTERM alone did not exit within the grace deadline -- a wedged generation, not
+                # merely a slow one. Force it rather than leaving it running under a shared root.
+                diagnostic = self._record_process_diagnostic(record)
+                if not diagnostic.current:
+                    return False
+                try:
+                    os.kill(service_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    return False
+                deadline = self.clock() + LOCAL_SERVICE_RETIRE_FORCE_SECONDS
+                process_state = retained_process_state()
+                while process_state == "current" and self.clock() < deadline:
+                    self.sleep(0.03)
+                    process_state = retained_process_state()
+                if process_state == "replaced":
+                    return False
+        if process_state != "exited" or self._remove_stale_record() is not True:
             return False
         try:
             self.socket_path.unlink()
@@ -1292,15 +1564,37 @@ class LocalServiceRegistry:
         timeout: float = 0.2,
         protocol_version: int | None = None,
     ) -> dict[str, Any]:
-        try:
-            request_protocol_version = self.spec.protocol_version if protocol_version is None else protocol_version
-            request_payload = {"action": method, "protocol_version": request_protocol_version, **(payload or {})}
-            envelope = new_envelope(self.spec.name, method, request_payload, timeout_seconds=timeout)
-            response, _binary = request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
-        except (OSError, LocalRpcError) as exc:
-            self.note_rpc_failure(type(exc).__name__)
-            return {}
-        return response if isinstance(response, dict) else {}
+        request_protocol_version = self.spec.protocol_version if protocol_version is None else protocol_version
+        request_payload = {"action": method, "protocol_version": request_protocol_version, **(payload or {})}
+
+        def attempt(attempt_timeout: float) -> tuple[dict[str, Any], bytes]:
+            try:
+                envelope = new_envelope(self.spec.name, method, request_payload, timeout_seconds=attempt_timeout)
+                response, binary = request(
+                    self.socket_path,
+                    envelope,
+                    timeout_seconds=attempt_timeout,
+                    fallback_legacy=True,
+                )
+            except (OSError, LocalRpcError) as exc:
+                self.note_rpc_failure(type(exc).__name__)
+                return {
+                    "ok": False,
+                    "error": redact_local_service_text(exc),
+                    "_transport_error": local_service_transport_error(exc),
+                    "exception_type": type(exc).__name__,
+                    "cause": local_service_exception_cause(exc),
+                }, b""
+            return response if isinstance(response, dict) else {}, binary
+
+        response, _binary = retry_local_service_prehandler_busy(
+            attempt,
+            lambda result: result[0],
+            timeout,
+            clock=self.clock,
+            sleep=self.sleep,
+        )
+        return response
 
     def healthy(self) -> bool:
         response = self._request("ping", timeout=0.15)
@@ -1465,6 +1759,10 @@ class LocalServiceRegistry:
         self._failure_reason = ""
         self._record_refusal_reason = ""
         self._write_record(record)
+        if self._record_refusal_reason:
+            self._failure_reason = self._record_refusal_reason
+            self.invalidate_rpc_health()
+            return False
         return True
 
     def _mark_failure(

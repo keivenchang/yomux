@@ -402,6 +402,7 @@
   "debug.system.roster.column.requests": "Solicitudes",
   "debug.system.roster.column.restarts": "Reinicios",
   "debug.system.roster.column.service": "Servicio",
+  "debug.system.roster.column.starts": "Inicios",
   "debug.system.roster.coverage.partial": "parcial",
   "debug.system.roster.detail.eventsChat": "Eventos y chat",
   "debug.system.roster.detail.process": "Proceso",

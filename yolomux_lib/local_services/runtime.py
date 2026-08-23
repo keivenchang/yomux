@@ -252,6 +252,32 @@ def release_client_lease(leases: dict[str, object], lease_id: object) -> dict[st
     return {"ok": True, "leases": len(leases)}
 
 
+def claim_gated_idle_due(state: object, has_claim: bool, *, now: Callable[[], float] = time.monotonic) -> bool:
+    """Answer the one shared claim-gated idle-shutdown decision for a service.
+
+    ``state`` must expose a mutable ``last_client_at`` and a numeric
+    ``idle_seconds``.  Every local service's ``on_idle`` maintenance probe
+    runs on every listener idle tick (see ``run_local_rpc_service``'s
+    accept-timeout loop) regardless of RPC traffic, so this is the ONLY place
+    that may move the idle deadline: pass the service's own freshly computed
+    claim predicate (a lease, a descriptor, accepted work -- whatever that
+    service defines as real external demand) on every call.  A claim present
+    refreshes the deadline; a claim absent lets it age toward
+    ``idle_seconds``.  A bare status/ping/snapshot RPC never changes the
+    claim predicate, so it can never reach the refreshing branch here --
+    unlike a connection-level ``on_client`` callback, which cannot tell a
+    diagnostic probe from real demand and must always be wired to a no-op for
+    any service that adopts this owner.  The claim predicate is the only
+    thing that varies per service; the transition/deadline algorithm does
+    not, and every service must route through this one function rather than
+    reimplementing it.
+    """
+    if has_claim:
+        state.last_client_at = now()
+        return False
+    return now() - state.last_client_at >= state.idle_seconds
+
+
 def peer_uid(connection: socket.socket) -> int | None:
     """Return the Unix peer UID where the platform exposes ``SO_PEERCRED``."""
     if not hasattr(socket, "SO_PEERCRED"):
@@ -262,6 +288,18 @@ def peer_uid(connection: socket.socket) -> int | None:
     except OSError:
         return None
     return int(uid)
+
+
+def peer_pid(connection: socket.socket) -> int | None:
+    """Return the Unix peer PID where the platform exposes ``SO_PEERCRED``."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        return None
+    try:
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        pid, _uid, _gid = struct.unpack("3i", credentials)
+    except OSError:
+        return None
+    return int(pid)
 
 
 def run_local_rpc_service(
@@ -354,7 +392,9 @@ def run_local_rpc_service(
                         if uid is not None and uid != os.getuid():
                             write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH}, legacy=True)
                             return
-                        on_client()
+                        pid = peer_pid(connection)
+                        if pid is None or pid != os.getpid():
+                            on_client()
                         try:
                             read_started = time.monotonic()
                             envelope, payload, request_binary, legacy = read_message(connection)

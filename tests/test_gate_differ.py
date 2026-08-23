@@ -78,9 +78,9 @@ def _control_filesystem_operation_product(
             "product": {"coalesce_key": product_key, "generation": 0},
         }, b""
 
-    def product(key):
+    def product(key, timeout=0.5):
         if key not in product_keys:
-            return original_product(key)
+            return original_product(key, timeout=timeout)
         release_pending = release is not None and not release.is_set()
         delay_pending = (
             ready_after_seconds is not None

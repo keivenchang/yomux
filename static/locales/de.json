@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "Anfragen",
   "debug.system.roster.column.restarts": "Neustarts",
   "debug.system.roster.column.service": "Dienst",
+  "debug.system.roster.column.starts": "Startvorgänge",
   "debug.system.roster.coverage.partial": "teilweise",
   "debug.system.roster.detail.eventsChat": "Ereignisse & Chat",
   "debug.system.roster.detail.process": "Prozess",

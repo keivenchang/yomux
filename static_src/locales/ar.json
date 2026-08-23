@@ -2676,6 +2676,7 @@
   "debug.system.roster.collapse": "إخفاء تفاصيل {service}",
   "debug.system.roster.column.service": "الخدمة",
   "debug.system.roster.column.latency": "زمن الاستجابة المتوسط / الأقصى",
+  "debug.system.roster.column.starts": "عمليات البدء",
   "debug.system.roster.column.restarts": "عمليات إعادة التشغيل",
   "debug.system.roster.column.requests": "الطلبات",
   "debug.system.roster.column.errors": "الأخطاء",

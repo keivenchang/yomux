@@ -582,6 +582,36 @@ def test_ready_process_identity_change_publishes_and_counts_a_restart(harness: H
     assert statsd["current"]["pid"] == 101
     assert statsd["current"]["process_epoch"] == "pid:101:start:101"
     assert statsd["aggregate"]["restart_count"] == 1
+    assert statsd["aggregate"]["unexpected_restart_count"] == 1
+
+
+def test_demand_scoped_absence_classifies_watchd_reentry_as_a_start_not_a_restart(harness: Harness):
+    harness.cycle(2)
+    watchd = harness.services["watchd"]
+    watchd.row.update({"pid": 0, "healthy": False, "last_failure": "", "demand_started": True})
+    harness.cycle(2)
+    current = harness.store.document()["resources"]["watchd"]["current"]
+    assert current["absence_expected"] is True
+
+    watchd.row.update({"pid": 101, "healthy": True, "last_failure": ""})
+    harness.cycle(2)
+    aggregate = harness.store.document()["resources"]["watchd"]["aggregate"]
+    assert aggregate["process_start_count"] == 2
+    assert aggregate["demand_start_count"] == 1
+    assert aggregate["unexpected_restart_count"] == 0
+
+
+def test_unobserved_watchd_epoch_replacement_is_left_unclassified(harness: Harness):
+    harness.cycle(2)
+    watchd = harness.services["watchd"]
+    watchd.row["pid"] = 101
+    harness.cycle(2)
+
+    aggregate = harness.store.document()["resources"]["watchd"]["aggregate"]
+    assert aggregate["restart_count"] == 1
+    assert aggregate["demand_start_count"] == 0
+    assert aggregate["unexpected_restart_count"] == 0
+    assert aggregate["lifecycle_classification_exact"] is False
 
 
 def test_each_published_change_advances_exactly_one_store_revision(harness: Harness):

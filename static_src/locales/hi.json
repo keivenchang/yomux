@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "{service} का विवरण छिपाएँ",
   "debug.system.roster.column.service": "सेवा",
   "debug.system.roster.column.latency": "विलंब औसत / अधिकतम",
+  "debug.system.roster.column.starts": "शुरुआतें",
   "debug.system.roster.column.restarts": "पुनरारंभ",
   "debug.system.roster.column.requests": "अनुरोध",
   "debug.system.roster.column.errors": "त्रुटियाँ",

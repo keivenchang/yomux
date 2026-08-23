@@ -1025,7 +1025,7 @@ def test_local_service_transport_log_names_action_request_and_client_elapsed_tim
     client = LocalServiceClient("watchd", "fixture.module", socket_path, service_dir=socket_path.parent)
     request_ids = []
     emitted = []
-    clock = iter((10.0, 10.125))
+    clock = iter((10.0, 10.0, 10.125))
 
     def timeout_request(_socket_path, envelope, **_kwargs):
         request_ids.append(envelope.request_id)

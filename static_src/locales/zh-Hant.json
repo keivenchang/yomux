@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "隱藏 {service} 的詳細資訊",
   "debug.system.roster.column.service": "服務",
   "debug.system.roster.column.latency": "延遲 平均 / 最大",
+  "debug.system.roster.column.starts": "啟動次數",
   "debug.system.roster.column.restarts": "重新啟動次數",
   "debug.system.roster.column.requests": "請求數",
   "debug.system.roster.column.errors": "錯誤數",

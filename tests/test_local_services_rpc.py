@@ -2,6 +2,8 @@ import errno
 import json
 import select
 import socket
+import subprocess
+import sys
 import threading
 import fcntl
 import os
@@ -290,6 +292,148 @@ def test_local_service_runtime_peer_uid_is_safe_when_unsupported_or_matching(mon
         server.close()
 
 
+def test_local_service_runtime_self_connection_is_excluded_from_on_client(tmp_path):
+    """A connection whose peer PID equals this process's own PID must not count as external demand."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        pytest.skip("SO_PEERCRED not supported on this platform")
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    listener_ready = threading.Event()
+    client_calls = []
+
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name="testd",
+            stop_event=stop_event,
+            handle=lambda _request, _request_binary: ({"ok": True}, b""),
+            on_idle=lambda: False,
+            on_client=lambda: client_calls.append(time.monotonic()),
+            on_start=listener_ready.set,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert listener_ready.wait(timeout=2.0)
+        envelope = rpc.new_envelope("testd", "echo", {"action": "echo"}, timeout_seconds=1.0)
+        response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=1.0)
+        assert response.get("ok") is True
+    finally:
+        stop_event.set()
+        worker.join(timeout=1.0)
+
+    assert client_calls == [], "a same-process (self) connection must not reset the idle/demand clock"
+
+
+class _ClaimState:
+    """Minimal stand-in for a service exposing the two attributes
+    ``claim_gated_idle_due`` reads/writes -- every real service (watchd,
+    jobd, statusd, approvald, search_indexer) uses this exact shared
+    function against its own ``last_client_at``/``idle_seconds``.
+    """
+
+    def __init__(self, *, idle_seconds: float, last_client_at: float):
+        self.idle_seconds = idle_seconds
+        self.last_client_at = last_client_at
+
+
+def test_claim_gated_idle_due_empty_then_claimed_then_empty(monkeypatch):
+    clock = [0.0]
+    now = lambda: clock[0]
+    state = _ClaimState(idle_seconds=5.0, last_client_at=0.0)
+
+    # Empty from the start: once idle_seconds has elapsed, it is due.
+    clock[0] = 6.0
+    assert runtime.claim_gated_idle_due(state, False, now=now) is True
+
+    # A claim arrives: never due while it holds, and the deadline keeps
+    # sliding forward on every observation.
+    clock[0] = 6.1
+    assert runtime.claim_gated_idle_due(state, True, now=now) is False
+    assert state.last_client_at == 6.1
+    clock[0] = 6.2
+    assert runtime.claim_gated_idle_due(state, True, now=now) is False
+    assert state.last_client_at == 6.2
+
+    # The claim departs: due only after a fresh idle_seconds has elapsed
+    # from the moment it was last observed present, not from the original
+    # empty-state timestamp.
+    clock[0] = 6.2 + 4.9
+    assert runtime.claim_gated_idle_due(state, False, now=now) is False
+    clock[0] = 6.2 + 5.1
+    assert runtime.claim_gated_idle_due(state, False, now=now) is True
+
+
+def test_claim_gated_idle_due_persistent_claim_never_expires(monkeypatch):
+    clock = [0.0]
+    now = lambda: clock[0]
+    state = _ClaimState(idle_seconds=1.0, last_client_at=0.0)
+
+    for tick in range(1, 21):
+        clock[0] = float(tick)
+        assert runtime.claim_gated_idle_due(state, True, now=now) is False
+    assert state.last_client_at == 20.0
+
+
+def test_claim_gated_idle_due_observer_traffic_never_extends_the_deadline():
+    """A caller that never has a real claim -- e.g. a diagnostic status
+    poller -- must never be able to pass ``has_claim=True``; from this
+    function's side, that means repeated ``has_claim=False`` observations
+    never touch ``last_client_at`` at all, regardless of how many times they
+    are made.
+    """
+    clock = [0.0]
+    now = lambda: clock[0]
+    state = _ClaimState(idle_seconds=5.0, last_client_at=0.0)
+
+    for tick in (1.0, 2.0, 3.0, 4.0):
+        assert runtime.claim_gated_idle_due(state, False, now=lambda t=tick: t) is False
+    assert state.last_client_at == 0.0, "observer-shaped calls (has_claim=False) mutated the clock"
+
+    clock[0] = 5.1
+    assert runtime.claim_gated_idle_due(state, False, now=now) is True
+
+
+def test_claim_gated_idle_due_duplicate_release_is_inert():
+    """A duplicate/no-op release (the caller already knows the claim is
+    gone, so it reports ``has_claim=False`` again) must not itself move the
+    deadline -- only an actual claim observed present may do that.
+    """
+    clock = [0.0]
+    now = lambda: clock[0]
+    state = _ClaimState(idle_seconds=5.0, last_client_at=0.0)
+
+    clock[0] = 1.0
+    assert runtime.claim_gated_idle_due(state, True, now=now) is False
+    assert state.last_client_at == 1.0
+
+    clock[0] = 1.1
+    assert runtime.claim_gated_idle_due(state, False, now=now) is False
+    assert state.last_client_at == 1.0, "the departure observation itself must not restamp the clock"
+
+    clock[0] = 1.2
+    assert runtime.claim_gated_idle_due(state, False, now=now) is False, "a duplicate departure observation pushed out the deadline"
+    assert state.last_client_at == 1.0
+
+    clock[0] = 6.1
+    assert runtime.claim_gated_idle_due(state, False, now=now) is True
+
+
+def test_claim_gated_idle_due_deadline_is_exact_with_a_controllable_clock():
+    clock = [100.0]
+    now = lambda: clock[0]
+    state = _ClaimState(idle_seconds=10.0, last_client_at=100.0)
+
+    clock[0] = 109.999
+    assert runtime.claim_gated_idle_due(state, False, now=now) is False
+    clock[0] = 110.0
+    assert runtime.claim_gated_idle_due(state, False, now=now) is True
+
+
 def _wait_for_service_socket(socket_path, expected_mode=0o600):
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -327,10 +471,45 @@ def _connect_to_service(service_socket_path, *, timeout=1.0, deadline_seconds=2.
         return client
 
 
+def _start_local_rpc_service(
+    socket_path,
+    lock_path,
+    stop_event,
+    *,
+    service_name,
+    handle,
+    concurrent_handlers=0,
+):
+    listener_ready = threading.Event()
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name=service_name,
+            stop_event=stop_event,
+            handle=handle,
+            on_idle=lambda: False,
+            on_client=lambda: None,
+            on_start=listener_ready.set,
+            concurrent_handlers=concurrent_handlers,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    if not listener_ready.wait(timeout=2.0):
+        stop_event.set()
+        worker.join(timeout=1.0)
+        pytest.fail("local service listener did not reach its post-listen start boundary")
+    if not socket_path.exists() or (socket_path.stat().st_mode & 0o777) != 0o600:
+        stop_event.set()
+        worker.join(timeout=1.0)
+        pytest.fail("local service post-listen socket was not published with mode 0o600")
+    return worker
+
+
 def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, peer_uid=None):
     if monkeypatch is not None:
         monkeypatch.setattr(runtime, "peer_uid", lambda _connection: peer_uid)
-    listener_ready = threading.Event()
 
     def handle(request, request_binary):
         if request.get("action") == "shutdown":
@@ -342,26 +521,13 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
             return {"ok": True, "blob": "x" * (rpc.LOCAL_RPC_MAX_METADATA_BYTES + 1)}, b""
         return {"ok": True, "echo": request, "request_binary": request_binary.decode("utf-8")}, b""
 
-    worker = threading.Thread(
-        target=lambda: runtime.run_local_rpc_service(
-            socket_path=socket_path,
-            lock_path=lock_path,
-            service_name="testd",
-            stop_event=stop_event,
-            handle=handle,
-            on_idle=lambda: False,
-            on_client=lambda: None,
-            on_start=listener_ready.set,
-        ),
-        daemon=True,
+    return _start_local_rpc_service(
+        socket_path,
+        lock_path,
+        stop_event,
+        service_name="testd",
+        handle=handle,
     )
-    worker.start()
-    if not listener_ready.wait(timeout=2.0):
-        stop_event.set()
-        worker.join(timeout=1.0)
-        pytest.fail("local service listener did not reach its post-listen start boundary")
-    _wait_for_service_socket(socket_path)
-    return worker
 
 
 def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clients(tmp_path, monkeypatch):
@@ -537,6 +703,143 @@ def test_local_service_runtime_does_not_idle_shutdown_with_active_handler(tmp_pa
         worker.join(timeout=1.0)
 
 
+def test_local_service_runtime_idle_shutdown_after_last_client_disconnects(tmp_path):
+    """The real accept loop -- not just the ``claim_gated_idle_due`` predicate in isolation --
+    must actually terminate once a real external client's demand departs and the idle deadline
+    elapses.
+
+    Synchronization is entirely event-driven, no sleeps or timing polls anywhere: the server's
+    real ``on_client`` callback (fired synchronously inside ``serve_connection`` before it reads
+    anything, i.e. on connect, not on data) sets ``client_observed`` the moment it happens; the
+    test only closes the held-open client connection AFTER waiting on that event, so there is no
+    window where the client can vanish before the server has observed it. A same-process connect
+    is asserted first to prove it does NOT set that event (self-connections never reach
+    ``on_client`` -- see ``test_local_service_runtime_self_connection_is_excluded_from_on_client``
+    for the isolated version of that same fact), giving this test its own negative control before
+    the real external-client positive case.
+    """
+    if not hasattr(socket, "SO_PEERCRED"):
+        pytest.skip("SO_PEERCRED not supported on this platform")
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    listener_ready = threading.Event()
+    client_observed = threading.Event()
+    clock = [0.0]
+    state = _ClaimState(idle_seconds=5.0, last_client_at=0.0)
+    demand = {"present": False}
+
+    def on_client():
+        demand["present"] = True
+        client_observed.set()
+
+    def idle_probe():
+        return runtime.claim_gated_idle_due(state, demand["present"], now=lambda: clock[0])
+
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name="testd",
+            stop_event=stop_event,
+            handle=lambda _request, _request_binary: ({"ok": True}, b""),
+            on_idle=idle_probe,
+            on_client=on_client,
+            on_start=listener_ready.set,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    try:
+        assert listener_ready.wait(timeout=2.0)
+        # Not idle-shutdown at the very start: rules out a trivial always-due predicate.
+        assert stop_event.wait(timeout=0.3) is False
+
+        # Negative control: a same-process connection must never set client_observed.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as self_probe:
+            self_probe.connect(str(service_socket_path))
+        assert client_observed.wait(timeout=0.3) is False, (
+            "a self-connection satisfied external-demand observation"
+        )
+        assert demand["present"] is False
+
+        # A real, different-PID client connects and is held open -- proving the external
+        # accept path fires on_client -- and is only closed AFTER that event is observed, so
+        # there is no race window where the client could vanish before being counted.
+        client = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import socket, sys; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); "
+                f"s.connect({str(service_socket_path)!r}); "
+                "sys.stdout.write('connected\\n'); sys.stdout.flush(); "
+                "sys.stdin.readline(); s.close()",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            connected_line = client.stdout.readline()
+            assert connected_line == "connected\n", "client subprocess failed to report a real connect"
+            assert client_observed.wait(timeout=2.0) is True, (
+                "the real non-self accept path never observed the client"
+            )
+            assert demand["present"] is True
+        finally:
+            # Deterministic exit signal, not a timing guess: the child blocks on this exact
+            # readline() call above, so writing a line unblocks and closes it right now. Best
+            # effort only: if an assertion above already failed because the child crashed or
+            # exited early, its stdin is already gone, and a BrokenPipeError here must never
+            # replace that original failure -- swallow it and fall through to the exact-child
+            # fail-safe escalation below, which reaps the child regardless of how it died.
+            try:
+                client.stdin.write("exit\n")
+                client.stdin.flush()
+                client.stdin.close()
+            except OSError:
+                pass
+            # Exact-child-only fail-safe: never a broad pkill/pgrep pattern, always this one
+            # `client` object. Escalates only if the orderly exit above did not already reap it.
+            if client.poll() is None:
+                client.terminate()
+                try:
+                    client.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    pass
+            if client.poll() is None:
+                # SIGKILL cannot be blocked or ignored by the child, so once delivered the
+                # kernel guarantees it becomes reapable -- this final wait is intentionally
+                # unbounded (never a timeout to silently swallow), the one point in this
+                # escalation that MUST succeed.
+                client.kill()
+                client.wait()
+            if client.stdout is not None and not client.stdout.closed:
+                client.stdout.close()
+            if client.stdin is not None and not client.stdin.closed:
+                client.stdin.close()
+            # Never assert/raise from inside `finally` in a way that would replace an
+            # already-active behavioral exception from the `try` block above -- an
+            # in-flight exception here means this IS that already-failing path, and the
+            # cleanup's own job (reap the child, close both pipes) is already done above
+            # unconditionally; only report a NEW failure when nothing else already is.
+            if sys.exc_info()[0] is None:
+                assert client.returncode is not None, "client subprocess was not reaped after cleanup"
+
+        # The last client's demand goes away, and the idle deadline elapses.
+        demand["present"] = False
+        clock[0] = state.idle_seconds + 0.1
+
+        assert stop_event.wait(timeout=2.0) is True, "the real loop never observed on_idle() becoming true"
+        worker.join(timeout=1.0)
+        assert worker.is_alive() is False, "the accept loop's own while condition never exited"
+        assert not socket_path.exists(), "normal exit cleanup did not run"
+    finally:
+        stop_event.set()
+        worker.join(timeout=1.0)
+
+
 def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, monkeypatch):
     socket_path = tmp_path / "service.sock"
     service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
@@ -692,22 +995,14 @@ def _run_traffic_service(
             return {"ok": False, "error": "fixture refused", "error_code": "fixture_refused"}, b""
         return {"ok": True, "echo": action}, b""
 
-    worker = threading.Thread(
-        target=lambda: runtime.run_local_rpc_service(
-            socket_path=socket_path,
-            lock_path=lock_path,
-            service_name="trafficd",
-            stop_event=stop_event,
-            handle=handle,
-            on_idle=lambda: False,
-            on_client=lambda: None,
-            concurrent_handlers=concurrent_handlers,
-        ),
-        daemon=True,
+    return _start_local_rpc_service(
+        socket_path,
+        lock_path,
+        stop_event,
+        service_name="trafficd",
+        handle=handle,
+        concurrent_handlers=concurrent_handlers,
     )
-    worker.start()
-    _wait_for_service_socket(socket_path)
-    return worker
 
 
 def _stop_traffic_service(worker, stop_event, socket_path):
@@ -1271,7 +1566,7 @@ def test_local_service_traffic_keeps_probe_and_work_separate_under_concurrency(t
     assert snapshot["work"]["errors"] == snapshot["probe"]["errors"] == 0
 
 
-def test_echo_service_fixture_returns_only_after_the_listener_is_ready(tmp_path, monkeypatch):
+def test_traffic_service_fixture_returns_only_after_the_listener_is_ready(tmp_path, monkeypatch):
     """The fixture's published socket file is not enough to prove listener readiness.
 
     `run_local_rpc_service` binds the path -- creating it with its final 0600 mode -- and calls
@@ -1283,24 +1578,49 @@ def test_echo_service_fixture_returns_only_after_the_listener_is_ready(tmp_path,
     """
 
     socket_path = tmp_path / "service.sock"
-    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     original_listen = socket.socket.listen
+    listen_entered = threading.Event()
+    release_listen = threading.Event()
+    fixture_returned = threading.Event()
+    workers = []
+    failures = []
 
-    def delayed_listen(self, backlog=0):
-        time.sleep(0.3)
+    def blocked_listen(self, backlog=0):
+        listen_entered.set()
+        if not release_listen.wait(timeout=2.0):
+            raise RuntimeError("listener barrier timed out")
         return original_listen(self, backlog)
 
-    monkeypatch.setattr(socket.socket, "listen", delayed_listen)
-    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+    def start_fixture():
+        try:
+            workers.append(_run_traffic_service(socket_path, lock_path, stop_event, service_pid=5150))
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            fixture_returned.set()
+
+    monkeypatch.setattr(socket.socket, "listen", blocked_listen)
+    launcher = threading.Thread(target=start_fixture, daemon=True)
+    launcher.start()
+    reached_bind_before_listen = listen_entered.wait(timeout=2.0)
+    socket_published_before_listen = socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600
+    fixture_waited_for_listen = not fixture_returned.is_set()
+    release_listen.set()
+    assert fixture_returned.wait(timeout=2.0)
+    launcher.join(timeout=1.0)
+    assert launcher.is_alive() is False
+    if failures:
+        raise failures[0]
+    worker = workers[0]
     try:
-        # The socket path is published, but the fixture must not return until the same service can
-        # accept the caller's first real request without a connect retry or readiness probe.
-        assert socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600
-        envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
-        response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=1.0)
-        assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
+        assert reached_bind_before_listen is True
+        assert socket_published_before_listen is True
+        assert fixture_waited_for_listen is True
+        envelope = rpc.new_envelope("trafficd", "ping", {"action": "ping"})
+        response, _binary = rpc.request(socket_path, envelope, timeout_seconds=1.0)
+        assert response["pid"] == 5150
     finally:
         stop_event.set()
         worker.join(timeout=2.0)

@@ -36,6 +36,7 @@ from yolomux_lib.watchd_protocol import validate_descriptor
 from yolomux_lib.watchd_protocol import WATCHD_MAX_PATHS
 from yolomux_lib.watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
 from yolomux_lib.local_services import registry as registry_mod
+from yolomux_lib.local_services import runtime as local_service_runtime
 from yolomux_lib import watchd_client
 from yolomux_lib.watchd_client import WatchClient
 from yolomux_lib import app as app_module
@@ -242,6 +243,7 @@ def test_watchd_bridge_applies_each_retained_revision_in_order(tmp_path, monkeyp
     record = ClientEventWatcherRecord(
         watchd_lease_id="lease",
         watchd_epoch=service.epoch,
+        watchd_descriptor_ids={"test-descriptor"},
         filesystem_roots=(str(tmp_path),),
     )
     webapp.client_watch_service.event_watcher_record = record
@@ -1013,6 +1015,129 @@ def test_watchd_listener_accepts_a_request_while_the_service_condition_is_held(t
     assert listener.is_alive() is False
 
 
+def test_watchd_status_probe_does_not_reset_the_idle_clock(tmp_path):
+    """A bare status/ping RPC -- e.g. a diagnostic probe, not a real filesystem
+    watch client -- must not push out watchd's idle-shutdown clock.
+
+    ``app.py`` documents "the descriptor set is the sole demand owner for
+    watchd"; a diagnostic RPC that is not a lease/descriptor action must never
+    count as demand.  ``handle()`` previously re-stamped ``last_client_at`` on
+    every dispatched RPC, defeating that invariant even after excluding
+    same-process connections at the socket layer.
+    """
+    service = PersistentWatchService(tmp_path / "watchd.sock", idle_seconds=5.0)
+    assert not service.leases
+    service.last_client_at = time.monotonic() - 6.0
+    assert service.idle_due() is True, "baseline: no leases and idle_seconds elapsed must already report idle"
+
+    service.last_client_at = time.monotonic() - 6.0
+    response, _body = service.handle(_request("status"))
+    assert response["ok"] is True
+
+    assert service.idle_due() is True, "a status probe with no lease held reset the idle clock"
+
+
+def test_watchd_external_status_probe_never_refreshes_demand_but_a_real_lease_does(tmp_path, monkeypatch):
+    """Cross the real listener boundary (not a direct ``handle()`` call) to
+    prove both halves of the demand invariant end to end: an external
+    observer/status RPC with no lease never refreshes the idle clock, while
+    acquiring a real lease does and blocks retirement until it is released.
+    """
+    service = PersistentWatchService(tmp_path / "watchd.sock", idle_seconds=5.0)
+    listener = threading.Thread(target=service.run, daemon=True)
+    listener.start()
+    try:
+        _wait_for_watchd_socket(service.socket_path)
+        # A genuinely foreign peer PID, so this exercises the same connection
+        # this daemon would see from an unrelated observer/health-check
+        # process, not a same-process self-connection.
+        monkeypatch.setattr(local_service_runtime, "peer_pid", lambda _connection: os.getpid() + 999_000)
+
+        service.last_client_at = time.monotonic() - 6.0
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(WATCHD_SERVICE_NAME, "status", _request("status"))
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        assert service.idle_due() is True, "an external status probe with no lease refreshed the idle clock"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(WATCHD_SERVICE_NAME, "lease", _request("lease", client_pid=os.getpid()))
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        lease_id = str(response["lease_id"])
+        assert service.idle_due() is False, "acquiring a real lease did not refresh demand"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(WATCHD_SERVICE_NAME, "release", _request("release", lease_id=lease_id))
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        assert service.idle_due() is False, "releasing the final lease must start the idle grace window, not report idle immediately"
+
+        service.last_client_at = time.monotonic() - 6.0
+        assert service.idle_due() is True, "idle grace window did not elapse after the final lease released"
+    finally:
+        service.stop_event.set()
+        listener.join(timeout=3.0)
+
+
+def test_watchd_duplicate_or_unknown_release_never_extends_the_idle_deadline(tmp_path):
+    """A stray/duplicate release RPC -- e.g. a client's own release-retry
+    landing after the lease was already gone -- must not itself push out the
+    idle deadline.  Only ``idle_due()`` observing a currently-held lease may
+    refresh the clock; ``handle()``/``_release_locked`` never stamp it
+    directly, so a no-op release (unknown or already-released lease_id) is
+    inert with respect to the idle clock.
+    """
+    service = PersistentWatchService(tmp_path / "watchd.sock", idle_seconds=5.0)
+    lease_response, _body = service.handle(_request("lease", client_pid=os.getpid()))
+    assert lease_response["ok"] is True
+    lease_id = str(lease_response["lease_id"])
+
+    release_response, _body = service.handle(_request("release", lease_id=lease_id))
+    assert release_response["ok"] is True
+    assert not service.leases
+
+    service.last_client_at = time.monotonic() - 6.0
+    assert service.idle_due() is True, "baseline: idle_seconds elapsed since the real release must already report idle"
+
+    service.last_client_at = time.monotonic() - 6.0
+    duplicate_response, _body = service.handle(_request("release", lease_id=lease_id))
+    assert duplicate_response["ok"] is True, "release is deliberately idempotent on the wire"
+
+    assert service.idle_due() is True, "a duplicate release for an already-gone lease pushed out the idle deadline"
+
+
+def test_watchd_idle_due_reaps_a_dead_client_lease_through_the_real_reap_path(tmp_path):
+    """"Stale lease" in this codebase is process-identity staleness, not a wall-clock TTL --
+    ``reap_dead_client_leases`` (``local_services/runtime.py``) discards a lease only when the
+    recorded owner is provably dead (pid probe + process-birth-identity mismatch), never by
+    elapsed time. This drives that through watchd's own real ``idle_due()`` entry point
+    (``_dead_lease_ids()`` -> ``_reap_locked()``, watchd.py:468-490) rather than calling the
+    shared reaper function directly -- unlike ``tests/test_local_services_host_identity.py``'s
+    isolation-level coverage of the mechanism itself, or ``tests/test_statusd.py``'s
+    coverage which monkeypatches the reaper out entirely, this proves the real SERVICE
+    correctly wires a dead-owner lease into its own idle decision.
+    """
+    service = PersistentWatchService(tmp_path / "watchd.sock", idle_seconds=5.0)
+    service.last_client_at = time.monotonic() - (service.idle_seconds * 10)
+    service.leases["dead-client"] = local_service_runtime.current_host_identity().process_record_fields(
+        pid=999_999_999,
+        start_identity="proc:1",
+    )
+
+    assert service.idle_due() is True
+    assert service.leases == {}, "the real idle_due() entry point did not reap the dead-owner lease"
+
+
 def test_watchd_snapshot_returns_exact_opaque_watch_diff_bytes_and_uniform_product(tmp_path, monkeypatch):
     service = PersistentWatchService(tmp_path / "watchd.sock")
     root = tmp_path / "repo"
@@ -1199,7 +1324,11 @@ def test_watchd_transport_failure_reuses_local_service_transport_log_owner(monke
 
 def test_watchd_unchanged_success_closes_existing_failure_episode(monkeypatch):
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    record = ClientEventWatcherRecord(watchd_lease_id="lease", watchd_epoch="epoch")
+    record = ClientEventWatcherRecord(
+        watchd_lease_id="lease",
+        watchd_epoch="epoch",
+        watchd_descriptor_ids={"test-descriptor"},
+    )
     webapp.client_watch_service.event_watcher_record = record
     emitted = []
     # The failure is observed at 10.0 and the recovery at 11.0. This drives the real revision
@@ -2177,7 +2306,7 @@ def test_an_unknown_watchd_error_code_is_still_collapsed_to_service_unavailable(
     assert "totally_invented_code" not in emitted[0][0][2]
 
 
-def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):
+def test_web_defers_watchd_bridge_without_descriptor_demand(monkeypatch):
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
     wait_entered = threading.Event()
     release = threading.Event()
@@ -2202,16 +2331,14 @@ def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):
             return {"ok": True}
 
     webapp.watch_client = Client()
-    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {})
+    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {"test-descriptor": {"descriptor_generation": 1}})
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
     webapp.start_client_event_watcher()
     try:
-        assert wait_entered.wait(1.0)
-        thread_names = {thread.name for thread in threading.enumerate()}
-        assert "watchd-revision" in thread_names
-        assert "native-filesystem-watch" not in thread_names
-        assert not any("notify-rs" in name for name in thread_names)
+        assert not wait_entered.wait(0.1)
+        record = webapp.client_watch_service.event_watcher_record
+        assert record.watchd_worker is None
     finally:
         release.set()
         webapp.stop_client_event_watcher()
@@ -2538,7 +2665,7 @@ def test_watchd_revision_loop_floors_its_period_and_still_exits_without_paying_i
     """
 
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    record = ClientEventWatcherRecord()
+    record = ClientEventWatcherRecord(watchd_descriptor_ids={"test-descriptor"})
     clock = [1000.0]
     waits: list[float] = []
     iterations = [0]
@@ -2561,7 +2688,7 @@ def test_watchd_revision_loop_floors_its_period_and_still_exits_without_paying_i
 
     monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(record.watchd_stop_event, "wait", recording_wait)
-    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {})
+    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {"test-descriptor": {"descriptor_generation": 1}})
     monkeypatch.setattr(webapp, "publish_watchd_recovery", lambda _record: None)
     webapp.watch_client = _PacingClient(advance_body)
 
@@ -2588,7 +2715,7 @@ def test_watchd_revision_loop_stop_event_breaks_the_floor_immediately(monkeypatc
     """A stop requested during the floor must not wait it out."""
 
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
-    record = ClientEventWatcherRecord()
+    record = ClientEventWatcherRecord(watchd_descriptor_ids={"test-descriptor"})
     clock = [500.0]
     iterations = [0]
 
@@ -2598,7 +2725,7 @@ def test_watchd_revision_loop_stop_event_breaks_the_floor_immediately(monkeypatc
         record.watchd_stop_event.set()
 
     monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {})
+    monkeypatch.setattr(webapp, "watchd_descriptor_payloads", lambda: {"test-descriptor": {"descriptor_generation": 1}})
     monkeypatch.setattr(webapp, "publish_watchd_recovery", lambda _record: None)
     webapp.watch_client = _PacingClient(advance_body)
 
@@ -3421,6 +3548,7 @@ def test_stale_same_protocol_watchd_is_retired_before_descriptors(tmp_path, monk
         "pid": stale_pid,
         "socket": str(registry.socket_path),
         "protocol_version": WATCHD_PROTOCOL_VERSION,
+        "process_start_identity": f"proc:{stale_pid}",
         "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
         "launcher_pid": os.getpid(),
     })

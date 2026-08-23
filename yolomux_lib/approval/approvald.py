@@ -27,6 +27,7 @@ from ..local_services.rpc import LOCAL_RPC_VERSION
 from ..local_services.rpc import safe_socket_path
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
+from ..local_services.runtime import claim_gated_idle_due
 from ..local_services.runtime import LocalRpcServiceState
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -144,7 +145,9 @@ class PersistentApprovalService(LocalRpcServiceState):
         if not started:
             return {"ok": False, "locked": True, "owner": owner, "status": worker.status()}
         self.records[target] = ApprovalWorkerRecord(session=session, worker=worker)
-        self.last_client_at = time.monotonic()
+        # idle_due (claim_gated_idle_due) refreshes last_client_at on every
+        # idle tick while self.records is non-empty; no per-mutation stamp
+        # is needed here.
         return {"ok": True, "started": True, "status": self._status_payload(target)}
 
     def _stop_target(self, target: str) -> dict[str, Any]:
@@ -154,7 +157,6 @@ class PersistentApprovalService(LocalRpcServiceState):
         stopped = record.worker.stop()
         if not stopped:
             self.records[target] = record
-        self.last_client_at = time.monotonic()
         return {"ok": bool(stopped), "stopped": bool(stopped), "target": target, "status": self._status_payload(target, record)}
 
     def _stop_session(self, session: str) -> dict[str, Any]:
@@ -262,10 +264,20 @@ class PersistentApprovalService(LocalRpcServiceState):
         return {"ok": True, "shutdown": True}, b""
 
     def handle(self, request: dict[str, Any], payload: bytes = b"") -> tuple[dict[str, Any], bytes]:
-        self.last_client_at = time.monotonic()
+        # Deliberately does NOT stamp last_client_at here, and the listener's
+        # on_client callback (wired in run()) is a no-op.  Only idle_due
+        # refreshes the clock, and only while a real claim (lease or worker
+        # record) exists -- a diagnostic RPC, self-connected or external,
+        # must never masquerade as demand.
         action = str(request.get("action") or "")
         response = APPROVALD_COMMAND_ROUTER.dispatch(self, action, request, payload)
         return response if response is not None else ({"ok": False, "error": f"unknown action: {action}"}, b"")
+
+    def idle_due(self) -> bool:
+        # claim_gated_idle_due is the one shared owner of the
+        # transition/deadline algorithm every local service routes through;
+        # approvald's claim predicate is a held lease or worker record.
+        return claim_gated_idle_due(self, bool(self.leases) or bool(self.records))
 
     def run(self) -> int:
         return run_local_rpc_service(
@@ -274,8 +286,8 @@ class PersistentApprovalService(LocalRpcServiceState):
             service_name="approvald",
             stop_event=self.stop_event,
             handle=self.handle,
-            on_idle=lambda: not self.leases and not self.records and time.monotonic() - self.last_client_at >= self.idle_seconds,
-            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            on_idle=self.idle_due,
+            on_client=lambda: None,
             on_shutdown=self._shutdown,
         )
 

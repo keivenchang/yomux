@@ -2538,6 +2538,7 @@
   "debug.system.roster.collapse": "הסתר פרטים עבור {service}",
   "debug.system.roster.column.service": "שירות",
   "debug.system.roster.column.latency": "השהיה ממוצעת / מרבית",
+  "debug.system.roster.column.starts": "הפעלות",
   "debug.system.roster.column.restarts": "הפעלות מחדש",
   "debug.system.roster.column.requests": "בקשות",
   "debug.system.roster.column.errors": "שגיאות",

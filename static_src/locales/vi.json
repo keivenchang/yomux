@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "Ẩn chi tiết của {service}",
   "debug.system.roster.column.service": "Dịch vụ",
   "debug.system.roster.column.latency": "Độ trễ TB / tối đa",
+  "debug.system.roster.column.starts": "Lần khởi động",
   "debug.system.roster.column.restarts": "Lần khởi động lại",
   "debug.system.roster.column.requests": "Yêu cầu",
   "debug.system.roster.column.errors": "Lỗi",

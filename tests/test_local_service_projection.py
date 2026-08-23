@@ -237,6 +237,7 @@ def test_watchd_publishes_a_bridge_pid_the_record_cannot_verify(monkeypatch, tmp
     service_dir.mkdir(parents=True, exist_ok=True)
     client = WatchClient(socket_path=service_dir / "watchd.sock")
     registry = client.registry
+    registry.record_path.parent.mkdir(parents=True, exist_ok=True)
     registry.record_path.write_text(
         json.dumps({
             **registry.host_identity.process_record_fields(pid=2),
@@ -344,6 +345,7 @@ def test_registry_process_identity_refuses_an_unreadable_or_foreign_record(tmp_p
     registry = client.registry
 
     absent = local_service_projection.registry_process_identity(registry)
+    registry.record_path.parent.mkdir(parents=True, exist_ok=True)
     registry.record_path.write_text("{not json", encoding="utf-8")
     unreadable = local_service_projection.registry_process_identity(registry)
     registry.record_path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
@@ -385,7 +387,7 @@ def test_the_snapshot_schema_is_frozen_and_immutable():
 
     assert tuple(snapshot.__dataclass_fields__) == SNAPSHOT_DATACLASS_FIELDS
     assert tuple(snapshot.rows[0].__dataclass_fields__) == ROW_DATACLASS_FIELDS
-    assert snapshot.schema_version == 3
+    assert snapshot.schema_version == 4
     assert snapshot.observed_at == 160.0
     assert snapshot.inventory == local_service_projection.LOCAL_SERVICE_INVENTORY
     assert snapshot.row("indexd").uptime_seconds == 60.0
@@ -396,8 +398,8 @@ def test_the_snapshot_schema_is_frozen_and_immutable():
         snapshot.row("indexd").fields["pid"] = 99
 
 
-def test_the_rendered_payload_publishes_schema_three_and_the_frozen_inventory():
-    """W13 removed the dead `alert` key, so the version moved with it. Both are pinned together.
+def test_the_rendered_payload_publishes_schema_four_and_the_frozen_inventory():
+    """Lifecycle metrics changed the row shape, so the version moved with them.
 
     This is the negative control for "a schema change without a version bump": the key set
     and the version number are asserted in ONE statement, so removing (or adding) a field
@@ -407,7 +409,7 @@ def test_the_rendered_payload_publishes_schema_three_and_the_frozen_inventory():
     collector = local_service_projection.LocalServicesCollector(lambda: _stub_producers())
     payload = collector.collect().payload(lambda row: dict(row))
 
-    assert (payload["schema_version"], frozenset(payload)) == (3, SNAPSHOT_PAYLOAD_KEYS)
+    assert (payload["schema_version"], frozenset(payload)) == (4, SNAPSHOT_PAYLOAD_KEYS)
     assert "alert" not in payload
     assert payload["inventory"] == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
     assert [service["service"] for service in payload["services"]] == list(payload["inventory"])

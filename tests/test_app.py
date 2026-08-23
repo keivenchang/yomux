@@ -92,7 +92,21 @@ def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, n
 def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch)
 def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch)
 def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch)
+def test_wait_for_jobd_product_retries_busy_within_the_existing_budget(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_retries_busy_within_the_existing_budget(monkeypatch)
 def test_wait_for_jobd_product_keeps_broker_failure_distinct(): app_jobd_product.assert_wait_for_jobd_product_keeps_broker_failure_distinct()
+def test_wait_for_jobd_product_caps_rpc_at_outer_deadline(monkeypatch): app_jobd_product.assert_wait_for_jobd_product_caps_rpc_at_outer_deadline(monkeypatch)
+
+
+@pytest.mark.parametrize("provenance", ("capacity_rejected", "admission_rejected"))
+def test_jobd_busy_failure_result_remains_retryable_after_client_budget_exhaustion(provenance):
+    result = app_module.TmuxWebtermApp.jobd_operation_failure_result(
+        "r-busy",
+        {"ok": False, "error": "service busy", provenance: True},
+        route="POST /api/fs/batch",
+        operation="jobd.produce",
+    )
+
+    assert result["error"]["retryable"] is True
 
 
 class StatsRoleOwner:
@@ -685,7 +699,8 @@ def test_the_system_status_row_publishes_the_retained_health_it_was_attached_to(
     for row in payload["services"]:
         assert set(row["metrics"]) == {"cpu_now_percent", "rss_bytes", "uptime_seconds"}, row["id"]
         assert set(row["health"]["metrics"]) == {
-            "restart_count", "observations", "request_count", "error_count",
+            "restart_count", "process_start_count", "demand_start_count", "unexpected_restart_count",
+            "observations", "request_count", "error_count",
             "completed_count", "latency_average_ms", "latency_max_ms",
         }, row["id"]
     # A service the observer never recorded says so; it does not borrow jobd's numbers.
@@ -3689,7 +3704,7 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     try:
         webapp.start_client_event_watcher()
-        assert started == ["client-event-watch", "watchd-revision"]
+        assert started == ["client-event-watch"]
         record = webapp.client_watch_service.event_watcher_record
         assert record.next_attention_ack_poll_at == pytest.approx(112.0)
         assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
@@ -8351,8 +8366,10 @@ def test_unchanged_client_watch_descriptor_refreshes_ttl_without_restarting_snap
     webapp = app_module.TmuxWebtermApp([])
     wakes = []
     snapshots = []
+    lifecycle_starts = []
     monkeypatch.setattr(webapp, "wake_client_event_watcher", lambda: wakes.append("wake"))
     monkeypatch.setattr(webapp, "start_client_watch_snapshot_publish", lambda: snapshots.append("snapshot") or True)
+    monkeypatch.setattr(webapp, "start_client_event_watcher", lambda: lifecycle_starts.append("start"))
     subscriber, _queue = webapp.client_events.subscribe(channels="files", client_id="browser-a")
     descriptor = {"client_id": "browser-a", "roots": ["/repo"], "files": ["/repo/open.py"]}
     try:
@@ -8362,6 +8379,7 @@ def test_unchanged_client_watch_descriptor_refreshes_ttl_without_restarting_snap
 
         assert wakes == ["wake", "wake"]
         assert snapshots == ["snapshot", "snapshot"]
+        assert lifecycle_starts == ["start", "start"]
         assert webapp.client_watch_service.descriptors["browser-a"].descriptor_generation == 2
     finally:
         webapp.client_events.unsubscribe(subscriber)
@@ -8720,7 +8738,7 @@ def test_filesystem_watch_diff_request_submits_bounded_jobd_batches_and_complete
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             requests = product_payloads[product_key]["requests"]
             responses = [
                 {
@@ -8814,7 +8832,7 @@ def test_filesystem_watch_diff_warm_calls_return_ready_without_another_jobd_rpc(
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             assert product_key == submissions[0][2]["coalesce_key"]
             return {"ok": True, "state": "ready", "generation": 1, "inflight": False}, product_body
 
@@ -8883,7 +8901,7 @@ def test_equivalent_inflight_filesystem_watch_diff_requests_share_one_completion
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             assert product_key == submissions[0][2]["coalesce_key"]
             assert product_released.wait(2.0), "test did not release the shared watch product"
             return {
@@ -9062,7 +9080,7 @@ def test_inflight_watch_diff_fanout_owns_one_completion_per_semantic_key(monkeyp
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             assert product_released.wait(2.0), "test did not release the distinct watch products"
             with submission_lock:
                 submission = next(call for call in submissions if call[2]["coalesce_key"] == product_key)
@@ -9442,7 +9460,7 @@ def test_publish_context_items_ready_events_on_transcript_watch_routes_through_j
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             return {"ok": True, "job": {"status": "running"}}
 
         def product(self, coalesce_key, timeout=0.5):
@@ -9682,7 +9700,7 @@ def test_context_http_boundaries_accept_one_jobd_product_without_request_thread_
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             actions.append(("result", threading.current_thread().name))
             return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
 
@@ -9735,7 +9753,7 @@ def test_context_product_receipt_completes_through_operation_event_and_replay(mo
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert job_id == "job-context"
             return {
                 "ok": True,
@@ -9857,9 +9875,11 @@ def test_session_files_result_deadline_preserves_typed_failure_and_one_diagnosti
     ])
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
     webapp.job_client = client
+    now = iter([9.0, 11.0])
+    monkeypatch.setattr(app_module.time, "time", lambda: next(now, 11.0))
     try:
         with pytest.raises(app_module.SessionFilesJobdUnavailable) as raised:
-            webapp.wait_for_session_files_operation_job("session-files-1", time.time() - 1.0)
+            webapp.wait_for_session_files_operation_job("session-files-1", 10.0)
     finally:
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
@@ -9872,7 +9892,7 @@ def test_session_files_unrecoverable_absent_client_fails_immediately_with_cause(
     calls = []
 
     class AbsentJobClient:
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             calls.append(job_id)
             return {
                 "ok": False,
@@ -9946,9 +9966,11 @@ def test_jobd_product_deadline_publishes_one_deferred_transport_error(monkeypatc
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
     webapp.job_client = client
     producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-1", generation=7)
+    now = iter([9.0, 11.0])
+    monkeypatch.setattr(app_module.time, "time", lambda: next(now, 11.0))
     try:
         with pytest.raises(app_module.JobdOperationUnavailable) as raised:
-            webapp.wait_for_jobd_operation_product(producer, time.time() - 1.0)
+            webapp.wait_for_jobd_operation_product(producer, 10.0)
     finally:
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
@@ -9957,6 +9979,199 @@ def test_jobd_product_deadline_publishes_one_deferred_transport_error(monkeypatc
     assert raised.value.failure["last_transient_transport"] == "timeout"
     assert len(emitted) == 1
     assert emitted[0].request_id == "request-product"
+
+
+@pytest.mark.parametrize("waiter", ("job", "product"))
+def test_jobd_waiters_do_not_start_an_rpc_after_the_outer_deadline(monkeypatch, waiter):
+    calls = []
+
+    class ExpiredJob:
+        def product(self, _product_key, timeout=0.5):
+            calls.append(("product", timeout))
+            raise AssertionError("an expired product deadline must not start an RPC")
+
+        def result(self, _job_id, timeout=0.5):
+            calls.append(("result", timeout))
+            raise AssertionError("an expired result deadline must not start an RPC")
+
+    class NoWaitEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, _seconds):
+            raise AssertionError("an expired deadline must not wait")
+
+    monkeypatch.setattr(app_module.time, "time", lambda: 11.0)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.job_client = ExpiredJob()
+    webapp.jobd_operation_service = SimpleNamespace(stop_event=NoWaitEvent())
+    producer = app_module.JobdProductOperation(
+        job_id="job-expired",
+        product_key="product-expired",
+        generation=1,
+    )
+
+    with pytest.raises(app_module.JobdOperationUnavailable) as raised:
+        if waiter == "job":
+            webapp.wait_for_jobd_operation_job(producer.job_id, 10.0)
+        else:
+            webapp.wait_for_jobd_operation_product(producer, 10.0)
+
+    assert raised.value.code == "deadline_expired"
+    assert calls == []
+
+
+@pytest.mark.parametrize("waiter", ("job", "product", "filesystem"))
+def test_jobd_waiters_forward_the_same_remaining_budget_to_every_rpc(monkeypatch, waiter):
+    calls = []
+
+    class BudgetedJob:
+        def product(self, product_key, timeout=0.5):
+            calls.append(("product", product_key, timeout))
+            return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+        def result(self, job_id, timeout=0.5):
+            calls.append(("result", job_id, timeout))
+            return {"ok": True, "job": {"job_id": job_id, "status": "failed", "error": "fixture terminal"}}
+
+    class NoWaitEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, _seconds):
+            raise AssertionError("a terminal producer must not wait")
+
+    clock_values = iter([100.0] if waiter == "job" else [100.0, 100.2])
+    monkeypatch.setattr(app_module.time, "time", lambda: next(clock_values))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.job_client = BudgetedJob()
+    webapp.jobd_operation_service = SimpleNamespace(stop_event=NoWaitEvent())
+    producer = app_module.JobdProductOperation(
+        job_id="job-budget",
+        product_key="product-budget",
+        generation=1,
+    )
+
+    with pytest.raises(app_module.JobdOperationUnavailable):
+        if waiter == "job":
+            webapp.wait_for_jobd_operation_job(producer.job_id, 100.4)
+        elif waiter == "product":
+            webapp.wait_for_jobd_operation_product(producer, 100.4)
+        else:
+            webapp.wait_for_filesystem_operation_product(producer, 100.4)
+
+    expected = (
+        [("result", "job-budget", pytest.approx(0.4))]
+        if waiter == "job"
+        else [
+            ("product", "product-budget", pytest.approx(0.4)),
+            ("result", "job-budget", pytest.approx(0.2)),
+        ]
+    )
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    ("waiter", "product_response", "result_response", "clock_values", "expected_calls"),
+    [
+        pytest.param(
+            "jobd",
+            {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"},
+            None,
+            [9.0, 11.0],
+            (1, 0),
+            id="jobd-product-transient",
+        ),
+        pytest.param(
+            "jobd",
+            {"ok": True, "state": "none", "generation": 0, "inflight": False},
+            {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"},
+            [9.0, 9.5, 11.0],
+            (1, 1),
+            id="jobd-result-transient",
+        ),
+        pytest.param(
+            "filesystem",
+            None,
+            None,
+            [11.0],
+            (0, 0),
+            id="filesystem-entry",
+        ),
+        pytest.param(
+            "filesystem",
+            {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"},
+            None,
+            [9.0, 11.0],
+            (1, 0),
+            id="filesystem-product-transient",
+        ),
+        pytest.param(
+            "filesystem",
+            {"ok": True, "state": "none", "generation": 0, "inflight": False},
+            {"ok": False, "error": "scripted receive timeout", "_transport_error": "timeout"},
+            [9.0, 9.5, 11.0],
+            (1, 1),
+            id="filesystem-result-transient",
+        ),
+    ],
+)
+def test_jobd_product_deadline_edges_share_complete_transient_diagnostics(
+    monkeypatch,
+    waiter,
+    product_response,
+    result_response,
+    clock_values,
+    expected_calls,
+):
+    calls = {"product": 0, "result": 0}
+
+    class DeadlineJob:
+        def product(self, _product_key, **_kwargs):
+            calls["product"] += 1
+            assert product_response is not None
+            return dict(product_response), b""
+
+        def result(self, _job_id, **_kwargs):
+            calls["result"] += 1
+            assert result_response is not None
+            return dict(result_response)
+
+    class NoWaitEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, _seconds):
+            raise AssertionError("an expired product deadline must not wait again")
+
+    now = iter(clock_values)
+    monkeypatch.setattr(app_module.time, "time", lambda: next(now, 11.0))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.job_client = DeadlineJob()
+    webapp.jobd_operation_service = SimpleNamespace(stop_event=NoWaitEvent())
+    producer = app_module.JobdProductOperation(
+        job_id="job-deadline",
+        product_key="product-deadline",
+        generation=1,
+    )
+
+    with pytest.raises(app_module.JobdOperationUnavailable) as raised:
+        if waiter == "jobd":
+            webapp.wait_for_jobd_operation_product(producer, 10.0)
+        else:
+            webapp.wait_for_filesystem_operation_product(producer, 10.0)
+
+    transient_polls = int(expected_calls != (0, 0))
+    assert raised.value.failure == {
+        "error": "jobd product deadline expired",
+        "status": "deadline_expired",
+        "transient_polls": transient_polls,
+        "last_transient_error": "scripted receive timeout" if transient_polls else "",
+        "last_transient_transport": "timeout" if transient_polls else "",
+    }
+    assert raised.value.code == "deadline_expired"
+    assert raised.value.status == HTTPStatus.GATEWAY_TIMEOUT
+    assert (calls["product"], calls["result"]) == expected_calls
 
 
 def test_context_product_completed_without_mapping_terminalizes_protocol_failure(monkeypatch, tmp_path):
@@ -9976,7 +10191,7 @@ def test_context_product_completed_without_mapping_terminalizes_protocol_failure
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert job_id == "job-context"
             return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": []}}
 
@@ -10022,7 +10237,7 @@ def test_context_product_unexpected_completion_failure_terminalizes_operation(mo
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert job_id == "job-context"
             return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": {}}}
 
@@ -10069,7 +10284,7 @@ def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypat
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             actions.append(("product", threading.current_thread().name, product_key))
             body = json.dumps({
                 "responses": [
@@ -10192,11 +10407,11 @@ def test_filesystem_operation_refuses_an_invalid_path_before_accepting_it(
                 "job": {"job_id": "job-invalid-path", "status": "queued", "generation": kwargs["generation"]},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             submissions.append(("product", product_key))
             return {"ok": True, "state": "none", "inflight": True, "generation": 0}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             submissions.append(("result", job_id))
             return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
 
@@ -10282,7 +10497,7 @@ def test_filesystem_operation_cold_receipt_leaves_request_thread_before_worker_f
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             actions.append(("product", threading.current_thread().name, product_key))
             assert release.wait(2.0)
             body = json.dumps({"path": "/repo/note.txt", "content": "offloaded"}).encode("utf-8")
@@ -10447,10 +10662,10 @@ def test_filesystem_operation_cold_failure_replay_preserves_typed_status(monkeyp
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, _product_key):
+        def product(self, _product_key, timeout=0.5):
             return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert job_id == "job-fs-failed"
             return {
                 "ok": False,
@@ -10520,12 +10735,12 @@ class _TerminalFailureFilesystemJob:
             "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
         }, b""
 
-    def product(self, _product_key):
+    def product(self, _product_key, timeout=0.5):
         if self.product_failure is not None:
             return dict(self.product_failure), b""
         return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
 
-    def result(self, job_id):
+    def result(self, job_id, timeout=0.5):
         assert job_id == "job-fs-terminal"
         return {
             "ok": False,
@@ -10874,7 +11089,7 @@ def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(m
                 "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
             }, b""
 
-        def product(self, _product_key):
+        def product(self, _product_key, timeout=0.5):
             if failure_kind == "malformed-product":
                 body = b"not-json"
                 return {
@@ -10886,7 +11101,7 @@ def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(m
                 }, body
             return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert failure_kind == "worker-crash"
             assert job_id == "job-worker-crash"
             return {
@@ -10930,10 +11145,12 @@ def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(m
 class _RecordingFilesystemJob:
     """Record every produce submission and answer with one caller-supplied product script."""
 
-    def __init__(self, product_script):
+    def __init__(self, product_script, result_script=None):
         self.produced = []
         self.product_calls = []
+        self.result_calls = []
         self._product_script = list(product_script)
+        self._result_script = list(result_script or [])
 
     def produce(self, task, payload, **kwargs):
         self.produced.append((task, payload, kwargs))
@@ -10944,11 +11161,14 @@ class _RecordingFilesystemJob:
             "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
         }, b""
 
-    def product(self, product_key):
+    def product(self, product_key, timeout=0.5):
         self.product_calls.append(product_key)
         return self._product_script.pop(0) if self._product_script else ({"ok": True, "state": "pending", "generation": 0, "inflight": True}, b"")
 
-    def result(self, job_id):
+    def result(self, job_id, timeout=0.5):
+        self.result_calls.append(job_id)
+        if self._result_script:
+            return self._result_script.pop(0)
         return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
 
 
@@ -11458,6 +11678,41 @@ def test_transient_product_metadata_is_retried_inside_the_operation_budget(monke
     }
 
 
+def test_transient_result_fallback_is_retried_inside_the_product_budget():
+    waits = []
+
+    class PollEvent:
+        def is_set(self):
+            return False
+
+        def wait(self, seconds):
+            waits.append(seconds)
+            return False
+
+    job = _RecordingFilesystemJob(
+        [
+            ({"ok": True, "state": "none", "generation": 0, "inflight": False}, b""),
+            _ready_filesystem_product({"path": "/fixture/note.md", "content": "recovered"}),
+        ],
+        result_script=[{"ok": False, "error": "service busy", "capacity_rejected": True}],
+    )
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.job_client = job
+    webapp.jobd_operation_service = SimpleNamespace(stop_event=PollEvent())
+    producer = app_module.JobdProductOperation(job_id="job-1", product_key="product-key", generation=1)
+
+    product, body, schedule = webapp.wait_for_filesystem_operation_product(
+        producer,
+        time.time() + 1.0,
+    )
+
+    assert product["format"] == "json"
+    assert json.loads(body) == {"path": "/fixture/note.md", "content": "recovered"}
+    assert schedule["transient_polls"] == 1
+    assert job.result_calls == ["job-1"]
+    assert waits == [app_module.SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS]
+
+
 def test_real_unix_product_receive_timeout_recovers_then_exhausts_with_one_terminal_diagnostic(
     monkeypatch, tmp_path,
 ):
@@ -11508,11 +11763,11 @@ def test_real_unix_product_receive_timeout_recovers_then_exhausts_with_one_termi
     real_client = jobd.JobClient(socket_path)
 
     class ShortReceiveClient:
-        def product(self, key):
-            return real_client.product(key, timeout=0.03)
+        def product(self, key, timeout=0.5):
+            return real_client.product(key, timeout=min(0.03, timeout))
 
-        def result(self, job_id):
-            return real_client.result(job_id)
+        def result(self, job_id, timeout=0.5):
+            return real_client.result(job_id, timeout=timeout)
 
     webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
     webapp.job_client = ShortReceiveClient()
@@ -11557,11 +11812,11 @@ def test_real_producer_terminal_states_still_fail_the_operation_immediately(monk
     terminal = threading.Event()
 
     class TerminalProducerJob(_RecordingFilesystemJob):
-        def product(self, product_key):
+        def product(self, product_key, timeout=0.5):
             self.product_calls.append(product_key)
             return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             return {"ok": True, "job": {"job_id": job_id, "status": producer_state, "error": "producer ended"}}
 
     job = TerminalProducerJob([])
@@ -12009,7 +12264,7 @@ def test_cold_terminal_then_same_key_warm_adds_no_receipt_or_terminal(monkeypatc
                 }, b""
             return {"ok": True, "state": "ready", "product": product}, body
 
-        def product(self, _product_key):
+        def product(self, _product_key, timeout=0.5):
             return {
                 "ok": True,
                 "state": "ready",
@@ -17785,7 +18040,7 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
             self.submissions.append((task, payload, options))
             return {"ok": True, "job": {"job_id": "repo-job", "status": "queued"}}
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             assert job_id == "repo-job"
             assert self.release_result.wait(timeout=2.0)
             return {"ok": True, "job": {"status": "completed", "result": {"roots": [str(tmp_path / "repo")]}}}
@@ -17817,7 +18072,7 @@ def test_indexed_repo_discovery_reuses_healthy_generation_until_a_descendant_cha
             self.submissions.append((task, payload, options))
             return {"ok": True, "job": {"job_id": f"repo-job-{len(self.submissions)}", "status": "queued"}}
 
-        def result(self, job_id):
+        def result(self, job_id, timeout=0.5):
             return {"ok": True, "job": {"status": "completed", "result": {"roots": [str(tmp_path / "repo")]}}}
 
     webapp = object.__new__(app_module.TmuxWebtermApp)

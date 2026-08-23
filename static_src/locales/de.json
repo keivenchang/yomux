@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "Details für {service} ausblenden",
   "debug.system.roster.column.service": "Dienst",
   "debug.system.roster.column.latency": "Latenz Ø / max",
+  "debug.system.roster.column.starts": "Startvorgänge",
   "debug.system.roster.column.restarts": "Neustarts",
   "debug.system.roster.column.requests": "Anfragen",
   "debug.system.roster.column.errors": "Fehler",

@@ -197,6 +197,42 @@ def test_jobd_source_epoch_is_opaque_and_per_broker_start(tmp_path):
     assert first_epoch != second.common_status()["source_epoch"]
 
 
+@pytest.mark.parametrize("state_lock_contended", (False, True))
+def test_jobd_retirement_epoch_mismatch_does_not_close_admission(
+    state_lock_contended,
+    tmp_path,
+    monkeypatch,
+):
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker.source_epoch = "replacement-epoch-b"
+    shutdown_calls = []
+    monkeypatch.setattr(broker, "_request_shutdown", lambda: shutdown_calls.append(True))
+    if state_lock_contended:
+        assert broker.state_lock.acquire(blocking=False) is True
+
+    try:
+        response, body = broker.handle({
+            "action": "shutdown",
+            "protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+            "retirement_handshake": True,
+            "expected_source_epoch": "retained-epoch-a",
+        })
+    finally:
+        if state_lock_contended:
+            broker.state_lock.release()
+
+    assert body == b""
+    assert response == {
+        **broker._control_plane_identity(),
+        "ok": False,
+        "error": "source_epoch_mismatch",
+        "shutdown": False,
+    }
+    assert shutdown_calls == []
+    assert broker.shutdown_requested.is_set() is False
+    assert broker.stop_event.is_set() is False
+
+
 def test_registered_task_result_preserves_opaque_body_and_metadata(monkeypatch):
     body = b"\x00opaque\xff"
     product = {
@@ -347,11 +383,69 @@ def test_jobd_broker_past_its_idle_window_stays_up_while_a_client_lease_is_held(
     # A held client lease is what a request in flight leaves behind; it must veto both guards, so
     # the broker cannot vanish out from under a slow browser between two filesystem calls.
     broker.stop_event = multiprocessing.get_context("spawn").Event()
+    broker.shutdown_requested.clear()
     broker.leases["lease-1"] = {"client_pid": os.getpid()}
     assert broker._idle_should_stop() is False
     leased_response, _ = broker.handle({"action": "shutdown_if_idle"})
     assert leased_response == {"ok": True, "shutdown": False, "leases": 1}
     assert broker.stop_event.is_set() is False
+
+
+def test_jobd_status_probe_does_not_reset_the_idle_clock(tmp_path):
+    """``handle()`` must never restamp the idle clock; only a real lease or
+    active work, observed by ``_idle_should_stop`` itself, may do that.
+    """
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    assert not broker.leases and broker._queued_count() == 0
+    broker.last_client_at = time.monotonic() - 6.0
+    assert broker._idle_should_stop() is True, "baseline: no claims and idle_seconds elapsed must already report idle"
+
+    broker.last_client_at = time.monotonic() - 6.0
+    response, _body = broker.handle({"action": "status"})
+    assert response["ok"] is True
+    assert broker._idle_should_stop() is True, "a status probe reset the idle clock via handle()"
+
+
+def test_jobd_external_status_probe_never_refreshes_demand_but_a_real_lease_does(tmp_path, monkeypatch):
+    """Cross the real listener boundary (not a direct ``handle()`` call) to
+    prove an external health/status poller with zero leases/active work
+    cannot refresh jobd's idle deadline, while acquiring a real lease does
+    and blocks retirement until it is released.
+    """
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=5.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    try:
+        client = jobd.JobClient(socket_path)
+        deadline = time.monotonic() + 2.0
+        while not client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert client.registry.healthy() is True
+
+        # A genuinely foreign peer PID, so this exercises the same connection
+        # this broker would see from an unrelated observer/health-check
+        # process (e.g. BackendHealthObserver's periodic status poll), not a
+        # same-process self-connection.
+        monkeypatch.setattr(runtime, "peer_pid", lambda _connection: os.getpid() + 999_000)
+
+        broker.last_client_at = time.monotonic() - 6.0
+        status_response = client.registry.status()
+        assert status_response.get("healthy") is True
+        assert broker._idle_should_stop() is True, "an external status probe with no lease/work refreshed the idle clock"
+
+        lease_response = client.registry.acquire_lease()
+        assert lease_response.get("ok") is True
+        lease_id = str(lease_response["lease_id"])
+        assert broker._idle_should_stop() is False, "acquiring a real lease did not refresh demand"
+
+        release_response = client.registry.release_lease(lease_id)
+        assert release_response.get("ok") is True
+        broker.last_client_at = time.monotonic() - 6.0
+        assert broker._idle_should_stop() is True, "idle grace window did not elapse after the final lease released"
+    finally:
+        broker.stop_event.set()
+        worker.join(timeout=3.0)
 
 
 def test_jobd_idle_reaps_a_dead_client_lease_before_deciding_to_stay_up(tmp_path):
@@ -801,27 +895,16 @@ def test_artifact_adoption_does_not_hold_the_broker_state_lock(tmp_path, monkeyp
     pump.start()
     assert adoption_started.wait(timeout=1.0)
 
-    responses = []
     requests = (
         {"action": "produce", "task": "json_compact", "payload": {"value": 1}, "coalesce_key": "unrelated-produce"},
         {"action": "result", "job_id": "unknown"},
         {"action": "product", "coalesce_key": "unrelated-product"},
     )
-    callers = [
-        threading.Thread(
-            target=lambda request=request: responses.append((request["action"], broker.handle(request))),
-            name=f"jobd-unrelated-{request['action']}",
-        )
-        for request in requests
-    ]
-    for caller in callers:
-        caller.start()
-    for caller in callers:
-        caller.join(timeout=0.1)
-    served_while_adopting = all(not caller.is_alive() for caller in callers)
+    assert broker.state_lock.acquire(blocking=False), "artifact adoption retained the broker state lock"
+    broker.state_lock.release()
+    responses = [(request["action"], broker.handle(request)) for request in requests]
+    served_while_adopting = not release_adoption.is_set()
     release_adoption.set()
-    for caller in callers:
-        caller.join(timeout=2.0)
     pump.join(timeout=2.0)
 
     assert served_while_adopting is True
@@ -2414,8 +2497,8 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, v22 retires the blocking `relay` action, v23 adds private file-backed artifacts, and v24 registers queued-delivery compaction.
-    assert jobd.JOBD_PROTOCOL_VERSION == 24
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, v22 retires the blocking `relay` action, v23 adds private file-backed artifacts, v24 registers queued-delivery compaction, and v25 classifies shutdown admission refusal as retryable pre-handler busy.
+    assert jobd.JOBD_PROTOCOL_VERSION == 25
     assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS

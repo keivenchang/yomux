@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "リクエスト",
   "debug.system.roster.column.restarts": "再起動回数",
   "debug.system.roster.column.service": "サービス",
+  "debug.system.roster.column.starts": "起動回数",
   "debug.system.roster.coverage.partial": "部分的",
   "debug.system.roster.detail.eventsChat": "イベントとチャット",
   "debug.system.roster.detail.process": "プロセス",

@@ -194,7 +194,7 @@ def validate_request(request: object) -> dict[str, Any]:
     if version != STATUSD_PROTOCOL_VERSION:
         raise StatusProtocolError("upgrade_required")
     action = request.get("action")
-    if action not in {"snapshot", "inventory", "activity_summary", "wait_generation", "invalidate", "status", "ping", "lease", "release", "shutdown", "shutdown_if_idle"}:
+    if action not in {"snapshot", "inventory", "activity_summary", "wait_generation", "invalidate", "status", "ping", "lease", "release", "shutdown", "shutdown_if_idle", "orphan_diagnostics"}:
         raise StatusProtocolError("unknown status action")
     generation = request.get("after_generation", 0)
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:

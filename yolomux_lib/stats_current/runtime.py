@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
+from ..local_services.client import release_local_service_lease_eventually
 from . import collectors, scheduler, storage
 from .client import StatsCurrentClient, iter_append_batches
 
@@ -302,13 +303,26 @@ class StatsCurrentRuntime:
             self._retry_delay_seconds = 0.0
             self._next_retry_at = 0.0
 
-    def _release(self, lease_id: str) -> None:
-        try:
-            response = self.client.release_lease(lease_id)
-        except EXPECTED_SUPERVISOR_ERRORS as error:
-            self._record_failure(type(error).__name__)
-            return
-        if response.get("ok") is not True:
+    def _record_running(self) -> None:
+        with self._lock:
+            self._clear_retry()
+            self._last_failure_kind = ""
+            self._phase = "running"
+
+    def _release(self, lease_id: str, *, preserve_failure: bool = False) -> None:
+        owner = release_local_service_lease_eventually(
+            (
+                lambda current_lease_id: self.client.release_lease(
+                    current_lease_id,
+                    bypass_cached_upgrade=True,
+                )
+            )
+            if preserve_failure
+            else self.client.release_lease,
+            lease_id,
+            expected_errors=EXPECTED_SUPERVISOR_ERRORS,
+        )
+        if not owner.completed.is_set() and not preserve_failure:
             self._record_failure("LeaseReleaseFailed")
 
     def _register_collector_context(self, generation: int) -> bool:
@@ -344,14 +358,16 @@ class StatsCurrentRuntime:
             return False
         return True
 
-    def _stop_scheduler_and_release(self) -> None:
+    def _stop_scheduler_and_release(self, *, preserve_failure: bool = False) -> None:
         with self._lock:
             lease_id = self._lease_id
         self.scheduler.stop()
         while any(item.alive for item in self.scheduler.status().values()):
             self.scheduler.stop()
         if lease_id:
-            self._release(lease_id)
+            # Cleanup cannot replace the failure that forced a terminal demotion. Once the client
+            # is fenced, release itself returns that same cached refusal and has no newer cause.
+            self._release(lease_id, preserve_failure=preserve_failure)
         with self._lock:
             if self._lease_id == lease_id:
                 self._lease_id = ""
@@ -420,8 +436,7 @@ class StatsCurrentRuntime:
                     retry_delay = min(self._retry_max_seconds, retry_delay * 2)
                     continue
                 retry_delay = self._retry_initial_seconds
-                self._clear_retry()
-                self._set_phase("running")
+                self._record_running()
                 lease_failed = False
                 terminal_lease_failure = False
                 while (
@@ -448,8 +463,14 @@ class StatsCurrentRuntime:
                     lease_id = renewed_id
                     with self._lock:
                         self._lease_id = lease_id
-                self._set_phase("stopping" if self._stop_event.is_set() else "demoting")
-                self._stop_scheduler_and_release()
+                self._set_phase(
+                    "stopping"
+                    if self._stop_event.is_set()
+                    else ("blocked" if terminal_lease_failure else "demoting")
+                )
+                self._stop_scheduler_and_release(
+                    preserve_failure=terminal_lease_failure,
+                )
                 scheduler_active = False
                 if terminal_lease_failure:
                     return

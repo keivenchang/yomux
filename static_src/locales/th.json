@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "ซ่อนรายละเอียดของ {service}",
   "debug.system.roster.column.service": "บริการ",
   "debug.system.roster.column.latency": "ความหน่วง เฉลี่ย / สูงสุด",
+  "debug.system.roster.column.starts": "การเริ่มทำงาน",
   "debug.system.roster.column.restarts": "การรีสตาร์ท",
   "debug.system.roster.column.requests": "คำขอ",
   "debug.system.roster.column.errors": "ข้อผิดพลาด",

@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "{service} 세부 정보 숨기기",
   "debug.system.roster.column.service": "서비스",
   "debug.system.roster.column.latency": "지연 평균 / 최대",
+  "debug.system.roster.column.starts": "시작 횟수",
   "debug.system.roster.column.restarts": "재시작",
   "debug.system.roster.column.requests": "요청",
   "debug.system.roster.column.errors": "오류",

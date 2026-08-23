@@ -71,7 +71,11 @@ class FakeService:
 
 class BackendHealthHarness:
     def __init__(self, tmp_path: Path, **kwargs: Any) -> None:
-        self.services = {name: FakeService(name) for name in LOCAL_SERVICE_INVENTORY}
+        demand_scoped = frozenset({"indexd", "statusd", "watchd", "approvald"})
+        self.services = {
+            name: FakeService(name, demand_started=name in demand_scoped)
+            for name in LOCAL_SERVICE_INVENTORY
+        }
         self.published: list[tuple[str, dict[str, Any]]] = []
         self.monotonic = FakeClock(500.0)
         self.wall = FakeClock(1_000_000.0)

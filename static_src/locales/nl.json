@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "Details van {service} verbergen",
   "debug.system.roster.column.service": "Dienst",
   "debug.system.roster.column.latency": "Latentie gem / max",
+  "debug.system.roster.column.starts": "Opstartbeurten",
   "debug.system.roster.column.restarts": "Herstarts",
   "debug.system.roster.column.requests": "Verzoeken",
   "debug.system.roster.column.errors": "Fouten",

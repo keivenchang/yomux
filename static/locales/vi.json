@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "Yêu cầu",
   "debug.system.roster.column.restarts": "Lần khởi động lại",
   "debug.system.roster.column.service": "Dịch vụ",
+  "debug.system.roster.column.starts": "Lần khởi động",
   "debug.system.roster.coverage.partial": "một phần",
   "debug.system.roster.detail.eventsChat": "Sự kiện và trò chuyện",
   "debug.system.roster.detail.process": "Tiến trình",

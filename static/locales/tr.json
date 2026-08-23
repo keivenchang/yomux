@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "İstekler",
   "debug.system.roster.column.restarts": "Yeniden başlatmalar",
   "debug.system.roster.column.service": "Hizmet",
+  "debug.system.roster.column.starts": "Başlatmalar",
   "debug.system.roster.coverage.partial": "kısmi",
   "debug.system.roster.detail.eventsChat": "Olaylar ve sohbet",
   "debug.system.roster.detail.process": "Süreç",

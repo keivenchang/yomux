@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
-// The Daemons roster front end: the System panel renders `local_services` schema 3 -- the
+// The Daemons roster front end: the System panel renders `local_services` schema 4 -- the
 // snapshot-level `health` provenance block and the per-row `health` block -- through the ONE
 // metric-envelope cell renderer, as ONE service roster with one disclosure per row.
 //
@@ -190,12 +190,17 @@ function serviceHealth(overrides = {}) {
     coverage: {
       retained_counters: 'full',
       retained_counter_reasons: [],
+      lifecycle: 'full',
+      lifecycle_reasons: [],
       counters: 'full',
       counter_reasons: [],
       counter_scope: 'web_process',
     },
     metrics: {
       restart_count: measured(3),
+      process_start_count: measured(4),
+      demand_start_count: measured(3),
+      unexpected_restart_count: measured(0),
       observations: measured(450),
       request_count: measured(1204),
       error_count: measured(7),
@@ -228,7 +233,7 @@ function serviceRow(id, overrides = {}, healthOverrides = {}) {
 
 function localServices(overrides = {}, serviceOverrides = {}) {
   return {
-    schema_version: 3,
+    schema_version: 4,
     inventory: ['statsd'],
     services: [serviceRow('statsd', overrides.serviceExtra || {}, serviceOverrides)],
     health: healthSnapshot(overrides.health || {}),
@@ -317,27 +322,27 @@ function renderAlerts(healthOverrides = {}) {
 
 // -- the guard ---------------------------------------------------------------------------------
 
-test('the panel guard renders schema 3, the version yolomux_lib/local_service_projection.py publishes', () => {
+test('the panel guard renders schema 4, the version yolomux_lib/local_service_projection.py publishes', () => {
   const guarded = [...source.matchAll(/Number\(payload\.local_services\?\.schema_version\) === (\d+)/g)].map(match => match[1]);
-  assert.deepEqual(guarded, ['3'], 'the panel must guard exactly once, on the published schema version');
+  assert.deepEqual(guarded, ['4'], 'the panel must guard exactly once, on the published schema version');
   const projection = fs.readFileSync('yolomux_lib/local_service_projection.py', 'utf8');
-  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 3$/m, 'producer and consumer pin the same number');
+  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 4$/m, 'producer and consumer pin the same number');
 });
 
 test('an unsupported schema renders every health column as its reason, never as a number', () => {
   const supported = renderRoster(localServices());
-  assert.match(supported, /data-subsystem-health-metric="restart_count" data-metric-state="measured" data-metric-coverage="full">3</);
+  assert.match(supported, /data-subsystem-health-metric="process_start_count" data-metric-state="measured">4</);
 
   // The immediately-previous schema (2) is now refused: removing the dead `alert` key was a shape
   // change, so a schema-2 payload must fall through to the typed unsupported state, not render.
   const stale = localServices();
-  stale.schema_version = 2;
+  stale.schema_version = 3;
   const unsupported = renderRoster(stale);
   // `coverage="unavailable"`, not `"full"`. Coverage is read out of the payload's own health block,
   // and this panel has just said it cannot read that payload -- so claiming full coverage was one
   // more fact borrowed from the schema it declared unrenderable.
-  assert.match(unsupported, /data-subsystem-health-metric="restart_count" data-metric-state="unavailable" data-metric-coverage="unavailable" title="the backend published a local-services schema this panel does not render" data-metric-reason="schema_unsupported">—</);
-  assert.doesNotMatch(unsupported, /data-subsystem-health-metric="restart_count"[^>]*>3</, 'an unrendered schema must not publish its numbers as measured');
+  assert.match(unsupported, /data-subsystem-health-metric="process_start_count" data-metric-state="unavailable" title="the backend published a local-services schema this panel does not render" data-metric-reason="schema_unsupported">—</);
+  assert.doesNotMatch(unsupported, /data-subsystem-health-metric="process_start_count"[^>]*>4</, 'an unrendered schema must not publish its numbers as measured');
   // Every metric column, not just the health ones. The process metrics are typed envelopes from
   // the same payload, and forwarding them raw printed a measured memory figure on a row that had
   // just declared the payload unreadable.
@@ -388,7 +393,7 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
   // payload from a genuinely newer schema need not carry `inventory` or `services` at all, and then
   // the adapter produced NO service rows and the roster rendered as though the web process were the
   // only thing running. Nothing anywhere said the panel could not read it.
-  for (const shape of [{schema_version: 4}, {schema_version: 4, inventory: [], services: []}]) {
+  for (const shape of [{schema_version: 5}, {schema_version: 5, inventory: [], services: []}]) {
     const html = renderRoster(shape);
     const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'local-services'], JSON.stringify(shape));
@@ -403,7 +408,7 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
 
   // NEGATIVE CONTROL: a SUPPORTED payload with an empty inventory has genuinely nothing to list
   // and must not grow a warning row.
-  const supported = renderRoster({schema_version: 3, inventory: [], services: []});
+  const supported = renderRoster({schema_version: 4, inventory: [], services: []});
   const supportedIds = [...supported.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(supportedIds, ['web', 'tmux-signal-watcher']);
   assert.doesNotMatch(supported, /schema_unsupported/);
@@ -416,7 +421,7 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   // The rule is now absolute rather than field-by-field: an unreadable payload is never iterated
   // and never read, so there is no per-service row for any of it to reach.
   const future = {
-    schema_version: 4,
+    schema_version: 5,
     inventory: ['statsd'],
     services: [serviceRow('statsd', {pid: 4242, state: 'running'})],
   };
@@ -431,9 +436,9 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   const detail = slice(html, 'id="js-debug-roster-detail-local-services"', '</tr>');
   assert.match(detail, /the backend published a local-services schema this panel does not render/);
 
-  // NEGATIVE CONTROL: the SAME fixture at schema 3 renders all of it, so the assertions above are
+  // NEGATIVE CONTROL: the SAME fixture at schema 4 renders all of it, so the assertions above are
   // measuring the guard and not a fixture that never had the data.
-  const supported = {...future, schema_version: 3};
+  const supported = {...future, schema_version: 4};
   const supportedRow = rosterRow(renderStatsdOpen(supported), 'statsd');
   assert.match(supportedRow, /data-subsystem-metric="rss_bytes" data-metric-state="measured"/);
   assert.match(slice(renderStatsdOpen(supported), 'id="js-debug-roster-detail-statsd"', '</tr>'), /observer samples: 450/);
@@ -459,7 +464,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   };
   const hostile = {
     // Familiar-LOOKING, so nothing about its shape warns a reader off it. Only the version differs.
-    schema_version: 4,
+    schema_version: 5,
     health: {
       available: true,
       port: Number(sentinels.port),
@@ -507,9 +512,9 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   assert.doesNotMatch(rosterRow(renderRoster(hostile), 'web'), /js-debug-roster-qualifier/);
   assert.equal(renderAlerts(hostile), '', 'an unreadable payload cannot raise a health or recovery alert');
 
-  // NEGATIVE CONTROL: at schema 3 the SAME payload renders those sentinels, so the sweep above is
+  // NEGATIVE CONTROL: at schema 4 the SAME payload renders those sentinels, so the sweep above is
   // measuring the guard and not a fixture that never carried the values.
-  const readable = {...hostile, schema_version: 3};
+  const readable = {...hostile, schema_version: 4};
   const supported = renderRoster(readable, {expanded: [sentinels.inventory]});
   for (const key of ['port', 'inventory', 'label', 'pid']) {
     assert.equal(supported.includes(sentinels[key]), true, `${key} must render when the schema IS supported`);
@@ -520,7 +525,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   const direct = source.split('\n')
     .filter(line => line.includes('payload.local_services') && !line.trim().startsWith('//'));
   assert.deepEqual(direct.map(line => line.trim()), [
-    'return Number(payload.local_services?.schema_version) === 3;',
+    'return Number(payload.local_services?.schema_version) === 4;',
     "return payload.local_services && typeof payload.local_services === 'object' ? payload.local_services : {};",
   ], 'exactly two direct reads survive: the version guard, and the one owner it gates');
   assert.match(sourceFunction('debugSystemRenderableLocalServices', 'debugSystemRolesHtml'),
@@ -658,11 +663,11 @@ test('a service in the inventory with no published row is a visible missing row,
 
 // -- what Keiven asked to see ------------------------------------------------------------------
 
-test('one row shows what is up, how long, how many restarts, errors, requests and avg/max responses', () => {
+test('one row shows what is up, how long, how many starts, errors, requests and avg/max responses', () => {
   const html = renderRoster(localServices());
   assert.match(html, /data-subsystem-row data-subsystem-id="statsd" data-subsystem-kind="service" data-subsystem-state="running"/);
   assert.match(html, /data-subsystem-metric="uptime_seconds" data-metric-state="measured">1h 0m 0s</);
-  assert.match(html, /data-subsystem-health-metric="restart_count" data-metric-state="measured" data-metric-coverage="full">3</);
+  assert.match(html, /data-subsystem-health-metric="process_start_count" data-metric-state="measured">4</);
   assert.match(html, /data-subsystem-health-metric="request_count" data-metric-state="measured" data-metric-coverage="full">1,204</);
   assert.match(html, /data-subsystem-health-metric="error_count" data-metric-state="measured" data-metric-coverage="full">7</);
   assert.match(html, /data-subsystem-health-metric="latency_average_ms" data-metric-state="measured" data-metric-coverage="full">12.5ms</);
@@ -696,12 +701,12 @@ test('the status cell carries a dot, a word and a machine state -- never colour 
   assert.match(rosterRow(html, 'watchd'), /<span class="js-debug-roster-reason" data-subsystem-reason>Starts on demand<\/span>/);
 });
 
-// -- NEGATIVE CONTROL: the web process's four unobserved columns must never render as 0 ----------
+// -- NEGATIVE CONTROL: the web process's unobserved columns must never render as 0 ----------------
 
-test('the web process renders its four unobserved columns as their reason, never as 0', () => {
+test('the web process renders its unobserved columns as their reason, never as 0', () => {
   const html = renderRoster(localServices());
   const webRow = rosterRow(html, 'web');
-  for (const key of ['restart_count', 'request_count', 'error_count', 'latency_average_ms', 'latency_max_ms']) {
+  for (const key of ['process_start_count', 'request_count', 'error_count', 'latency_average_ms', 'latency_max_ms']) {
     assert.match(
       webRow,
       new RegExp(`data-subsystem-health-metric="${key}" data-metric-state="unavailable"[^>]*title="the backend-health observer watches the local services from this web process, so it has never observed this web process itself" data-metric-reason="web_process_not_observed">—<`),
@@ -806,10 +811,10 @@ test('the disclosure repeats the columns that can DROP, and only those', () => {
   const open = renderStatsdOpen(localServices());
   const dropped = slice(open, 'data-subsystem-dropped-metrics', '</dl>');
   // Exactly the `priority: secondary` columns -- the five the container query hides.
-  for (const label of ['Memory', 'CPU', 'Restarts', 'Requests', 'Errors']) {
+  for (const label of ['Memory', 'CPU', 'Starts', 'Requests', 'Errors']) {
     assert.match(dropped, new RegExp(`<dt>${label}</dt>`), label);
   }
-  assert.match(dropped, /<dt>Restarts<\/dt><dd>3<\/dd>/);
+  assert.match(dropped, /<dt>Starts<\/dt><dd>4<\/dd>/);
   // NEGATIVE CONTROL: Latency and Uptime are `primary` and survive every width, so a copy of them
   // underneath the row they are already on is pure duplication -- the top third of the ~40-line
   // disclosure Keivenc measured. If a column is ever demoted to secondary this must be updated,
@@ -828,7 +833,7 @@ test('the disclosure repeats the columns that can DROP, and only those', () => {
 
 test('the published fields the columns have no room for are rendered, not dropped', () => {
   const html = renderStatsdOpen(localServices({}, {errors_by_reason: {transport_refused: 4, timeout: 3, never_seen: 0}}));
-  assert.match(html, /<p data-subsystem-health-detail>observer samples: 450 · completed requests: 1,197 · peer pid 4242 \(epoch pid:4242:start:98\)\.<\/p>/);
+  assert.match(html, /<p data-subsystem-health-detail>observer samples: 450 · process starts: 4 · demand starts: 3 · unexpected restarts: 0 · completed requests: 1,197 · peer pid 4242 \(epoch pid:4242:start:98\)\.<\/p>/);
   assert.match(html, /<p data-subsystem-errors-by-reason>Errors by reason: transport_refused 4, timeout 3\.<\/p>/);
   assert.doesNotMatch(html, /never_seen/, 'a reason with no error is not an error row');
 
@@ -842,7 +847,7 @@ test('the published fields the columns have no room for are rendered, not droppe
       completed_count: absent('counters_unreadable', 'The local-service RPC ledger returned no usable counter'),
     },
   }));
-  assert.match(unobserved, /<p data-subsystem-health-detail>observer samples: The health observer has not recorded this service yet · completed requests: The local-service RPC ledger returned no usable counter\.<\/p>/);
+  assert.match(unobserved, /<p data-subsystem-health-detail>observer samples: The health observer has not recorded this service yet · process starts: 4 · demand starts: 3 · unexpected restarts: 0 · completed requests: The local-service RPC ledger returned no usable counter\.<\/p>/);
   assert.doesNotMatch(unobserved, /observer samples: 0/, 'an unobserved sample count rendered as 0 is a fabricated measurement');
   assert.doesNotMatch(unobserved, /peer pid/, 'an unverified pid is not published as a fact');
 });
@@ -882,9 +887,12 @@ test('an unobserved or untimed value renders its reason, never 0', () => {
     state: '',
     transitions: [],
     transitions_total: 0,
-    coverage: {retained_counters: 'unavailable', retained_counter_reasons: [], counters: 'full', counter_reasons: [], counter_scope: 'web_process'},
+    coverage: {retained_counters: 'unavailable', retained_counter_reasons: [], lifecycle: 'unavailable', lifecycle_reasons: [], counters: 'full', counter_reasons: [], counter_scope: 'web_process'},
     metrics: {
       restart_count: absent('resource_unobserved', 'The health observer has not recorded this service yet'),
+      process_start_count: absent('resource_unobserved', 'The health observer has not recorded this service yet'),
+      demand_start_count: absent('resource_unobserved', 'The health observer has not recorded this service yet'),
+      unexpected_restart_count: absent('resource_unobserved', 'The health observer has not recorded this service yet'),
       observations: absent('resource_unobserved', 'The health observer has not recorded this service yet'),
       request_count: measured(0),
       error_count: measured(0),
@@ -894,17 +902,17 @@ test('an unobserved or untimed value renders its reason, never 0', () => {
     },
   });
   const html = renderStatsdOpen(fixture);
-  assert.match(html, /data-subsystem-health-metric="restart_count" data-metric-state="unavailable" data-metric-coverage="unavailable" title="The health observer has not recorded this service yet" data-metric-reason="resource_unobserved">—</);
+  assert.match(html, /data-subsystem-health-metric="process_start_count" data-metric-state="unavailable" title="The health observer has not recorded this service yet" data-metric-reason="resource_unobserved">—</);
   assert.match(html, /data-subsystem-health-metric="latency_average_ms" data-metric-state="unavailable" data-metric-coverage="full" title="No completed request has been timed in this web process" data-metric-reason="no_completed_request">—</);
   assert.match(html, /data-subsystem-health-metric="latency_max_ms" data-metric-state="unavailable" data-metric-coverage="full" title="No completed request has been timed in this web process" data-metric-reason="no_completed_request">—</);
   // The em dash is the CELL; the sentence behind it is still reachable. For a column that can drop
   // it is reachable twice -- in the cell's title and in the disclosure's copy.
-  assert.match(html, /<dt>Restarts<\/dt><dd>The health observer has not recorded this service yet<\/dd>/);
+  assert.match(html, /<dt>Starts<\/dt><dd>The health observer has not recorded this service yet<\/dd>/);
   // Latency never drops, so its reason is carried by the cell it sits in (asserted above) and is
   // NOT restated underneath. Losing the copy must not lose the sentence.
   assert.match(html, /title="No completed request has been timed in this web process"/);
   assert.doesNotMatch(html, /<dt>Latency avg \/ max<\/dt>/, 'a column that never drops is not restated in its own disclosure');
-  assert.doesNotMatch(html, /data-subsystem-health-metric="restart_count"[^>]*>0</, 'an unobserved restart count rendered as 0 is a fabricated measurement');
+  assert.doesNotMatch(html, /data-subsystem-health-metric="process_start_count"[^>]*>0</, 'an unobserved start count rendered as 0 is a fabricated measurement');
   assert.doesNotMatch(html, /data-subsystem-health-metric="latency_average_ms"[^>]*>0/, 'an untimed average rendered as 0ms is a fabricated measurement');
   // A request count of 0 IS measured -- this process really issued no request -- so it stays 0.
   assert.match(html, /data-subsystem-health-metric="request_count" data-metric-state="measured" data-metric-coverage="full">0</);
@@ -914,23 +922,21 @@ test('an unobserved or untimed value renders its reason, never 0', () => {
 
 // -- NEGATIVE CONTROL: a partial count must never look complete ----------------------------------
 
-test('a partial retained aggregate is flagged in the cell and its reason is visible in the row', () => {
+test('a partial retained counter aggregate keeps its reason in the row', () => {
   const fixture = localServices({}, {
     coverage: {
       retained_counters: 'partial',
       retained_counter_reasons: ['counters_not_observed', 'missed_final_sample'],
+      lifecycle: 'full',
+      lifecycle_reasons: [],
       counters: 'full',
       counter_reasons: [],
       counter_scope: 'web_process',
     },
   });
   const html = renderStatsdOpen(fixture);
-  assert.match(
-    html,
-    /data-subsystem-health-metric="restart_count" data-metric-state="measured" data-metric-coverage="partial">3<sup class="js-debug-system-coverage-flag" data-coverage-flag>/,
-    'a partial count must carry the partial-coverage footnote marker in the cell that shows the number',
-  );
-  assert.match(html, /Retained totals \(restarts, observations\) are PARTIAL: counters_not_observed \(the observer never read a counter sample, so every retained total would be a structural zero\); missed_final_sample \(a restart happened before the final counter sample could be read\)\./);
+  assert.match(html, /Retained counter totals \(observations\) are PARTIAL: counters_not_observed \(the observer never read a counter sample, so every retained total would be a structural zero\); missed_final_sample \(a restart happened before the final counter sample could be read\)\./);
+  assert.match(html, /data-subsystem-health-metric="process_start_count" data-metric-state="measured">4<\/span>/);
   // The ledger counters are independently complete here, so they are NOT flagged.
   assert.match(html, /data-subsystem-health-metric="request_count" data-metric-state="measured" data-metric-coverage="full">1,204<\/span>/);
   assert.doesNotMatch(html, /data-subsystem-health-metric="request_count"[^>]*>1,204<sup class="js-debug-system-coverage-flag"/);
@@ -941,6 +947,8 @@ test('partial ledger counters flag the request, error and response columns, not 
     coverage: {
       retained_counters: 'full',
       retained_counter_reasons: [],
+      lifecycle: 'full',
+      lifecycle_reasons: [],
       counters: 'partial',
       counter_reasons: ['web_process_scope'],
       counter_scope: 'web_process',
@@ -949,8 +957,24 @@ test('partial ledger counters flag the request, error and response columns, not 
   for (const key of ['request_count', 'error_count', 'latency_average_ms', 'latency_max_ms']) {
     assert.match(html, new RegExp(`data-subsystem-health-metric="${key}" data-metric-state="measured" data-metric-coverage="partial">[^<]+<sup class="js-debug-system-coverage-flag"`), key);
   }
-  assert.match(html, /data-subsystem-health-metric="restart_count" data-metric-state="measured" data-metric-coverage="full">3<\/span>/);
-  assert.match(html, /Requests, errors and response times are PARTIAL: web_process_scope \(the retained history starts before this web process, so these counts cover less time than the restarts beside them\)\./);
+  assert.match(html, /data-subsystem-health-metric="process_start_count" data-metric-state="measured">4<\/span>/);
+  assert.match(html, /Requests, errors and response times are PARTIAL: web_process_scope \(the retained history starts before this web process, so these counts cover less time than the process history beside them\)\./);
+});
+
+test('legacy lifecycle history reports a partial classification without inventing restarts', () => {
+  const html = renderStatsdOpen(localServices({}, {
+    coverage: {
+      retained_counters: 'full',
+      retained_counter_reasons: [],
+      lifecycle: 'partial',
+      lifecycle_reasons: ['legacy_lifecycle_unclassified'],
+      counters: 'full',
+      counter_reasons: [],
+      counter_scope: 'web_process',
+    },
+  }));
+  assert.match(html, /unexpected restarts: 0/);
+  assert.match(html, /Restart classification is PARTIAL: legacy_lifecycle_unclassified \(older retained process replacements did not record whether the preceding absence was expected\)\./);
 });
 
 // -- the partial mark is a FOOTNOTE MARKER, and it keeps the word for a screen reader -------------
@@ -960,24 +984,26 @@ test('partial ledger counters flag the request, error and response columns, not 
 // word from the page is only safe while the word survives in the accessibility tree -- a bare `*`
 // announces as nothing, or as "asterisk", which is not the fact.
 
-function partialRetainedCoverageHtml() {
+function partialCounterCoverageHtml() {
   return renderStatsdOpen(localServices({}, {
     coverage: {
-      retained_counters: 'partial',
-      retained_counter_reasons: ['counters_not_observed'],
-      counters: 'full',
-      counter_reasons: [],
+      retained_counters: 'full',
+      retained_counter_reasons: [],
+      lifecycle: 'full',
+      lifecycle_reasons: [],
+      counters: 'partial',
+      counter_reasons: ['web_process_scope'],
       counter_scope: 'web_process',
     },
   }));
 }
 
 test('a partial count is marked with a real superscript footnote, not the word partial', () => {
-  const html = partialRetainedCoverageHtml();
+  const html = partialCounterCoverageHtml();
   assert.match(
     html,
-    /data-metric-coverage="partial">3<sup class="js-debug-system-coverage-flag" data-coverage-flag><span aria-hidden="true">\*<\/span>/,
-    'the mark must be a real <sup> attached to the number it qualifies, so the cell reads 3*',
+    /data-metric-coverage="partial">1,204<sup class="js-debug-system-coverage-flag" data-coverage-flag><span aria-hidden="true">\*<\/span>/,
+    'the mark must be a real <sup> attached to the number it qualifies, so the cell reads 1,204*',
   );
   assert.doesNotMatch(
     html,
@@ -986,11 +1012,11 @@ test('a partial count is marked with a real superscript footnote, not the word p
   );
   // The full sentence is a footnote, so it must still be reachable: the row keeps its coverage
   // explanation verbatim. A marker with nothing behind it is worse than the word it replaced.
-  assert.match(html, /Retained totals \(restarts, observations\) are PARTIAL: counters_not_observed \(the observer never read a counter sample, so every retained total would be a structural zero\)\./);
+  assert.match(html, /Requests, errors and response times are PARTIAL: web_process_scope/);
 });
 
 test('the partial footnote marker keeps an accessible name that says partial in words', () => {
-  const html = partialRetainedCoverageHtml();
+  const html = partialCounterCoverageHtml();
   assert.match(
     html,
     /<sup class="js-debug-system-coverage-flag" data-coverage-flag><span aria-hidden="true">\*<\/span><span class="a11y-only">partial<\/span><\/sup>/,
@@ -1033,13 +1059,13 @@ test('counter_scope web_process is spelled out ONCE for the whole table', () => 
   // Requests and Errors to 121-127px apiece against numbers that need ~68px.
   assert.doesNotMatch(html, /<th[^>]*>[^<]*<span class="js-debug-system-column-scope">/, 'the scope is not repeated in the column headers');
   assert.match(html, /data-subsystem-column="request_count" data-subsystem-health-column="request_count">Requests<\/th>/);
-  assert.match(html, /data-subsystem-column="restart_count" data-subsystem-health-column="restart_count">Restarts<\/th>/, 'the retained restart count is not scoped to this web process');
+  assert.match(html, /data-subsystem-column="process_start_count">Starts<\/th>/, 'the retained process-start count is not scoped to this web process');
   // NEGATIVE CONTROL 2: nor once per expanded row. Two rows are open above; one sentence total.
   assert.equal((html.match(/data-subsystem-coverage-note/g) || []).length, 0, 'a full-coverage row has no per-row note left to print');
   // The row-specific coverage notes are NOT what moved: a partial count is still explained in the
   // row that is partial, because that fact differs per row.
   const partial = renderStatsdOpen(localServices({}, {
-    coverage: {retained_counters: 'full', retained_counter_reasons: [], counters: 'partial', counter_reasons: ['web_process_scope'], counter_scope: 'web_process'},
+    coverage: {retained_counters: 'full', retained_counter_reasons: [], lifecycle: 'full', lifecycle_reasons: [], counters: 'partial', counter_reasons: ['web_process_scope'], counter_scope: 'web_process'},
   }));
   assert.match(partial, /Requests, errors and response times are PARTIAL: web_process_scope/);
   assert.equal((partial.match(sentence) || []).length, 1, 'the scope sentence is still exactly once');

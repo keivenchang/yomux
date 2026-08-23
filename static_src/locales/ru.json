@@ -2584,6 +2584,7 @@
   "debug.system.roster.collapse": "Скрыть подробности для {service}",
   "debug.system.roster.column.service": "Служба",
   "debug.system.roster.column.latency": "Задержка сред / макс",
+  "debug.system.roster.column.starts": "Запуски",
   "debug.system.roster.column.restarts": "Перезапуски",
   "debug.system.roster.column.requests": "Запросы",
   "debug.system.roster.column.errors": "Ошибки",

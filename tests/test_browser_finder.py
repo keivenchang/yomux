@@ -70,6 +70,28 @@ def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, 
     )
 
     browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]').click()
+    # The click's own activation is intentionally deferred by one macrotask (see
+    # scheduleFileTreeRowActivation in 40_file_explorer_files.js -- the deferral lets a
+    # same-gesture contextmenu cancel it first, a documented, load-bearing behavior this
+    # fix does not touch). A bare synchronous read here would race that deferred tick,
+    # exactly like the two preceding expand assertions above already wait for their own
+    # async settling instead of reading immediately. This waits for the complete
+    # collapsed state -- both rows, both stores -- then captures the SAME state the
+    # assertion below already expected; no invariant is relaxed, only correctly timed.
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = liveDirectoryRows('/home/test/dev', null);
+            return rows.length === 2
+              && rows.every(row => (
+                row.getAttribute('aria-expanded') === 'false'
+                && childContainerForRow(row, '/home/test/dev') === null
+              ))
+              && !fileExplorerExpanded.has('/home/test/dev')
+              && fileExplorerPendingExpansions.size === 0;
+            """
+        )
+    )
     collapsed = browser.execute_script(
         """
         const rows = liveDirectoryRows('/home/test/dev', null);

@@ -136,6 +136,8 @@ def observation(
     reason_code: str = "none",
     recovery_outcome: str = "none",
     epoch: tuple[str, int] | None = EPOCH_A,
+    absence_expected: bool = False,
+    demand_scoped: bool = False,
     counters_available: bool = True,
     requests: float = 0.0,
     errors: float = 0.0,
@@ -151,6 +153,8 @@ def observation(
         recovery_outcome=recovery_outcome,
         pid=pid,
         process_start_identity=identity,
+        absence_expected=absence_expected,
+        demand_scoped=demand_scoped,
         counters_available=counters_available and epoch is not None,
         request_count=requests,
         error_count=errors,
@@ -309,6 +313,10 @@ def test_restart_accounting_adds_both_epochs_and_never_emits_a_negative_delta(tm
     aggregate = aggregate_of(after_restart.document)
     assert aggregate["restart_count"] == 1
     assert aggregate["verified_epochs"] == 2
+    assert aggregate["process_start_count"] == 2
+    assert aggregate["unexpected_restart_count"] == 1
+    assert aggregate["demand_start_count"] == 0
+    assert aggregate["lifecycle_classification_exact"] is True
     # 25 from the dead process plus 3 from the new one. The lower absolute counter of the
     # new process must never subtract from the total.
     assert aggregate["request_count"] == 28
@@ -323,6 +331,66 @@ def test_restart_accounting_adds_both_epochs_and_never_emits_a_negative_delta(tm
     assert aggregate["latency_total_ms"] >= 0.0
     # The final observation of epoch A carried counters, so nothing is claimed lost.
     assert aggregate["coverage"] == AGGREGATE_COVERAGE_FULL
+
+
+def test_expected_absence_classifies_the_next_epoch_as_a_demand_start(tmp_path, clock, epoch_ids):
+    store = build_store(tmp_path, clock, epoch_ids)
+    publish(store, clock, observation())
+    publish(store, clock, observation(state="starting", epoch=None, absence_expected=True))
+    restarted = publish(store, clock, observation(epoch=EPOCH_B))
+
+    aggregate = aggregate_of(restarted.document)
+    assert aggregate["process_start_count"] == 2
+    assert aggregate["demand_start_count"] == 1
+    assert aggregate["unexpected_restart_count"] == 0
+    assert aggregate["restart_count"] == 1
+
+
+def test_unobserved_demand_scoped_epoch_replacement_is_not_called_unexpected(tmp_path, clock, epoch_ids):
+    store = build_store(tmp_path, clock, epoch_ids)
+    publish(store, clock, observation(demand_scoped=True))
+    replaced = publish(store, clock, observation(epoch=EPOCH_B, demand_scoped=True))
+
+    aggregate = aggregate_of(replaced.document)
+    assert aggregate["restart_count"] == 1
+    assert aggregate["demand_start_count"] == 0
+    assert aggregate["unexpected_restart_count"] == 0
+    assert aggregate["lifecycle_classification_exact"] is False
+
+
+def test_legacy_epoch_replacements_are_retained_but_not_misclassified(tmp_path, clock, epoch_ids):
+    store = build_store(tmp_path, clock, epoch_ids)
+    publish(store, clock, observation())
+    publish(store, clock, observation(epoch=EPOCH_B))
+    document = json.loads(store.document_path.read_text(encoding="utf-8"))
+    aggregate = document["resources"]["statsd"]["aggregate"]
+    for name in (
+        "process_start_count",
+        "demand_start_count",
+        "unexpected_restart_count",
+        "lifecycle_classification_exact",
+    ):
+        aggregate.pop(name)
+    store.document_path.write_text(json.dumps(document), encoding="utf-8")
+
+    reopened = build_store(tmp_path, clock, epoch_ids, identity=writer_identity(pid=99, ticks=7))
+    migrated = aggregate_of(reopened.document())
+    assert migrated["process_start_count"] == 2
+    assert migrated["restart_count"] == 1
+    assert migrated["demand_start_count"] == 0
+    assert migrated["unexpected_restart_count"] == 0
+    assert migrated["lifecycle_classification_exact"] is False
+
+
+def test_incomplete_lifecycle_fields_are_partial_even_without_a_replacement(tmp_path, clock, epoch_ids):
+    store = build_store(tmp_path, clock, epoch_ids)
+    publish(store, clock, observation())
+    document = json.loads(store.document_path.read_text(encoding="utf-8"))
+    document["resources"]["statsd"]["aggregate"].pop("lifecycle_classification_exact")
+    store.document_path.write_text(json.dumps(document), encoding="utf-8")
+
+    reopened = build_store(tmp_path, clock, epoch_ids, identity=writer_identity(pid=99, ticks=7))
+    assert aggregate_of(reopened.document())["lifecycle_classification_exact"] is False
 
 
 def test_a_restart_seen_through_a_blind_observation_is_reported_as_partial(tmp_path, clock, epoch_ids):

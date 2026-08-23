@@ -2538,6 +2538,7 @@
   "debug.system.roster.collapse": "Masquer les détails de {service}",
   "debug.system.roster.column.service": "Service ",
   "debug.system.roster.column.latency": "Latence moy / max",
+  "debug.system.roster.column.starts": "Démarrages",
   "debug.system.roster.column.restarts": "Redémarrages",
   "debug.system.roster.column.requests": "Requêtes",
   "debug.system.roster.column.errors": "Erreurs",

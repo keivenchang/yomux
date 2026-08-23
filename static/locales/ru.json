@@ -408,6 +408,7 @@
   "debug.system.roster.column.requests": "Запросы",
   "debug.system.roster.column.restarts": "Перезапуски",
   "debug.system.roster.column.service": "Служба",
+  "debug.system.roster.column.starts": "Запуски",
   "debug.system.roster.coverage.partial": "частично",
   "debug.system.roster.detail.eventsChat": "События и чат",
   "debug.system.roster.detail.process": "Процесс",

@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "คำขอ",
   "debug.system.roster.column.restarts": "การรีสตาร์ท",
   "debug.system.roster.column.service": "บริการ",
+  "debug.system.roster.column.starts": "การเริ่มทำงาน",
   "debug.system.roster.coverage.partial": "บางส่วน",
   "debug.system.roster.detail.eventsChat": "เหตุการณ์และแชท",
   "debug.system.roster.detail.process": "กระบวนการ",

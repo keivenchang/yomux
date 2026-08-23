@@ -408,6 +408,7 @@
   "debug.system.roster.column.requests": "Żądania",
   "debug.system.roster.column.restarts": "Restarty",
   "debug.system.roster.column.service": "Usługa",
+  "debug.system.roster.column.starts": "Uruchomienia",
   "debug.system.roster.coverage.partial": "częściowe",
   "debug.system.roster.detail.eventsChat": "Zdarzenia i czat",
   "debug.system.roster.detail.process": "Proces",

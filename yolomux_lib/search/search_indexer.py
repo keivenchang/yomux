@@ -29,6 +29,7 @@ from ..local_services.rpc import safe_socket_path
 from ..local_services.registry import LocalServiceRegistry
 from ..local_services.registry import LocalServiceSpec
 from ..local_services.runtime import acquire_client_lease
+from ..local_services.runtime import claim_gated_idle_due
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -268,13 +269,16 @@ class PersistentSearchIndexer:
         self.stop_event.set()
         return {"ok": True}, b""
 
+    def idle_due(self) -> bool:
+        self.process_due()
+        # claim_gated_idle_due is the one shared owner of the
+        # transition/deadline algorithm every local service routes through;
+        # indexd's claim predicate is a held lease.
+        return claim_gated_idle_due(self, bool(self.leases))
+
     def run(self) -> int:
         def handle(request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
             return self.handle(request), b""
-
-        def idle() -> bool:
-            self.process_due()
-            return not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds
 
         return run_local_rpc_service(
             socket_path=self.socket_path,
@@ -282,8 +286,12 @@ class PersistentSearchIndexer:
             service_name="indexd",
             stop_event=self.stop_event,
             handle=handle,
-            on_idle=idle,
-            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            on_idle=self.idle_due,
+            # idle_due refreshes last_client_at directly whenever a lease is
+            # held; a connection-level callback here would count a bare
+            # diagnostic RPC as demand regardless of whether any real claim
+            # exists.
+            on_client=lambda: None,
         )
 
 

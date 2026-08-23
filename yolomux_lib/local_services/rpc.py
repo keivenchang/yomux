@@ -16,14 +16,17 @@ import socket
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from time import monotonic as monotonic_clock
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic as monotonic_clock
+from time import sleep as sleep_clock
 from typing import Any
+from typing import TypeVar
 
 from tools.instance_isolation import local_rpc_socket_path_bytes
 
@@ -69,6 +72,53 @@ LOCAL_SERVICE_ERROR_BUSY = "service busy"
 LOCAL_SERVICE_ERROR_INVALID_REQUEST = "invalid request"
 LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH = "peer uid mismatch"
 LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE = "response too large"
+LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS = 0.005
+LOCAL_SERVICE_BUSY_RETRY_MAX_SECONDS = 0.05
+
+
+_RetryResult = TypeVar("_RetryResult")
+
+
+def local_service_response_is_prehandler_busy(payload: Mapping[str, Any]) -> bool:
+    """Return whether a peer proved it refused work before command handling began."""
+
+    return (
+        payload.get("ok") is False
+        and payload.get("terminal") is not True
+        and str(payload.get("error") or "").strip().lower() == LOCAL_SERVICE_ERROR_BUSY
+        and (
+            payload.get("capacity_rejected") is True
+            or payload.get("state_lock_rejected") is True
+            or payload.get("admission_rejected") is True
+        )
+    )
+
+
+def retry_local_service_prehandler_busy(
+    attempt: Callable[[float], _RetryResult],
+    response_for_result: Callable[[_RetryResult], Mapping[str, Any]],
+    timeout_seconds: float,
+    *,
+    clock: Callable[[], float] = monotonic_clock,
+    sleep: Callable[[float], None] = sleep_clock,
+) -> _RetryResult:
+    """Retry proven pre-handler refusal within one caller-owned deadline."""
+
+    deadline = clock() + max(0.0, timeout_seconds)
+    attempt_timeout = max(0.0, timeout_seconds)
+    retry_seconds = LOCAL_SERVICE_BUSY_RETRY_INITIAL_SECONDS
+    while True:
+        result = attempt(attempt_timeout)
+        if not local_service_response_is_prehandler_busy(response_for_result(result)):
+            return result
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return result
+        sleep(min(retry_seconds, remaining))
+        attempt_timeout = deadline - clock()
+        if attempt_timeout <= 0:
+            return result
+        retry_seconds = min(LOCAL_SERVICE_BUSY_RETRY_MAX_SECONDS, retry_seconds * 2.0)
 
 
 # --- Retained per-service request/error/latency accounting -------------------------------
@@ -499,15 +549,30 @@ class LocalRpcEnvelope:
 
 
 def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | None = None) -> Path:
-    """Keep Unix-domain paths portable without leaking a long state directory."""
+    """Keep Unix-domain paths portable without leaking a long state directory.
+
+    The fallback always nests inside its own `{prefix}-{uid}-{digest}/` directory,
+    never a bare file directly under `/tmp` -- a caller deriving sibling paths from
+    this one (e.g. `.with_suffix(".service.json")` for a record path) must still get
+    a `.parent` that is a private, owned directory, not the shared `/tmp` root itself.
+
+    This is pure path computation -- it never touches the filesystem. Creating the
+    fallback directory as a side effect here was tried and reverted: this function is
+    reached from a plain `@property` (`LocalServiceRegistry.socket_path`) that callers
+    read repeatedly, including diagnostic/status paths that must stay read-only, and a
+    real `mkdir` on every read silently RECREATED the directory after a caller had just
+    deleted it (observed directly: a test asserting the directory was gone failed
+    because merely re-reading `record_path` for the assertion recreated it). A caller
+    that is about to WRITE into the returned path is responsible for its own
+    `parent.mkdir(parents=True, exist_ok=True)` first, exactly as `LocalServiceRegistry
+    ._write_record` already does.
+    """
     candidate = path.expanduser()
     if len(os.fsencode(str(candidate))) <= LOCAL_RPC_SOCKET_PATH_BYTES:
         return candidate
     digest = hashlib.sha256(os.fsencode(str(candidate))).hexdigest()[:20]
     uid = getattr(os, "getuid", lambda: "nouid")()
-    if fallback_name:
-        return Path("/tmp") / f"{prefix}-{uid}-{digest}" / fallback_name
-    return Path("/tmp") / f"{prefix}-{uid}-{digest}.sock"
+    return Path("/tmp") / f"{prefix}-{uid}-{digest}" / (fallback_name or candidate.name)
 
 
 def new_envelope(

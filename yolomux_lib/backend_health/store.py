@@ -434,6 +434,8 @@ class ResourceObservation:
     recovery_outcome: str = "none"
     pid: int = 0
     process_start_identity: str = ""
+    absence_expected: bool = False
+    demand_scoped: bool = False
     counters_available: bool = False
     request_count: float = 0.0
     error_count: float = 0.0
@@ -829,6 +831,14 @@ class BackendHealthStore:
                 )
             if observation.resource in seen:
                 raise BackendHealthContractError(f"duplicate resource {observation.resource!r} in one snapshot")
+            if not isinstance(observation.absence_expected, bool):
+                raise BackendHealthContractError(
+                    f"absence_expected must be boolean for {observation.resource!r}"
+                )
+            if not isinstance(observation.demand_scoped, bool):
+                raise BackendHealthContractError(
+                    f"demand_scoped must be boolean for {observation.resource!r}"
+                )
             seen.add(observation.resource)
         return tuple(snapshot.resources)
 
@@ -919,7 +929,14 @@ class BackendHealthStore:
             pid = 0
 
         aggregate["observations"] = int(aggregate.get("observations") or 0) + 1
-        self._accumulate(aggregate, observation, epoch=epoch, verified=verified, deferred=deferred)
+        self._accumulate(
+            aggregate,
+            observation,
+            epoch=epoch,
+            verified=verified,
+            prior_absence_expected=prior_current.get("absence_expected") is True,
+            deferred=deferred,
+        )
 
         previous_state = str(prior_current.get("state") or NO_PRIOR_STATE)
         changed = previous_state != observation.state
@@ -950,6 +967,7 @@ class BackendHealthStore:
                 "recovery_outcome": recovery_outcome,
                 "process_epoch": epoch,
                 "pid": pid,
+                "absence_expected": observation.absence_expected,
                 "observed_at": observed_at,
                 "since_revision": revision if changed else int(prior_current.get("since_revision") or revision),
                 "since_wall_time": observed_at
@@ -972,6 +990,7 @@ class BackendHealthStore:
         *,
         epoch: str,
         verified: bool,
+        prior_absence_expected: bool,
         deferred: list[tuple[str, str]],
     ) -> None:
         """Fold one observation's peer counters into the cumulative aggregate.
@@ -986,9 +1005,19 @@ class BackendHealthStore:
         if verified and epoch != last_verified_epoch:
             if last_verified_epoch:
                 aggregate["restart_count"] = int(aggregate.get("restart_count") or 0) + 1
+                if prior_absence_expected:
+                    aggregate["demand_start_count"] = int(aggregate.get("demand_start_count") or 0) + 1
+                elif observation.demand_scoped:
+                    # The service may have idled and restarted entirely between observer cycles,
+                    # or it may have failed. Without an accepted absent row there is no evidence
+                    # for either exact cause, so retain the restart and stop classifying it.
+                    aggregate["lifecycle_classification_exact"] = False
+                else:
+                    aggregate["unexpected_restart_count"] = int(aggregate.get("unexpected_restart_count") or 0) + 1
                 if not bool(last_sample.get("counters_available")):
                     self._mark_partial(aggregate, COVERAGE_REASON_MISSED_FINAL)
             aggregate["verified_epochs"] = int(aggregate.get("verified_epochs") or 0) + 1
+            aggregate["process_start_count"] = int(aggregate["verified_epochs"])
             aggregate["last_verified_epoch"] = epoch
             aggregate["epoch_latency_max_ms"] = None
             aggregate["epoch_latency_max_process_epoch"] = epoch
@@ -1197,6 +1226,7 @@ class BackendHealthStore:
             "recovery_outcome": recovery,
             "process_epoch": epoch,
             "pid": max(0, int(current.get("pid") or 0)),
+            "absence_expected": current.get("absence_expected") is True,
             "observed_at": float(_finite_number(current.get("observed_at")) or 0.0),
             "since_revision": max(0, int(current.get("since_revision") or 0)),
             "since_wall_time": float(_finite_number(current.get("since_wall_time")) or 0.0),
@@ -1232,11 +1262,32 @@ class BackendHealthStore:
         maximum = aggregate.get("epoch_latency_max_ms")
         if maximum is not None and _finite_number(maximum) is None:
             raise _DocumentRejected(RESET_HISTORY_CORRUPT)
+        restart_count = max(0, int(aggregate.get("restart_count") or 0))
+        verified_epochs = max(0, int(aggregate.get("verified_epochs") or 0))
+        lifecycle_fields_present = any(
+            name in aggregate
+            for name in (
+                "process_start_count",
+                "demand_start_count",
+                "unexpected_restart_count",
+                "lifecycle_classification_exact",
+            )
+        )
+        lifecycle_exact = aggregate.get("lifecycle_classification_exact")
+        if not isinstance(lifecycle_exact, bool):
+            lifecycle_exact = restart_count == 0 and not lifecycle_fields_present
         return {
             "coverage": coverage,
             "coverage_reasons": reasons,
-            "restart_count": max(0, int(aggregate.get("restart_count") or 0)),
-            "verified_epochs": max(0, int(aggregate.get("verified_epochs") or 0)),
+            "restart_count": restart_count,
+            "verified_epochs": verified_epochs,
+            # These additive lifecycle fields do not reinterpret the retained legacy count.
+            # A pre-field document keeps every verified epoch as a start, while replacements
+            # that happened before classification remain an explicitly partial unknown.
+            "process_start_count": verified_epochs,
+            "demand_start_count": max(0, int(aggregate.get("demand_start_count") or 0)),
+            "unexpected_restart_count": max(0, int(aggregate.get("unexpected_restart_count") or 0)),
+            "lifecycle_classification_exact": lifecycle_exact,
             "observations": max(0, int(aggregate.get("observations") or 0)),
             **counters,
             "latency_average_ms": (
@@ -1344,6 +1395,10 @@ class BackendHealthStore:
             "coverage_reasons": [],
             "restart_count": 0,
             "verified_epochs": 0,
+            "process_start_count": 0,
+            "demand_start_count": 0,
+            "unexpected_restart_count": 0,
+            "lifecycle_classification_exact": True,
             "observations": 0,
             "request_count": 0,
             "error_count": 0,
