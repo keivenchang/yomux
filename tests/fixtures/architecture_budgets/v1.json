@@ -2045,7 +2045,7 @@
     "tests/test_cache.py": 39,
     "tests/test_chat_service.py": 214,
     "tests/test_chat_store.py": 916,
-    "tests/test_check_runner.py": 2586,
+    "tests/test_check_runner.py": 2590,
     "tests/test_claude_permission_hook.py": 149,
     "tests/test_client_event_broker_backlog_disambiguation.py": 955,
     "tests/test_client_events.py": 410,
