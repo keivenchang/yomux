@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import importlib.util
 import json
@@ -7,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from threading import Event
 
@@ -26,12 +28,12 @@ from yolomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_GRACE_SECON
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
+from yolomux_lib.local_services.registry import pid_is_serving
 from yolomux_lib.stats_current import client as stats_current_client
 from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
-from tests.serving_process import pid_is_serving
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
 from tests.helpers.local_service_records import FixtureProcessRecordBuilder
@@ -2114,6 +2116,11 @@ class _VirtualRetirementClock:
         self.signals: list[int] = []
         self.marks: dict[str, float] = {}
         self.alive = {service_pid: True}
+        # The generation this record was published with. A local-service record
+        # carrying NO generation is RETAINED rather than retired -- this build
+        # never wrote that proof, so it may not signal on it -- which means a
+        # fixture without one proves nothing about the escalation below.
+        self.generation = uuid.uuid4().hex
         self.registry = LocalServiceRegistry(
             tmp_path,
             LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", spec_version),
@@ -2125,6 +2132,7 @@ class _VirtualRetirementClock:
             "service": "statsd",
             "socket": str(self.registry.socket_path),
             "protocol_version": service_version,
+            "spawn_generation": self.generation,
         }
         self.retained_start_identity = str(record["process_start_identity"])
         # The identity the live PID currently reports. Flipping it models the exact
@@ -2161,6 +2169,15 @@ class _VirtualRetirementClock:
         # Keep the identity fence reading only this fixture's state: without it,
         # process_record_diagnostic would consult the real /proc for `service_pid`.
         monkeypatch.setattr(registry_mod, "process_state", lambda pid: "")
+        # The generation dimension is read live out of the target's inherited
+        # environment, so it is faked for the same reason the identity readers
+        # above are: `service_pid` is not a real process here. It can still
+        # disagree -- a pid that is gone proves no generation at all.
+        monkeypatch.setattr(
+            registry_mod,
+            "process_spawn_generation",
+            lambda pid: self.generation if self.alive.get(pid, False) else None,
+        )
         monkeypatch.setattr(registry_mod.os, "kill", fake_kill)
 
     def _sleep(self, seconds):
@@ -2280,13 +2297,10 @@ def test_registry_retirement_yields_to_a_replacement_holding_the_same_pid(
     assert harness.registry.socket_path.exists() is True, "the replacement's socket was unlinked"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the replacement guards return False silently: no typed diagnostic names the PID handoff, "
-        "so status() still reports the stale current_local_process reason. Needs the product change."
-    ),
-)
+# The strict xfail this test carried has been removed: it is the queue's own
+# "stale PID-handoff diagnostic replaced by the typed current transition" item,
+# so it must fail as a real regression until the product publishes the typed
+# reason, not pass by being expected to fail.
 def test_registry_retirement_publishes_a_typed_diagnostic_for_a_pid_handoff(tmp_path, monkeypatch):
     """Yielding to a replacement must be visible, not merely silent.
 
@@ -2311,6 +2325,16 @@ def test_registry_retirement_publishes_a_typed_diagnostic_for_a_pid_handoff(tmp_
     assert diagnostic["observed_start_identity"] == replacement_identity
 
 
+# SCOPE WARNING -- read before citing this test as evidence.
+# This proves the WAITING ALGORITHM spends the declared budgets. It fakes both
+# liveness predicates (`pid_is_alive`, `process_start_identity`) through
+# `_VirtualRetirementClock`, so it cannot see the zombie-blindness class: a real
+# daemon exits in ~0.16s, but `retained_process_state()` (registry.py:1587-1591)
+# reads a process that has exited and not been reaped as still "current", so the
+# owner burns the whole grace window against a dead child. This test stays green
+# through that entire miss. Done Criterion 3 of the queue is evidenced ONLY by
+# `test_retirement_observes_a_real_child_exit_within_one_supervision_pass`, which
+# drives a real forked child and varies parentage.
 def test_registry_retirement_spends_exactly_the_declared_grace_and_force_budgets(tmp_path, monkeypatch):
     """Each escalation step waits its own DECLARED budget, not a hardcoded number.
 
@@ -2849,9 +2873,13 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     target_socket = service_dir / "jobd.sock"
     bystander_socket = service_dir / "statusd.sock"
 
+    # A local-service record with NO spawn generation is retained rather than
+    # retired -- this build never wrote that proof, so it may not act on it --
+    # which would make every escalation assertion below vacuous.
+    generation = uuid.uuid4().hex
     target_record = FixtureLocalServiceRecordBuilder(
         service="jobd", socket_path=target_socket, pid=500,
-        fields={"launcher_pid": 700, "launcher_port": 8881},
+        fields={"launcher_pid": 700, "launcher_port": 8881, "spawn_generation": generation},
     ).build()
     (service_dir / "jobd.service.json").write_text(registry_mod.json.dumps(target_record), encoding="utf-8")
 
@@ -2861,35 +2889,41 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
     ).build()
     (service_dir / "statusd.service.json").write_text(registry_mod.json.dumps(bystander_record), encoding="utf-8")
 
-    initial = _table([
-        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {target_socket} --idle-seconds 60", 1500),
-        (501, 500, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501),
-        (600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600),
-        (601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601),
-    ])
-    # After the SIGTERM pass: the jobd leader (500) has exited; its worker (501) is a
-    # wedged holdout that must be force-killed. The unrelated launcher's group (600/601)
-    # is completely untouched -- still alive with an unchanged identity.
-    survivors = _table([
-        (501, 1, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501),
-        (600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600),
-        (601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601),
-    ])
-
-    tables = [initial, survivors]
+    # The jobd leader (500) is a wedged holdout that ignores SIGTERM and only dies
+    # on SIGKILL; its worker (501) exits as soon as its own SIGKILL lands. The
+    # unrelated launcher's group (600/601) stays alive with an unchanged identity
+    # throughout and must never be signalled.
+    now = [100.0]
+    alive = {500: True, 501: True, 600: True, 601: True}
 
     def table_reader():
-        return tables.pop(0) if len(tables) > 1 else tables[0]
+        rows = []
+        if alive[500]:
+            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {target_socket} --idle-seconds 60", 1500))
+        if alive[501]:
+            # Reparented to init once its leader is gone; the process GROUP is what
+            # binds it to the leader, and that is unchanged by the leader exiting.
+            rows.append((501, 500 if alive[500] else 1, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501))
+        if alive[600]:
+            rows.append((600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600))
+        if alive[601]:
+            rows.append((601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601))
+        return _table(rows)
 
     kills = []
+    marks = {}
 
     def kill(pid, signum):
         kills.append((pid, signum))
+        marks.setdefault((pid, signum), now[0])
+        if signum == signal.SIGKILL:
+            alive[pid] = False
 
     sleeps = []
 
     def sleep(seconds):
         sleeps.append(seconds)
+        now[0] += seconds
 
     result = registry_mod.shutdown_owned_local_services(
         8881,
@@ -2898,14 +2932,42 @@ def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated
         table_reader=table_reader,
         kill=kill,
         sleep=sleep,
+        clock=lambda: now[0],
+        # The live dimension probes. Injected for the same reason `table_reader`
+        # is: these pids are fixtures, so a probe that asked /proc would answer
+        # about whatever real process happens to hold pid 500 on this machine.
+        generation_reader=lambda pid: generation if pid == 500 and alive[500] else None,
+        process_group_reader=lambda pid: 500 if alive.get(pid) else None,
         grace_seconds=2.5,
     )
 
-    assert sleeps == [2.5], "the caller's exact grace budget must reach sleep(), not a hardcoded or dropped value"
-    assert result == {"signalled": [500], "terminated": [501]}
-    assert kills == [(500, signal.SIGTERM), (501, signal.SIGKILL)], "graceful must precede forced, and only the owned group is touched"
+    # The owner POLLS the grace window in uniform steps rather than sleeping it
+    # blind, so the thing to measure is the elapsed window, not the step list.
+    # Comparing the step list to the budget is what the poll replaced: a blind
+    # `sleep(grace)` cannot notice a child that exited in 0.1s.
+    assert sleeps, "no supervision pass was observed; nothing polled"
+    assert len(set(sleeps)) == 1, f"the grace window was polled at inconsistent steps: {sorted(set(sleeps))}"
+    poll = sleeps[0]
+    assert poll < 2.5, "a 'poll' the size of the whole budget is the blind sleep this replaced"
+    graceful = marks[(500, signal.SIGKILL)] - marks[(500, signal.SIGTERM)]
+    assert 2.5 <= graceful < 2.5 + poll, (
+        f"the post-SIGTERM wait was {graceful}s; the caller's exact grace budget must bound the "
+        "escalation, not a hardcoded or dropped value"
+    )
+    # Positive control that the caller's value really is what arrived: 2.5 is not
+    # the module default, so a dropped argument would show up as a shorter window.
+    assert 2.5 > LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+    assert kills == [(500, signal.SIGTERM), (500, signal.SIGKILL), (501, signal.SIGKILL)], (
+        "graceful must precede forced, the leader is escalated before its members, and only the "
+        "owned group is touched"
+    )
+    assert result == {"signalled": [500, 501], "terminated": [500, 501], "unconfirmed": [], "retained": []}
     assert 600 not in [pid for pid, _signum in kills] and 601 not in [pid for pid, _signum in kills], (
         "an unrelated launcher's process group must never be signalled"
+    )
+    assert alive[600] is True and alive[601] is True, (
+        "positive control: the unrelated group was alive for the whole pass, so 'never signalled' "
+        "is not merely 'was never there'"
     )
 
 
@@ -3052,3 +3114,1044 @@ def test_publish_record_clears_a_blocked_start_latch_on_healthy_adoption(tmp_pat
 
     assert registry._failure_reason == "", "a published, identity-proven daemon must clear the stale blocked-start latch"
     assert "start blocked" not in registry.failure_response()["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Bounded backend lifetime: last-external-claim retirement.
+#
+# CONTRACT REQUIRED OF THE LIFETIME OWNER (queue DOIT.p1.e5.backend-lifetime-
+# supervision, "one shared lifetime owner that observes the last valid external
+# claim disappearing and performs bounded graceful then forced shutdown"):
+#
+#   shutdown_owned_local_services(
+#       port, service_dir, *,
+#       launcher_pid=None,
+#       table_reader=bounded_process_table,
+#       kill=os.kill,
+#       sleep=sleep_clock,
+#       clock=monotonic_clock,                                # NEW
+#       claims_reader=None,                                   # NEW
+#       grace_seconds=LOCAL_SERVICE_RETIRE_GRACE_SECONDS,     # derived, not 0.5
+#       force_seconds=LOCAL_SERVICE_RETIRE_FORCE_SECONDS,     # NEW
+#   ) -> {"signalled": [...], "terminated": [...], "unconfirmed": [...], "retained": [...]}
+#
+# - ``claims_reader() -> list[dict]`` returns the SAME typed claim rows
+#   ``ProcessClaimLedger.reap_unsupervised``/``adopt_unsupervised`` already
+#   produce, read once per pass; ``retained_claim_pids`` then keeps every pid a
+#   row marks ``CLAIM_REASON_SUPERVISOR_ALIVE``. That is deliberately not a
+#   per-group count callback: the claim ledger is the one authority on live
+#   external claims and it does not know about tracked groups, so asking it
+#   per-group would mean a second resolver. A retained pid receives no signal and
+#   is reported under ``retained``. ``claims_reader=None`` keeps today's
+#   launcher-shutdown behaviour (every owned group retires).
+# - After SIGTERM the owner POLLS (``sleep`` + ``clock``) until ``grace_seconds``
+#   instead of sleeping the whole budget blindly, so a child that exits early is
+#   confirmed within one supervision pass rather than one full grace window.
+# - A member still current at the grace deadline gets SIGKILL, then the same poll
+#   until ``force_seconds``. Anything still current after that is reported under
+#   ``unconfirmed`` rather than silently declared terminated.
+# ---------------------------------------------------------------------------
+
+
+def _live_claim_row(pid: int) -> dict:
+    """One claim row in the exact shape ``retained_claim_pids`` reads.
+
+    The reason string is the product's own constant, never re-spelled here: a
+    row that named a reason this repo no longer emits would silently stop
+    retaining anything and every "no signal was sent" assertion below would pass
+    for the wrong reason.
+    """
+
+    return {
+        "pid": int(pid),
+        "attempted_action": registry_mod.ORPHAN_ACTION_NONE,
+        "result": registry_mod.ORPHAN_RESULT_REPORTED_ONLY,
+        "reason": registry_mod.CLAIM_REASON_SUPERVISOR_ALIVE,
+    }
+
+
+class _VirtualLifetimeClock:
+    """One retirement pass whose every elapsed value is the product's own budget.
+
+    ``clock()`` moves only because the product asked to ``sleep()``, so the
+    deadlines asserted below are the declared constants plus the product's own
+    observed poll step -- never a machine-speed measurement and never a sleep.
+
+    SCOPE WARNING: liveness here is a fixture dictionary, so every test built on
+    this harness proves the ARITHMETIC of the escalation, not that the owner can
+    observe a real process transition. A real daemon exits in ~0.16s but a
+    zombie-blind predicate reports it "current" for the whole budget, and these
+    tests stay green through that miss. The real-process half of the contract is
+    ``test_retirement_observes_a_real_child_exit_within_one_supervision_pass``.
+    """
+
+    def __init__(self, tmp_path, *, exits_after=None, port=8881, launcher_pid=700):
+        self.now = [100.0]
+        self.sleeps: list[float] = []
+        self.signals: list[tuple[int, int]] = []
+        self.marks: dict[str, float] = {}
+        self.port = port
+        self.launcher_pid = launcher_pid
+        # signal -> how long (virtual seconds) after it lands the child exits.
+        # None means "ignores it entirely".
+        self.exits_after = dict(exits_after or {})
+        # The generation the record was published with. A local-service record
+        # carrying NO generation is retained, not retired -- this build never
+        # wrote that proof, so it may not act on it -- which means a fixture
+        # without one proves nothing about the escalation.
+        self.generation = uuid.uuid4().hex
+        self.service_dir = tmp_path / "services"
+        self.service_dir.mkdir(parents=True, exist_ok=True)
+        self.socket_path = self.service_dir / "jobd.sock"
+        self.bystander_socket = self.service_dir / "statusd.sock"
+        (self.service_dir / "jobd.service.json").write_text(
+            registry_mod.json.dumps(
+                FixtureLocalServiceRecordBuilder(
+                    service="jobd",
+                    socket_path=self.socket_path,
+                    pid=500,
+                    fields={
+                        "launcher_pid": launcher_pid,
+                        "launcher_port": port,
+                        "protocol_version": 1,
+                        "spawn_generation": self.generation,
+                    },
+                ).build()
+            ),
+            encoding="utf-8",
+        )
+        # An unrelated launcher's group under the SAME directory: never touched.
+        (self.service_dir / "statusd.service.json").write_text(
+            registry_mod.json.dumps(
+                FixtureLocalServiceRecordBuilder(
+                    service="statusd",
+                    socket_path=self.bystander_socket,
+                    pid=600,
+                    fields={"launcher_pid": 999, "launcher_port": 9999, "protocol_version": 1},
+                ).build()
+            ),
+            encoding="utf-8",
+        )
+        self.alive: dict[int, float | None] = {500: None, 600: None}
+
+    def _live_generation(self, pid):
+        """The generation only pid 500 still proves; anything else is unreadable."""
+
+        return self.generation if pid == 500 and self._is_alive(500) else None
+
+    def _live_process_group(self, pid):
+        """The group a still-serving pid proves, read at the moment it is asked."""
+
+        return pid if self._is_alive(pid) else None
+
+    def _rows(self):
+        rows = []
+        if self._is_alive(500):
+            rows.append((500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {self.socket_path} --idle-seconds 60", 1500))
+        if self._is_alive(600):
+            rows.append((600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {self.bystander_socket} --idle-seconds 60", 1600))
+        return _table(rows)
+
+    def _is_alive(self, pid):
+        exit_at = self.alive.get(pid)
+        return exit_at is None or self.now[0] < exit_at
+
+    def _sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now[0] += seconds
+
+    def _kill(self, pid, signum):
+        self.signals.append((pid, signum))
+        self.marks.setdefault(signum, self.now[0])
+        delay = self.exits_after.get(signum)
+        if delay is not None and pid == 500:
+            self.alive[500] = self.now[0] + delay
+
+    def run(self, **overrides):
+        kwargs = {
+            "launcher_pid": self.launcher_pid,
+            "table_reader": self._rows,
+            "kill": self._kill,
+            "sleep": self._sleep,
+            "clock": lambda: self.now[0],
+            # The two live dimension probes. They are injected for the same
+            # reason `table_reader` is: this fixture's pids are not real, so a
+            # reader that asked /proc would answer about whatever process
+            # happens to hold pid 500 on this machine.
+            "generation_reader": self._live_generation,
+            "process_group_reader": self._live_process_group,
+        }
+        kwargs.update(overrides)
+        result = registry_mod.shutdown_owned_local_services(self.port, self.service_dir, **kwargs)
+        self.marks["returned"] = self.now[0]
+        return result
+
+    @property
+    def poll_seconds(self) -> float:
+        assert self.sleeps, "no supervision pass was observed; nothing polled"
+        assert len(set(self.sleeps)) == 1, f"retirement polled at inconsistent steps: {sorted(set(self.sleeps))}"
+        return self.sleeps[0]
+
+
+def test_a_live_external_claim_retains_the_service_and_releasing_it_retires_it(tmp_path):
+    """A claim is the only thing that keeps a non-retained service alive.
+
+    Two runs differ in exactly one variable -- whether ``claims_reader`` reports
+    a live external claim for the tracked group. The claimed run is the POSITIVE
+    CONTROL that makes the released run's escalation meaningful, and the released
+    run is the positive control that makes the claimed run's empty signal list
+    meaningful. Neither empty collection stands alone.
+    """
+    claimed = _VirtualLifetimeClock(tmp_path, exits_after={signal.SIGTERM: 0.1})
+    claimed_result = claimed.run(claims_reader=lambda: [_live_claim_row(500)])
+
+    assert claimed.signals == [], "a service with a live external claim was signalled"
+    assert claimed_result["signalled"] == []
+    assert claimed_result["retained"] == [500]
+
+    released = _VirtualLifetimeClock(tmp_path, exits_after={signal.SIGTERM: 0.1})
+    released_result = released.run(claims_reader=lambda: [])
+
+    assert released.signals == [(500, signal.SIGTERM)]
+    assert released_result["signalled"] == [500]
+    assert released_result["retained"] == []
+    # ``terminated`` means CONFIRMED DEAD, not "force-killed": a child that
+    # answered SIGTERM is confirmed and must be reported, or a pid the owner
+    # signalled would appear in no bucket at all. ``unconfirmed`` staying empty
+    # is the half that must not drift -- that is the field that would otherwise
+    # let a survivor be silently declared gone.
+    assert released_result["terminated"] == [500]
+    assert released_result["unconfirmed"] == []
+
+
+def test_releasing_the_last_claim_retires_within_the_declared_grace_plus_one_pass(tmp_path):
+    """Graceful exit is bounded by the DECLARED grace constant, not a literal.
+
+    The child answers SIGTERM after 0.1 virtual seconds. The owner must notice
+    within one supervision pass rather than blocking for the whole grace window,
+    and it must never spend more than the declared budget plus one pass.
+    """
+    harness = _VirtualLifetimeClock(tmp_path, exits_after={signal.SIGTERM: 0.1})
+
+    result = harness.run(claims_reader=lambda: [])
+
+    assert harness.signals == [(500, signal.SIGTERM)], "escalation went past graceful for a child that exited"
+    elapsed = harness.marks["returned"] - harness.marks[signal.SIGTERM]
+    assert elapsed <= LOCAL_SERVICE_RETIRE_GRACE_SECONDS + harness.poll_seconds, (
+        f"graceful retirement spent {elapsed}s, past the declared "
+        f"{LOCAL_SERVICE_RETIRE_GRACE_SECONDS}s grace budget plus one supervision pass"
+    )
+    # Positive control that the bound is not trivially satisfied by returning
+    # immediately: the owner really did wait for the child, past its exit time.
+    assert elapsed >= 0.1
+    # Confirmed by observation inside the grace window, so it belongs in
+    # ``terminated``; nothing may land in ``unconfirmed`` on this path.
+    assert result["terminated"] == [500] and result["unconfirmed"] == []
+
+
+def test_a_wedged_child_is_forced_within_the_declared_force_budget_plus_one_pass(tmp_path):
+    """A child that ignores SIGTERM is force-terminated on the declared budget.
+
+    Both escalation windows are derived from the product's own constants and its
+    own observed poll step, so re-spelling either budget as a literal, or reusing
+    the grace budget for the force step, turns this red.
+    """
+    harness = _VirtualLifetimeClock(tmp_path, exits_after={signal.SIGKILL: 0.2})
+
+    result = harness.run(claims_reader=lambda: [])
+
+    assert harness.signals == [(500, signal.SIGTERM), (500, signal.SIGKILL)]
+    poll = harness.poll_seconds
+    graceful = harness.marks[signal.SIGKILL] - harness.marks[signal.SIGTERM]
+    forced = harness.marks["returned"] - harness.marks[signal.SIGKILL]
+    assert LOCAL_SERVICE_RETIRE_GRACE_SECONDS <= graceful < LOCAL_SERVICE_RETIRE_GRACE_SECONDS + poll, (
+        f"the post-SIGTERM wait was {graceful}s, not the declared {LOCAL_SERVICE_RETIRE_GRACE_SECONDS}s grace budget"
+    )
+    assert forced <= LOCAL_SERVICE_RETIRE_FORCE_SECONDS + poll, (
+        f"the post-SIGKILL confirmation spent {forced}s, past the declared "
+        f"{LOCAL_SERVICE_RETIRE_FORCE_SECONDS}s force budget plus one supervision pass"
+    )
+    # Positive control that these are two different budgets and not one shared
+    # number reused: the force window really is the larger of the two.
+    assert LOCAL_SERVICE_RETIRE_FORCE_SECONDS > LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+    assert result["terminated"] == [500]
+    assert result["unconfirmed"] == []
+    assert 600 not in [pid for pid, _signum in harness.signals], (
+        "an unrelated launcher's group was signalled during escalation"
+    )
+
+
+def test_a_child_that_survives_sigkill_is_reported_unconfirmed_not_declared_dead(tmp_path):
+    """Escalation is bounded at exactly one SIGTERM and one SIGKILL.
+
+    A process that survives both is the one case where the owner may not claim
+    success. It must stop signalling and report the survivor, because silently
+    returning ``terminated`` here is precisely the false-green that leaves a
+    daemon running under a shared root while the ledger says it is gone.
+    """
+    harness = _VirtualLifetimeClock(tmp_path, exits_after={})
+
+    result = harness.run(claims_reader=lambda: [])
+
+    assert harness.signals == [(500, signal.SIGTERM), (500, signal.SIGKILL)]
+    assert result["unconfirmed"] == [500]
+    assert result["terminated"] == []
+    total = harness.marks["returned"] - harness.marks[signal.SIGTERM]
+    poll = harness.poll_seconds
+    budget = LOCAL_SERVICE_RETIRE_GRACE_SECONDS + LOCAL_SERVICE_RETIRE_FORCE_SECONDS + 2 * poll
+    assert total <= budget, f"escalation ran {total}s, past the two declared budgets plus two supervision passes"
+
+
+# ---------------------------------------------------------------------------
+# The real-process half of the retirement contract.
+#
+# Measured: every daemon exits in ~0.11-0.17s after a shutdown request, well
+# inside LOCAL_SERVICE_RETIRE_GRACE_SECONDS. The miss is not slow shutdown; it
+# is that `retained_process_state()` (registry.py:1587-1591) asks
+# `process_start_identity` (reads /proc/<pid>/stat) and `pid_is_alive`
+# (os.kill(pid, 0)), and BOTH answer identically for a running process and for
+# one that exited and has not yet been reaped. Our own spawned daemon becomes
+# exactly such an unreaped child, so the owner keeps calling it "current" and
+# spends the entire budget against a corpse.
+#
+# CONTRACT REQUIRED OF THE LIFETIME OWNER: liveness decisions in the retirement
+# loop must go through the zombie-excluding serving predicate that production
+# already owns in `bounded_process_table(require_complete=True)`. Concretely,
+# `yolomux_lib.local_services.registry` must export `pid_is_serving` and
+# `process_group_has_serving_member`, `retained_process_state()` must use them,
+# and no second copy may exist anywhere. The test-side copy that used to live in
+# `tests/serving_process.py` is deleted, not shimmed; every test imports the
+# product symbols directly. See
+# `test_serving_predicate_has_exactly_one_owner_and_it_is_the_product`.
+# ---------------------------------------------------------------------------
+
+
+def _fork_blocking_child():
+    """A real child that lives until its pipe is closed. Returns (pid, release)."""
+
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # pragma: no cover - child never returns
+        os.close(write_fd)
+        try:
+            os.read(read_fd, 1)
+        finally:
+            os._exit(0)
+    os.close(read_fd)
+    return pid, write_fd
+
+
+def _fork_reparented_blocking_grandchild():
+    """A real NON-child that lives until its pipe is closed. Returns (pid, release).
+
+    The intermediate child exits immediately and is reaped here, so the
+    grandchild is reparented to init: when it later exits, init reaps it and its
+    pid genuinely leaves the process table. Parentage is the only variable that
+    differs from ``_fork_blocking_child``.
+    """
+
+    release_read, release_write = os.pipe()
+    pid_read, pid_write = os.pipe()
+    intermediate = os.fork()
+    if intermediate == 0:  # pragma: no cover - child never returns
+        os.close(pid_read)
+        os.close(release_write)
+        grandchild = os.fork()
+        if grandchild == 0:
+            os.close(pid_write)
+            try:
+                os.read(release_read, 1)
+            finally:
+                os._exit(0)
+        os.write(pid_write, f"{grandchild}".encode("ascii"))
+        os._exit(0)
+    os.close(pid_write)
+    os.close(release_read)
+    os.waitpid(intermediate, 0)
+    with os.fdopen(pid_read, "rb") as handle:
+        pid = int(handle.read().decode("ascii"))
+    return pid, release_write
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="real process lifetime transitions are POSIX-only")
+@pytest.mark.parametrize(
+    "child_kind",
+    ["still_running", "own_unreaped_child", "reparented_non_child"],
+    ids=["still_running_escalates", "own_unreaped_child_exit_is_seen", "reparented_non_child_exit_is_seen"],
+)
+def test_retirement_observes_a_real_child_exit_within_one_supervision_pass(tmp_path, monkeypatch, child_kind):
+    """A REAL process exiting mid-retirement must be seen within one pass.
+
+    Parentage is the whole variable, and it is why a test that forks and reaps
+    normally proves nothing:
+
+    - ``own_unreaped_child``: the daemon we spawned exits but nothing has
+      wait()-ed it yet. ``/proc/<pid>/stat`` still exists with the same start
+      ticks and ``os.kill(pid, 0)`` still succeeds, so a zombie-blind predicate
+      calls it alive for the whole budget. THIS is the measured defect.
+    - ``reparented_non_child``: the identical exit, observed for a process init
+      reaps, is seen immediately. Same event, different parentage, different
+      answer -- which is the proof that the predicate, not the daemon, is wrong.
+    - ``still_running`` is the POSITIVE CONTROL: a genuinely live process really
+      does drive the full escalation and really does spend the grace budget, so
+      the two "seen within one pass" bounds above are not passing because the
+      harness returns early for everyone.
+
+    Nothing here sleeps: virtual time moves only when the product polls. The one
+    real wait is on a kernel transition (the child reaching state ``Z``, or its
+    pid leaving the table), which no virtual clock can produce.
+    """
+    service_pid, release_fd = (
+        _fork_reparented_blocking_grandchild() if child_kind == "reparented_non_child" else _fork_blocking_child()
+    )
+    now = [100.0]
+    sleeps: list[float] = []
+    signals: list[int] = []
+    marks: dict[object, float] = {}
+    released = [False]
+
+    def release_and_settle():
+        """Close the pipe and wait for the REAL kernel transition, once."""
+
+        if released[0]:
+            return
+        released[0] = True
+        os.close(release_fd)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            state = registry_mod.process_state(service_pid)
+            if child_kind == "own_unreaped_child" and state == "Z":
+                return
+            if child_kind == "reparented_non_child" and not state:
+                return
+            time.sleep(0.005)
+        pytest.fail(f"the real {child_kind} never reached its expected post-exit kernel state")
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+        if child_kind != "still_running":
+            release_and_settle()
+
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+        clock=lambda: now[0],
+        sleep=fake_sleep,
+    )
+    # The generation this record was published with, plus the live reader that
+    # re-proves it. A record carrying no generation is RETAINED rather than
+    # retired, so without both halves the `still_running` positive control below
+    # would observe zero signals for a reason that has nothing to do with
+    # parentage -- the one variable this test exists to isolate. The reader can
+    # still disagree: a pid that has stopped serving proves no generation.
+    generation = uuid.uuid4().hex
+    monkeypatch.setattr(
+        registry_mod,
+        "process_spawn_generation",
+        lambda pid: generation if pid_is_serving(int(pid)) else None,
+    )
+    record = {
+        **current_host_identity().process_record_fields(
+            pid=service_pid,
+            start_identity=registry_mod.process_start_identity(service_pid),
+        ),
+        "service": "statsd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 22,
+        "spawn_generation": generation,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    }
+    assert registry._write_record(record) is True
+    registry.socket_path.touch()
+    # The process really is serving at the moment retirement starts -- the
+    # precondition every branch below shares.
+    assert pid_is_serving(service_pid) is True
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if method == "shutdown":
+            marks["shutdown"] = now[0]
+            return {"ok": True}
+        return {
+            "ok": False,
+            "error_code": "upgrade_required",
+            "version": 22,
+            "required_protocol_version": 22,
+            "pid": service_pid,
+        }
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    real_kill = os.kill
+
+    def recording_kill(pid, signum):
+        # signum 0 is `pid_is_alive`'s liveness probe, not a destructive signal:
+        # it must keep reaching the real kernel or the loop cannot observe
+        # anything. Only real signals are intercepted and recorded.
+        if signum == 0:
+            return real_kill(pid, signum)
+        signals.append(signum)
+        return None
+
+    monkeypatch.setattr(registry_mod.os, "kill", recording_kill)
+
+    try:
+        result = registry._retire_incompatible_service()
+        elapsed = now[0] - marks["shutdown"]
+        poll = sleeps[0] if sleeps else 0.0
+
+        if child_kind == "still_running":
+            assert signals == [signal.SIGTERM, signal.SIGKILL], (
+                "a genuinely live process must drive the full escalation"
+            )
+            assert elapsed >= LOCAL_SERVICE_RETIRE_GRACE_SECONDS, (
+                "positive control: a live process really does consume the grace budget, "
+                "so the one-pass bounds in the other rows are meaningful"
+            )
+            assert result is False
+        else:
+            assert pid_is_serving(service_pid) is False, (
+                "positive control: the real process really did stop serving before this was measured"
+            )
+            assert signals == [], (
+                f"the owner signalled a {child_kind} that had already exited"
+            )
+            assert elapsed <= 2 * poll, (
+                f"the owner spent {elapsed}s of its {LOCAL_SERVICE_RETIRE_GRACE_SECONDS}s grace budget "
+                f"failing to notice a {child_kind} that had already exited; one supervision pass "
+                f"({poll}s) is the whole budget it is allowed for an exit it can observe"
+            )
+            assert result is True, "an exited generation was not retired"
+            assert registry.record_path.exists() is False
+            assert registry.socket_path.exists() is False
+    finally:
+        if not released[0]:
+            os.close(release_fd)
+        if child_kind != "reparented_non_child":
+            try:
+                os.waitpid(service_pid, 0)
+            except ChildProcessError:
+                pass
+
+
+def test_serving_predicate_has_exactly_one_owner_and_it_is_the_product(tmp_path):
+    """The zombie-excluding liveness predicate has exactly one IMPLEMENTATION, in the product.
+
+    ``tests/serving_process.py`` used to hold the only correct implementation
+    while it had zero production call sites, so the retirement owner could not
+    use it and spent its whole grace budget watching corpses. The product owns it
+    now, and the test-side copy is DELETED rather than kept as a delegating shim:
+    a shim is still a second name that can later be given a second body, and a
+    second body is exactly the drift this test exists to prevent. Every test that
+    needs the predicate imports it from ``yolomux_lib.local_services.registry``.
+    """
+    assert hasattr(registry_mod, "pid_is_serving"), (
+        "yolomux_lib.local_services.registry must own the zombie-excluding liveness predicate"
+    )
+    assert hasattr(registry_mod, "process_group_has_serving_member")
+
+    predicate_names = ("pid_is_serving", "process_group_has_serving_member")
+    product_source = Path(registry_mod.__file__).read_text(encoding="utf-8")
+    # Positive control: the scan below looks for a string the product really does
+    # contain, so "no test file defines it" is not an empty-vs-empty comparison.
+    for name in predicate_names:
+        assert f"def {name}(" in product_source, f"the product owner no longer defines {name}"
+
+    test_sources = sorted((REPO_ROOT / "tests").rglob("*.py"))
+    assert len(test_sources) > 50, f"the tests-tree scan found only {len(test_sources)} files"
+    redefiners = sorted(
+        f"{path.relative_to(REPO_ROOT)}:{name}"
+        for path in test_sources
+        for name in predicate_names
+        if f"def {name}(" in path.read_text(encoding="utf-8")
+    )
+    assert redefiners == [], (
+        f"the serving predicate has a second implementation under tests/: {redefiners}; one "
+        "predicate, one body, or the retirement owner and the oracle judging it can drift apart"
+    )
+    assert (REPO_ROOT / "tests" / "serving_process.py").exists() is False, (
+        "the test-side copy of the serving predicate is back"
+    )
+    assert pid_is_serving is registry_mod.pid_is_serving, (
+        "this module must bind the product predicate itself, not a local re-implementation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Supervisor transfer during adoption.
+#
+# `_record_from_status` (registry.py:1753) writes `launcher_pid: os.getpid()`
+# UNCONDITIONALLY, while the comment two lines above (1749-1752) states that a
+# shared daemon "keeps the first launcher's stamp". Those two disagree, and the
+# code wins: the stamp is last-writer-wins. Three of the four adoption call
+# sites in `ensure_started` (2251, 2259, 2269) also run OUTSIDE `file_lock`, so
+# two successors adopting one healthy daemon can both believe they supervise it.
+#
+# CONTRACT: adopting a daemon that already names a LIVE supervisor must not
+# silently re-stamp it. Exactly one supervisor may hold the daemon; the loser
+# adopts read-only, arms no reaper, and its refusal is typed and readable.
+# ---------------------------------------------------------------------------
+
+
+def _adoptable_registry(root, *, pid, launcher_pid, monkeypatch, protocol_version=3):
+    registry = LocalServiceRegistry(
+        root,
+        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", protocol_version),
+        popen=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("an adopting generation must never spawn over a live healthy daemon")
+        ),
+    )
+    monkeypatch.setattr(
+        registry,
+        "_request",
+        lambda method, payload=None, timeout=0.2, protocol_version=None: {
+            "ok": True,
+            "version": registry.spec.protocol_version,
+            "pid": pid,
+            "process_start_identity": f"proc:{pid + 1000}",
+            "started_at": 1.0,
+        },
+    )
+    return registry
+
+
+def test_two_successors_adopting_one_daemon_leave_exactly_one_supervisor(tmp_path, monkeypatch):
+    """A caller-shared root with one live daemon has one supervisor, not two.
+
+    Both successors see the same healthy daemon on the same socket. The first
+    adoption is the POSITIVE CONTROL: it really does publish a record naming a
+    live supervisor. The second must not overwrite that stamp, because a daemon
+    whose ledger names the wrong supervisor is reaped by nobody -- the exact
+    dead-owner row the queue forbids.
+    """
+    daemon_pid = 4242
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: pid in {daemon_pid, os.getpid()})
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if pid in {daemon_pid, os.getpid()} else None,
+    )
+
+    first = _adoptable_registry(tmp_path, pid=daemon_pid, launcher_pid=os.getpid(), monkeypatch=monkeypatch)
+    monkeypatch.setattr(first, "_arm_adopted_reaper", lambda: None)
+    assert first.ensure_started() is True
+    first_record = json.loads(first.record_path.read_text(encoding="utf-8"))
+    assert int(first_record["launcher_pid"]) == os.getpid(), "positive control: the first adopter really stamped itself"
+    assert int(first_record["pid"]) == daemon_pid
+
+    # A genuinely separate successor sharing the same root and the same socket.
+    second = _adoptable_registry(tmp_path, pid=daemon_pid, launcher_pid=os.getpid(), monkeypatch=monkeypatch)
+    assert second.record_path == first.record_path
+    armed: list[str] = []
+    monkeypatch.setattr(second, "_arm_adopted_reaper", lambda: armed.append("armed"))
+
+    started = second.ensure_started()
+
+    second_record = json.loads(second.record_path.read_text(encoding="utf-8"))
+    assert started is True, "the second caller must still be able to USE a healthy shared daemon"
+    assert int(second_record["launcher_pid"]) == int(first_record["launcher_pid"]), (
+        "the second adopter re-stamped itself as supervisor over a live one; the daemon now has "
+        "two processes that each believe they own its lifetime"
+    )
+    assert armed == [], "the non-supervising caller armed a second reaper for a daemon it does not own"
+    assert second.status()["supervisor"] == {
+        "pid": int(first_record["launcher_pid"]),
+        "transferred": False,
+    }, "a caller that did not take supervision must be able to read who did"
+
+
+def test_a_private_root_never_adopts_another_roots_daemon(tmp_path, monkeypatch):
+    """Managed private roots perform ZERO cross-root adoption.
+
+    Root A publishes a healthy daemon. A registry under private root B must arm
+    no reaper for it, claim no supervision of it, and leave root A byte-for-byte
+    unchanged. The same call against root A's OWN registry is the POSITIVE
+    CONTROL that adoption is reachable at all in this fixture.
+    """
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    daemon_pid = 4343
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: pid == daemon_pid)
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if pid == daemon_pid else None,
+    )
+    monkeypatch.setattr(registry_mod, "process_state", lambda _pid: "")
+    # Arming the adopted reaper is arming `waitpid`, which is only ever
+    # legitimate for THIS process's own child, so the product proves parentage
+    # live. `daemon_pid` is synthetic; without this the proof would be answered
+    # by whatever really holds pid 4343 and adoption would be unreachable for
+    # BOTH roots, which is exactly what the positive control below rejects.
+    # 0 is the refusal value, never a default parent.
+    monkeypatch.setattr(
+        registry_mod,
+        "process_parent_id",
+        lambda pid: os.getpid() if int(pid) == daemon_pid else 0,
+    )
+
+    registry_a = LocalServiceRegistry(root_a, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    registry_a._write_record({
+        **_process_record(daemon_pid),
+        "service": "statusd",
+        "socket": str(registry_a.socket_path),
+        "protocol_version": 3,
+    })
+    # A long tmp_path can push the socket (and therefore the record) into
+    # safe_socket_path's private fallback directory, so snapshot the record's
+    # OWN directory rather than assuming it sits under root_a.
+    owned_dir_a = registry_a.record_path.parent
+    snapshot_a = _directory_snapshot(owned_dir_a)
+    assert registry_a.record_path.exists() is True
+    assert snapshot_a, "positive control: root A really holds a published record"
+
+    registry_b = LocalServiceRegistry(root_b, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    assert registry_b.record_path != registry_a.record_path
+
+    registry_b._arm_adopted_reaper()
+
+    assert registry_b._adopted_reaper_pid == 0, "a private root armed a reaper for another root's daemon"
+    assert registry_b._child_ownership.reaper_threads == set()
+    assert _directory_snapshot(owned_dir_a) == snapshot_a, "root B's adoption pass mutated root A"
+
+    # POSITIVE CONTROL: the identical call against the record's OWN root does arm.
+    monkeypatch.setattr(registry_a, "_reap_adopted_child", lambda _pid: None)
+    registry_a._arm_adopted_reaper()
+    assert registry_a._adopted_reaper_pid == daemon_pid, (
+        "adoption is unreachable in this fixture, so root B's zero above proves nothing"
+    )
+    registry_a.settle_reaper_threads()
+
+
+# ---------------------------------------------------------------------------
+# Bounded host-local repair.
+#
+# `verified_orphan_diagnostics` reports survivors and its own docstring calls
+# itself "the bounded host-local repair path's diagnostic half". The acting half
+# used not to exist: `attempted_action` was the constant "none" and `result` the
+# constant "reported_only" at every site, so no repair outcome could ever be
+# reported through the status owner the queue names.
+#
+# IMPLEMENTED CONTRACT:
+#   registry.repair_verified_orphans(
+#       service_dir, state_dir, service_names, *,
+#       current_generations=None, private_root=MANAGED_PRIVATE_ROOT,
+#       host_identity=None, kill=os.kill, clock=monotonic_clock,
+#       sleep=sleep_clock, grace_seconds=LOCAL_SERVICE_RETIRE_GRACE_SECONDS,
+#       force_seconds=LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
+#       now=None, observations=None,
+#   ) -> list[dict]
+#
+# Same row shape as verified_orphan_diagnostics plus `failure_reason`, with:
+#   ORPHAN_ACTION_TERMINATE       = "terminate"
+#   ORPHAN_RESULT_REPAIRED        = "repaired"
+#   ORPHAN_RESULT_REFUSED         = "refused"
+#   ORPHAN_RESULT_FAILED          = "failed"
+#
+# WHY THE INPUT IS A CLAIM LEDGER AND NOT A PROCESS TABLE. These tests were first
+# written against `repair_verified_orphans(service_dir, table, ...)`, i.e. repair
+# the survivors `verified_orphan_diagnostics` found by matching `--socket <path>`
+# in a live process's command text. The product refuses that input, and it is
+# right to: a process is not yours because its argv looks like yours, and the
+# whole point of this path is that it SIGNALS. The only input carrying authority
+# is a claim the spawning supervisor persisted while it still had direct proof of
+# what it created, so repair reads claim ledgers under `state_dir` for the named
+# services. `verified_orphan_diagnostics` keeps the command-text input precisely
+# because it may only ever report.
+#
+# These tests therefore drive REAL child processes rather than a fixture process
+# table. The product reads the process table itself with `require_complete=True`
+# (an incomplete table must never be able to certify a live process as retired),
+# so there is nothing to inject, and using real children also exercises the part
+# that matters most: confirmation goes through the zombie-excluding serving
+# predicate, so a SIGTERMed child of this test is confirmed dead while it is
+# still an unreaped corpse in the process table.
+# ---------------------------------------------------------------------------
+
+
+_REPAIR_SURVIVOR_SOURCE = "import sys\nsys.stdin.read()\n"
+
+
+def _spawn_claimable_survivor(generation):
+    """A real process carrying a real inherited spawn-generation marker.
+
+    ``process_spawn_generation`` reads `/proc/<pid>/environ` and accepts only a
+    32-hex-character marker, so the generation cannot be a readable label here --
+    a "gen-old" string reads back as *unavailable*, which the fence correctly
+    refuses, and the test would then pass for the wrong reason.
+    """
+
+    environment = dict(os.environ)
+    environment[registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation
+    process = subprocess.Popen(
+        [sys.executable, "-c", _REPAIR_SURVIVOR_SOURCE],
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if registry_mod.process_spawn_generation(process.pid) == generation:
+            return process
+        time.sleep(0.02)
+    process.kill()
+    process.wait(timeout=5.0)
+    raise AssertionError(f"survivor {process.pid} never published its spawn generation marker")
+
+
+def _publish_orphan_claim(state_dir, service_name, pid, generation, identity, *, start_identity=None):
+    """Publish a real claim, then make its supervisor provably gone.
+
+    ``publish`` stamps THIS process as the supervisor, and a claim whose
+    supervisor is alive is retained by design -- that is the adoption contract,
+    not the repair one. A survivor is by definition a process whose supervisor
+    left, so exactly that one field is rewritten and every other dimension stays
+    whatever the product itself wrote.
+    """
+
+    ledger = registry_mod.service_claim_ledger(
+        state_dir, service_name, private_root=False, host_identity=identity
+    )
+    claim = ledger.publish(pid, generation=generation)
+    payload = json.loads(claim.path.read_text(encoding="utf-8"))
+    payload["supervisor"] = identity.process_record_fields(pid=999_999_999, start_identity="proc:1")
+    if start_identity is not None:
+        payload["process_start_identity"] = start_identity
+    claim.path.write_text(json.dumps(payload), encoding="utf-8")
+    return claim
+
+
+@contextlib.contextmanager
+def _repairable_claim_ledger(tmp_path, survivors):
+    """One state dir, one service dir, and one real claimed survivor per entry.
+
+    ``survivors`` maps service name -> (claim generation, the caller's current
+    generation). Yields ``(service_dir, state_dir, identity, pids, claims)``.
+    """
+
+    service_dir = tmp_path / "services"
+    state_dir = tmp_path / "state"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    identity = registry_mod.current_host_identity()
+    processes = {}
+    claims = {}
+    try:
+        for service_name, entry in survivors.items():
+            generation, _current, start_identity = (*entry, None)[:3]
+            process = _spawn_claimable_survivor(generation)
+            processes[service_name] = process
+            claims[service_name] = _publish_orphan_claim(
+                state_dir, service_name, process.pid, generation, identity,
+                start_identity=start_identity,
+            )
+        pids = {name: process.pid for name, process in processes.items()}
+        yield service_dir, state_dir, identity, pids, claims
+    finally:
+        for process in processes.values():
+            process.kill()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:  # pragma: no cover - a wedged fixture child
+                pass
+
+
+def _repair(service_dir, state_dir, identity, survivors, *, kill):
+    return registry_mod.repair_verified_orphans(
+        service_dir,
+        state_dir,
+        tuple(survivors),
+        current_generations={name: entry[1] for name, entry in survivors.items()},
+        private_root=False,
+        host_identity=identity,
+        kill=kill,
+        now=1000.0,
+        observations=registry_mod.OrphanObservationLedger(),
+    )
+
+
+def test_bounded_repair_acts_only_on_a_verified_survivor_and_says_so(tmp_path):
+    """One survivor is repaired, one is refused, and the rows differ.
+
+    The two survivors are identical in every dimension the fence binds -- same
+    host, same boot, same real process-start identity, same kind, same namespace,
+    same live claim -- except ONE: whether the claim's generation is strictly
+    older than the caller's current generation. The refused row is the POSITIVE
+    CONTROL for the repaired one and vice versa: ``attempted_action`` and
+    ``result`` must genuinely vary across two survivors in one pass, which is
+    exactly what they could not do while both were literals.
+    """
+    superseded = uuid.uuid4().hex
+    current = uuid.uuid4().hex
+    survivors = {"verified": (superseded, current), "ambiguous": (current, current)}
+    signals: list[tuple[int, int]] = []
+
+    def kill(pid, signum):
+        signals.append((pid, signum))
+        os.kill(pid, signum)
+
+    with _repairable_claim_ledger(tmp_path, survivors) as (service_dir, state_dir, identity, pids, claims):
+        rows = _repair(service_dir, state_dir, identity, survivors, kill=kill)
+        by_pid = {int(row["pid"]): row for row in rows}
+
+        assert sorted(by_pid) == sorted(pids.values()), "a survivor disappeared from the repair report"
+        repaired = by_pid[pids["verified"]]
+        refused = by_pid[pids["ambiguous"]]
+
+        assert repaired["attempted_action"] == registry_mod.ORPHAN_ACTION_TERMINATE
+        assert repaired["result"] == registry_mod.ORPHAN_RESULT_REPAIRED
+        assert repaired["failure_reason"] == ""
+        assert signals == [(pids["verified"], signal.SIGTERM)], "repair signalled a survivor it could not verify"
+        assert refused["attempted_action"] == registry_mod.ORPHAN_ACTION_NONE
+        assert refused["result"] == registry_mod.ORPHAN_RESULT_REFUSED
+        assert refused["reason"] == registry_mod.ORPHAN_REASON_GENERATION_NOT_SUPERSEDED
+        # The two rows are materially different -- the property that was impossible
+        # while both fields were literals in one comprehension.
+        assert (repaired["attempted_action"], repaired["result"]) != (
+            refused["attempted_action"],
+            refused["result"],
+        )
+        # Measured, not assumed: the repaired survivor really stopped serving and
+        # the refused one really did not, and only one signal ever left the owner.
+        assert registry_mod.pid_is_serving(pids["verified"]) is False
+        assert registry_mod.pid_is_serving(pids["ambiguous"]) is True
+        # The claim is spent only when it was cashed. Leaving the repaired one
+        # behind would let a later pass signal a recycled pid on a used proof;
+        # removing the refused one would destroy authority nothing acted on.
+        assert claims["verified"].path.exists() is False
+        assert claims["ambiguous"].path.exists() is True
+
+
+def test_bounded_repair_reports_a_typed_failure_instead_of_swallowing_it(tmp_path):
+    """A repair that is attempted and fails must say so, with the reason.
+
+    The control is the successful repair in the sibling test above: the same
+    survivor, the same verification, and only the outcome of the action differs.
+    """
+    survivors = {"verified": (uuid.uuid4().hex, uuid.uuid4().hex)}
+    attempts: list[tuple[int, int]] = []
+
+    def refusing_kill(pid, signum):
+        attempts.append((pid, signum))
+        raise PermissionError("operation not permitted")
+
+    with _repairable_claim_ledger(tmp_path, survivors) as (service_dir, state_dir, identity, pids, claims):
+        rows = _repair(service_dir, state_dir, identity, survivors, kill=refusing_kill)
+        row = {int(item["pid"]): item for item in rows}[pids["verified"]]
+
+        assert attempts == [(pids["verified"], signal.SIGTERM)], (
+            "positive control: the repair really did reach the signal it then failed to send"
+        )
+        assert row["attempted_action"] == registry_mod.ORPHAN_ACTION_TERMINATE
+        assert row["result"] == registry_mod.ORPHAN_RESULT_FAILED
+        assert row["failure_reason"] == "PermissionError", (
+            "a repair that was attempted and failed reported no reason; the operator sees a survivor "
+            "with no explanation for why it is still there"
+        )
+        assert registry_mod.pid_is_serving(pids["verified"]) is True, "the survivor is the whole point of the row"
+        assert claims["verified"].path.exists() is True, "a claim was spent on a repair that never happened"
+
+
+def test_bounded_repair_stops_dead_when_the_identity_changes_under_it(tmp_path):
+    """Verification and action are not the same instant.
+
+    If the claimed pid no longer proves the process-start identity the claim
+    recorded, the pid now names a different process and the repair owns no
+    authority over it: zero signals, zero unlinks, one typed refusal. The
+    unchanged-identity run in
+    ``test_bounded_repair_acts_only_on_a_verified_survivor_and_says_so`` is the
+    positive control that this path can act at all.
+    """
+    survivors = {"verified": (uuid.uuid4().hex, uuid.uuid4().hex, "proc:999999")}
+    signals: list[tuple[int, int]] = []
+
+    with _repairable_claim_ledger(tmp_path, survivors) as (service_dir, state_dir, identity, pids, claims):
+        before = _directory_snapshot(state_dir)
+        assert before, "positive control: the fixture wrote claims to compare against"
+
+        rows = _repair(
+            service_dir, state_dir, identity, survivors,
+            kill=lambda pid, signum: signals.append((pid, signum)),
+        )
+        row = {int(item["pid"]): item for item in rows}[pids["verified"]]
+
+        assert signals == [], "repair signalled a pid whose process identity had changed"
+        assert row["attempted_action"] == registry_mod.ORPHAN_ACTION_NONE
+        assert row["result"] == registry_mod.ORPHAN_RESULT_REFUSED
+        assert row["reason"] == LocalProcessReason.PROCESS_IDENTITY_REUSED.value
+        assert registry_mod.pid_is_serving(pids["verified"]) is True
+        assert claims["verified"].path.exists() is True
+        assert _directory_snapshot(state_dir) == before, "repair unlinked an artifact after an identity change"
+
+
+def test_no_write_or_chmod_reaches_a_removed_service_directory_from_any_entry_point(tmp_path, monkeypatch):
+    """Zero ``atomic_write_text`` AND zero ``chmod`` after the directory is gone.
+
+    ``test_registry_fences_a_real_child_after_its_fixture_directory_is_removed``
+    proves this for ``_publish_record`` alone and counts only writes. The queue's
+    Done Criterion names ``atomic_write_text``/``chmod`` together and the historical
+    traceback died on the ``chmod``, so count both -- and drive every routine entry
+    point a live registry still calls after teardown, not just one.
+    """
+    now = [100.0]
+    registry = _publication_registry(tmp_path, clock=now, spawned=[])
+    record = {
+        **current_host_identity().process_record_fields(
+            pid=os.getpid(),
+            start_identity=registry_mod.process_start_identity(os.getpid()),
+        ),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    }
+    assert registry._write_record(record) is True, "positive control: this owner published here once"
+
+    writes: list[str] = []
+    chmods: list[str] = []
+    real_atomic_write_text = registry_mod.atomic_write_text
+    real_path_chmod = Path.chmod
+    real_os_chmod = os.chmod
+
+    def counting_atomic_write_text(path, text, mode=None):
+        writes.append(str(path))
+        return real_atomic_write_text(path, text, mode=mode)
+
+    def counting_path_chmod(self, mode, **kwargs):
+        chmods.append(str(self))
+        return real_path_chmod(self, mode, **kwargs)
+
+    def counting_os_chmod(path, mode, **kwargs):
+        chmods.append(str(path))
+        return real_os_chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(registry_mod, "atomic_write_text", counting_atomic_write_text)
+    monkeypatch.setattr(Path, "chmod", counting_path_chmod)
+    monkeypatch.setattr(os, "chmod", counting_os_chmod)
+
+    # Positive control that BOTH counters can move at all: one more successful
+    # publish while the directory still exists.
+    assert registry._write_record(record) is True
+    assert writes, "the atomic_write_text spy never observed a real write"
+    assert chmods, "the chmod spy never observed a real chmod"
+
+    service_dir = registry.record_path.parent
+    rmtree_within(service_dir, tmp_path)
+    assert service_dir.exists() is False
+    writes.clear()
+    chmods.clear()
+
+    outcomes = {
+        "write_record": registry._write_record(record),
+        "publish_record": registry._publish_record({"ok": True, "version": 1, "pid": os.getpid(), "started_at": 1.0}),
+        "remove_stale_record": registry._remove_stale_record(),
+        "arm_adopted_reaper": registry._arm_adopted_reaper(),
+        "prune_runtime_locks": registry.prune_stale_runtime_locks_once(),
+    }
+
+    measured = {"outcomes": outcomes, "writes": writes, "chmods": chmods}
+    assert writes == [], measured
+    assert chmods == [], measured
+    assert service_dir.exists() is False, (
+        f"a routine entry point recreated the removed service directory: {measured}"
+    )
+    registry.settle_reaper_threads()

@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers.external_lease_client import assert_self_lease_is_refused
+from tests.helpers.external_lease_client import external_lease_client
 from yolomux_lib.host_identity import current_host_identity
 from yolomux_lib.stats_current import client as client_module
 from yolomux_lib.stats_current import http as http_module
@@ -2899,40 +2901,51 @@ def test_active_client_lease_prevents_idle_exit_until_released(tmp_path):
     service._pending_full = False
     monotonic_now[0] = 10.0
 
-    lease, binary = service.handle_with_binary({
-        **FENCE,
-        "action": "lease",
-        "client_pid": os.getpid(),
-        "lease_id": "",
-    })
-    assert lease.get("ok") is True, lease
-    assert binary == b""
-    assert service._idle() is False
+    def lease_request(client_pid, lease_id=""):
+        return service.handle_with_binary({
+            **FENCE,
+            "action": "lease",
+            "client_pid": client_pid,
+            "lease_id": lease_id,
+        })
 
-    renewed, binary = service.handle_with_binary({
-        **FENCE,
-        "action": "lease",
-        "client_pid": os.getpid(),
-        "lease_id": lease["lease_id"],
-    })
-    assert renewed == lease
-    assert binary == b""
-    assert len(service.leases) == 1
+    # The client has to be a REAL separate process. A harness naming
+    # ``os.getpid()`` IS the daemon, and the one shared lease fence correctly
+    # refuses a daemon the lease that keeps itself alive; production's caller is
+    # the web server talking to a separate statsd.
+    with external_lease_client() as client_pid:
+        # NEGATIVE CONTROL, asserted first: the external stand-in is not a way
+        # around the fence. A true self-lease stays refused and never reaches
+        # the lease table, so the pin proved below cannot be bought that way.
+        assert_self_lease_is_refused(
+            lambda pid: lease_request(pid)[0],
+            lambda: len(service.leases),
+        )
 
-    released, binary = service.handle_with_binary({
-        **FENCE,
-        "action": "release",
-        "lease_id": lease["lease_id"],
-    })
-    assert released == {"ok": True, "leases": 0}
-    assert binary == b""
-    # claim_gated_idle_due (the one shared transition/deadline owner every
-    # local service routes through) refreshed the deadline on the last
-    # claimed check above, so release starts the idle_seconds countdown --
-    # it does not report idle at the same instant it lost its last claim.
-    assert service._idle() is False, "release must start the countdown, not report idle at the same instant"
-    monotonic_now[0] += 1.0
-    assert service._idle() is True
+        lease, binary = lease_request(client_pid)
+        assert lease.get("ok") is True, lease
+        assert binary == b""
+        assert service._idle() is False
+
+        renewed, binary = lease_request(client_pid, lease["lease_id"])
+        assert renewed == lease
+        assert binary == b""
+        assert len(service.leases) == 1
+
+        released, binary = service.handle_with_binary({
+            **FENCE,
+            "action": "release",
+            "lease_id": lease["lease_id"],
+        })
+        assert released == {"ok": True, "leases": 0}
+        assert binary == b""
+        # claim_gated_idle_due (the one shared transition/deadline owner every
+        # local service routes through) refreshed the deadline on the last
+        # claimed check above, so release starts the idle_seconds countdown --
+        # it does not report idle at the same instant it lost its last claim.
+        assert service._idle() is False, "release must start the countdown, not report idle at the same instant"
+        monotonic_now[0] += 1.0
+        assert service._idle() is True
 
 
 def test_genuine_idle_exit_restarts_and_cold_warms_the_same_database(tmp_path):
@@ -3014,12 +3027,26 @@ def test_new_lease_reaps_dead_process_owners_instead_of_leaking_capacity(tmp_pat
     )
     service.leases["dead"] = dead_client_lease_record(2_147_483_647)
 
-    lease, _binary = service.handle_with_binary({
-        **FENCE,
-        "action": "lease",
-        "client_pid": os.getpid(),
-        "lease_id": "",
-    })
+    def lease_request(client_pid):
+        return service.handle_with_binary({
+            **FENCE,
+            "action": "lease",
+            "client_pid": client_pid,
+            "lease_id": "",
+        })[0]
+
+    # Reaping the dead owner is only reachable for a caller the fence would
+    # otherwise ADMIT, so this client is a real separate process; a harness
+    # naming ``os.getpid()`` is the daemon itself and is refused one step
+    # earlier, for a completely different reason.
+    with external_lease_client() as client_pid:
+        # NEGATIVE CONTROL: a self-lease is still refused, and -- because it
+        # never reaches the reaper -- it also leaves the dead lease in place,
+        # which is what keeps the reap below attributable to the real client.
+        assert_self_lease_is_refused(lambda pid: lease_request(pid), lambda: len(service.leases))
+        assert "dead" in service.leases, "a refused self-lease ran the reaper anyway"
+
+        lease = lease_request(client_pid)
 
     assert lease["ok"] is True
     assert lease["leases"] == 1

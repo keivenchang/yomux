@@ -65,6 +65,13 @@ class _DarwinProcBsdInfo(ctypes.Structure):
 class ProcessIdentitySnapshot:
     state: str
     start_identity: str
+    # The parent this pid reports RIGHT NOW. It rides along on the one native
+    # read rather than getting a reader of its own, because it comes out of the
+    # same `/proc/<pid>/stat` line (and the same libproc struct) the state and
+    # the birth identity do, and a second reader would be a second answer.
+    # Zero means "not proven", never "orphaned": a `ps` fallback and an
+    # unreadable pid both land there, and a lifetime decision must refuse both.
+    parent_pid: int = 0
 
 
 def _darwin_process_identity_snapshot(pid: int) -> ProcessIdentitySnapshot | None:
@@ -84,6 +91,7 @@ def _darwin_process_identity_snapshot(pid: int) -> ProcessIdentitySnapshot | Non
     return ProcessIdentitySnapshot(
         state=_DARWIN_PROCESS_STATES.get(int(info.pbi_status), "?"),
         start_identity=f"darwin:{started_microseconds}",
+        parent_pid=int(info.pbi_ppid),
     )
 
 
@@ -109,7 +117,11 @@ def process_identity_snapshot(
         fields = stat_text[closing_paren + 1 :].split()
         if len(fields) > 19:
             try:
-                return ProcessIdentitySnapshot(state=fields[0], start_identity=f"proc:{int(fields[19])}")
+                return ProcessIdentitySnapshot(
+                    state=fields[0],
+                    start_identity=f"proc:{int(fields[19])}",
+                    parent_pid=int(fields[1]),
+                )
             except ValueError:
                 pass
     if platform_name.casefold() == "darwin":
@@ -165,6 +177,66 @@ def process_start_identity(
     """Return a stable kernel/process-table birth identity for one live PID."""
     snapshot = process_identity_snapshot(pid, proc_root=proc_root, runner=runner)
     return snapshot.start_identity if snapshot is not None else None
+
+
+def process_state(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    platform_name: str = sys.platform,
+) -> str:
+    """Return the native process state character, preserving zombies as non-serving.
+
+    This lives beside the fence rather than beside a caller because "has this
+    process actually exited?" is a fence question.  A zombie keeps its PID, its
+    PGID, and its ``/proc/<pid>/stat`` start ticks, so ``os.kill(pid, 0)`` and a
+    raw start-identity read both answer exactly as they would for a running
+    process.  The state character is the only cheap signal that distinguishes a
+    live process from a corpse, and every destructive decision needs it.
+    """
+
+    snapshot = process_identity_snapshot(pid, proc_root=proc_root, runner=runner, platform_name=platform_name)
+    if snapshot is not None:
+        return snapshot.state
+    if platform_name.casefold() != "darwin":
+        return ""
+    # libproc could not answer for this pid on macOS. `ps` is the remaining
+    # authority for the state character alone; it never grants any other proof.
+    try:
+        completed = runner(
+            ("ps", "-o", "state=", "-p", str(int(pid))),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    state = str(completed.stdout or "").strip()
+    return state[0] if completed.returncode == 0 and state else ""
+
+
+def process_parent_id(
+    pid: int,
+    *,
+    proc_root: Path = Path("/proc"),
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    platform_name: str = sys.platform,
+) -> int:
+    """Return the parent this pid still reports, or 0 when it cannot be proven.
+
+    "Is this process MY child" is the only question that makes `os.waitpid`
+    legitimate, and it is a live measurement rather than a remembered one: a
+    launcher that dropped its `Popen` still has the child, and a caller that
+    merely found the same socket never did. Zero is deliberately not "orphaned":
+    an unreadable pid and a platform this cannot answer for both produce zero,
+    and a lifetime decision must refuse both rather than default one of them into
+    ownership.
+    """
+
+    snapshot = process_identity_snapshot(pid, proc_root=proc_root, runner=runner, platform_name=platform_name)
+    return 0 if snapshot is None else max(0, int(snapshot.parent_pid))
 
 
 def process_start_ticks(identity: object) -> int | None:
@@ -499,8 +571,22 @@ def is_current_local_process(
     host_identity: HostIdentity | None = None,
     start_identity_reader: Callable[[int], str | None] | None = None,
     pid_probe: Callable[[int], bool] | None = None,
+    state_reader: Callable[[int], str] | None = None,
 ) -> LocalProcessDiagnostic:
-    """Fence a persisted process record before any local process or file action."""
+    """Fence a persisted process record before any local process or file action.
+
+    ``state_reader`` is how the fence excludes a zombie, and it defaults to on.
+    Every caller that reached this function through a raw call -- the process
+    claim ledger deciding whether a supervisor is still alive, and the local
+    service lease reaper deciding whether a client still exists -- previously
+    saw an exited-but-unreaped process as ``current_local_process``, because a
+    zombie answers ``os.kill(pid, 0)`` and keeps its recorded start identity. A
+    corpse read as a live supervisor retains its helper forever, and a corpse
+    read as a live target gets signalled and reported as ``signalled`` rather
+    than ``already_exited``.  Callers that read from a process table which
+    already excludes zombies pass a reader that returns the empty string, so the
+    same rule is expressed once and paid for once.
+    """
 
     identity = host_identity or current_host_identity()
     record_host_id = str(record.get("stable_host_id") or "").strip().lower()
@@ -558,6 +644,20 @@ def is_current_local_process(
         return result(LocalProcessReason.PROCESS_NOT_FOUND, recorded=recorded_start)
     if str(observed_start) != recorded_start:
         return result(LocalProcessReason.PROCESS_IDENTITY_REUSED, observed=str(observed_start), recorded=recorded_start)
+    read_state = process_state if state_reader is None else state_reader
+    try:
+        if read_state(pid) == "Z":
+            # Exited, awaiting its reaper. It cannot serve, cannot be signalled
+            # into anything, and its record is safe to discard -- which is the
+            # same outcome as a pid that is simply gone, so it carries the same
+            # reason rather than a second name for the same fact.
+            return result(LocalProcessReason.PROCESS_NOT_FOUND, observed=str(observed_start), recorded=recorded_start)
+    except (PermissionError, OSError):
+        return result(
+            LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE,
+            observed=str(observed_start),
+            recorded=recorded_start,
+        )
     if pid_probe is not None:
         try:
             alive = bool(pid_probe(pid))

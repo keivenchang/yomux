@@ -28,6 +28,8 @@ from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..infra.filesystem_preflight import preflight_mutable_roots
+from .lifetime import LOCAL_SERVICE_SPAWN_GENERATION_ENV
+from .lifetime import ServiceLifetimeOwner
 from .rpc import LOCAL_SERVICE_ERROR_BUSY
 from .rpc import LOCAL_SERVICE_ERROR_INVALID_REQUEST
 from .rpc import LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH
@@ -49,6 +51,14 @@ LOCAL_SERVICE_MAX_CLIENT_LEASES = 64
 # is 0.  One shared limit for every daemon so no service can silently go back to serial.
 LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT = 8
 LOCAL_SERVICE_STACK_FRAME_LIMIT = 32
+# The listener's kernel-proven peer verdict, published to the handler running on
+# this thread. Deliberately NOT stamped into the request payload: several
+# handlers echo their request back to the caller, and a private key smuggled
+# through the payload would leak into those responses and change the wire.
+# Handlers run on the same thread that accepted the connection (serially, or on
+# the worker thread the listener started for that one connection), so the thread
+# is the exact scope of one connection's verdict.
+_CONNECTION_VERDICT = threading.local()
 LOCAL_SERVICE_SECRET_MARKERS = ("token", "secret", "password", "cookie", "authorization", "api_key", "apikey", "bearer")
 logger = logging.getLogger(__name__)
 
@@ -91,6 +101,44 @@ def reap_dead_client_leases(
     for lease_id in dead:
         leases.pop(lease_id, None)
     return len(dead)
+
+
+def request_is_self_connection(_request: object = None) -> bool | None:
+    """Return the listener's proven self-connection verdict for the current request.
+
+    ``None`` is not "no": it means no transport proof reached this handler at all,
+    which is what a direct in-process call looks like. The caller decides what to
+    do with an absent proof; nothing here defaults it away.
+    """
+
+    return getattr(_CONNECTION_VERDICT, "value", None)
+
+
+def live_client_claim(
+    leases: dict[str, object],
+    *,
+    host_identity: HostIdentity | None = None,
+    start_identity_reader: Callable[[int], str | None] = process_start_identity,
+    pid_probe: Callable[[int], bool] = pid_is_alive,
+) -> bool:
+    """Return whether any lease still names a LIVE client, dropping the ones that do not.
+
+    ``bool(self.leases)`` is not the same question.  A client that was hard-killed
+    cannot release its lease, so the table keeps an entry naming a process that no
+    longer exists and the daemon's idle deadline is refreshed forever by a ghost.
+    ``statusd``, ``watchd`` and ``jobd`` each reaped before deciding; ``approvald``
+    and ``indexd`` did not, so those two alone could be pinned indefinitely by one
+    crashed caller.  Two spellings of one predicate is what produced that gap, so
+    there is now one.
+    """
+
+    reap_dead_client_leases(
+        leases,
+        host_identity=host_identity,
+        start_identity_reader=start_identity_reader,
+        pid_probe=pid_probe,
+    )
+    return bool(leases)
 
 
 def apply_service_process_priority(increment: int = 5) -> bool:
@@ -196,12 +244,47 @@ def acquire_client_lease(
     host_identity: HostIdentity | None = None,
     start_identity_reader: Callable[[int], str | None] = process_start_identity,
     pid_probe: Callable[[int], bool] = pid_is_alive,
+    service_pid: int | None = None,
+    self_connection: bool | None = None,
 ) -> dict[str, object]:
-    """Bound the shared local-service lease table for every daemon."""
+    """Bound the shared local-service lease table for every daemon.
+
+    A lease is the claim that keeps a daemon alive, so a daemon must never be
+    able to grant one to itself.  The self-connection exclusion was closed at the
+    connection level (``run_local_rpc_service`` compares ``peer_pid`` to
+    ``os.getpid()`` before calling ``on_client``) and left wide open here: this
+    function trusted a caller-supplied ``client_pid`` verbatim, so one self-issued
+    lease request pinned the daemon's idle deadline forever and no amount of
+    correctness in ``claim_gated_idle_due`` could undo it.  ``service_pid``
+    defaults to this process, which is the daemon in every production call.
+    """
     try:
         pid = max(0, int(client_pid or 0))
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid client pid", "leases": len(leases)}
+    own_pid = os.getpid() if service_pid is None else int(service_pid)
+    if self_connection is None:
+        # No transport proof reached this handler, which is what a direct
+        # in-process call looks like. The claimed pid is then the only evidence
+        # there is, and a caller naming this very process is claiming to be its
+        # own client.
+        is_self = pid > 0 and pid == own_pid
+    else:
+        # The request arrived over a socket and the kernel answered who was on
+        # the other end. Sharing a pid with the peer is NOT sufficient on its
+        # own: a daemon object hosted inside its caller's process (a service run
+        # on a thread) legitimately serves that caller over a real socket and
+        # would share its pid with every request. Only a process that was itself
+        # spawned as a local service -- proven by the spawn marker in its own
+        # environment -- can be talking to itself.
+        is_self = bool(self_connection) and bool(os.environ.get(LOCAL_SERVICE_SPAWN_GENERATION_ENV))
+    if is_self:
+        return {
+            "ok": False,
+            "error": "a service may not lease itself",
+            "diagnostic": {"reason": "self_connection", "pid": pid},
+            "leases": len(leases),
+        }
     identity = host_identity or current_host_identity()
     reap_dead_client_leases(
         leases,
@@ -334,6 +417,16 @@ def run_local_rpc_service(
     requested_socket_path = socket_path
     socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
     socket_alias = requested_socket_path if requested_socket_path != socket_path else None
+    # ONE lifetime owner for every local service, built here rather than in each
+    # daemon so no service can go back to graceful-only. The launching
+    # supervisor's identity is captured now, while that process is still
+    # provable; after it exits, `getppid()` would name init and prove nothing.
+    lifetime_owner = ServiceLifetimeOwner.for_launching_parent(
+        service_name,
+        stop_event,
+        parent_pid=launching_parent_pid,
+    )
+    lifetime_path = socket_path.with_suffix(".lifetime.json")
     preflight_mutable_roots(unix_sockets=[socket_path])
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -370,6 +463,17 @@ def run_local_rpc_service(
                 socket_alias.symlink_to(socket_path)
             server.listen(16)
             server.settimeout(0.1)
+            # Published beside the socket, not behind the status RPC: the moment
+            # "who is keeping this daemon alive" matters most is when the daemon
+            # is wedged and cannot answer an RPC at all.
+            publish_failure = lifetime_owner.publish(lifetime_path)
+            if publish_failure:
+                logger.warning(
+                    "local service %s could not publish its lifetime record at %s: %s",
+                    service_name,
+                    lifetime_path,
+                    publish_failure,
+                )
             if on_start is not None:
                 # Stateful initialization belongs after singleton ownership and
                 # listener publication.  A losing contender must never open or
@@ -393,7 +497,8 @@ def run_local_rpc_service(
                             write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH}, legacy=True)
                             return
                         pid = peer_pid(connection)
-                        if pid is None or pid != os.getpid():
+                        self_connected = pid is not None and pid == os.getpid()
+                        if not self_connected:
                             on_client()
                         try:
                             read_started = time.monotonic()
@@ -406,6 +511,11 @@ def run_local_rpc_service(
                                 pass
                         else:
                             service_started = time.monotonic()
+                            # Publish the proven verdict for this one connection. A
+                            # lease is the claim that keeps a daemon alive, so the
+                            # only place that can prove "this is me talking to
+                            # myself" has to be the place that says so.
+                            _CONNECTION_VERDICT.value = self_connected
                             try:
                                 response, response_binary = handle(payload, request_binary)
                             except Exception as exc:
@@ -419,6 +529,8 @@ def run_local_rpc_service(
                                     "error_code": "handler_failed",
                                     "exception_type": type(exc).__name__,
                                 }, b""
+                            finally:
+                                _CONNECTION_VERDICT.value = None
                             with capacity_lock:
                                 response_rejection_count = capacity_rejections
                             response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(
@@ -458,7 +570,8 @@ def run_local_rpc_service(
             try:
                 while not stop_event.is_set():
                     if launching_parent_pid > 1 and int(parent_pid_reader()) != launching_parent_pid:
-                        stop_event.set()
+                        lifetime_owner.request_retirement("launching_supervisor_exited")
+                        lifetime_owner.publish(lifetime_path)
                         continue
                     try:
                         connection, _address = server.accept()
@@ -469,7 +582,16 @@ def run_local_rpc_service(
                                     continue
                         try:
                             if on_idle():
-                                stop_event.set()
+                                # The last valid external claim is gone. Setting
+                                # `stop_event` is a REQUEST the listener may never
+                                # honour -- a stuck handler, a blocking shutdown
+                                # hook, or a non-daemon thread at interpreter exit
+                                # all leave the daemon up. Waiting for the next
+                                # launcher start to force it is the future-restart
+                                # authority the supervision contract forbids, so
+                                # the owner bounds this exit itself.
+                                lifetime_owner.request_retirement("idle_no_external_claim")
+                                lifetime_owner.publish(lifetime_path)
                         except Exception as exc:
                             traceback_text = traceback.format_exc()
                             if on_idle_failure is not None:
@@ -522,7 +644,21 @@ def run_local_rpc_service(
     finally:
         if on_shutdown is not None:
             on_shutdown()
+        # The listener completed on its own, so the armed escalation stands down
+        # before it can signal a process that is already leaving.
+        lifetime_owner.note_exited_gracefully()
         if owns_lock:
+            try:
+                lifetime_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                logger.warning(
+                    "local service %s could not remove its lifetime record at %s: %s",
+                    service_name,
+                    lifetime_path,
+                    type(error).__name__,
+                )
             if socket_alias is not None:
                 try:
                     socket_alias.unlink()

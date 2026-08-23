@@ -25,10 +25,10 @@ from tests.gate_harness import gate_runtime_paths  # noqa: F401
 from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import load_gate_browser
 from tests.gate_harness import run_when_browser_ready
-from tests.serving_process import pid_is_serving
-from tests.serving_process import process_group_has_serving_member
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
+from yolomux_lib.local_services.registry import pid_is_serving
+from yolomux_lib.local_services.registry import process_group_has_serving_member
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.tmux.session_retirement import capture_tmux_session_retirement
 from yolomux_lib.tmux.session_retirement import join_tmux_session_retirement

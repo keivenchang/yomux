@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
-import os
 import threading
 import time
 
+from tests.helpers.external_lease_client import assert_daemon_refuses_a_self_lease
+from tests.helpers.external_lease_client import external_lease_client
 from yolomux_lib import app as app_module
 from yolomux_lib import jobd
 from yolomux_lib.local_services import client as local_service_client
@@ -127,33 +128,49 @@ def test_status_generation_release_timeout_retries_until_statusd_acknowledges(mo
 
 
 def test_jobd_interaction_release_timeout_retries_until_the_broker_unpins(tmp_path, monkeypatch):
+    """A timed-out interaction-lease release retries until the broker is actually unpinned.
+
+    The client has to be a REAL separate process. A harness naming ``os.getpid()``
+    IS the daemon, and the one shared lease fence in ``runtime.acquire_client_lease``
+    correctly refuses a daemon the lease that keeps itself alive. Production is not
+    shaped like that: the web server holds this interaction lease on a separate jobd
+    process, so the fence sees a different pid whose start identity it can verify.
+    """
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
     release_calls = []
 
-    class BrokerLeaseRegistry:
-        def acquire_lease(self, existing_lease_id=""):
-            return broker.handle({
-                "action": "lease",
-                "client_pid": os.getpid(),
-                "lease_id": existing_lease_id,
-            })[0]
+    with external_lease_client() as client_pid:
+        class BrokerLeaseRegistry:
+            def acquire_lease(self, existing_lease_id=""):
+                return broker.handle({
+                    "action": "lease",
+                    "client_pid": client_pid,
+                    "lease_id": existing_lease_id,
+                })[0]
 
-        def release_lease(self, lease_id):
-            release_calls.append(lease_id)
-            if len(release_calls) == 1:
-                return {"ok": False, "_transport_error": "timeout"}
-            return broker.handle({"action": "release", "lease_id": lease_id})[0]
+            def release_lease(self, lease_id):
+                release_calls.append(lease_id)
+                if len(release_calls) == 1:
+                    return {"ok": False, "_transport_error": "timeout"}
+                return broker.handle({"action": "release", "lease_id": lease_id})[0]
 
-    monkeypatch.setattr(local_service_client, "LOCAL_SERVICE_LEASE_RELEASE_RETRY_SECONDS", 0.01)
-    lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": BrokerLeaseRegistry()})())
+        monkeypatch.setattr(local_service_client, "LOCAL_SERVICE_LEASE_RELEASE_RETRY_SECONDS", 0.01)
+        lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": BrokerLeaseRegistry()})())
 
-    assert lease.acquire() is True
-    assert broker.common_status()["clients"] == 1
-    lease.release()
-    assert lease.held is False
+        # NEGATIVE CONTROL, asserted first: the external stand-in is not a way
+        # around the fence. A true self-lease stays refused and never reaches the
+        # lease table, so the pin proved on the next line is the real client's and
+        # cannot have been bought by the daemon leasing itself.
+        assert_daemon_refuses_a_self_lease(broker)
+        assert broker.common_status()["clients"] == 0, "the refused self-lease pinned the broker anyway"
 
-    deadline = time.monotonic() + 1.0
-    while broker.common_status()["clients"] and time.monotonic() < deadline:
-        threading.Event().wait(0.01)
-    assert release_calls == [release_calls[0], release_calls[0]]
-    assert broker.common_status()["clients"] == 0
+        assert lease.acquire() is True
+        assert broker.common_status()["clients"] == 1
+        lease.release()
+        assert lease.held is False
+
+        deadline = time.monotonic() + 1.0
+        while broker.common_status()["clients"] and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert release_calls == [release_calls[0], release_calls[0]]
+        assert broker.common_status()["clients"] == 0

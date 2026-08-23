@@ -241,14 +241,19 @@ class FamilyScheduler:
         epoch_cadence: float | None = None
         last_started = -math.inf
         while not self._stop.is_set() and self._owner_generation() == generation:
+            epoch_started_monotonic = monotonic_anchor + (epoch_started_at - wall_anchor)
             before_wait = self._monotonic()
             woke = worker.wake.wait(max(0.0, next_deadline - before_wait))
             while woke and not self._stop.is_set():
-                # Hold a rate-limited wake to its floor without ever pushing it
-                # past its own cadence deadline, so a saturated backlog cannot
-                # spin this worker while a refresh still runs immediately.
+                # A replacement epoch can begin after an overrun has returned. Hold
+                # a queued wake until that epoch exists so the collector never labels
+                # current state with a future timestamp. Outside a skipped window this
+                # preserves the existing immediate/rate-limited wake behavior.
                 floor = min(
-                    last_started + worker.wake_min_interval_seconds,
+                    max(
+                        last_started + worker.wake_min_interval_seconds,
+                        epoch_started_monotonic,
+                    ),
                     next_deadline,
                 )
                 remaining = floor - self._monotonic()
@@ -262,7 +267,12 @@ class FamilyScheduler:
                 break
             now = self._monotonic()
             early_wake = woke and now < next_deadline
-            attempt_deadline = now if early_wake else next_deadline
+            # The wait floor above owns the delay. Keep this clamp as the timestamp
+            # invariant at the boundary in case a custom wake returns fractionally
+            # before its timeout expires.
+            attempt_deadline = (
+                max(now, epoch_started_monotonic) if early_wake else next_deadline
+            )
             desired_cadence = self._cadence(worker.job)
             attempted_at = self._wall_clock()
             scheduled_at = wall_anchor + attempt_deadline - monotonic_anchor
