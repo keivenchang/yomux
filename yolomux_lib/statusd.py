@@ -168,11 +168,6 @@ class PersistentStatusService(LocalRpcServiceState):
         self.refresh_worker: threading.Thread | None = None
         self.refresh_requested_sessions: tuple[str, ...] | None = None
         self.refresh_build_sessions: tuple[str, ...] | None = None
-        # First-observed wall-clock time per ambiguous survivor pid, so a
-        # repeated diagnostic pass can report retained age instead of
-        # re-discovering the same orphan as brand new every call. A pid that
-        # stops appearing (reaped, exited, or reused) is pruned the next pass.
-        self._orphan_first_seen: dict[int, float] = {}
         self.refresh_retry_at = 0.0
         self.session_payload_cache: dict[str, dict[str, Any]] = {}
         self.session_capture_due_at: dict[str, float] = {}
@@ -680,24 +675,17 @@ class PersistentStatusService(LocalRpcServiceState):
         """Bounded, typed report of every ambiguous local-service survivor.
 
         Diagnostics-only: reports never signal or unlink (see
-        ``verified_orphan_diagnostics``). ``attempted_action``/``result`` are
-        carried straight through; only ``age_seconds`` is added here, using
-        this daemon's own retained first-seen bookkeeping across supervision
-        passes rather than any per-process wall-clock birth time.
+        ``verified_orphan_diagnostics``).  Every field including ``age_seconds``
+        now comes from that one owner -- this daemon used to keep its own
+        first-seen map, which meant the only surface carrying an age was the one
+        no product code called.
         """
         with self.lock:
-            table = bounded_process_table()
-            rows = verified_orphan_diagnostics(self.socket_path.parent, table)
-            now = self.wall_clock()
-            seen_pids = set()
-            for row in rows:
-                pid = int(row["pid"])
-                seen_pids.add(pid)
-                first_seen = self._orphan_first_seen.setdefault(pid, now)
-                row["age_seconds"] = max(0.0, now - first_seen)
-            for stale_pid in set(self._orphan_first_seen) - seen_pids:
-                del self._orphan_first_seen[stale_pid]
-            return rows
+            return verified_orphan_diagnostics(
+                self.socket_path.parent,
+                bounded_process_table(),
+                now=self.wall_clock(),
+            )
 
     def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         return CommonDaemonActions.ping(

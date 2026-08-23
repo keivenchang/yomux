@@ -270,6 +270,10 @@ def test_lane_specs_are_the_one_owner_of_names_defaults_and_shared_steps():
         if phase == "gate_serial"
     }
     assert gate_serial_nodes == {
+        "tests/test_client_event_broker_backlog_disambiguation.py::test_enqueue_to_dequeue_and_sse_send_are_not_the_backlog_owner",
+        "tests/test_client_event_broker_backlog_disambiguation.py::test_independent_publishers_can_serialize_events_concurrently",
+        "tests/test_client_event_broker_backlog_disambiguation.py::test_payload_serialization_never_runs_inside_the_ordering_critical_section",
+        "tests/test_client_event_broker_backlog_disambiguation.py::test_the_broker_lock_genuinely_serializes_every_concurrent_publisher",
         "tests/test_gate_tmux.py::test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session",
         "tests/test_hot_path_owner.py::test_churn_abandon_and_restart_leaves_no_deleted_fds_and_one_generation",
         "tests/test_jobd.py::test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window",

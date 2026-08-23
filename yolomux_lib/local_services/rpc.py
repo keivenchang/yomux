@@ -151,6 +151,23 @@ LOCAL_SERVICE_REASON_TRANSPORT = "transport_error"
 LOCAL_SERVICE_REASON_SERVICE_ERROR = "service_error"
 LOCAL_SERVICE_REASON_OTHER = "other"
 
+# The two reasons that mean "no serving socket answered", so the lifecycle owner -- not the
+# caller -- is the one that can recover.  Every consumer that used to spell `{"absent",
+# "refused"}` by hand reads this instead: a hand-copied pair on one side silently makes a
+# recoverable absence terminal, which is the divergence this constant exists to prevent.
+LOCAL_SERVICE_LIFECYCLE_REASONS = frozenset({
+    LOCAL_SERVICE_REASON_ABSENT,
+    LOCAL_SERVICE_REASON_REFUSED,
+})
+
+# A response envelope arrived but declared the peer over budget.  Physically the same event as
+# `LOCAL_SERVICE_REASON_TIMEOUT` -- the peer could not answer in time -- so bounded retry policy
+# must treat all three alike.
+LOCAL_SERVICE_DEADLINE_REASONS = frozenset({
+    LOCAL_SERVICE_REASON_DEADLINE_HANDLER,
+    LOCAL_SERVICE_REASON_DEADLINE_UNATTRIBUTED,
+})
+
 _LISTENER_ERROR_REASONS = {
     LOCAL_SERVICE_ERROR_BUSY: LOCAL_SERVICE_REASON_OVERLOAD,
     LOCAL_SERVICE_ERROR_INVALID_REQUEST: "invalid_request",

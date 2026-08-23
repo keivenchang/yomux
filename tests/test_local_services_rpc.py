@@ -1624,3 +1624,105 @@ def test_traffic_service_fixture_returns_only_after_the_listener_is_ready(tmp_pa
     finally:
         stop_event.set()
         worker.join(timeout=2.0)
+
+
+# --- Transport-error classification has exactly one owner ------------------------
+#
+# `rpc.local_service_failure_reason` is that owner: it uses the shared
+# LOCAL_SERVICE_REASON_* constants and separates absence, refusal, deadline
+# attribution, identity mismatch and revision mismatch, because each has a
+# different recovery. `registry.local_service_transport_error` is a second,
+# younger classifier over the same exception space that re-spells the agreeing
+# cases as bare literals and collapses everything else into one "rpc" bucket.
+# The registry's `_request`, `LocalServiceClient._transport_error`, and through it
+# every `_transport_error` field the app reads, all go through that duplicate.
+
+def _agreeing_transport_errors():
+    """The exceptions both classifiers already resolve to the same reason."""
+    return [
+        ("timeout", TimeoutError("receive deadline expired")),
+        ("absent", OSError(errno.ENOENT, "No such file or directory")),
+        ("refused", OSError(errno.ECONNREFUSED, "Connection refused")),
+    ]
+
+
+def _divergent_transport_errors():
+    """The exceptions the rpc owner separates and the registry duplicate collapses."""
+    return [
+        ("unclassified_oserror", OSError(errno.EPIPE, "Broken pipe")),
+        ("revision_mismatch", rpc.LocalRpcError("unsupported RPC version")),
+        ("deadline_attributed_to_handler", rpc.LocalRpcError("peer_handler_slow")),
+        ("identity_mismatch", rpc.LocalRpcError("response request_id mismatch")),
+        ("protocol_error", rpc.LocalRpcError("truncated frame")),
+    ]
+
+
+@pytest.mark.parametrize(
+    "label, error",
+    _agreeing_transport_errors(),
+    ids=[case[0] for case in _agreeing_transport_errors()],
+)
+def test_registry_transport_error_agrees_with_the_rpc_owner_on_the_shared_cases(label, error):
+    """Positive control for the divergence test below.
+
+    These three exceptions are the cases both classifiers already agree on, and
+    the value the registry hands back is the rpc owner's own named constant --
+    not a coincidentally equal string spelled twice. If this ever goes red the
+    divergence test below is measuring the wrong thing.
+    """
+    owner_reason = rpc.local_service_failure_reason(error)
+    # The duplicate classifier was not rerouted, it was DELETED, which is the
+    # stronger outcome: there is no second implementation left to drift. Assert
+    # its absence rather than its agreement -- a reintroduced copy fails here.
+    assert not hasattr(registry_module, "local_service_transport_error"), (
+        "registry.local_service_transport_error is back; the shared classifier in rpc.py is the one owner"
+    )
+    assert LocalServiceClient._transport_error(error) == owner_reason
+    # The owner's value really is one of its declared constants, so "agreement"
+    # here means agreement with the shared vocabulary, not with a literal.
+    assert owner_reason in {
+        rpc.LOCAL_SERVICE_REASON_TIMEOUT,
+        rpc.LOCAL_SERVICE_REASON_ABSENT,
+        rpc.LOCAL_SERVICE_REASON_REFUSED,
+    }
+
+
+# Written as a strict xfail against the duplicate classifier, which returned the bare literal
+# 'rpc' for every OSError and every LocalRpcError the rpc owner separates into transport_error,
+# revision_mismatch, deadline_peer_handler_slow, identity_mismatch and protocol_error. The
+# duplicate has since been deleted and every caller rerouted through the one owner, so this is a
+# live green regression: it goes red again if any second classifier reappears.
+@pytest.mark.parametrize("label, error", _divergent_transport_errors(), ids=[case[0] for case in _divergent_transport_errors()])
+def test_registry_transport_error_uses_the_rpc_owner_including_its_fallthrough(label, error):
+    """Every exception, including the ones neither classifier names explicitly,
+    must be classified by the single rpc owner.
+
+    The fallthrough is the whole point: an unrecognised OSError is a transport
+    failure, an unrecognised LocalRpcError is a protocol failure, and a
+    revision or handler-deadline error is neither. Collapsing all four into one
+    'rpc' string is what makes a registry/app failure indistinguishable from a
+    stale client that needs an upgrade.
+    """
+    owner_reason = rpc.local_service_failure_reason(error)
+    assert not hasattr(registry_module, "local_service_transport_error"), (
+        "registry.local_service_transport_error is back; the shared classifier in rpc.py is the one owner"
+    )
+    assert LocalServiceClient._transport_error(error) == owner_reason
+
+
+def test_rpc_owner_separates_every_transport_case_the_duplicate_collapses():
+    """The divergent cases really are five distinct outcomes to the owner.
+
+    Without this, the test above could pass by collapsing the owner's vocabulary
+    down to one string instead of by routing the registry through it -- exactly
+    the wrong repair.
+    """
+    reasons = [rpc.local_service_failure_reason(error) for _label, error in _divergent_transport_errors()]
+    assert len(set(reasons)) == len(reasons), f"the rpc owner collapsed cases it must separate: {reasons}"
+    assert reasons == [
+        rpc.LOCAL_SERVICE_REASON_TRANSPORT,
+        rpc.LOCAL_SERVICE_REASON_REVISION_MISMATCH,
+        rpc.LOCAL_SERVICE_REASON_DEADLINE_HANDLER,
+        rpc.LOCAL_SERVICE_REASON_IDENTITY_MISMATCH,
+        rpc.LOCAL_SERVICE_REASON_PROTOCOL,
+    ]

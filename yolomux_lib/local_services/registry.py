@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import json
 import ctypes
 import ctypes.util
@@ -44,6 +43,7 @@ from ..host_identity import process_identity_snapshot
 from ..host_identity import recorded_start_identity
 from ..infra.worktree_writer import child_process_artifact_environment
 from .rpc import LocalRpcError
+from .rpc import local_service_failure_reason
 from .rpc import new_envelope
 from .rpc import request
 from .rpc import retry_local_service_prehandler_busy
@@ -81,18 +81,6 @@ _LAUNCH_CONTEXT: dict[str, int] = {}
 _TRANSPORT_DIAGNOSTICS_LOCK = threading.Lock()
 _TRANSPORT_TEARDOWNS_TOTAL = 0
 _TRANSPORT_TEARDOWNS_BY_EXCEPTION: dict[str, int] = {}
-
-
-def local_service_transport_error(error: OSError | LocalRpcError) -> str:
-    """Classify one local transport exception for shared retry policy."""
-
-    if isinstance(error, TimeoutError):
-        return "timeout"
-    if isinstance(error, OSError) and error.errno == errno.ENOENT:
-        return "absent"
-    if isinstance(error, OSError) and error.errno == errno.ECONNREFUSED:
-        return "refused"
-    return "rpc"
 
 
 def jobd_retirement_state(
@@ -705,13 +693,93 @@ def untracked_local_service_processes(
     return rows
 
 
+ORPHAN_ACTION_NONE = "none"
+ORPHAN_RESULT_REPORTED_ONLY = "reported_only"
+
+# Why one ambiguous survivor could not be acted on.  These are the real,
+# distinguishable authority gaps a survivor can sit in; they were previously
+# collapsed into the single constant `untracked_no_ledger_record`, which made
+# the field incapable of telling an operator anything.
+ORPHAN_REASON_NO_LEDGER_RECORD = "untracked_no_ledger_record"
+ORPHAN_REASON_SUPERSEDED_GENERATION = "superseded_by_recorded_generation"
+ORPHAN_REASON_UNREADABLE_RECORD = "unreadable_service_record"
+
+
+class OrphanObservationLedger:
+    """The one retained first-observation clock for ambiguous survivors.
+
+    A single process-table snapshot carries no wall-clock-comparable birth time
+    (``ProcessTableEntry.start_time`` is an opaque platform tick counter, not an
+    epoch), so "how long has this been hanging around" can only come from
+    observation retained across supervision passes.  That bookkeeping existed
+    only inside ``statusd.StatusDaemon.orphan_diagnostics`` -- a method with no
+    product caller -- while the surface the System panel actually reads
+    (``app.runtime_process_ledger``) carried no age at all.  One owner, read by
+    both, so the two can never disagree again.
+
+    Observations are keyed by service directory: two directories inspected from
+    the same process must not prune each other's retained pids.
+    """
+
+    def __init__(self) -> None:
+        self._first_seen: dict[str, dict[int, float]] = {}
+        self._lock = threading.Lock()
+
+    def age_rows(self, service_dir: Path, rows: list[dict[str, Any]], now: float) -> list[dict[str, Any]]:
+        key = str(Path(service_dir))
+        with self._lock:
+            retained = self._first_seen.setdefault(key, {})
+            seen: set[int] = set()
+            for row in rows:
+                pid = int(row["pid"])
+                seen.add(pid)
+                row["age_seconds"] = max(0.0, float(now) - retained.setdefault(pid, float(now)))
+            for departed in set(retained) - seen:
+                del retained[departed]
+        return rows
+
+    def forget(self, service_dir: Path) -> None:
+        with self._lock:
+            self._first_seen.pop(str(Path(service_dir)), None)
+
+
+ORPHAN_OBSERVATIONS = OrphanObservationLedger()
+
+
+def _recorded_socket_owners(service_dir: Path) -> dict[str, dict[str, Any] | None]:
+    """Map each recorded socket path to the record that names it.
+
+    ``None`` marks a record file that exists but could not be parsed, which is a
+    different authority gap from no record at all and must not be collapsed into
+    it: an unreadable record hides an owner rather than proving there is none.
+    """
+
+    owners: dict[str, dict[str, Any] | None] = {}
+    try:
+        record_paths = sorted(Path(service_dir).glob("*.service.json"))
+    except OSError:
+        return owners
+    for record_path in record_paths:
+        record = read_json_file(record_path, None)
+        if not isinstance(record, dict):
+            owners[str(record_path.with_suffix("").with_suffix(".sock"))] = None
+            continue
+        socket_path = str(record.get("socket") or "")
+        if socket_path:
+            owners[socket_path] = record
+    return owners
+
+
 def verified_orphan_diagnostics(
     service_dir: Path,
     table: dict[int, ProcessTableEntry] | None = None,
+    *,
+    now: float | None = None,
+    observations: OrphanObservationLedger | None = None,
 ) -> list[dict[str, Any]]:
     """Return one typed, bounded diagnostic row per ambiguous survivor.
 
-    Every candidate this finds already lacks a ledger record (that is what
+    Every candidate this finds lacks a *usable* ledger record (that is what
     ``untracked_local_service_processes`` proves), so identity can never be
     fully verified and no signal or unlink is authorized -- see Rejected
     Shortcuts in ``DOIT.p1.e5.backend-lifetime-supervision.md`` ("do not add
@@ -721,28 +789,44 @@ def verified_orphan_diagnostics(
     about an ambiguous survivor, but it may only ever report one, never act
     on it beyond reporting.
 
-    Retained age since first observation is the caller's job (e.g. the
-    status owner's persistent state across supervision passes) -- a single
-    process-table snapshot carries no wall-clock-comparable birth time
-    (``ProcessTableEntry.start_time`` is an opaque platform tick counter,
-    not an epoch), so this function reports identity only, not age.
+    ``attempted_action`` and ``result`` are therefore genuinely constant here
+    and say so honestly; ``reason`` is not, and now names which authority gap
+    the survivor actually sits in.  ``age_seconds`` comes from the shared
+    ``OrphanObservationLedger`` so every caller reports the same retained age.
     """
     if table is None:
         table = bounded_process_table()
     tracked = tracked_local_service_groups(service_dir, table)
     untracked = untracked_local_service_processes(service_dir, table, tracked)
-    return [
-        {
+    recorded_owners = _recorded_socket_owners(service_dir)
+    rows: list[dict[str, Any]] = []
+    for candidate in untracked:
+        socket_path = str(candidate.get("socket") or "")
+        if socket_path not in recorded_owners:
+            reason = ORPHAN_REASON_NO_LEDGER_RECORD
+        elif recorded_owners[socket_path] is None:
+            reason = ORPHAN_REASON_UNREADABLE_RECORD
+        else:
+            record = recorded_owners[socket_path]
+            assert record is not None
+            if int(record.get("pid") or 0) == int(candidate["pid"]):
+                # The record names this exact pid yet the group was not tracked, so
+                # the central fence rejected it. Carry that fence's own reason rather
+                # than minting a second vocabulary for the same decision.
+                reason = f"identity_{process_record_diagnostic(record, table=table).reason.value}"
+            else:
+                reason = ORPHAN_REASON_SUPERSEDED_GENERATION
+        rows.append({
             "pid": int(candidate["pid"]),
             "ppid": candidate.get("ppid"),
             "pgid": candidate.get("pgid"),
             "socket": candidate.get("socket"),
-            "attempted_action": "none",
-            "result": "reported_only",
-            "reason": "untracked_no_ledger_record",
-        }
-        for candidate in untracked
-    ]
+            "attempted_action": ORPHAN_ACTION_NONE,
+            "result": ORPHAN_RESULT_REPORTED_ONLY,
+            "reason": reason,
+        })
+    ledger = observations or ORPHAN_OBSERVATIONS
+    return ledger.age_rows(service_dir, rows, wall_clock() if now is None else float(now))
 
 
 def stale_local_service_groups_of_dead_launcher(
@@ -1581,7 +1665,7 @@ class LocalServiceRegistry:
                 return {
                     "ok": False,
                     "error": redact_local_service_text(exc),
-                    "_transport_error": local_service_transport_error(exc),
+                    "_transport_error": local_service_failure_reason(exc),
                     "exception_type": type(exc).__name__,
                     "cause": local_service_exception_cause(exc),
                 }, b""

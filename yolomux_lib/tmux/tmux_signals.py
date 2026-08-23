@@ -12,14 +12,21 @@ import ctypes
 import os
 import signal
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from ..common import AGENT_COMMANDS
+from ..common import STATE_DIR
+from ..infra.process_claims import CLAIM_RESULT_CLAIM_REMOVE_FAILED
+from ..infra.process_claims import CLAIM_RESULT_SIGNAL_REFUSED
+from ..infra.process_claims import CLAIM_RESULT_SIGNALLED
+from ..infra.process_claims import ProcessClaim
+from ..infra.process_claims import ProcessClaimError
+from ..infra.process_claims import ProcessClaimLedger
 from .tmux_utils import TmuxSocketTargetError
 from .tmux_utils import cmd_error
 from .tmux_utils import tmux_command
@@ -178,50 +185,48 @@ def set_control_client_parent_death_signal() -> None:
         _LIBC.prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
-def reap_macos_orphaned_tmux_control_clients() -> list[int]:
-    """Terminate monitor clients left behind by a crashed macOS YOLOmux process.
+TMUX_CONTROL_CLIENT_CLAIM_KIND = "tmux-control-client"
 
-    Linux uses PR_SET_PDEATHSIG above, but macOS has no equivalent. Limit the
-    sweep to orphaned (PPID 1) read-only, ignore-size control clients so it
-    cannot affect an interactive tmux attach or another live server's monitor.
+# Sweep outcomes an operator must see.  A retained claim whose supervisor is alive
+# and a routine record-only cleanup are normal and stay out of the error surface.
+_CLAIM_SWEEP_REPORTABLE_RESULTS = frozenset({
+    CLAIM_RESULT_SIGNALLED,
+    CLAIM_RESULT_SIGNAL_REFUSED,
+    CLAIM_RESULT_CLAIM_REMOVE_FAILED,
+})
+
+
+def tmux_control_client_claims(root: Path | None = None) -> ProcessClaimLedger:
+    """Return the one claim ledger that owns control-client reap authority."""
+
+    return ProcessClaimLedger(Path(root) if root is not None else STATE_DIR, TMUX_CONTROL_CLIENT_CLAIM_KIND)
+
+
+def reap_unsupervised_tmux_control_clients(
+    *,
+    ledger: ProcessClaimLedger | None = None,
+    signal_process: Callable[[int, int], None] = os.kill,
+) -> list[dict[str, Any]]:
+    """Terminate only control clients whose spawning YOLOmux server is provably gone.
+
+    Linux closes this at the source with PR_SET_PDEATHSIG above; macOS has no
+    equivalent, so a hard-killed server leaks its ``tmux -C attach-session``
+    client on the shared socket.  The previous sweep decided that from a ``ps``
+    scrape keyed on ``PPID == 1`` plus argv substrings, which is exactly the
+    authority the lifetime-supervision contract rejects: PPID, PGID, hostname,
+    and command text prove nothing about *who* created a process, so an
+    unrelated user's read-only monitor matched the same pattern.
+
+    Authority now comes from a claim this server wrote when it spawned the
+    client, carrying host, boot, PID, process-start identity, kind, namespace,
+    generation, and the spawning supervisor's own identity.  A claim whose
+    supervisor is still alive is deliberately retained and names that surviving
+    supervisor; everything ambiguous is reported and never signalled.  The
+    platform gate is gone with the scrape: a claim is provable on every host, so
+    a Linux server that lost PDEATHSIG (libc unavailable) is covered too.
     """
-    if sys.platform != "darwin":
-        return []
-    try:
-        result = subprocess.run(
-            ["ps", "-eww", "-o", "pid=,ppid=,command="],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=2.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if result.returncode != 0:
-        return []
-    reaped: list[int] = []
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 2)
-        if len(fields) != 3:
-            continue
-        try:
-            pid, parent_pid = int(fields[0]), int(fields[1])
-        except ValueError:
-            continue
-        if parent_pid != 1:
-            continue
-        args = fields[2].split()
-        if not args or os.path.basename(args[0]) != "tmux":
-            continue
-        if "-C" not in args or "attach-session" not in args or "read-only,ignore-size" not in args:
-            continue
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            continue
-        reaped.append(pid)
-    return reaped
+
+    return (ledger or tmux_control_client_claims()).reap_unsupervised(signal_process=signal_process)
 
 
 def tmux_signal_subscription_commands() -> list[list[str]]:
@@ -302,6 +307,8 @@ class TmuxSignalEventWatcher:
         self.status_state = "never-started"
         self.status_sessions: list[str] = []
         self.status_error = ""
+        self._claim_ledger: ProcessClaimLedger | None = None
+        self.claim: ProcessClaim | None = None
 
     @staticmethod
     def status_details(state: str, error: str = "") -> tuple[bool | None, str, str]:
@@ -355,11 +362,55 @@ class TmuxSignalEventWatcher:
                 self.status_sessions = [str(session) for session in sessions]
             self.status_error = error
 
+    def claim_ledger(self) -> ProcessClaimLedger:
+        """Resolve the reap-authority ledger once per watcher, lazily.
+
+        Built on first use rather than in ``__init__`` because resolving the host
+        identity touches the filesystem, and a watcher is constructed during
+        server import where that read must not run.
+        """
+
+        with self.lock:
+            if self._claim_ledger is None:
+                self._claim_ledger = tmux_control_client_claims()
+            return self._claim_ledger
+
+    def publish_client_claim(self, pid: int, session: str) -> ProcessClaim | None:
+        """Persist reap authority over the client just spawned, or say why it has none.
+
+        A refused claim is not fatal to monitoring: the client still runs and this
+        server still owns it through its live handle.  What is lost is the ability
+        of a LATER server to reap it after a hard kill, so the refusal is surfaced
+        rather than defaulted away.
+        """
+
+        try:
+            return self.claim_ledger().publish(int(pid), generation=str(session))
+        except ProcessClaimError as exc:
+            self.emit_error(f"tmux control-client claim refused ({exc.reason_code}): {exc}")
+            return None
+
+    def reap_unsupervised_clients(self) -> list[dict[str, Any]]:
+        """Supervisor boundary for the claim sweep: never let it stop the watcher."""
+
+        try:
+            rows = reap_unsupervised_tmux_control_clients(ledger=self.claim_ledger())
+        except (OSError, ProcessClaimError) as exc:
+            self.emit_error(f"tmux control-client claim sweep failed: {type(exc).__name__}: {exc}")
+            return []
+        for row in rows:
+            if row.get("result") in _CLAIM_SWEEP_REPORTABLE_RESULTS:
+                self.emit_error(
+                    "tmux control-client claim "
+                    f"{row.get('result')} (pid={row.get('pid')}, reason={row.get('reason')})"
+                )
+        return rows
+
     def start(self) -> bool:
         with self.lock:
             if self.thread is not None and self.thread.is_alive():
                 return False
-            reap_macos_orphaned_tmux_control_clients()
+            self.reap_unsupervised_clients()
             self.stop_event.clear()
             self._set_status("attaching")
             self.thread = threading.Thread(target=self.run, name="tmux-signal-events", daemon=True)
@@ -421,8 +472,10 @@ class TmuxSignalEventWatcher:
             self._set_status("never-started", error=error)
             self.emit_error(error)
             return
+        claim = self.publish_client_claim(process.pid, session)
         with self.lock:
             self.process = process
+            self.claim = claim
         self._set_status("attached")
         install_tmux_signal_control_subscriptions(process)
         try:
@@ -441,6 +494,9 @@ class TmuxSignalEventWatcher:
             with self.lock:
                 if self.process is process:
                     self.process = None
+                released_claim = self.claim if claim is not None and self.claim is claim else None
+                if released_claim is not None:
+                    self.claim = None
             if not self.stop_event.is_set():
                 self._set_status("exited")
             if process.poll() is None:
@@ -449,6 +505,11 @@ class TmuxSignalEventWatcher:
                     process.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            # Release only after this owner has stopped its own client: the claim is
+            # the sole authority a later server has to reap it, so dropping it while
+            # the client could still be alive would strand the client permanently.
+            if released_claim is not None and not self.claim_ledger().release(released_claim):
+                self.emit_error(f"tmux control-client claim release failed: {released_claim.path}")
 
 
 def int_or_none(value: Any) -> int | None:

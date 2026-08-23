@@ -329,30 +329,31 @@ def test_control_client_parent_death_signal_requests_sigterm(monkeypatch):
     tmux_signals.set_control_client_parent_death_signal()
 
 
-def test_macos_orphaned_control_client_reaper_is_platform_scoped(monkeypatch):
-    calls = []
-    monkeypatch.setattr(tmux_signals.sys, "platform", "linux")
-    monkeypatch.setattr(tmux_signals.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Linux must not inspect macOS orphan clients")))
+def test_the_unfenced_ps_scrape_control_client_reaper_stays_deleted():
+    """The `ps`-scrape reaper is gone, and must not come back.
 
-    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == []
+    `reap_macos_orphaned_tmux_control_clients` decided to SIGTERM on two facts a hostile or
+    merely unlucky process can both present: `PPID == 1`, and the substrings `-C`,
+    `attach-session` and `read-only,ignore-size` in its argv. No host id, no boot id, no
+    process start identity, no record -- so a recycled pid whose argv happened to match was
+    indistinguishable from the real orphan, and the Darwin gate bounded the blast radius
+    without making the decision correct. That is the exact authority the queue's Rejected
+    Shortcuts forbid: "Do not use hostname, PPID, PGID, command text ... as sufficient
+    authority", and "Do not add a broad host sweeper".
 
-    monkeypatch.setattr(tmux_signals.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        tmux_signals.subprocess,
-        "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0,
-            stdout=(
-                "101 1 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
-                "102 999 tmux -C attach-session -f read-only,ignore-size -t 1:\n"
-                "103 1 tmux attach-session -t 1:\n"
-            ),
-        ),
+    It is replaced by `reap_unsupervised_tmux_control_clients`, which signals only a claim
+    that re-proves its recorded birth identity and whose supervisor is provably gone. This
+    test asserts the deletion rather than the replacement's behaviour, because the failure
+    mode being guarded is a well-meaning reintroduction of the shortcut alongside the
+    ledger -- two owners, one of them unfenced.
+    """
+    assert not hasattr(tmux_signals, "reap_macos_orphaned_tmux_control_clients"), (
+        "the unfenced PPID+argv ps-scrape reaper is back; identity-fenced claim reaping is the one owner"
     )
-    monkeypatch.setattr(tmux_signals.os, "kill", lambda pid, sig: calls.append((pid, sig)))
-
-    assert tmux_signals.reap_macos_orphaned_tmux_control_clients() == [101]
-    assert calls == [(101, signal.SIGTERM)]
+    # Positive control: the replacement really is present, so this cannot pass merely because
+    # the module failed to import or the whole reaping concept was dropped.
+    assert callable(tmux_signals.reap_unsupervised_tmux_control_clients)
+    assert callable(tmux_signals.tmux_control_client_claims)
 
 
 def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
@@ -371,11 +372,26 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
         def __init__(self):
             self.stdin = FakeStdin()
             self.stdout = iter(())  # empty stream -> reader loop exits immediately
+            # A real subprocess.Popen always exposes .pid, and the spawn path now publishes a
+            # process claim keyed on it. The double omitted it, so it stopped standing in for a
+            # real Popen the moment claims were introduced.
+            self.pid = 424242
 
         def poll(self):
             return 0  # already exited -> finally skips terminate/kill
 
+    # Substitute the double ONLY for the control-client spawn this test is about, and let every
+    # other subprocess use the real Popen. Spawning now also publishes a process claim, which
+    # resolves identity through subprocess.run() -- and run() needs a genuine Popen (context
+    # manager, .args, .returncode). Faking every Popen made the double stand in for objects it
+    # was never written to be, which surfaced as a chain of unrelated AttributeErrors rather
+    # than as a statement about the preexec hook.
+    real_popen = tmux_signals.subprocess.Popen
+
     def fake_popen(command, **kwargs):
+        text = " ".join(command) if isinstance(command, (list, tuple)) else str(command)
+        if "attach-session" not in text:
+            return real_popen(command, **kwargs)
         captured["kwargs"] = kwargs
         return FakeProcess()
 
