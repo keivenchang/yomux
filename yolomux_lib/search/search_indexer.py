@@ -29,7 +29,10 @@ from ..local_services.rpc import safe_socket_path
 from ..local_services.registry import LocalServiceRegistry
 from ..local_services.registry import LocalServiceSpec
 from ..local_services.runtime import acquire_client_lease
+from ..local_services.runtime import request_is_self_connection
 from ..local_services.runtime import claim_gated_idle_due
+from ..local_services.runtime import live_client_claim
+from ..local_services.runtime import reap_dead_client_leases
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -236,13 +239,20 @@ class PersistentSearchIndexer:
         return {"ok": True, "processed": processed, "status": self.common_status()}, b""
 
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"))
+        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"), self_connection=request_is_self_connection(request))
         return {**response, "version": INDEXER_PROTOCOL_VERSION}, b""
 
     def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         return release_client_lease(self.leases, request.get("lease_id")), b""
 
     def _handle_shutdown_if_idle(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        # Departures go through the ONE shared reaper before the answer is
+        # computed, exactly as `idle_due` routes them through
+        # `live_client_claim`. Without it this handler counted corpses: a client
+        # that was hard-killed cannot release its lease, so a single crashed
+        # caller refused every legitimate idle shutdown forever and the `leases`
+        # count reported here named a process that no longer exists.
+        reap_dead_client_leases(self.leases)
         if self.leases:
             return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
         self.stop_event.set()
@@ -273,8 +283,10 @@ class PersistentSearchIndexer:
         self.process_due()
         # claim_gated_idle_due is the one shared owner of the
         # transition/deadline algorithm every local service routes through;
-        # indexd's claim predicate is a held lease.
-        return claim_gated_idle_due(self, bool(self.leases))
+        # indexd's claim predicate is a held lease that still names a LIVE
+        # client. `bool(self.leases)` alone let one crashed caller pin this
+        # daemon forever, because a killed process cannot release its lease.
+        return claim_gated_idle_due(self, live_client_claim(self.leases))
 
     def run(self) -> int:
         def handle(request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:

@@ -180,6 +180,12 @@ class BackgroundOwnerRegistry:
         self.last_transition = "new"
         self.last_transition_details: dict[str, Any] = {}
         self.process_diagnostics: list[dict[str, Any]] = []
+        # Filesystem maintenance failures that used to be `except OSError: pass`.
+        # They are not identity diagnostics, so they get their own bounded list
+        # rather than being mixed into `process_diagnostics` where a reader
+        # expects host/boot/pid fields -- but they are published through the SAME
+        # typed status owner, because an invisible failure is the actual defect.
+        self.maintenance_failures: list[dict[str, Any]] = []
 
     def owner_payload(self) -> dict[str, Any]:
         return {
@@ -230,6 +236,28 @@ class BackgroundOwnerRegistry:
         self.process_diagnostics.append(payload)
         self.process_diagnostics = self.process_diagnostics[-GENERATION_INDEX_MAX_RECORDS:]
 
+    def record_maintenance_failure(self, operation: str, path: Path, error: OSError) -> None:
+        """Make one filesystem maintenance failure visible instead of discarding it.
+
+        These are the failures a supervisor boundary is FOR: an index write or a
+        stale-record unlink that cannot complete must not stop the owner loop,
+        but it also must not vanish.  A generation index that silently stopped
+        being written leaves every later status read recovering from the
+        per-generation files without anyone knowing why; a record file that
+        silently failed to unlink leaves a dead generation looking live.
+        """
+
+        self.maintenance_failures.append({
+            "operation": str(operation),
+            "path": str(path),
+            "error": type(error).__name__,
+            "errno": getattr(error, "errno", None),
+            "at": self.clock(),
+            "generation_id": self.generation_id,
+        })
+        self.maintenance_failures = self.maintenance_failures[-GENERATION_INDEX_MAX_RECORDS:]
+        self.last_error = f"{operation} failed: {type(error).__name__}"
+
     def generation_record(self) -> dict[str, Any]:
         return {
             **self.owner_payload(),
@@ -254,10 +282,12 @@ class BackgroundOwnerRegistry:
                 records = index["records"]
                 records[self.generation_id] = record
                 self._write_generation_index_unlocked(self._compact_generation_records(records))
-        except OSError:
+        except OSError as error:
             # The per-generation record remains the recovery source when an index write races
-            # with shutdown or a filesystem failure.
-            pass
+            # with shutdown or a filesystem failure -- but "recoverable" is not "invisible":
+            # an index that stopped being written makes every later status read pay a full
+            # directory scan, and nothing said why until this was recorded.
+            self.record_maintenance_failure("publish_generation_index_write", self.generation_index_path, error)
 
     def _empty_generation_index(self) -> dict[str, Any]:
         return {"version": GENERATION_INDEX_VERSION, "records": {}}
@@ -360,13 +390,19 @@ class BackgroundOwnerRegistry:
                 for name in names:
                     records.pop(name, None)
                 self._write_generation_index_unlocked(records)
-        except OSError:
-            pass
+        except OSError as error:
+            self.record_maintenance_failure("prune_generation_index_write", self.generation_index_path, error)
         for path, _record in approved:
             try:
                 path.unlink()
-            except (FileNotFoundError, OSError):
-                pass
+            except FileNotFoundError:
+                # Already gone is the outcome this call wanted, not a failure.
+                continue
+            except OSError as error:
+                # A stale generation record that cannot be removed keeps reading
+                # as a live generation to every later `latest_live_generation`
+                # check, so the caller has to be able to see that it is stuck.
+                self.record_maintenance_failure("prune_generation_record_unlink", path, error)
 
     def latest_live_generation(self) -> dict[str, Any] | None:
         records = self.live_generation_records()
@@ -611,8 +647,48 @@ class BackgroundOwnerRegistry:
             self.thread.start()
         return acquired
 
+    def remove_owned_owner_record(self) -> None:
+        """Drop the owner record this process published, while still holding the owner lock.
+
+        `release_owner` gives up ownership but used to leave `owner.json` on disk
+        forever, still naming this now-dead process as the current owner.  Every
+        later reader then has to re-derive "that owner is gone" from the process
+        fence, and the durable artifact itself is never reclaimed by anyone.
+
+        This runs BEFORE the flock is released on purpose: while this process is
+        still the lock holder no successor can have replaced the record between
+        the identity check and the unlink.  A record this process cannot prove it
+        wrote -- different generation, different instance nonce, or a fence that
+        does not resolve to this live local process -- is left alone and reported
+        as a diagnostic rather than removed on a guess.
+        """
+
+        record = self.read_owner_record()
+        if record is None:
+            return
+        diagnostic = self.process_fence(record)
+        owns_record = (
+            diagnostic.current
+            and record.get("generation_id") == self.generation_id
+            and record.get("instance_nonce") == self.nonce
+        )
+        if not owns_record:
+            self.record_process_diagnostic(record, diagnostic, path=self.owner_path)
+            return
+        try:
+            self.owner_path.unlink()
+        except FileNotFoundError:
+            # Already gone is the outcome this call wanted, not a failure.
+            return
+        except OSError as error:
+            # The owner record outlived the owner. Until it is removed it keeps
+            # advertising a stopped process as the current owner, so a run that
+            # leaked it must not look identical to a run that cleaned up.
+            self.record_maintenance_failure("stop_owner_record_unlink", self.owner_path, error)
+
     def stop(self) -> None:
         self.stop_event.set()
+        self.remove_owned_owner_record()
         self.release_owner("stop")
         if self.thread is not None:
             self.thread.join(timeout=2.0)
@@ -627,8 +703,13 @@ class BackgroundOwnerRegistry:
             if owns_record:
                 try:
                     self.record_path.unlink()
-                except (FileNotFoundError, OSError):
+                except FileNotFoundError:
                     pass
+                except OSError as error:
+                    # This process is stopping and has just proven the record is
+                    # its own. Leaving it behind advertises a dead owner as live
+                    # to the next takeover, so the failure has to be reported.
+                    self.record_maintenance_failure("stop_generation_record_unlink", self.record_path, error)
             else:
                 self.record_process_diagnostic(record, diagnostic, path=self.record_path)
 
@@ -810,6 +891,7 @@ class BackgroundOwnerRegistry:
                 "last_transition_details": dict(self.last_transition_details),
                 "last_error": self.last_error,
                 "process_diagnostics": list(self.process_diagnostics),
+                "maintenance_failures": list(self.maintenance_failures),
                 "search_index": {
                     "role": BACKGROUND_ROLE_SEARCH_INDEX,
                     "owner": bool(search_index_state.get("owner")),
@@ -872,6 +954,7 @@ class DisabledBackgroundOwner(BackgroundOwnerRegistry):
             "last_transition_details": {},
             "last_error": self.last_error,
             "process_diagnostics": [],
+            "maintenance_failures": [],
             "search_index": {
                 "role": BACKGROUND_ROLE_SEARCH_INDEX,
                 "owner": True,

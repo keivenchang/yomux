@@ -16,6 +16,8 @@ from types import SimpleNamespace
 import pytest
 from watchfiles import Change
 
+from tests.helpers.external_lease_client import assert_self_lease_is_refused
+from tests.helpers.external_lease_client import external_lease_client
 from yolomux_lib import watchd
 from yolomux_lib.filesystem import search as search_module
 from yolomux_lib import filesystem
@@ -1098,22 +1100,34 @@ def test_watchd_duplicate_or_unknown_release_never_extends_the_idle_deadline(tmp
     inert with respect to the idle clock.
     """
     service = PersistentWatchService(tmp_path / "watchd.sock", idle_seconds=5.0)
-    lease_response, _body = service.handle(_request("lease", client_pid=os.getpid()))
-    assert lease_response["ok"] is True
-    lease_id = str(lease_response["lease_id"])
+    # The client has to be a REAL separate process. A harness naming
+    # ``os.getpid()`` IS the daemon, and the shared lease fence correctly
+    # refuses a daemon the lease that keeps itself alive; production's caller is
+    # the web server talking to a separate watchd.
+    with external_lease_client() as client_pid:
+        # NEGATIVE CONTROL, asserted first: the external stand-in is not a way
+        # around the fence. A true self-lease stays refused.
+        assert_self_lease_is_refused(
+            lambda pid: service.handle(_request("lease", client_pid=pid))[0],
+            lambda: len(service.leases),
+        )
 
-    release_response, _body = service.handle(_request("release", lease_id=lease_id))
-    assert release_response["ok"] is True
-    assert not service.leases
+        lease_response, _body = service.handle(_request("lease", client_pid=client_pid))
+        assert lease_response["ok"] is True
+        lease_id = str(lease_response["lease_id"])
 
-    service.last_client_at = time.monotonic() - 6.0
-    assert service.idle_due() is True, "baseline: idle_seconds elapsed since the real release must already report idle"
+        release_response, _body = service.handle(_request("release", lease_id=lease_id))
+        assert release_response["ok"] is True
+        assert not service.leases
 
-    service.last_client_at = time.monotonic() - 6.0
-    duplicate_response, _body = service.handle(_request("release", lease_id=lease_id))
-    assert duplicate_response["ok"] is True, "release is deliberately idempotent on the wire"
+        service.last_client_at = time.monotonic() - 6.0
+        assert service.idle_due() is True, "baseline: idle_seconds elapsed since the real release must already report idle"
 
-    assert service.idle_due() is True, "a duplicate release for an already-gone lease pushed out the idle deadline"
+        service.last_client_at = time.monotonic() - 6.0
+        duplicate_response, _body = service.handle(_request("release", lease_id=lease_id))
+        assert duplicate_response["ok"] is True, "release is deliberately idempotent on the wire"
+
+        assert service.idle_due() is True, "a duplicate release for an already-gone lease pushed out the idle deadline"
 
 
 def test_watchd_idle_due_reaps_a_dead_client_lease_through_the_real_reap_path(tmp_path):

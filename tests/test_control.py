@@ -150,3 +150,75 @@ def test_control_server_current_rpc_socket_round_trip():
     finally:
         server.stop()
     assert server.path.exists() is False
+
+
+# ---------------------------------------------------------------------------
+# Predecessor control-socket cleanup.
+#
+# `YolomuxControlServer.__init__` (control.py:52) names its socket
+# `yolomux-<pid>-<id(self):x>.sock`. `id(self)` is a CPython object address: it
+# is reused as soon as a previous server object is collected, and it carries no
+# information about which generation owns the file. Nothing anywhere enumerates
+# `control/yolomux-*.sock` -- the only unlink is `self.path`, in `start()` and
+# `stop()` -- so any server that did not run `stop()` leaks its socket forever,
+# and a successor that happens to reuse the address silently deletes a file it
+# never proved it owned.
+#
+# CONTRACT:
+#   1. The token must come from a durable, non-reusable identity (the process
+#      start identity / instance nonce / generation id), not a memory address.
+#   2. `start()` must remove predecessor control sockets belonging to THIS exact
+#      process identity that no live server holds -- and nothing else. Never a
+#      broad sweep of other pids' sockets or of unrelated files.
+# ---------------------------------------------------------------------------
+
+
+def test_control_socket_name_is_not_a_reusable_memory_address(monkeypatch, tmp_path):
+    """The socket name must not encode `id(self)`.
+
+    A memory address is reused the moment the previous object is collected, so
+    two different generations can name the same path -- which is why the blind
+    `unlink()` in `start()` can destroy a live predecessor's socket.
+    """
+    monkeypatch.setattr(control, "CONTROL_SOCKET_DIR", tmp_path)
+
+    server = control.YolomuxControlServer(lambda request: {"ok": True, "echo": request})
+
+    # Positive control: the name really is derived from this process at all.
+    assert str(os.getpid()) in server.path.name, "the control socket no longer names its owning process"
+    assert f"{id(server):x}" not in server.path.name, (
+        "the control socket token is this object's memory address; a later server object handed the "
+        "same address names the same socket path and unlinks its predecessor's file blind"
+    )
+
+
+def test_control_server_start_reclaims_only_its_own_stale_predecessor_socket(monkeypatch, tmp_path):
+    """Bounded, same-identity-only predecessor cleanup -- never a broad sweep.
+
+    Three seeded files differ in exactly one dimension each. The own-identity
+    stale socket must go; the other pid's socket and the unrelated file must
+    stay. The two survivors are the POSITIVE CONTROL that this is a targeted
+    reclaim and not a directory wipe, and the survivors set is non-empty, so no
+    assertion here compares two empty collections.
+    """
+    monkeypatch.setattr(control, "CONTROL_SOCKET_DIR", tmp_path)
+    own_stale = tmp_path / f"yolomux-{os.getpid()}-stalegeneration.sock"
+    other_process = tmp_path / f"yolomux-{os.getpid() + 1}-othergeneration.sock"
+    unrelated = tmp_path / "not-a-control-socket.txt"
+    for path in (own_stale, other_process):
+        path.write_bytes(b"leftover-socket-artifact")
+    unrelated.write_bytes(b"unrelated")
+
+    server = control.YolomuxControlServer(lambda request: {"ok": True, "echo": request})
+    server.start()
+    try:
+        survivors = {path.name for path in tmp_path.iterdir()} - {server.path.name}
+    finally:
+        server.stop()
+
+    assert other_process.name in survivors, "another process's control socket was swept"
+    assert unrelated.name in survivors, "an unrelated file in the control directory was removed"
+    assert own_stale.name not in survivors, (
+        "this process's own stale predecessor control socket was left behind; nothing enumerates "
+        "the control directory, so it leaks for the lifetime of the machine"
+    )

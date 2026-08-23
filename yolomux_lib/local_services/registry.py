@@ -16,7 +16,9 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections.abc import Iterator
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
@@ -31,6 +33,7 @@ from time import time as wall_clock
 from ..atomic_file import atomic_write_text
 from ..atomic_file import file_lock
 from ..background_owner import pid_is_alive
+from ..common import MANAGED_PRIVATE_ROOT
 from ..common import STATE_DIR
 from ..host_identity import HostIdentity
 from ..host_identity import LocalProcessDiagnostic
@@ -40,8 +43,36 @@ from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
 from ..host_identity import process_identity_snapshot
+from ..host_identity import process_parent_id
+from ..host_identity import process_state as host_process_state
 from ..host_identity import recorded_start_identity
+from ..infra.process_claims import CLAIM_ACTION_ADOPT
+from ..infra.process_claims import CLAIM_REASON_KIND_MISMATCH
+from ..infra.process_claims import CLAIM_REASON_MISSING_SUPERVISOR_RECORD
+from ..infra.process_claims import CLAIM_REASON_NAMESPACE_MISMATCH
+from ..infra.process_claims import CLAIM_REASON_SUPERVISOR_ALIVE
+from ..infra.process_claims import CLAIM_RESULT_ADOPTED
+from ..infra.process_claims import CLAIM_RESULT_ADOPTION_CONTENDED
+from ..infra.process_claims import ProcessClaim
+from ..infra.process_claims import ProcessClaimError
+from ..infra.process_claims import ProcessClaimLedger
 from ..infra.worktree_writer import child_process_artifact_environment
+from .lifetime import DIMENSION_CLAIM
+from .lifetime import LIFETIME_ACTION_NONE
+from .lifetime import LOCAL_SERVICE_SPAWN_GENERATION_ENV
+from .lifetime import LIFETIME_ACTION_TERMINATE
+from .lifetime import LIFETIME_RESULT_REFUSED
+# One definition, re-exported here so every existing importer and the launch
+# timing tests keep reading the same object rather than a second literal.
+from .lifetime import LOCAL_SERVICE_RETIRE_FORCE_SECONDS
+from .lifetime import LOCAL_SERVICE_RETIRE_GRACE_SECONDS
+from .lifetime import SCOPE_TRACKED_PROCESS_GROUP
+from .lifetime import ServiceDestructionAuthorization
+from .lifetime import TerminationOutcome
+from .lifetime import authorize_service_destruction
+from .lifetime import root_sharing_mode
+from .lifetime import service_claim_ledger
+from .lifetime import terminate_authorized_process
 from .rpc import LocalRpcError
 from .rpc import local_service_failure_reason
 from .rpc import new_envelope
@@ -62,11 +93,6 @@ LOCAL_SERVICE_START_TIMEOUT_SECONDS = 5.0
 LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
 LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
-LOCAL_SERVICE_RETIRE_GRACE_SECONDS = 0.5
-# A retired generation that ignores SIGTERM (wedged, not merely slow) must still be force-terminated
-# rather than left running forever under a caller-shared root -- matches shutdown_owned_local_services'
-# same escalation contract for the multi-service path.
-LOCAL_SERVICE_RETIRE_FORCE_SECONDS = 2.0
 # jobd accepts request deadlines up to 120 seconds and gives an executing worker a two-second
 # cooperative-stop backstop. Registry cannot import jobd without creating a cycle, so keep the
 # replacement-side bound explicit and leave one second for the broker to publish terminal state.
@@ -74,8 +100,31 @@ LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS = 123.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
-LOCAL_SERVICE_SPAWN_GENERATION_ENV = "YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION"
 
+
+
+# What actually happened to a retiring generation, in the caller's vocabulary.
+# A retirement that does not complete used to surface as a bare `False`; these
+# name the three outcomes an operator has to act on differently.
+# The identity fields a claim payload carries, so a re-read claim rebuilds the
+# same record the ledger published rather than a second, drifting shape.
+_CLAIM_IDENTITY_FIELDS = (
+    "stable_host_id",
+    "hostname",
+    "boot_id",
+    "pid",
+    "process_start_identity",
+    "process_start_ticks",
+    "instance_nonce",
+)
+
+LOCAL_SERVICE_TRANSITION_HANDOFF = "process_identity_handoff"
+LOCAL_SERVICE_TRANSITION_EXITED = "retired_process_exited"
+LOCAL_SERVICE_TRANSITION_IDENTITY_UNPROVEN = "retired_process_identity_unproven"
+LOCAL_SERVICE_RETIREMENT_TRANSITIONS = {
+    LocalProcessReason.PROCESS_IDENTITY_REUSED: LOCAL_SERVICE_TRANSITION_HANDOFF,
+    LocalProcessReason.PROCESS_NOT_FOUND: LOCAL_SERVICE_TRANSITION_EXITED,
+}
 
 _LAUNCH_CONTEXT: dict[str, int] = {}
 _TRANSPORT_DIAGNOSTICS_LOCK = threading.Lock()
@@ -318,24 +367,13 @@ def process_start_time(pid: int) -> int:
 
 
 def process_state(pid: int) -> str:
-    """Return the native process state, preserving zombies as non-serving."""
-    snapshot = process_identity_snapshot(pid)
-    if snapshot is not None:
-        return snapshot.state
-    if platform.system() != "Darwin":
-        return ""
-    try:
-        completed = subprocess.run(
-            ("ps", "-o", "state=", "-p", str(int(pid))),
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return ""
-    state = str(completed.stdout or "").strip()
-    return state[0] if completed.returncode == 0 and state else ""
+    """Return the native process state, preserving zombies as non-serving.
+
+    Delegates to the one owner beside the identity fence. It used to be a second
+    implementation here, which is how the fence and its callers came to disagree
+    about whether a corpse is alive.
+    """
+    return host_process_state(int(pid))
 
 
 def process_spawn_generation(
@@ -487,6 +525,63 @@ def bounded_preflight_process_table() -> dict[int, ProcessTableEntry]:
     return bounded_process_table(require_complete=True)
 
 
+def pid_is_serving(pid: int, *, table: dict[int, ProcessTableEntry] | None = None) -> bool:
+    """Return True iff ``pid`` is a live, NON-ZOMBIE process in the bounded table.
+
+    "Is this pid still serving" is a different question from "does this pid
+    exist", and only this one is safe to build a lifetime decision on.  A
+    zombie exists: it answers ``os.kill(pid, 0)``, it keeps its PGID, and
+    ``/proc/<pid>/stat`` still reports its original start ticks.  It just cannot
+    do anything ever again.  ``bounded_process_table`` already drops those, so
+    membership in the table IS the predicate; ``require_complete=True`` means a
+    failed process-table read raises rather than silently certifying a live
+    process as retired.
+    """
+
+    if table is not None:
+        return int(pid) in table
+    # Same rule, asked about one pid without sweeping the whole process table:
+    # `bounded_process_table` keeps a pid only when it is present AND its state
+    # is not "Z", which is exactly this. A caller polling one identity every
+    # 30ms must not pay for a full `ps` on each pass to learn it.
+    return int(pid) > 1 and process_state(int(pid)) not in {"", "Z"}
+
+
+def live_process_group(pid: int) -> int | None:
+    """Return the process group a pid still proves, or None when it cannot be read.
+
+    This is the ONE live prober behind the group-scoped destructive fence, and it
+    deliberately asks the KERNEL (``os.getpgid``) rather than the bounded process
+    table.  The table is what RESOLVED the tracked group in the first place, so
+    checking the group against it again would compare a measurement with itself
+    and the dimension could never vary.  Asking a different source at a later
+    moment is what makes "is this target still in the group I was authorized
+    against" a real question.
+
+    ``None`` means the group could not be read, which the authorization treats as
+    unproven and therefore refuses.  It is deliberately distinct from ``0``:
+    ``os.getpgid`` never returns 0 for a live process, so collapsing the two
+    would make an unreadable group indistinguishable from a real one and hand a
+    destructive decision a default it never proved.
+    """
+
+    if int(pid) <= 1:
+        return None
+    observed = process_group_id(int(pid))
+    return observed if observed > 0 else None
+
+
+def process_group_has_serving_member(
+    process_group: int,
+    *,
+    table: dict[int, ProcessTableEntry] | None = None,
+) -> bool:
+    """Return True iff any live, non-zombie member of the group is in the table."""
+
+    resolved = bounded_process_table(require_complete=True) if table is None else table
+    return any(entry.pgid == int(process_group) for entry in resolved.values())
+
+
 def process_record_diagnostic(
     record: dict[str, Any],
     *,
@@ -496,22 +591,16 @@ def process_record_diagnostic(
     """Route persisted local-service identity through the one central fence."""
 
     if table is None:
-        try:
-            record_pid = int(record.get("pid") or 0)
-        except (TypeError, ValueError):
-            record_pid = 0
-        if process_state(record_pid) == "Z":
-            return is_current_local_process(
-                record,
-                host_identity=host_identity,
-                start_identity_reader=lambda _pid: None,
-                pid_probe=lambda _pid: False,
-            )
+        # The zombie rule itself belongs to the fence; this only supplies the
+        # state reader it needs. Keeping the rule in one place is what stopped
+        # `_retire_incompatible_service` from carrying a second, zombie-blind
+        # liveness predicate alongside this one.
         return is_current_local_process(
             record,
             host_identity=host_identity,
             start_identity_reader=process_start_identity,
             pid_probe=pid_is_alive,
+            state_reader=process_state,
         )
 
     def table_start_identity(pid: int) -> str | None:
@@ -525,6 +614,10 @@ def process_record_diagnostic(
         host_identity=host_identity,
         start_identity_reader=table_start_identity,
         pid_probe=lambda pid: pid in table,
+        # `bounded_process_table` already drops every pid whose state is "Z", so
+        # a pid present here is non-zombie by construction. Re-reading /proc per
+        # record would pay for the same proof twice on the watchdog's hot path.
+        state_reader=lambda _pid: "",
     )
 
 
@@ -624,6 +717,11 @@ def resolve_tracked_local_service_groups(
                 "service": str(record.get("service") or ""),
                 "pid": pid,
                 "pgid": pgid,
+                # The generation this record was PUBLISHED with. Carried out of
+                # the record rather than re-read from the live process at the
+                # decision site: a dimension both sides read off the same target
+                # can never disagree, so re-proving it would prove nothing.
+                "spawn_generation": str(record.get("spawn_generation") or ""),
                 "socket": str(record.get("socket") or ""),
                 "launcher_pid": int(record.get("launcher_pid") or 0),
                 "launcher_port": int(record.get("launcher_port") or 0),
@@ -694,7 +792,18 @@ def untracked_local_service_processes(
 
 
 ORPHAN_ACTION_NONE = "none"
+ORPHAN_ACTION_TERMINATE = LIFETIME_ACTION_TERMINATE
 ORPHAN_RESULT_REPORTED_ONLY = "reported_only"
+ORPHAN_RESULT_REPAIRED = "repaired"
+ORPHAN_RESULT_REFUSED = "refused"
+ORPHAN_RESULT_FAILED = "failed"
+
+# Why one claim-backed survivor was not repaired. Every one of these is a real,
+# distinguishable authority gap; none of them is a literal that no branch can vary.
+ORPHAN_REASON_SUPERVISOR_ALIVE = CLAIM_REASON_SUPERVISOR_ALIVE
+ORPHAN_REASON_GENERATION_NOT_SUPERSEDED = "generation_not_superseded"
+ORPHAN_REASON_NO_CLAIM = "no_persisted_claim"
+ORPHAN_REASON_PROCESS_TABLE_UNAVAILABLE = "process_table_unavailable"
 
 # Why one ambiguous survivor could not be acted on.  These are the real,
 # distinguishable authority gaps a survivor can sit in; they were previously
@@ -829,6 +938,214 @@ def verified_orphan_diagnostics(
     return ledger.age_rows(service_dir, rows, wall_clock() if now is None else float(now))
 
 
+def repair_verified_orphans(
+    service_dir: Path,
+    state_dir: Path,
+    service_names: tuple[str, ...],
+    *,
+    current_generations: Mapping[str, str] | None = None,
+    private_root: bool = MANAGED_PRIVATE_ROOT,
+    host_identity: HostIdentity | None = None,
+    kill: Callable[[int, int], None] = os.kill,
+    clock: Callable[[], float] = monotonic_clock,
+    sleep: Callable[[float], None] = sleep_clock,
+    grace_seconds: float = LOCAL_SERVICE_RETIRE_GRACE_SECONDS,
+    force_seconds: float = LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
+    now: float | None = None,
+    observations: OrphanObservationLedger | None = None,
+) -> list[dict[str, Any]]:
+    """Repair claim-backed survivors, host-locally and genuinely bounded.
+
+    This is a SEPARATE producer from ``verified_orphan_diagnostics`` on purpose.
+    That function's candidates come from command-text matching, which is a
+    rejected authority: a process is not yours because its argv looks like yours.
+    Its constants are honest FOR THAT INPUT -- it may only ever report. Repair
+    needs a different input, and the only one that carries authority is a claim
+    the spawning supervisor persisted while it still had direct proof of what it
+    created.
+
+    Every dimension is re-proved here before anything is signalled: the claim
+    exists; host and boot match; the pid re-proves its recorded process-start
+    identity AND is not an unreaped corpse; the kind matches; the namespace
+    matches; the generation is STRICTLY older than the caller's current one; and
+    the supervisor is provably gone by the full identity fence, not by
+    ``pid_is_alive`` on a bare integer. A survivor that fails any of these gets
+    zero signals and one typed row. A survivor whose supervisor is alive is
+    retained and the row names that surviving supervisor.
+
+    ``age_seconds``, ``attempted_action``, ``result`` and ``failure_reason`` all
+    come from what actually executed. None of them is a literal.
+    """
+
+    identity = host_identity or current_host_identity()
+    generations = dict(current_generations or {})
+    started = clock()
+    rows: list[dict[str, Any]] = []
+    try:
+        table = bounded_process_table(require_complete=True)
+    except ProcessTableUnavailable as exc:
+        # Fail CLOSED before any signal: an incomplete process table cannot tell
+        # a dead survivor from an unreadable one, and the difference is a kill.
+        return [{
+            "pid": 0,
+            "attempted_action": ORPHAN_ACTION_NONE,
+            "result": ORPHAN_RESULT_REFUSED,
+            "reason": ORPHAN_REASON_PROCESS_TABLE_UNAVAILABLE,
+            "failure_reason": str(exc),
+            "age_seconds": round(clock() - started, 6),
+        }]
+    for service_name in service_names:
+        ledger = service_claim_ledger(
+            Path(state_dir),
+            str(service_name),
+            private_root=private_root,
+            host_identity=identity,
+        )
+        for claim_path, claim in ledger.rows():
+            rows.append(_repair_one_claimed_survivor(
+                ledger,
+                claim_path,
+                claim,
+                service_name=str(service_name),
+                service_dir=Path(service_dir),
+                current_generation=str(generations.get(str(service_name), "")),
+                identity=identity,
+                table=table,
+                kill=kill,
+                clock=clock,
+                sleep=sleep,
+                grace_seconds=grace_seconds,
+                force_seconds=force_seconds,
+                started=started,
+            ))
+    ledger_observations = observations or ORPHAN_OBSERVATIONS
+    return ledger_observations.age_rows(
+        Path(service_dir) / "repair",
+        rows,
+        wall_clock() if now is None else float(now),
+    )
+
+
+def _repair_one_claimed_survivor(
+    ledger: ProcessClaimLedger,
+    claim_path: Path,
+    claim: dict[str, Any] | None,
+    *,
+    service_name: str,
+    service_dir: Path,
+    current_generation: str,
+    identity: HostIdentity,
+    table: dict[int, ProcessTableEntry],
+    kill: Callable[[int, int], None],
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    grace_seconds: float,
+    force_seconds: float,
+    started: float,
+) -> dict[str, Any]:
+    def row(pid: int, action: str, result: str, reason: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "pid": int(pid),
+            "claim_path": str(claim_path),
+            "service": service_name,
+            "attempted_action": action,
+            "result": result,
+            "reason": reason,
+            "failure_reason": "",
+            "age_seconds": round(clock() - started, 6),
+            **extra,
+        }
+
+    if not isinstance(claim, dict) or not claim:
+        return row(0, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, ORPHAN_REASON_NO_CLAIM)
+    pid = int(claim.get("pid") or 0)
+    if str(claim.get("kind") or "") != ledger.kind:
+        return row(pid, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, CLAIM_REASON_KIND_MISMATCH)
+    if str(claim.get("namespace") or "") != ledger.namespace:
+        return row(pid, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, CLAIM_REASON_NAMESPACE_MISMATCH)
+    supervisor = claim.get("supervisor")
+    if not isinstance(supervisor, dict) or not supervisor:
+        return row(pid, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, CLAIM_REASON_MISSING_SUPERVISOR_RECORD)
+    supervisor_state = is_current_local_process(supervisor, host_identity=identity)
+    if supervisor_state.current:
+        return row(
+            pid,
+            ORPHAN_ACTION_NONE,
+            ORPHAN_RESULT_REFUSED,
+            ORPHAN_REASON_SUPERVISOR_ALIVE,
+            surviving_supervisor=supervisor_state.as_dict(),
+        )
+    claim_generation = str(claim.get("generation") or "")
+    if not claim_generation or not current_generation or claim_generation == current_generation:
+        # "Strictly older" is the requirement. An equal generation is the LIVE
+        # one and an unknown generation is not older, it is unproven.
+        return row(pid, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, ORPHAN_REASON_GENERATION_NOT_SUPERSEDED)
+    record = {
+        **{key: claim[key] for key in _CLAIM_IDENTITY_FIELDS if key in claim},
+        "service": service_name,
+        "namespace": str(service_dir),
+        "spawn_generation": claim_generation,
+    }
+    diagnostic = process_record_diagnostic(record, table=table)
+    authorization = authorize_service_destruction(
+        record,
+        diagnostic=diagnostic,
+        expected_kind=service_name,
+        expected_namespace=str(service_dir),
+        live_generation_reader=process_spawn_generation,
+        claim_state=str(claim.get("claim_id") or ""),
+        require_claim=True,
+    )
+    if not authorization.authorized:
+        return row(
+            pid,
+            ORPHAN_ACTION_NONE,
+            ORPHAN_RESULT_REFUSED,
+            authorization.reason,
+            failed_dimension=authorization.failed_dimension,
+        )
+    outcome = terminate_authorized_process(
+        authorization,
+        still_current=lambda: pid_is_serving(pid),
+        signal_process=kill,
+        grace_seconds=grace_seconds,
+        force_seconds=force_seconds,
+        clock=clock,
+        sleep=sleep,
+    )
+    if not outcome.confirmed_dead:
+        return row(
+            pid,
+            outcome.attempted_action,
+            ORPHAN_RESULT_FAILED,
+            outcome.reason,
+            failure_reason=outcome.error or outcome.result,
+            signals=list(outcome.signals),
+        )
+    # The claim is spent the moment it is cashed: leaving it would let a later
+    # pass signal a recycled pid on an already-used proof.
+    try:
+        claim_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return row(
+            pid,
+            outcome.attempted_action,
+            ORPHAN_RESULT_REPAIRED,
+            outcome.reason,
+            failure_reason=f"claim_remove_failed: {type(error).__name__}",
+            signals=list(outcome.signals),
+        )
+    return row(
+        pid,
+        outcome.attempted_action,
+        ORPHAN_RESULT_REPAIRED,
+        outcome.reason,
+        signals=list(outcome.signals),
+    )
+
+
 def stale_local_service_groups_of_dead_launcher(
     port: int,
     service_dir: Path,
@@ -852,6 +1169,82 @@ def stale_local_service_groups_of_dead_launcher(
     ]
 
 
+def retained_claim_pids(claim_rows: list[dict[str, Any]]) -> set[int]:
+    """Pids a claim says are deliberately retained by a still-living supervisor.
+
+    A claim whose supervisor is alive names that surviving supervisor by design.
+    Stopping such a helper at OUR launcher exit would kill something another live
+    server is still using, which is precisely the failure adoption exists to
+    prevent, so those pids are excluded from teardown and reported instead.
+    """
+
+    return {
+        int(row.get("pid") or 0)
+        for row in claim_rows
+        if str(row.get("reason") or "") == CLAIM_REASON_SUPERVISOR_ALIVE and int(row.get("pid") or 0) > 0
+    }
+
+
+def _terminate_group_member(
+    member_record: dict[str, Any],
+    member_pid: int,
+    *,
+    service_name: str,
+    service_dir: Path,
+    group_pgid: int,
+    generation_reader: Callable[[int], str | None],
+    process_group_reader: Callable[[int], int | None],
+    kill: Callable[[int, int], None],
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    force_seconds: float,
+    table_reader: Callable[[], dict[int, ProcessTableEntry]],
+) -> TerminationOutcome | None:
+    """Force one surviving group member, or return None when it is already gone.
+
+    A pool child is not independently addressable: it holds no socket, no record
+    of its own, and no spawn generation, so it goes through the ONE owner under
+    the GROUP scope. That scope does not waive the generation dimension, it
+    substitutes the one this class of target genuinely has: the process group it
+    provably shares with a leader whose identity came from a persisted record,
+    re-read live before the signal. It is signalled only after the leader's own
+    escalation, so a child that was going to exit with its parent already has.
+    """
+
+    table = table_reader()
+    if not pid_is_serving(member_pid, table=table):
+        return None
+    record = dict(member_record)
+    record.setdefault("service", service_name)
+    record["namespace"] = str(service_dir)
+    record["pgid"] = int(group_pgid)
+    diagnostic = process_record_diagnostic(record, table=table)
+    authorization = authorize_service_destruction(
+        record,
+        diagnostic=diagnostic,
+        expected_kind=service_name,
+        expected_namespace=str(service_dir),
+        live_generation_reader=generation_reader,
+        claim_state="launcher_owned_group_member",
+        scope=SCOPE_TRACKED_PROCESS_GROUP,
+        expected_process_group=int(group_pgid),
+        live_process_group_reader=process_group_reader,
+    )
+    return terminate_authorized_process(
+        authorization,
+        still_current=lambda: pid_is_serving(member_pid, table=table_reader()),
+        signal_process=kill,
+        # The leader's own SIGTERM window has already elapsed by the time this
+        # runs, so a second graceful window would only double the teardown.
+        graceful_first=False,
+        target="group-member",
+        grace_seconds=0.0,
+        force_seconds=force_seconds,
+        clock=clock,
+        sleep=sleep,
+    )
+
+
 def shutdown_owned_local_services(
     port: int,
     service_dir: Path,
@@ -860,9 +1253,31 @@ def shutdown_owned_local_services(
     table_reader: Callable[[], dict[int, ProcessTableEntry]] = bounded_process_table,
     kill: Callable[[int, int], None] = os.kill,
     sleep: Callable[[float], None] = sleep_clock,
-    grace_seconds: float = 0.5,
+    clock: Callable[[], float] = monotonic_clock,
+    claims_reader: Callable[[], list[dict[str, Any]]] | None = None,
+    grace_seconds: float = LOCAL_SERVICE_RETIRE_GRACE_SECONDS,
+    force_seconds: float = LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
+    # The two live dimension probes, injectable for the same reason `kill` and
+    # `table_reader` are: a destructive decision this function makes must be
+    # drivable by whoever is telling it what it is allowed to see.
+    generation_reader: Callable[[int], str | None] = process_spawn_generation,
+    process_group_reader: Callable[[int], int | None] = live_process_group,
 ) -> dict[str, list[int]]:
-    """Stop only sidecars whose ledger proves this live launcher created them."""
+    """Stop only sidecars whose ledger proves this live launcher created them.
+
+    Routed through the ONE destructive owner rather than a private
+    SIGTERM/sleep/SIGKILL block, so the escalation, the identity fence, and the
+    reported outcome are the same here as on every other path. The budgets are
+    the shared constants, not re-spelled literals: ``grace_seconds`` was
+    ``0.5`` -- a second copy of ``LOCAL_SERVICE_RETIRE_GRACE_SECONDS`` that
+    could silently drift from it.
+
+    ``unconfirmed`` is the field that stopped this from lying. The old version
+    reported ``terminated`` for every pid it managed to send SIGKILL to and never
+    re-checked, so a target that survived both signals was indistinguishable from
+    one that exited. ``retained`` names the pids a live claim protects.
+    """
+
     owner_pid = int(os.getpid() if launcher_pid is None else launcher_pid)
     initial = table_reader()
     groups = [
@@ -870,30 +1285,111 @@ def shutdown_owned_local_services(
         for group in tracked_local_service_groups(service_dir, initial)
         if group["launcher_port"] == int(port) and group["launcher_pid"] == owner_pid
     ]
-    member_records: dict[int, dict[str, Any]] = {}
-    for group in groups:
-        member_records.update(group["member_records"])
-    term_targets = [int(group["pid"]) for group in groups]
+    retained_pids = retained_claim_pids(claims_reader() if claims_reader is not None else [])
     signalled: list[int] = []
-    for pid in term_targets:
-        try:
-            kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            continue
-        signalled.append(pid)
-    if signalled:
-        sleep(max(0.0, float(grace_seconds)))
-    survivors = table_reader()
     terminated: list[int] = []
-    for pid, record in sorted(member_records.items()):
-        if not process_record_diagnostic(record, table=survivors).current:
+    unconfirmed: list[int] = []
+    retained: list[int] = []
+    for group in groups:
+        leader_pid = int(group["pid"])
+        if leader_pid in retained_pids:
+            retained.append(leader_pid)
             continue
-        try:
-            kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            continue
-        terminated.append(pid)
-    return {"signalled": signalled, "terminated": terminated}
+        record = dict(group["process_record"])
+        record.setdefault("service", group["service"])
+        record["namespace"] = str(service_dir)
+        # The generation the RECORD was published with, not one re-read from the
+        # live process at the decision site. Re-reading it here and again inside
+        # the authorization made recorded and observed the same measurement, so
+        # the dimension could not vary and re-proving it proved nothing.
+        record["spawn_generation"] = str(group["spawn_generation"] or "")
+        authorization = authorize_service_destruction(
+            record,
+            diagnostic=process_record_diagnostic(record, table=initial),
+            expected_kind=str(group["service"]),
+            expected_namespace=str(service_dir),
+            live_generation_reader=generation_reader,
+            claim_state="launcher_owned_group",
+        )
+        outcome = terminate_authorized_process(
+            authorization,
+            # Liveness comes from the SAME reader that resolved the group. A
+            # caller injecting `table_reader` is telling this function what it is
+            # allowed to see; polling /proc directly instead would quietly ignore
+            # that and answer from a process table the caller never authorized.
+            still_current=lambda pid=leader_pid: pid_is_serving(pid, table=table_reader()),
+            signal_process=kill,
+            grace_seconds=grace_seconds,
+            force_seconds=force_seconds,
+            clock=clock,
+            sleep=sleep,
+        )
+        if outcome.signals:
+            signalled.append(leader_pid)
+        if outcome.confirmed_dead:
+            terminated.append(leader_pid)
+        elif outcome.unproven_authority:
+            # Either this build may never signal that record (no spawn
+            # generation) or authority over the identity was not proven. Neither
+            # is an escalation that failed, and reporting them as `unconfirmed`
+            # would claim a signal that was never sent; both are things this
+            # teardown deliberately left running.
+            retained.append(leader_pid)
+        else:
+            unconfirmed.append(leader_pid)
+        # The leader is not the group. Spawn/pool children inherited the leader's
+        # fresh session at spawn, so nothing else can be in this group -- but they
+        # do not exit just because the leader did, and leaving them would strand
+        # exactly the workers this teardown exists to collect.
+        #
+        # A leader this teardown had no proven authority over retains its whole
+        # group. The leader's record is what proved this group exists at all and
+        # a member's group-scoped authority is derived from it, so force-killing
+        # the workers of a daemon we were not allowed to stop would leave a
+        # half-torn group -- worse than either whole answer. A member carries no
+        # generation of its own, so without this the superseded-generation and
+        # replaced-identity refusals would stop the leader and kill its workers.
+        for member_pid, member_record in sorted(group["member_records"].items()):
+            member_pid = int(member_pid)
+            if outcome.unproven_authority and member_pid != leader_pid:
+                retained.append(member_pid)
+                continue
+            if member_pid == leader_pid or member_pid in retained_pids:
+                if member_pid in retained_pids:
+                    retained.append(member_pid)
+                continue
+            member_outcome = _terminate_group_member(
+                member_record,
+                member_pid,
+                service_name=str(group["service"]),
+                service_dir=Path(service_dir),
+                group_pgid=int(group["pgid"]),
+                generation_reader=generation_reader,
+                process_group_reader=process_group_reader,
+                kill=kill,
+                clock=clock,
+                sleep=sleep,
+                force_seconds=force_seconds,
+                table_reader=table_reader,
+            )
+            if member_outcome is None:
+                continue
+            if member_outcome.signals:
+                signalled.append(member_pid)
+            if member_outcome.confirmed_dead:
+                terminated.append(member_pid)
+            elif member_outcome.unproven_authority:
+                # Same rule as the leader: nothing was signalled, so calling it
+                # `unconfirmed` would claim an escalation that never ran.
+                retained.append(member_pid)
+            else:
+                unconfirmed.append(member_pid)
+    return {
+        "signalled": sorted(signalled),
+        "terminated": sorted(terminated),
+        "unconfirmed": sorted(unconfirmed),
+        "retained": sorted(retained),
+    }
 
 
 def read_server_port_lease_record(port: int, state_dir: Path) -> dict[str, Any]:
@@ -1110,6 +1606,63 @@ class LocalServiceRegistry:
         # retirement of an incompatible generation) still starts with this
         # False and may create the directory on its own first write.
         self._record_directory_confirmed = False
+        # Re-entrancy for the ONE record lock. `ensure_started` already holds it
+        # across retire/remove/spawn/publish, and `_write_record` must take it to
+        # make its compare-and-swap atomic; `file_lock` is not re-entrant, so a
+        # naive second acquire would deadlock the start path.
+        self._record_lock_held = False
+        self._claim_ledger: ProcessClaimLedger | None = None
+        # Authority over the daemon this registry supervises: published when this
+        # registry spawns it, or transferred to this registry by an adoption
+        # transaction when the original launcher is provably gone.
+        self.claim: ProcessClaim | None = None
+        self.claim_rows: list[dict[str, Any]] = []
+        # True only when this registry's claim arrived through the adoption
+        # transaction rather than through publishing its own spawn.
+        self._claim_was_adopted = False
+
+    @property
+    def managed_private_root(self) -> bool:
+        """Whether this registry's root has exactly one possible supervisor.
+
+        A ``YOLOMUX_ROOT`` run owns every path it uses, so a daemon there can
+        never be inherited: there is no other caller who could be using it. The
+        per-user runtime directory is shared by every YOLOmux server that user
+        runs, so a survivor there may legitimately outlive its launcher.
+        """
+
+        return MANAGED_PRIVATE_ROOT
+
+    def claim_ledger(self) -> ProcessClaimLedger:
+        """Resolve this service kind's claim ledger once, lazily.
+
+        Lazily because building it resolves the host identity, which touches the
+        filesystem; a registry is constructed during import in some callers and
+        that read must not run there.
+        """
+
+        if self._claim_ledger is None:
+            self._claim_ledger = service_claim_ledger(
+                self.state_dir,
+                self.spec.name,
+                private_root=self.managed_private_root,
+                host_identity=self.host_identity,
+            )
+        return self._claim_ledger
+
+    @contextmanager
+    def _record_lock(self) -> Iterator[None]:
+        """Hold the one durable record lock, re-entrantly within this registry."""
+
+        if self._record_lock_held:
+            yield
+            return
+        with file_lock(self.lock_path, dir_mode=0o700):
+            self._record_lock_held = True
+            try:
+                yield
+            finally:
+                self._record_lock_held = False
 
     @property
     def failures(self) -> int:
@@ -1279,15 +1832,40 @@ class LocalServiceRegistry:
                 os.close(fd)
         return removed
 
+    @property
+    def _lock_directory_is_absent(self) -> bool:
+        """Whether the directory the record LOCK lives in does not exist right now.
+
+        The ONE predicate every entry point checks before taking that lock.
+        ``file_lock`` does ``parent.mkdir(...)`` followed by ``parent.chmod(...)``,
+        so ANY entry point that takes it resurrects and re-permissions a
+        directory teardown removed -- not just the record write that was already
+        fenced. `_publish_record` was fenced and `prune_stale_runtime_locks_once`
+        was not: one owner fenced, its sibling forgotten, which is the shape this
+        whole change exists to remove.
+
+        It is deliberately the LOCK's parent, not the record's. A long socket
+        path relocates the socket (and therefore the record) under a `/tmp`
+        fallback while the lock deliberately stays in the configured service
+        directory, so the two can be different directories and only one of them
+        is the one `file_lock` would create.
+        """
+
+        return not self.lock_path.parent.exists()
+
     def prune_stale_runtime_locks_once(self) -> list[Path]:
         """Run startup maintenance even when this generation adopts a healthy daemon."""
 
         if self._runtime_locks_pruned:
             return []
+        if self._lock_directory_is_absent:
+            # A directory that does not exist holds no stale lock to prune, so
+            # there is nothing this call could achieve by creating one.
+            return []
         with self.lock:
             if self._runtime_locks_pruned:
                 return []
-            with file_lock(self.lock_path, dir_mode=0o700):
+            with self._record_lock():
                 removed = self._prune_stale_runtime_locks()
             self._runtime_locks_pruned = True
             return removed
@@ -1300,7 +1878,84 @@ class LocalServiceRegistry:
         value = read_json_file(self.record_path, {})
         return value if isinstance(value, dict) else {}
 
+    def _record_supersession_refusal(self, existing: dict[str, Any], incoming: dict[str, Any]) -> str:
+        """Refuse a blind overwrite of a record another live generation owns.
+
+        The write used to be an unconditional ``atomic_write_text``: whoever
+        published last won, with no read and no comparison.  That is how the
+        supervisor field came to describe the most recent caller instead of the
+        owner -- while the comment above it claimed first-writer-wins.
+        """
+
+        try:
+            existing_pid = int(existing.get("pid") or 0)
+            incoming_pid = int(incoming.get("pid") or 0)
+        except (TypeError, ValueError):
+            return "unreadable_record_identity"
+        if existing_pid == incoming_pid and recorded_start_identity(existing) == recorded_start_identity(incoming):
+            return ""
+        if process_record_diagnostic(existing, host_identity=self.host_identity).current:
+            # A different process is alive and this record names it. Overwriting
+            # would silently retarget every destructive decision downstream --
+            # the watchdog, preflight, and launcher-exit teardown all resolve
+            # their targets from exactly this file.
+            return f"record_owned_by_live_pid_{existing_pid}"
+        return ""
+
+    def _merge_supervision_provenance(self, existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+        """Keep the FIRST supervisor's provenance unless this registry adopted the daemon.
+
+        A shared daemon is published again by every server that leases it, so a
+        last-writer-wins merge made ``supervisor``/``launcher_pid`` name whichever
+        server most recently made an RPC -- not the one that created it and not
+        the one responsible for stopping it.  Provenance therefore only changes
+        through the adoption transaction, which is fenced and single-winner.
+        """
+
+        try:
+            existing_pid = int(existing.get("pid") or 0)
+            incoming_pid = int(incoming.get("pid") or 0)
+        except (TypeError, ValueError):
+            return incoming
+        if existing_pid != incoming_pid or existing_pid <= 0:
+            return incoming
+        adopted = self.claim is not None and int(self.claim.pid) == incoming_pid
+        if adopted:
+            return incoming
+        merged = dict(incoming)
+        for field_name in ("supervisor", "launcher_pid", "launcher_port", "spawn_generation", "claim_id", "started_at"):
+            if field_name in existing:
+                merged[field_name] = existing[field_name]
+        return merged
+
     def _write_record(self, record: dict[str, Any]) -> bool:
+        """Publish the durable identity record as a compare-and-swap, never a blind write."""
+
+        if self._record_directory_confirmed and (
+            self._lock_directory_is_absent or not self.record_path.parent.exists()
+        ):
+            # Checked BEFORE the lock, because taking it is itself a mkdir and a
+            # chmod on the directory teardown removed. This exact owner already
+            # published here, so the directory being gone is a removal, not a
+            # first start.
+            self._record_refusal_reason = redact_local_service_text(
+                f"{self.spec.name} service record directory was removed after this owner already "
+                "published into it; refusing to resurrect it"
+            )
+            return False
+        with self._record_lock():
+            existing = self._read_record()
+            if existing:
+                refusal = self._record_supersession_refusal(existing, record)
+                if refusal:
+                    self._record_refusal_reason = redact_local_service_text(
+                        f"{self.spec.name} service record write refused (reason={refusal})"
+                    )
+                    return False
+                record = self._merge_supervision_provenance(existing, record)
+            return self._write_record_unlocked(record)
+
+    def _write_record_unlocked(self, record: dict[str, Any]) -> bool:
         if self._record_directory_confirmed and not self.record_path.parent.exists():
             # This exact owner already proved it published here once; the
             # directory disappearing since is a teardown/removal, not a
@@ -1395,28 +2050,278 @@ class LocalServiceRegistry:
             return True
         return True
 
-    def _can_reclaim_dead_launcher_service(self, service_pid: int) -> bool:
-        """Whether a daemon is provably left behind by a dead web owner.
+    def _supervisor_is_gone(self, record: dict[str, Any]) -> bool:
+        """Whether the recorded supervisor is PROVABLY gone, by the full fence.
 
-        Another live web server may still own a compatible or newer shared daemon,
-        so neither version nor a dead PID alone grants signal authority. A guarded
-        web restart is the narrow exception: the persisted record still identifies
-        this exact socket/process group, while its launcher has exited. Only that
-        ledger proof permits retiring the daemon and starting the current one.
+        `pid_is_alive(launcher_pid)` was the old test and it is not a proof: a
+        bare integer says nothing about which process now holds that number, and
+        a zombie answers it affirmatively. The fenced `supervisor` record carries
+        host, boot, pid and process-start identity, so "gone" means gone. A
+        legacy record that carries only `launcher_pid` still falls back to that
+        integer -- but only to refuse, never to authorize: an unprovable
+        supervisor can never be declared gone.
         """
-        if service_pid <= 0:
-            return False
-        record = self._read_record()
+
+        supervisor = record.get("supervisor")
+        if isinstance(supervisor, dict) and supervisor:
+            diagnostic = is_current_local_process(supervisor, host_identity=self.host_identity)
+            return diagnostic.may_remove_stale_record
         launcher_pid = int(record.get("launcher_pid") or 0)
-        if int(record.get("pid") or 0) != service_pid or launcher_pid <= 0:
+        if launcher_pid <= 0 or launcher_pid == os.getpid():
             return False
-        if launcher_pid == os.getpid() or pid_is_alive(launcher_pid):
-            return False
+        return not pid_is_alive(launcher_pid)
+
+    def _ledger_proves_recorded_daemon(self, service_pid: int) -> bool:
+        """Whether the shared ledger still anchors this exact pid to this exact socket."""
+
         return any(
             group["service"] == self.spec.name
             and group["pid"] == service_pid
             and group["socket"] == str(self.socket_path)
             for group in tracked_local_service_groups(self.service_dir)
+        )
+
+    def _is_dead_launcher_survivor(self, service_pid: int) -> bool:
+        """Whether the recorded daemon's supervisor is PROVABLY gone. No side effects.
+
+        Split out from the decision below because a health probe runs on every
+        RPC and must never run an adoption transaction as a side effect of
+        answering "is this daemon healthy?".
+        """
+
+        if service_pid <= 0:
+            return False
+        record = self._read_record()
+        if int(record.get("pid") or 0) != service_pid:
+            return False
+        if not self._supervisor_is_gone(record):
+            return False
+        return self._ledger_proves_recorded_daemon(service_pid)
+
+    def _dead_launcher_survivor_decision(self, service_pid: int) -> tuple[bool, str]:
+        """Decide the fate of a daemon whose launcher is provably gone.
+
+        Returns ``(may_reclaim, claim_state)``.  This is the keystone the rest of
+        the destructive contract hangs off, because the two wrong answers fail in
+        opposite directions: reclaim a survivor another live server is using and
+        you kill working state; retain one nobody can reach and it runs forever
+        with no owner.
+
+        The root's sharing mode decides which risk exists at all.  Under a
+        MANAGED-PRIVATE root there is exactly one possible launcher, so a
+        survivor has no successor, no election is possible, and ZERO adoption,
+        reuse, or cross-root reclaim is attempted -- the survivor is simply
+        reclaimable by the one destructive owner.  Under a CALLER-SHARED root a
+        successor may legitimately inherit it, but only by winning the atomic
+        adoption transaction: two successors racing the same dead launcher must
+        never both believe they own the daemon.
+
+        Every ambiguous outcome -- a transfer another successor is mid-way
+        through, a claim whose target no longer proves its identity -- returns
+        "do not reclaim" plus the reason, because an unresolved transfer is
+        exactly the case where a naive sweep would kill the daemon adoption
+        exists to preserve.
+        """
+
+        if service_pid <= 0:
+            return False, ""
+        record = self._read_record()
+        if int(record.get("pid") or 0) != service_pid:
+            return False, ""
+        if not self._supervisor_is_gone(record):
+            # Still supervised. Retention is the correct outcome and it is named,
+            # not silent: the surviving supervisor is in the record.
+            return False, CLAIM_REASON_SUPERVISOR_ALIVE
+        if not self._ledger_proves_recorded_daemon(service_pid):
+            return False, "ledger_does_not_anchor_recorded_daemon"
+        # From here the launcher is provably gone and the ledger anchors this
+        # exact daemon, so the root's sharing mode decides what happens next.
+        if self.managed_private_root:
+            return True, "managed_private_root_no_successor"
+        rows = self._adopt_survivor_claims(service_pid)
+        adopted = [row for row in rows if row.get("result") == CLAIM_RESULT_ADOPTED]
+        if adopted:
+            return False, CLAIM_RESULT_ADOPTED
+        contended = [row for row in rows if row.get("result") == CLAIM_RESULT_ADOPTION_CONTENDED]
+        if contended:
+            return False, str(contended[0].get("reason") or CLAIM_RESULT_ADOPTION_CONTENDED)
+        # No claim exists for this survivor (it predates claim publication) and no
+        # successor is mid-transfer. The fenced ledger record -- this exact host,
+        # boot, pid, process-start identity, socket and process group, with a
+        # supervisor provably gone -- is the remaining authority, and it is named
+        # so a reader can tell it apart from a claim-backed decision.
+        return True, "ledger_record_only"
+
+    def _adopt_survivor_claims(self, service_pid: int) -> list[dict[str, Any]]:
+        """Run the atomic adoption transaction and retain its typed rows."""
+
+        try:
+            rows = self.claim_ledger().adopt_unsupervised()
+        except (OSError, ProcessClaimError) as exc:
+            # Supervisor boundary for one transfer attempt: a ledger that cannot
+            # be read must not crash the start path, and must not silently read
+            # as "nothing to adopt" either.
+            rows = [{
+                "pid": service_pid,
+                "attempted_action": CLAIM_ACTION_ADOPT,
+                "result": "adoption_failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }]
+        self.claim_rows = rows
+        for row in rows:
+            if row.get("result") == CLAIM_RESULT_ADOPTED and int(row.get("pid") or 0) == service_pid:
+                self.claim = self._reload_adopted_claim(row)
+                self._claim_was_adopted = self.claim is not None
+                if self._claim_was_adopted:
+                    # The transfer is not complete until the durable record names
+                    # the new supervisor. Until it does, every later probe would
+                    # re-detect a dead launcher and re-run the transaction.
+                    self._stamp_record_supervision(service_pid, adopted=True)
+        return [row for row in rows if int(row.get("pid") or 0) == service_pid]
+
+    def _reload_adopted_claim(self, row: dict[str, Any]) -> ProcessClaim | None:
+        """Re-read the claim this registry just won so it holds the live handle."""
+
+        claim_path = Path(str(row.get("claim_path") or ""))
+        payload = read_json_file(claim_path, None)
+        if not isinstance(payload, dict):
+            return None
+        ledger = self.claim_ledger()
+        return ProcessClaim(
+            path=claim_path,
+            kind=str(payload.get("kind") or ledger.kind),
+            namespace=str(payload.get("namespace") or ledger.namespace),
+            generation=str(payload.get("generation") or ""),
+            claim_id=str(payload.get("claim_id") or ""),
+            pid=int(payload.get("pid") or 0),
+            record={key: payload[key] for key in _CLAIM_IDENTITY_FIELDS if key in payload},
+            supervisor=payload.get("supervisor") if isinstance(payload.get("supervisor"), dict) else {},
+            claimed_at=float(payload.get("claimed_at") or 0.0),
+        )
+
+    def publish_claim(self, pid: int, generation: str) -> None:
+        """Persist reap authority over the daemon this registry just spawned.
+
+        A refused claim is not fatal: the daemon runs and this process still owns
+        it through a live handle.  What is lost is a LATER process's ability to
+        prove anything about it, so the refusal is recorded rather than defaulted
+        away -- an unclaimed helper is simply never adoptable or reapable by
+        claim, which is the correct fail-closed outcome.
+        """
+
+        try:
+            self._claim_was_adopted = False
+            self.claim = self.claim_ledger().publish(
+                int(pid),
+                generation=str(generation or ""),
+                details={"service": self.spec.name, "socket": str(self.socket_path)},
+            )
+        except ProcessClaimError as exc:
+            self.claim = None
+            self.claim_rows = [{
+                "pid": int(pid),
+                "attempted_action": LIFETIME_ACTION_NONE,
+                "result": LIFETIME_RESULT_REFUSED,
+                "reason": exc.reason_code,
+            }]
+
+    def _stamp_record_supervision(self, pid: int, *, generation: str = "", adopted: bool = False) -> bool:
+        """Write claim and supervision provenance into the record already on disk.
+
+        Deliberately NOT a second `status` RPC. The identity was proven moments
+        ago; asking the wire again would be a second source for one fact, and on
+        the startup path it would add a post-deadline call the one-final-probe
+        contract forbids.
+        """
+
+        with self._record_lock():
+            record = self._read_record()
+            if int(record.get("pid") or 0) != int(pid):
+                return False
+            stamped = dict(record)
+            stamped["claim_id"] = self.claim.claim_id if self.claim is not None else ""
+            resolved_generation = str(generation or "") or self._resolved_spawn_generation(int(pid))
+            if resolved_generation:
+                stamped["spawn_generation"] = resolved_generation
+            stamped["namespace"] = str(self.service_dir)
+            stamped["root_sharing"] = root_sharing_mode(private_root=self.managed_private_root)
+            if adopted:
+                # The ONLY path on which supervision provenance changes hands.
+                stamped["supervisor"] = self.host_identity.process_record_fields()
+                stamped["launcher_pid"] = os.getpid()
+                stamped["launcher_port"] = local_service_launch_port()
+            stamped["updated_at"] = wall_clock()
+            return self._write_record_unlocked(stamped)
+
+    def _authorization_record(self, record: dict[str, Any], service_pid: int) -> dict[str, Any]:
+        """Fill dimensions this caller can PROVE, and leave the rest missing.
+
+        These are proofs, not defaults.  The namespace is proven because this
+        record was read from exactly ``self.record_path``, which lives in exactly
+        ``self.service_dir``; the spawn generation is proven because it is read
+        live out of the running process's inherited environment.  Anything that
+        cannot be proven stays absent so the authorization refuses, which is what
+        keeps a pre-existing record from silently acquiring authority it never
+        carried.
+        """
+
+        proven = dict(record)
+        proven["namespace"] = str(self.service_dir)
+        if not str(proven.get("spawn_generation") or ""):
+            ownership = self.spawn_ownership
+            if ownership is not None and int(ownership.leader_pid) == int(service_pid):
+                # This registry spawned that exact pid and REMEMBERS the marker
+                # it passed. That memory is independent of the target, so
+                # re-proving it against the live environment can genuinely
+                # disagree. `_resolved_spawn_generation` is deliberately NOT used
+                # here: its first source is the target's own environment, and a
+                # dimension read off the target on both sides can never vary.
+                proven["spawn_generation"] = str(ownership.generation_marker)
+        return proven
+
+    def _terminate_recorded_generation(
+        self,
+        record: dict[str, Any],
+        service_pid: int,
+        *,
+        claim_state: str,
+    ) -> TerminationOutcome:
+        """Stop one recorded generation through the ONE destructive owner.
+
+        This used to be a bespoke SIGTERM/grace/SIGKILL block whose trigger was
+        "a future launcher start happened", which is not authority for anything:
+        it makes a survivor of a launcher that never returns unresolvable, and it
+        made this one of four separate places that could kill a daemon on four
+        different triggers with four different fences.
+        """
+
+        diagnostic = self._record_process_diagnostic(record)
+        authorization = authorize_service_destruction(
+            self._authorization_record(record, service_pid),
+            diagnostic=diagnostic,
+            expected_kind=self.spec.name,
+            expected_namespace=str(self.service_dir),
+            live_generation_reader=process_spawn_generation,
+            claim_state=claim_state,
+            # A record this registry published before generations existed carries
+            # none, and this build may not signal a process on a proof it never
+            # wrote. That is the RETAINED disposition, not a waiver: the owner
+            # returns one typed row naming the absent dimension and sends
+            # nothing, and the caller below refuses to remove the record or
+            # unlink the socket because `confirmed_dead` stays False. A
+            # generation that IS recorded still has to re-prove live, and a
+            # mismatch still refuses.
+        )
+        return terminate_authorized_process(
+            authorization,
+            still_current=lambda: process_record_diagnostic(record, host_identity=self.host_identity).current,
+            identity_replaced=lambda: process_record_diagnostic(
+                record, host_identity=self.host_identity
+            ).reason is LocalProcessReason.PROCESS_IDENTITY_REUSED,
+            grace_seconds=LOCAL_SERVICE_RETIRE_GRACE_SECONDS,
+            force_seconds=LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
+            clock=self.clock,
+            sleep=self.sleep,
         )
 
     def _retire_incompatible_service(self) -> bool:
@@ -1426,7 +2331,7 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
-        dead_launcher_reclaimable = self._can_reclaim_dead_launcher_service(service_pid)
+        dead_launcher_reclaimable, claim_state = self._dead_launcher_survivor_decision(service_pid)
         newer_reclaimable = service_version > self.spec.protocol_version and dead_launcher_reclaimable
         if service_version > self.spec.protocol_version and not newer_reclaimable:
             self._upgrade_required = {
@@ -1585,10 +2490,51 @@ class LocalServiceRegistry:
                 grace_seconds = LOCAL_SERVICE_JOBD_DRAIN_GRACE_SECONDS
 
         def retained_process_state() -> str:
-            live_start_identity = process_start_identity(service_pid)
-            if live_start_identity == retained_start_identity and pid_is_alive(service_pid):
+            """Classify the retained identity through the ONE zombie-aware fence.
+
+            This was the first incorrect boundary in the retirement path, and it
+            was a divergent copy rather than a missing feature.  ``pid_is_alive``
+            is ``os.kill(pid, 0)`` and ``process_start_identity`` reads
+            ``/proc/<pid>/stat``; both answer identically for a running process
+            and for an exited-but-unreaped one, because a zombie keeps its PID,
+            its PGID, and its start ticks.  Measured: every daemon exits on
+            SIGTERM in ~0.11-0.14s, yet this predicate reported ``"current"`` for
+            the whole 0.5s grace AND the whole 2.0s force budget for our own
+            unreaped child, so retirement never confirmed.  The authority gates a
+            few lines below already used ``process_record_diagnostic``, which
+            handles ``Z`` -- so the same function held two liveness predicates
+            that disagreed, and the zombie-blind one drove the loop.
+
+            Raising the budgets, sleeping, or retrying cannot help: the process
+            is already dead and is never coming back to be observed.  A reason
+            the fence cannot classify as gone or reused is ``"unproven"``, which
+            reaches the final ``!= "exited"`` check and refuses -- no signal, no
+            record removal, no socket unlink on an identity we cannot prove.
+            """
+            diagnostic = process_record_diagnostic(record, host_identity=self.host_identity)
+            if diagnostic.current:
                 return "current"
-            return "replaced" if pid_is_alive(service_pid) else "exited"
+            # Publish the CURRENT transition, not the pre-handoff one. When a
+            # retired pid is replaced mid-retirement the registry returned a bare
+            # False while `status()["process_diagnostic"]` still described the
+            # process as it was BEFORE the handoff, so a caller could not tell a
+            # handoff from a permission failure or a wedged daemon -- three very
+            # different operator actions behind one silent False.
+            # `PROCESS_IDENTITY_REUSED` already carries both the recorded and the
+            # observed birth identity, which is exactly the old-and-new pair a
+            # handoff needs, so nothing new is invented here.
+            self._publish_retirement_transition(diagnostic)
+            if diagnostic.reason is LocalProcessReason.PROCESS_IDENTITY_REUSED:
+                return "replaced"
+            # `pid_is_serving` is the ONE predicate separating "gone" from "an
+            # exited-but-unreaped corpse that still answers os.kill(pid, 0) and
+            # still reports its original start ticks". The fence above already
+            # routes a zombie to PROCESS_NOT_FOUND, so the two spellings agree
+            # rather than being a second copy that can drift apart -- which is
+            # exactly what this loop used to carry.
+            if diagnostic.reason is LocalProcessReason.PROCESS_NOT_FOUND or not pid_is_serving(service_pid):
+                return "exited"
+            return "unproven"
 
         deadline = self.clock() + grace_seconds
         process_state = retained_process_state()
@@ -1598,41 +2544,14 @@ class LocalServiceRegistry:
         if process_state == "replaced":
             return False
         if process_state == "current":
-            diagnostic = self._record_process_diagnostic(record)
-            if not diagnostic.current:
+            # ONE destructive owner performs the escalation and reports what it
+            # actually did; this function no longer holds a private copy of the
+            # SIGTERM/grace/SIGKILL algorithm or of the fence that guards it.
+            outcome = self._terminate_recorded_generation(record, service_pid, claim_state=claim_state)
+            self._process_diagnostic = {**self._process_diagnostic, "termination": outcome.as_dict()}
+            if not outcome.confirmed_dead:
                 return False
-            try:
-                os.kill(service_pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                return False
-            deadline = self.clock() + LOCAL_SERVICE_RETIRE_GRACE_SECONDS
             process_state = retained_process_state()
-            while process_state == "current" and self.clock() < deadline:
-                self.sleep(0.03)
-                process_state = retained_process_state()
-            if process_state == "replaced":
-                return False
-            if process_state == "current":
-                # SIGTERM alone did not exit within the grace deadline -- a wedged generation, not
-                # merely a slow one. Force it rather than leaving it running under a shared root.
-                diagnostic = self._record_process_diagnostic(record)
-                if not diagnostic.current:
-                    return False
-                try:
-                    os.kill(service_pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except PermissionError:
-                    return False
-                deadline = self.clock() + LOCAL_SERVICE_RETIRE_FORCE_SECONDS
-                process_state = retained_process_state()
-                while process_state == "current" and self.clock() < deadline:
-                    self.sleep(0.03)
-                    process_state = retained_process_state()
-                if process_state == "replaced":
-                    return False
         if process_state != "exited" or self._remove_stale_record() is not True:
             return False
         try:
@@ -1640,6 +2559,19 @@ class LocalServiceRegistry:
         except FileNotFoundError:
             return True
         return True
+
+    def _publish_retirement_transition(self, diagnostic: LocalProcessDiagnostic) -> None:
+        """Publish the CURRENT transition so a caller can act on what just happened."""
+
+        self._process_diagnostic = {
+            **diagnostic.as_dict(),
+            "transition": LOCAL_SERVICE_RETIREMENT_TRANSITIONS.get(
+                diagnostic.reason,
+                LOCAL_SERVICE_TRANSITION_IDENTITY_UNPROVEN,
+            ),
+            "service": self.spec.name,
+            "socket": str(self.socket_path),
+        }
 
     def _request(
         self,
@@ -1684,7 +2616,7 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
         if service_version > self.spec.protocol_version:
-            if self._can_reclaim_dead_launcher_service(int(response.get("pid") or 0)):
+            if self._is_dead_launcher_survivor(int(response.get("pid") or 0)):
                 # _CurrentRegistry observes the wire fence before this health
                 # check.  Clear that provisional fence so ensure_started can
                 # execute the ledger-proven stale-owner recovery below.
@@ -1712,9 +2644,15 @@ class LocalServiceRegistry:
                 service_build > self.spec.build_revision
                 or str(response.get("code_revision") or "") == self.spec.code_revision
             )
-        if healthy and self._can_reclaim_dead_launcher_service(int(response.get("pid") or 0)):
-            self.invalidate_rpc_health()
-            return False
+        if healthy and self._is_dead_launcher_survivor(int(response.get("pid") or 0)):
+            # The launcher that created this daemon is gone. Whether the daemon
+            # survives is the adoption transaction's answer, not this probe's:
+            # under a caller-shared root a successor may inherit it, and under a
+            # managed-private root there is no successor and it must be stopped.
+            may_reclaim, _claim_state = self._dead_launcher_survivor_decision(int(response.get("pid") or 0))
+            if may_reclaim:
+                self.invalidate_rpc_health()
+                return False
         if healthy:
             self._upgrade_required = None
             self.note_rpc_success()
@@ -1750,8 +2688,24 @@ class LocalServiceRegistry:
             # this daemon (shared daemons keep the first launcher's stamp; live
             # lease/client state, not this record, decides sharedness).
             "pgid": process_group_id(pid),
+            # `launcher_pid` scopes a group to the port that asked for it; it is
+            # NOT authority. A bare integer proves nothing after that pid exits or
+            # is recycled, which is why the fenced `supervisor` record below --
+            # host, boot, pid AND process-start identity -- is what every
+            # destructive decision reads. First-writer-wins is enforced by
+            # `_merge_supervision_provenance`, not by this dict.
             "launcher_pid": os.getpid(),
             "launcher_port": local_service_launch_port(),
+            "supervisor": self.host_identity.process_record_fields(),
+            # The directory this record belongs to. Two YOLOmux installations on
+            # one host must never read each other's records as their own.
+            "namespace": str(self.service_dir),
+            # The spawn epoch, re-provable live from the child's inherited
+            # environment. Without it a survivor of generation N is
+            # indistinguishable from the live process of generation N+1.
+            "spawn_generation": self._resolved_spawn_generation(pid),
+            "root_sharing": root_sharing_mode(private_root=self.managed_private_root),
+            "claim_id": self.claim.claim_id if self.claim is not None else "",
             "worker_pids": [int(worker) for worker in worker_pids if isinstance(worker, int) and worker > 0] if isinstance(worker_pids, list) else [],
             "protocol_version": int(status.get("version") or 0),
             "socket": str(self.socket_path),
@@ -1762,6 +2716,27 @@ class LocalServiceRegistry:
         if isinstance(source_epoch, str) and source_epoch:
             record["source_epoch"] = source_epoch[:160]
         return record
+
+    def _resolved_spawn_generation(self, pid: int) -> str:
+        """Return the spawn marker this exact pid still proves, or the empty string.
+
+        Read live from the process rather than remembered, because the point of
+        the marker is to survive the death of whatever remembered it. A registry
+        that spawned this generation holds the same value in `spawn_ownership`;
+        a registry that ADOPTED a running daemon has no memory of it at all and
+        must read it from the process, which is exactly what makes generation a
+        usable dimension across a launcher restart.
+        """
+
+        if int(pid) <= 1:
+            return ""
+        observed = process_spawn_generation(int(pid))
+        if observed:
+            return str(observed)
+        ownership = self.spawn_ownership
+        if ownership is not None and int(ownership.leader_pid) == int(pid):
+            return str(ownership.generation_marker)
+        return ""
 
     def _record_publication_refusal(self, status: dict[str, Any], record: dict[str, Any]) -> str:
         """Name why a status response may not become the durable identity record."""
@@ -1875,9 +2850,15 @@ class LocalServiceRegistry:
         """
         recorded_pid = int(self._read_record().get("pid") or 0)
         diagnostic_reason = str(self._process_diagnostic.get("reason") or "unknown")
+        # The transition is what separates "someone else replaced this pid while
+        # we were retiring it" from "we were refused permission" and from "the
+        # daemon is wedged". Without it every one of them read as the same
+        # unactionable blocked start.
+        transition = str(self._process_diagnostic.get("transition") or "")
+        transition_text = f", transition={transition}" if transition else ""
         self._failure_reason = redact_local_service_text(
             f"{self.spec.name} start blocked by {stage} "
-            f"(record_pid={recorded_pid}, reason={diagnostic_reason})"
+            f"(record_pid={recorded_pid}, reason={diagnostic_reason}{transition_text})"
         )
 
     def _stderr_tail(self) -> str:
@@ -2092,10 +3073,77 @@ class LocalServiceRegistry:
         record = self._read_record()
         if int(record.get("pid") or 0) != pid:
             return
-        with file_lock(self.lock_path, dir_mode=0o700):
+        with self._record_lock():
             current = self._read_record()
             if int(current.get("pid") or 0) == pid:
                 self._remove_stale_record()
+                self._release_claim_for(pid)
+
+    def _adopted_child_pid(self) -> int:
+        """Return the recorded pid this process may `os.waitpid` for, or 0.
+
+        Arming the adopted reaper is arming `waitpid`, and `waitpid` is only ever
+        legitimate for THIS process's own child. That is the proof, and it is a
+        live measurement taken through the one native per-pid reader beside the
+        identity fence -- not `launcher_pid` and not the record's `supervisor`,
+        because two successors of the same daemon read the SAME values out of the
+        same record and under a caller-shared root both of those values can
+        legitimately be this very process.
+
+        The guard used to be "I hold no Popen" plus "the record is current",
+        which every caller of a healthy shared daemon satisfies. A second server
+        that merely leased the daemon armed a thread that waited on a process it
+        never parented, got `ChildProcessError` immediately, and walked straight
+        into retiring a LIVE daemon another supervisor owns -- stopped only by
+        `_remove_stale_record`'s own liveness fence, the second line of defence
+        standing in for the missing first one, once per adoption per server.
+        """
+
+        if self.process is not None:
+            return 0
+        record = self._read_record()
+        pid = int(record.get("pid") or 0)
+        if pid <= 1:
+            return 0
+        if not process_record_diagnostic(record, host_identity=self.host_identity).current:
+            return 0
+        if process_parent_id(pid) != os.getpid():
+            return 0
+        return pid
+
+    def _arm_adopted_reaper_if_owned(self) -> None:
+        """Arm only for a daemon this process actually parented.
+
+        The gate lives here rather than only inside `_arm_adopted_reaper` so a
+        non-supervising caller does not even attempt it: `ensure_started` reaches
+        the healthy-socket early returns on every lease of a shared daemon, and
+        "attempted and refused" once per call is still a thread's worth of work
+        and a decision this caller has no standing to make.
+        """
+
+        if self._adopted_child_pid():
+            self._arm_adopted_reaper()
+
+    def _release_claim_for(self, pid: int) -> None:
+        """Drop authority once this registry has stopped its own helper.
+
+        A spent claim left behind is not inert: a later pass would read it as
+        authority over whatever process next holds that pid. Releasing is part of
+        retirement, not cleanup.
+        """
+
+        claim = self.claim
+        if claim is None or int(claim.pid) != int(pid):
+            return
+        if not self.claim_ledger().release(claim):
+            self.claim_rows = [{
+                "pid": int(pid),
+                "attempted_action": "release_claim",
+                "result": "claim_remove_failed",
+                "reason": "claim_release_failed",
+            }]
+            return
+        self.claim = None
 
     def _reap_exited_child(self, process: subprocess.Popen[Any]) -> None:
         """Wait for one child and retire only the record that names that exact child."""
@@ -2138,7 +3186,13 @@ class LocalServiceRegistry:
             try:
                 os.waitpid(pid, 0)
             except ChildProcessError:
-                pass
+                # Two different facts arrive as one exception: "this pid was never mine to wait
+                # for" and "something else already reaped it". Neither of them is "the child
+                # exited", so neither may be turned into a retirement on its own. Ask the ONE
+                # zombie-aware liveness fence instead of inferring an exit from a failed wait --
+                # that check belongs here, not downstream in `_remove_stale_record`.
+                if pid_is_serving(pid):
+                    return
             with self.lock:
                 # A fresh spawn in this generation now owns reaping through its own Popen; the
                 # record it published names a different pid and is not this thread's to retire.
@@ -2162,14 +3216,18 @@ class LocalServiceRegistry:
         it idle-exits and then reads as alive to every liveness check. Arm a reaper for the
         recorded pid so the web process reaps its own adopted child -- only while this generation
         holds no Popen of its own, because the spawn path owns reaping then.
+
+        Arming is gated on this registry actually HOLDING supervision of that pid. It used to be
+        gated only on "I have no Popen" plus "the record is current", which every caller of a
+        healthy shared daemon satisfies: a second server that merely leased the daemon armed a
+        thread that `waitpid`ed a process it never parented, got `ChildProcessError` immediately,
+        and walked straight into retiring a LIVE daemon another supervisor owns. Nothing stopped
+        that except `_remove_stale_record`'s own liveness fence -- the second line of defence
+        standing in for the missing first one -- and every leasing server started one such thread
+        per adoption.
         """
-        if self.process is not None:
-            return
-        record = self._read_record()
-        pid = int(record.get("pid") or 0)
-        if pid <= 1:
-            return
-        if not process_record_diagnostic(record, host_identity=self.host_identity).current:
+        pid = self._adopted_child_pid()
+        if not pid:
             return
         if self.process is not None:
             return
@@ -2249,7 +3307,7 @@ class LocalServiceRegistry:
         if self._upgrade_required is not None:
             return False
         if self.recently_healthy():
-            self._arm_adopted_reaper()
+            self._arm_adopted_reaper_if_owned()
             return True
         if self._terminal_failure:
             return False
@@ -2257,7 +3315,7 @@ class LocalServiceRegistry:
         # published. When the follow-up status is lost, fall through to bounded
         # startup and retry instead of reporting a success nothing can prove.
         if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
-            self._arm_adopted_reaper()
+            self._arm_adopted_reaper_if_owned()
             return True
         if self._upgrade_required is not None:
             return False
@@ -2267,7 +3325,7 @@ class LocalServiceRegistry:
             if not self.starts_allowed():
                 return False
             if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
-                self._arm_adopted_reaper()
+                self._arm_adopted_reaper_if_owned()
                 return True
             if self._upgrade_required is not None:
                 return False
@@ -2275,9 +3333,21 @@ class LocalServiceRegistry:
                 return False
             if self.clock() < self.next_start_at:
                 return False
-            with file_lock(self.lock_path, dir_mode=0o700):
+            if self._record_directory_confirmed and (
+                self._lock_directory_is_absent or not self.record_path.parent.exists()
+            ):
+                # This exact owner already published here, so the directory
+                # disappearing since is a teardown, not a first start. Taking the
+                # lock would mkdir + chmod it back into existence.
+                self._record_refusal_reason = redact_local_service_text(
+                    f"{self.spec.name} service directory was removed after this owner published "
+                    "into it; refusing to recreate it for a start"
+                )
+                self._failure_reason = self._record_refusal_reason
+                return False
+            with self._record_lock():
                 if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
-                    self._arm_adopted_reaper()
+                    self._arm_adopted_reaper_if_owned()
                     return True
                 if self._upgrade_required is not None:
                     return False
@@ -2358,6 +3428,14 @@ class LocalServiceRegistry:
 
         self._startup_failure.reset()
         self.refresh_spawn_ownership()
+        ownership = self.spawn_ownership
+        if ownership is not None:
+            # Published while this process still has direct proof of what it
+            # created. That is the only moment the claim can be truthful, and it
+            # is what lets a LATER process decide anything about this daemon
+            # after this one is gone.
+            self.publish_claim(ownership.leader_pid, ownership.generation_marker)
+            self._stamp_record_supervision(ownership.leader_pid, generation=ownership.generation_marker)
         self._start_child_reaper(process)
         return True
 
@@ -2494,10 +3572,54 @@ class LocalServiceRegistry:
             "upgrade_required": dict(self._upgrade_required or {}),
             "failure_reason": self._failure_reason,
             "process_diagnostic": dict(self._process_diagnostic),
+            "root_sharing": root_sharing_mode(private_root=self.managed_private_root),
+            "supervisor": self.supervisor_state(),
+            "claim": {
+                "claim_id": self.claim.claim_id if self.claim is not None else "",
+                "pid": int(self.claim.pid) if self.claim is not None else 0,
+                "generation": self.claim.generation if self.claim is not None else "",
+            },
+            "claim_rows": list(self.claim_rows),
+            "lifetime": self._read_service_lifetime_record(),
             "terminal_failure": self._terminal_failure,
             "start_exit_count": self._start_exit_count,
             "last_exit_code": self._last_exit_code,
         }
+
+    def supervisor_state(self) -> dict[str, Any]:
+        """Name the process currently responsible for this daemon, and whether it inherited it.
+
+        ``transferred`` is the machine-readable answer to "did this daemon
+        outlive its launcher?". It is true only when THIS registry won the atomic
+        adoption transaction for the recorded pid, so two successors can never
+        both report themselves as the transferred supervisor.
+        """
+
+        record = self._read_record()
+        supervisor = record.get("supervisor")
+        if isinstance(supervisor, dict) and supervisor:
+            supervisor_pid = int(supervisor.get("pid") or 0)
+        else:
+            supervisor_pid = int(record.get("launcher_pid") or 0)
+        transferred = (
+            self._claim_was_adopted
+            and self.claim is not None
+            and int(self.claim.pid) > 0
+            and int(self.claim.pid) == int(record.get("pid") or 0)
+        )
+        return {"pid": supervisor_pid, "transferred": bool(transferred)}
+
+    def _read_service_lifetime_record(self) -> dict[str, Any]:
+        """Read the daemon-side surviving-supervisor record beside the socket.
+
+        Published by the daemon's own lifetime owner, so it stays readable when
+        the daemon is too wedged to answer a status RPC -- which is exactly when
+        "who retains this process, and has it already been asked to stop?" is the
+        question being asked.
+        """
+
+        value = read_json_file(self.socket_path.with_suffix(".lifetime.json"), {})
+        return value if isinstance(value, dict) else {}
 
     def resources(self, pid: int) -> dict[str, float | int | None]:
         """Return best-effort worker CPU/RSS without restarting the subprocess.

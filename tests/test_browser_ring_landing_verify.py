@@ -36,11 +36,11 @@ from tests.gate_harness import gate_tmux  # noqa: F401
 from tests.gate_harness import assert_no_surviving_local_service_daemons
 from tests.gate_harness import retire_local_service_daemons_beneath
 from tests.gate_harness import run_fixture_cleanup_phases
-from tests.serving_process import serving_process_table
 from yolomux_lib import auth as auth_module
 from yolomux_lib import common
 from yolomux_lib import server_auth
 from yolomux_lib.infra.worktree_writer import child_process_artifact_environment
+from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import inherited_python_path
 from yolomux_lib.stats_current import client as stats_client
 from yolomux_lib.stats_current import service as stats_service
@@ -165,7 +165,7 @@ def test_ring_server_stop_preserves_retirement_failure_after_stopping_process(mo
 
 def _statsd_processes_for_database(database_path: Path) -> list[dict[str, object]]:
     matches = []
-    for pid, process in serving_process_table().items():
+    for pid, process in bounded_process_table(require_complete=True).items():
         try:
             arguments = shlex.split(process.command)
         except ValueError:
@@ -763,7 +763,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert first_zero_gap["gapRects"], first_zero_gap
 
         _retire_browser_and_stop_server(browser, runtime, process)
-        sidecar_survived_server_stop = latest_statsd_pid > 0 and latest_statsd_pid in serving_process_table()
+        sidecar_survived_server_stop = latest_statsd_pid > 0 and latest_statsd_pid in bounded_process_table(require_complete=True)
         _retire_ring_fixture_daemons(gate_runtime_paths)
 
         restart_started = time.monotonic()

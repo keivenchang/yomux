@@ -23,6 +23,7 @@ from .tmux.tmux_utils import list_tmux_session_names
 from .tmux.tmux_utils import tmux
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import acquire_client_lease
+from .local_services.runtime import request_is_self_connection
 from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import claim_gated_idle_due
 from .local_services.runtime import LocalRpcServiceState
@@ -736,7 +737,7 @@ class PersistentStatusService(LocalRpcServiceState):
 
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         with self.lock:
-            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
+            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), self_connection=request_is_self_connection(request))
             self.lock.notify_all()
         return {**response, "version": STATUSD_PROTOCOL_VERSION}, b""
 
@@ -754,6 +755,10 @@ class PersistentStatusService(LocalRpcServiceState):
 
     def _handle_shutdown_if_idle(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         with self.lock:
+            # Same reaper `idle_due` runs, for the same reason: without it this
+            # handler counted corpses and one crashed client refused every
+            # legitimate idle shutdown forever.
+            reap_dead_client_leases(self.leases)
             leased = bool(self.leases)
         if leased:
             return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""

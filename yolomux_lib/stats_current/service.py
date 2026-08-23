@@ -27,6 +27,7 @@ from yolomux_lib.control import send_yolomux_control_request
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES, safe_socket_path
 from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
 from yolomux_lib.local_services.runtime import acquire_client_lease, claim_gated_idle_due, reap_dead_client_leases, release_client_lease
+from yolomux_lib.local_services.runtime import request_is_self_connection
 from yolomux_lib.local_services.runtime import run_local_rpc_service
 from yolomux_lib.settings import stats_prune_local_time
 from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
@@ -4084,7 +4085,7 @@ class StatsCurrentService:
         return {"ok": True, "profiles": {"retained": len(items), "maximum": MAX_BROWSER_PROFILES, "items": items, "queue_ms": _browser_queue_summary(items)}, "observation_status": {key: value for key, value in self._browser_observation_status().items() if key != "ok"}}, b""
 
     def _handle_lease(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return acquire_client_lease(self.leases, request["client_pid"], request["lease_id"]), b""
+        return acquire_client_lease(self.leases, request["client_pid"], request["lease_id"], self_connection=request_is_self_connection(request)), b""
 
     def _handle_collector_context(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return self._set_collector_context(request), b""

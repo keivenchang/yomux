@@ -48,6 +48,7 @@ from ..local_services.rpc import LOCAL_SERVICE_ERROR_BUSY
 from ..local_services.rpc import LOCAL_RPC_VERSION, new_envelope, request as local_service_request, safe_socket_path  # noqa: F401 - public transport-version compatibility export
 from ..local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from ..local_services.runtime import acquire_client_lease
+from ..local_services.runtime import request_is_self_connection
 from ..local_services.runtime import apply_service_process_priority
 from ..local_services.runtime import claim_gated_idle_due
 from ..local_services.runtime import local_service_exception_cause
@@ -2071,7 +2072,7 @@ class PersistentJobBroker:
         return {"ok": True, "job": self._record_payload(record)}, b""
 
     def _handle_lease(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
+        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), self_connection=request_is_self_connection(request))
         return {**response, "version": JOBD_PROTOCOL_VERSION}, b""
 
     def _handle_release(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
@@ -2113,8 +2114,18 @@ class PersistentJobBroker:
         return {"ok": True, "shutdown": True}, b""
 
     def _handle_shutdown_if_idle(self, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
-        if self.leases:
-            return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
+        # ONE definition of idle. This used to gate on `self.leases` alone while
+        # `_idle_should_stop` also honoured `_has_active_work()`, so a caller
+        # could shut jobd down out from under queued or running jobs simply by
+        # asking through this path instead of waiting for the idle tick. It also
+        # reaps first, so a crashed client's unreleasable lease cannot refuse a
+        # legitimate idle shutdown either.
+        with self.state_lock:
+            reap_dead_client_leases(self.leases)
+            busy = bool(self.leases) or self._has_active_work()
+            lease_count = len(self.leases)
+        if busy:
+            return {"ok": True, "shutdown": False, "leases": lease_count}, b""
         return self._handle_shutdown(request, body)
 
     def _scheduler_loop(self) -> None:

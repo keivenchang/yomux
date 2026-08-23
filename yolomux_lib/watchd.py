@@ -37,6 +37,7 @@ from .local_services.command_router import LocalServiceCommandRouter
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import acquire_client_lease
+from .local_services.runtime import request_is_self_connection
 from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import claim_gated_idle_due
 from .local_services.runtime import reap_dead_client_leases
@@ -1557,7 +1558,7 @@ class PersistentWatchService:
 
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         with self.lock:
-            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), start_identity_reader=process_start_identity, pid_probe=pid_is_alive)
+            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), start_identity_reader=process_start_identity, pid_probe=pid_is_alive, self_connection=request_is_self_connection(request))
             self.lock.notify_all()
         return {**response, "version": WATCHD_PROTOCOL_VERSION, "epoch": self.epoch, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation}, b""
 
@@ -1644,7 +1645,16 @@ class PersistentWatchService:
         return {"ok": True, "shutdown": True}, b""
 
     def _handle_shutdown_if_idle(self, request: dict[str, Any], body: bytes) -> tuple[dict[str, Any], bytes]:
+        # The same departure reap `idle_due` performs, through the same two
+        # owners (`_dead_lease_ids` off the lock, `_reap_locked` under it).
+        # Without it this handler counted corpses: a client that was hard-killed
+        # cannot release its lease, so one crashed caller refused every
+        # legitimate idle shutdown forever. A contended probe reaps nothing and
+        # therefore can only REFUSE the shutdown, never grant one.
+        dead_lease_ids = self._dead_lease_ids()
         with self.lock:
+            if dead_lease_ids and self._reap_locked(dead_lease_ids):
+                self._refresh_configuration_locked()
             if self.leases:
                 return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
         self.stop_event.set()

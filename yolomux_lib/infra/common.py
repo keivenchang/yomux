@@ -260,6 +260,13 @@ def cleanup_previous_boot_runtime_dirs(root: Path) -> tuple[Path, ...]:
 
 
 _YOLOMUX_ROOTS = resolve_yolomux_roots()
+# Whether the caller pinned every product path under one YOLOMUX_ROOT. That is
+# the difference between "several YOLOmux servers share this runtime directory,
+# so a survivor there may legitimately belong to one of them" and "this root has
+# exactly one launcher, so a survivor has no successor to be handed to". Every
+# adoption decision reads this, so it is resolved once beside the roots rather
+# than re-derived from a path shape at each call site.
+MANAGED_PRIVATE_ROOT = _YOLOMUX_ROOTS.root is not None
 RUNTIME_DIR = _YOLOMUX_ROOTS.runtime_dir
 CONFIG_DIR = _YOLOMUX_ROOTS.config_dir
 STATE_DIR = _YOLOMUX_ROOTS.state_dir

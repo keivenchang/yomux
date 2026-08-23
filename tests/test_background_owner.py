@@ -2162,3 +2162,143 @@ def test_owner_acquisition_starts_current_stats_runtime(no_control_socket, monke
         webapp.control_server.stop()
 
     assert runtime_starts == [True]
+
+
+# ---------------------------------------------------------------------------
+# Background-owner cleanup failures must be VISIBLE.
+#
+# Three sites swallow an OSError whole and leave no trace anywhere a human or a
+# status reader can see it:
+#   background_owner.py:356-364  generation-index write in _prune_generation_records
+#   background_owner.py:365-369  generation-record unlink in _prune_generation_records
+#   background_owner.py:628-631  owner-record unlink in stop()
+# Each one silently leaks a durable artifact. A full generations directory then
+# looks identical to a healthy one, which is how a dead owner's rows survive
+# every later pass.
+#
+# CONTRACT: the failure must reach `status_payload()` -- through a counter, a
+# `last_error`, or a `process_diagnostics` row. WHICH surface is Lane B's choice;
+# this asserts only that the payload is no longer byte-identical to the payload
+# of the same run without the failure, which is the definition of "visible".
+# ---------------------------------------------------------------------------
+
+
+_VOLATILE_STATUS_KEYS = ("generation", "latest_generation", "current_owner", "refresh_queue", "search_index", "roles")
+
+
+def _stable_status_payload(registry):
+    """The status payload minus fields that legitimately differ between runs."""
+
+    payload = registry.status_payload()
+    return {key: value for key, value in payload.items() if key not in _VOLATILE_STATUS_KEYS}
+
+
+def _stale_generation_record(registry, *, pid=2):
+    """A generation record whose process is provably gone, so pruning targets it."""
+
+    record = {
+        **registry.generation_record(),
+        **registry.host_identity.process_record_fields(pid=pid, start_identity="proc:1"),
+        "pid": pid,
+        "process_start_identity": "proc:1",
+        "process_start_ticks": 1,
+        "generation_id": "stale-generation",
+    }
+    registry.generations_dir.mkdir(parents=True, exist_ok=True)
+    path = registry.generations_dir / "stale-generation.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    # The compact index is read in preference to the directory, so a record that
+    # is only on disk is never seen by the prune path at all. Drop the index and
+    # let the product's own recovery rebuild it from the files.
+    registry.generation_index_path.unlink(missing_ok=True)
+    assert any(
+        str(item.get("generation_id")) == "stale-generation" for item in registry.read_generation_records()
+    ), "the stale generation never entered the index the prune path reads"
+    return path, record
+
+
+@pytest.mark.parametrize(
+    "failing_site",
+    ["generation_index_write", "generation_record_unlink", "owner_record_unlink"],
+)
+def test_background_owner_cleanup_failures_are_visible_not_swallowed(tmp_path, monkeypatch, failing_site):
+    """A cleanup that failed must not be indistinguishable from one that worked.
+
+    The clean baseline captured first is the POSITIVE CONTROL: it proves the
+    payload comparison sees a real, populated status structure, so a difference
+    below is a real signal rather than two empty dicts disagreeing.
+    """
+    # Fence the stale generation's liveness to this fixture: pid 2 must be
+    # provably gone on every host, or the prune path never runs at all.
+    gone_pid = 2
+    real_start_identity = background_owner_module.process_start_identity
+    real_pid_is_alive = background_owner_module.pid_is_alive
+    monkeypatch.setattr(
+        background_owner_module,
+        "process_start_identity",
+        lambda pid: None if pid == gone_pid else real_start_identity(pid),
+    )
+    monkeypatch.setattr(
+        background_owner_module,
+        "pid_is_alive",
+        lambda pid: False if pid == gone_pid else real_pid_is_alive(pid),
+    )
+
+    owner_dir = tmp_path / f"background-owner-{failing_site}"
+    baseline = BackgroundOwnerRegistry(owner_dir=owner_dir / "clean", clock=lambda: 100.0)
+    baseline.publish_generation()
+    stale_path, _record = _stale_generation_record(baseline)
+    if failing_site == "owner_record_unlink":
+        baseline.attempt_takeover()
+        baseline.stop()
+    else:
+        baseline.live_generation_records()
+    clean_payload = _stable_status_payload(baseline)
+    assert clean_payload.get("counters"), "positive control: the status payload really carries counters"
+    if failing_site != "owner_record_unlink":
+        assert stale_path.exists() is False, "positive control: the clean run really did prune the stale record"
+
+    registry = BackgroundOwnerRegistry(owner_dir=owner_dir / "failing", clock=lambda: 100.0)
+    registry.publish_generation()
+    failing_stale_path, _ = _stale_generation_record(registry)
+
+    real_unlink = Path.unlink
+    real_atomic_write_text = background_owner_module.atomic_write_text
+
+    if failing_site == "generation_index_write":
+        def failing_write(path, text, mode=None):
+            if Path(path) == registry.generation_index_path:
+                raise OSError("simulated index write failure")
+            return real_atomic_write_text(path, text, mode=mode)
+
+        monkeypatch.setattr(background_owner_module, "atomic_write_text", failing_write)
+        registry.live_generation_records()
+    elif failing_site == "generation_record_unlink":
+        def failing_unlink(self, **kwargs):
+            if self == failing_stale_path:
+                raise OSError("simulated generation-record unlink failure")
+            return real_unlink(self, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        registry.live_generation_records()
+        assert failing_stale_path.exists() is True, "the injected unlink failure did not actually leak a file"
+    else:
+        registry.attempt_takeover()
+        owner_path = registry.owner_path
+        assert owner_path.exists() is True, "positive control: the owner record really was written"
+
+        def failing_unlink(self, **kwargs):
+            if self == owner_path:
+                raise OSError("simulated owner-record unlink failure")
+            return real_unlink(self, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        registry.stop()
+        assert owner_path.exists() is True, "the injected unlink failure did not actually leak the owner record"
+
+    failed_payload = _stable_status_payload(registry)
+
+    assert failed_payload != clean_payload, (
+        f"{failing_site}: the cleanup failed and left a durable artifact behind, yet the status "
+        f"payload is byte-identical to a run where it succeeded -- nothing anywhere can tell them apart"
+    )

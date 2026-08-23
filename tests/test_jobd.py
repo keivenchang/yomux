@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import multiprocessing
@@ -15,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.external_lease_client import assert_daemon_refuses_a_self_lease
+from tests.helpers.external_lease_client import external_lease_client
 from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
 from yolomux_lib import github_client
@@ -485,9 +488,16 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
     and releases it at the end so idle shutdown is NOT weakened (an unheld broker still idles out).
     """
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    external_client = contextlib.ExitStack()
+    client_pid = external_client.enter_context(external_lease_client())
 
     class BrokerLeaseRegistry:
-        """Exercise the lease handlers synchronously; transport timing is not this contract."""
+        """Exercise the lease handlers synchronously; transport timing is not this contract.
+
+        ``client_pid`` is a REAL separate process, because in production this
+        caller is the web server and jobd is a separate daemon. See
+        ``external_lease_client``.
+        """
 
         def __init__(self):
             self.acquired: list[str] = []
@@ -496,9 +506,10 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
         def acquire_lease(self, existing_lease_id=""):
             response = broker.handle({
                 "action": "lease",
-                "client_pid": os.getpid(),
+                "client_pid": client_pid,
                 "lease_id": existing_lease_id,
             })[0]
+            assert response["ok"] is True, f"the external client could not lease the broker: {response}"
             self.acquired.append(str(response.get("lease_id") or ""))
             return response
 
@@ -511,6 +522,10 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
     app.jobd_fs_batch_lease = app_module.JobdInteractionLease(type("JobClient", (), {"registry": registry})())
     try:
         assert broker.handle({"action": "status"})[0]["clients"] == 0
+        assert_daemon_refuses_a_self_lease(broker)
+        assert broker.handle({"action": "status"})[0]["clients"] == 0, (
+            "the refused self-lease pinned the broker anyway"
+        )
 
         observed: dict[str, object] = {}
 
@@ -543,6 +558,7 @@ def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tm
         assert broker._idle_should_stop() is True
     finally:
         app.stop_jobd_operation_service()
+        external_client.close()
 
 
 def test_watch_diff_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
@@ -2339,8 +2355,17 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
     assert service._submit({"task": "text_facts", "payload": {"text": "negative"}, "deadline_ms": -1}) == {"ok": False, "error": "invalid deadline"}
     lease_record = runtime.current_host_identity().process_record_fields()
     service.leases = {str(number): dict(lease_record) for number in range(runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES)}
-    lease_response, _binary = service.handle({"action": "lease", "client_pid": os.getpid()})
-    assert lease_response == {"ok": False, "error": "too many clients", "leases": runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES, "version": jobd.JOBD_PROTOCOL_VERSION}
+    # The saturated-table refusal is only reachable for a caller the fence would
+    # otherwise admit, so the client here has to be a real separate process. A
+    # harness naming ``os.getpid()`` is the daemon itself and is refused one step
+    # earlier -- correctly, and for a completely different reason.
+    with external_lease_client() as client_pid:
+        lease_response, _binary = service.handle({"action": "lease", "client_pid": client_pid})
+        assert lease_response == {"ok": False, "error": "too many clients", "leases": runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES, "version": jobd.JOBD_PROTOCOL_VERSION}
+        # NEGATIVE CONTROL: the external stand-in is not a way around the fence.
+        # A real self-lease is refused for being a self-connection, not for the
+        # full table, so the two refusals cannot be confused for one another.
+        assert_daemon_refuses_a_self_lease(service)
 
     broken = service._queue_record("text_facts", {"text": "crash"}, "interactive", 999, "crash")
     broken.status = "running"
