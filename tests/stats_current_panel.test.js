@@ -2462,13 +2462,10 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
     );
     // jsDebugCurrentBucketRecord derives components from real per-bucket series/model-rate
     // data, which this unit test has no need to fabricate -- set the bucket's own already-
-    // applied costSummary directly, exactly as a prior real per-bucket cost tick would have
-    // left it, so the reconcile patch branch under test has real prior components to merge.
+    // applied ownCostComponents directly (the stable field a real per-bucket cost tick would
+    // have left), so the reconcile patch branch under test has real prior components to merge.
     const bucket90 = jsDebugGraphBuckets.get('90000:60000');
-    bucket90.costSummary = {
-      totalMicroUsd: 40, apiListMicroUsd: 40, totalTokenQuantity: 3, rangeReport: false,
-      components: [{provider: 'anthropic', model: 'claude-5', micro_usd: 40}], models: [], sources: [],
-    };
+    bucket90.ownCostComponents = [{provider: 'anthropic', model: 'claude-5', micro_usd: 40}];
     const richRangeCost2 = {
       priced: {}, unpriced: {}, total_tokens: 11, total_micro_usd: 900,
       evidence: [{provider: 'google', model: 'gemini-3', tokens: 11, micro_usd: 900}],
@@ -2479,6 +2476,28 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
       {buckets: []},
     );
     const latestBucketAfterRound4 = jsDebugGraphBuckets.get('90000:60000');
+    const round4Flagged = latestBucketAfterRound4.costSummary.rangeReport;
+    const round4ComponentCount = latestBucketAfterRound4.costSummary.components.length;
+    const round4ComponentModels = latestBucketAfterRound4.costSummary.components.map(row => row.model).sort().join(',');
+    const round4TotalTokens = latestBucketAfterRound4.costSummary.totalTokenQuantity;
+
+    // Round 5 (found by a THIRD independent audit of the round-4 fix): the SAME bucket (90)
+    // stays latest for a SECOND consecutive untouched round. The old guard read
+    // costSummary.rangeReport to mean "already handled this round" -- but round 4's patch also
+    // sets that flag, so round 5's guard would have seen it as already-true and returned early,
+    // freezing the bucket's totals/components at round 4's stale values forever instead of
+    // refreshing to round 5's real range data. This must NOT duplicate (own component still
+    // appears once) and must NOT freeze (range total/component must update to round 5's data).
+    const richRangeCost3 = {
+      priced: {}, unpriced: {}, total_tokens: 99, total_micro_usd: 5000,
+      evidence: [{provider: 'meta', model: 'llama-6', tokens: 99, micro_usd: 5000}],
+      models: [], agents: [],
+    };
+    applyJsDebugCurrentDelta(
+      {buckets: [{start: 0, duration: 60}, {start: 30, duration: 60}, {start: 60, duration: 60}, {start: 90, duration: 60}], cost_report: richRangeCost3},
+      {buckets: []},
+    );
+    const latestBucketAfterRound5 = jsDebugGraphBuckets.get('90000:60000');
 
     result = {
       afterRound1,
@@ -2488,10 +2507,14 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
       round3Flagged,
       round3ModelCount,
       round3TotalTokens,
-      round4Flagged: latestBucketAfterRound4.costSummary.rangeReport,
-      round4ComponentCount: latestBucketAfterRound4.costSummary.components.length,
-      round4ComponentModels: latestBucketAfterRound4.costSummary.components.map(row => row.model).sort().join(','),
-      round4TotalTokens: latestBucketAfterRound4.costSummary.totalTokenQuantity,
+      round4Flagged,
+      round4ComponentCount,
+      round4ComponentModels,
+      round4TotalTokens,
+      round5Flagged: latestBucketAfterRound5.costSummary.rangeReport,
+      round5ComponentCount: latestBucketAfterRound5.costSummary.components.length,
+      round5ComponentModels: latestBucketAfterRound5.costSummary.components.map(row => row.model).sort().join(','),
+      round5TotalTokens: latestBucketAfterRound5.costSummary.totalTokenQuantity,
     };
   `, context);
   assert.equal(context.result.afterRound1, true, 'the only bucket must carry the range-cost flag after round 1');
@@ -2505,6 +2528,10 @@ test('the range-cost owner never leaves two flagged buckets or a lost total when
   assert.equal(context.result.round4ComponentCount, 2, 'the bucket\'s own prior component and the new range component must both survive -- neither dropped nor duplicated');
   assert.equal(context.result.round4ComponentModels, 'claude-5,gemini-3', 'the bucket\'s own component must be merged with the range component, not replaced by it');
   assert.equal(context.result.round4TotalTokens, 11, 'the top-line total must reflect the new range total');
+  assert.equal(context.result.round5Flagged, true, 'a bucket staying latest across a SECOND consecutive untouched round must still end up flagged');
+  assert.equal(context.result.round5ComponentCount, 2, 'still exactly the own component plus the current round\'s range component -- never duplicated across rounds');
+  assert.equal(context.result.round5ComponentModels, 'claude-5,llama-6', 'round 5\'s range component must replace round 4\'s, not accumulate alongside it, while the bucket\'s own component survives');
+  assert.equal(context.result.round5TotalTokens, 99, 'the total must refresh to round 5\'s real range data, not freeze at round 4\'s stale total');
 });
 
 test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {
