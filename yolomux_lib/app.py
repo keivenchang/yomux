@@ -54,6 +54,8 @@ from .local_services.client import local_service_failure_is_busy
 from .local_services.client import local_service_failure_is_transient
 from .local_services.client import local_service_polling_capabilities
 from .local_services.client import release_local_service_lease_eventually
+from .local_services.rpc import LOCAL_SERVICE_LIFECYCLE_REASONS
+from .local_services.rpc import LOCAL_SERVICE_REASON_TIMEOUT
 from .local_services.rpc import local_service_traffic_snapshot
 from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
@@ -3135,7 +3137,7 @@ class WatchBridge:
         if action not in WATCHD_FAILURE_ACTIONS:
             raise ValueError("unknown watchd failure action")
         transport = str(response.get("_transport_error") or "")
-        state = "not_running" if transport in {"absent", "refused"} else "errored"
+        state = "not_running" if transport in LOCAL_SERVICE_LIFECYCLE_REASONS else "errored"
         if transport:
             with self.state.lock:
                 if self.state.event_watcher_record is not record or record.stop_event.is_set():
@@ -3279,7 +3281,7 @@ class WatchBridge:
                 response = app.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
                 if response.get("ok") is not True:
                     app.publish_watchd_failure(record, response, action="wait_revision")
-                    if response.get("_transport_error") in {"absent", "refused"}:
+                    if response.get("_transport_error") in LOCAL_SERVICE_LIFECYCLE_REASONS:
                         record.watchd_lease_id = ""
                     record.watchd_stop_event.wait(1.0)
                     continue
@@ -14970,7 +14972,7 @@ class TmuxWebtermApp:
         except Exception:
             reservation.release()
             raise
-        if response.get("_transport_error") == "timeout":
+        if response.get("_transport_error") == LOCAL_SERVICE_REASON_TIMEOUT:
             response, body = self.job_client.produce(
                 "filesystem_operation", job_payload, priority=priority, generation=generation,
                 coalesce_key=product_key, deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000), delivery="receipt",

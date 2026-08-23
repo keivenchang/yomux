@@ -9,6 +9,7 @@ from yolomux_lib import app as app_module
 from yolomux_lib import jobd
 from yolomux_lib.local_services import client as local_service_client
 from yolomux_lib.local_services import registry as local_service_registry
+from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services.rpc import LocalRpcError
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
@@ -75,7 +76,11 @@ def test_registry_lease_release_protocol_failure_stops_without_retry(tmp_path, m
     assert owner.terminal_response is not None
     assert owner.terminal_response["ok"] is False
     assert owner.terminal_response["error"] == "unsupported RPC version"
-    assert owner.terminal_response["_transport_error"] == "rpc"
+    # Was the duplicate classifier's bare 'rpc' fallthrough, which collapsed every unnamed
+    # OSError and LocalRpcError into one string. Routed through the single owner in rpc.py,
+    # "unsupported RPC version" is the case that owner names exactly: a stale peer that needs
+    # an upgrade, which a caller must be able to tell apart from a generic transport failure.
+    assert owner.terminal_response["_transport_error"] == rpc.LOCAL_SERVICE_REASON_REVISION_MISMATCH
     assert owner.terminal_response["exception_type"] == "LocalRpcError"
     assert owner.terminal_response["cause"]["exception"] == {
         "type": "LocalRpcError",

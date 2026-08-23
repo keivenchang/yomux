@@ -12,6 +12,7 @@ from threading import Event
 
 import pytest
 
+from yolomux_lib.infra.host_identity import LocalProcessReason
 from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib import approvald
 from yolomux_lib import jobd
@@ -20,6 +21,8 @@ from yolomux_lib.local_services.client import LocalServiceClient
 from yolomux_lib.local_services.client import TransportFailure
 from yolomux_lib.local_services import client as local_service_client_mod
 from yolomux_lib.local_services import runtime
+from yolomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_FORCE_SECONDS
+from yolomux_lib.local_services.registry import LOCAL_SERVICE_RETIRE_GRACE_SECONDS
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
@@ -2096,67 +2099,321 @@ def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_pat
     assert registry.socket_path.exists() is False
 
 
+class _VirtualRetirementClock:
+    """One retirement run driven entirely by an injected clock.
+
+    Nothing here touches the wall clock: ``clock()`` only ever moves because the
+    product called ``sleep()``, so every elapsed value asserted below is the
+    product's own declared budget rather than a machine-speed measurement.
+    """
+
+    def __init__(self, tmp_path, monkeypatch, *, service_pid=4242, spec_version=23, service_version=22):
+        self.now = [100.0]
+        self.sleeps: list[float] = []
+        self.actions: list[str] = []
+        self.signals: list[int] = []
+        self.marks: dict[str, float] = {}
+        self.alive = {service_pid: True}
+        self.registry = LocalServiceRegistry(
+            tmp_path,
+            LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", spec_version),
+            clock=lambda: self.now[0],
+            sleep=self._sleep,
+        )
+        record = {
+            **_process_record(service_pid),
+            "service": "statsd",
+            "socket": str(self.registry.socket_path),
+            "protocol_version": service_version,
+        }
+        self.retained_start_identity = str(record["process_start_identity"])
+        # The identity the live PID currently reports. Flipping it models the exact
+        # race the retirement guards exist for: the retained generation exits and an
+        # unrelated process is handed the same PID before this loop looks again.
+        self.live_start_identity = [self.retained_start_identity]
+        self.registry._write_record(record)
+        self.registry.socket_path.touch()
+
+        def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+            self.actions.append(method)
+            self.on_request(method)
+            if method == "shutdown":
+                return {"ok": True}
+            return {
+                "ok": False,
+                "error_code": "upgrade_required",
+                "version": service_version,
+                "required_protocol_version": service_version,
+                "pid": service_pid,
+            }
+
+        def fake_kill(pid, signum):
+            self.signals.append(signum)
+            self.on_signal(signum, pid)
+
+        monkeypatch.setattr(self.registry, "_request", fake_request)
+        monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: self.alive.get(pid, False))
+        monkeypatch.setattr(
+            registry_mod,
+            "process_start_identity",
+            lambda pid: self.live_start_identity[0] if self.alive.get(pid, False) else None,
+        )
+        # Keep the identity fence reading only this fixture's state: without it,
+        # process_record_diagnostic would consult the real /proc for `service_pid`.
+        monkeypatch.setattr(registry_mod, "process_state", lambda pid: "")
+        monkeypatch.setattr(registry_mod.os, "kill", fake_kill)
+
+    def _sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now[0] += seconds
+
+    def on_request(self, method):
+        if method == "shutdown":
+            self.marks["shutdown"] = self.now[0]
+
+    def on_signal(self, signum, pid):
+        self.marks[signum] = self.now[0]
+
+    def run(self):
+        result = self.registry._retire_incompatible_service()
+        self.marks["returned"] = self.now[0]
+        return result
+
+    @property
+    def poll_seconds(self) -> float:
+        """The product's own observed poll step, never a literal re-spelled here."""
+        assert self.sleeps, "no poll step was observed; nothing waited"
+        assert len(set(self.sleeps)) == 1, f"retirement polled at inconsistent steps: {sorted(set(self.sleeps))}"
+        return self.sleeps[0]
+
+
 def test_registry_retire_incompatible_service_escalates_to_sigkill_when_wedged(tmp_path, monkeypatch):
     """A generation that answers the RPC shutdown request but never actually exits
     (ignores SIGTERM) must be force-terminated, not left running under the shared
     socket forever. This is the same graceful-then-forced contract
     ``shutdown_owned_local_services`` already proves for the multi-service path,
     applied here to the single-service incompatible-generation retirement path.
+
+    This is also the differential control for
+    ``test_registry_retirement_yields_to_a_replacement_holding_the_same_pid``: the
+    only variable that differs between them is whether the live PID's start identity
+    still matches the retained record. Here it does, so every assertion is the exact
+    inverse -- signals are sent, and the record and socket are reclaimed.
     """
-    now = [100.0]
-    registry = LocalServiceRegistry(
-        tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
-        clock=lambda: now[0],
-        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
-    )
-    actions = []
-    signals_sent = []
-    alive = {4242: True}
-    registry._write_record({
-        **_process_record(4242),
-        "service": "statsd",
-        "socket": str(registry.socket_path),
-        "protocol_version": 22,
-    })
-    registry.socket_path.touch()
+    harness = _VirtualRetirementClock(tmp_path, monkeypatch)
+    base_on_signal = harness.on_signal
 
-    def fake_request(method, payload=None, timeout=0.2):
-        actions.append(method)
-        if method == "shutdown":
-            # The RPC layer acknowledges the request, but the process itself is
-            # wedged and never actually exits -- SIGTERM below must also be tried
-            # before anything is declared retired.
-            return {"ok": True}
-        return {
-            "ok": False,
-            "error_code": "upgrade_required",
-            "version": 22,
-            "required_protocol_version": 22,
-            "pid": 4242,
-        }
-
-    def fake_kill(pid, sig):
-        signals_sent.append(sig)
-        if sig == signal.SIGKILL:
-            alive[pid] = False
+    def on_signal(signum, pid):
+        base_on_signal(signum, pid)
         # SIGTERM is deliberately a no-op here: the wedged process ignores it.
+        if signum == signal.SIGKILL:
+            harness.alive[pid] = False
 
-    monkeypatch.setattr(registry, "_request", fake_request)
-    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
-    monkeypatch.setattr(
-        registry_mod,
-        "process_start_identity",
-        lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None,
+    harness.on_signal = on_signal
+
+    assert harness.run() is True
+
+    assert harness.actions == ["ping", "shutdown"]
+    assert harness.signals == [signal.SIGTERM, signal.SIGKILL]
+    assert harness.registry.record_path.exists() is False
+    assert harness.registry.socket_path.exists() is False
+
+
+@pytest.mark.parametrize(
+    "replace_at, expected_signals",
+    [
+        ("shutdown", []),
+        (signal.SIGTERM, [signal.SIGTERM]),
+        (signal.SIGKILL, [signal.SIGTERM, signal.SIGKILL]),
+    ],
+    ids=["before_any_signal", "during_sigterm_grace", "during_sigkill_force"],
+)
+def test_registry_retirement_yields_to_a_replacement_holding_the_same_pid(
+    tmp_path, monkeypatch, replace_at, expected_signals
+):
+    """A live PID whose start identity no longer matches the retained record is a
+    DIFFERENT process, so retirement owns no authority over it.
+
+    ``retained_process_state()`` calls that ``"replaced"``, and each of the three
+    guards that consume it must abandon the retirement immediately: no further
+    signal, no record removal, no socket unlink. Signalling here would kill an
+    unrelated process that merely inherited the PID, and unlinking here would
+    destroy the incoming generation's own socket and ledger row.
+
+    This is NOT the watchd in-process worker-slot handoff covered by
+    ``test_watchd_demand_lifecycle.py`` -- this is the OS-level PID handoff seen
+    by the registry's retirement loop.
+    """
+    harness = _VirtualRetirementClock(tmp_path, monkeypatch)
+    replacement_identity = f"{harness.retained_start_identity}-replacement"
+    assert replacement_identity != harness.retained_start_identity
+
+    def replace_now():
+        harness.live_start_identity[0] = replacement_identity
+
+    if replace_at == "shutdown":
+        harness.on_request = lambda method: replace_now() if method == "shutdown" else None
+    else:
+        base_on_signal = harness.on_signal
+
+        def on_signal(signum, pid):
+            base_on_signal(signum, pid)
+            if signum == replace_at:
+                replace_now()
+
+        harness.on_signal = on_signal
+
+    record_before = harness.registry.record_path.read_bytes()
+
+    assert harness.run() is False, "retirement claimed success against a process it never proved it owned"
+
+    assert harness.signals == expected_signals, (
+        "the replacement generation was signalled, or an earlier escalation step was skipped"
     )
-    monkeypatch.setattr(registry_mod.os, "kill", fake_kill)
+    # Positive control that these assertions are not vacuous: the same harness with
+    # the start identity left UNCHANGED signals, removes the record and unlinks the
+    # socket -- see test_registry_retire_incompatible_service_escalates_to_sigkill_when_wedged.
+    assert harness.registry.record_path.exists() is True
+    assert harness.registry.record_path.read_bytes() == record_before, (
+        "the incoming generation's ledger row was rewritten or deleted by the outgoing retirement"
+    )
+    assert harness.registry.socket_path.exists() is True, "the replacement's socket was unlinked"
 
-    assert registry._retire_incompatible_service() is True
 
-    assert actions == ["ping", "shutdown"]
-    assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
-    assert registry.record_path.exists() is False
-    assert registry.socket_path.exists() is False
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "the replacement guards return False silently: no typed diagnostic names the PID handoff, "
+        "so status() still reports the stale current_local_process reason. Needs the product change."
+    ),
+)
+def test_registry_retirement_publishes_a_typed_diagnostic_for_a_pid_handoff(tmp_path, monkeypatch):
+    """Yielding to a replacement must be visible, not merely silent.
+
+    ``LocalProcessReason.PROCESS_IDENTITY_REUSED`` is the exact typed reason for
+    "this PID is alive but is no longer the process the record names", and the
+    diagnostic carries both the recorded and the observed start identity. A caller
+    that only sees ``False`` cannot tell a PID handoff apart from a permission
+    failure or a wedged daemon.
+    """
+    harness = _VirtualRetirementClock(tmp_path, monkeypatch)
+    replacement_identity = f"{harness.retained_start_identity}-replacement"
+    harness.on_request = lambda method: (
+        harness.live_start_identity.__setitem__(0, replacement_identity) if method == "shutdown" else None
+    )
+
+    assert harness.run() is False
+
+    diagnostic = harness.registry.status()["process_diagnostic"]
+    assert diagnostic, "positive control: a typed diagnostic dict is exposed at all"
+    assert diagnostic["reason"] == LocalProcessReason.PROCESS_IDENTITY_REUSED.value
+    assert diagnostic["recorded_start_identity"] == harness.retained_start_identity
+    assert diagnostic["observed_start_identity"] == replacement_identity
+
+
+def test_registry_retirement_spends_exactly_the_declared_grace_and_force_budgets(tmp_path, monkeypatch):
+    """Each escalation step waits its own DECLARED budget, not a hardcoded number.
+
+    A generation that ignores both SIGTERM and SIGKILL (uninterruptible, not merely
+    slow) exercises all three waits back to back. Every bound below is derived from
+    the constants the product declares and from the poll step the product actually
+    used, so replacing either constant with a literal, or reusing one budget for the
+    other step, turns this red. The clock is virtual: it only advances because the
+    product asked to sleep.
+    """
+    harness = _VirtualRetirementClock(tmp_path, monkeypatch)
+
+    assert harness.run() is False, "a process that survived SIGKILL was declared retired"
+
+    assert harness.actions == ["ping", "shutdown"]
+    assert harness.signals == [signal.SIGTERM, signal.SIGKILL], (
+        "escalation must be bounded at exactly one SIGTERM then one SIGKILL"
+    )
+    poll = harness.poll_seconds
+    graceful = harness.marks[signal.SIGTERM] - harness.marks["shutdown"]
+    forced_wait = harness.marks[signal.SIGKILL] - harness.marks[signal.SIGTERM]
+    final_wait = harness.marks["returned"] - harness.marks[signal.SIGKILL]
+
+    assert LOCAL_SERVICE_RETIRE_GRACE_SECONDS <= graceful < LOCAL_SERVICE_RETIRE_GRACE_SECONDS + poll, (
+        f"the post-shutdown wait was {graceful}s, not the declared "
+        f"{LOCAL_SERVICE_RETIRE_GRACE_SECONDS}s grace budget"
+    )
+    assert LOCAL_SERVICE_RETIRE_GRACE_SECONDS <= forced_wait < LOCAL_SERVICE_RETIRE_GRACE_SECONDS + poll, (
+        f"the post-SIGTERM wait was {forced_wait}s, not the declared "
+        f"{LOCAL_SERVICE_RETIRE_GRACE_SECONDS}s grace budget"
+    )
+    assert LOCAL_SERVICE_RETIRE_FORCE_SECONDS <= final_wait < LOCAL_SERVICE_RETIRE_FORCE_SECONDS + poll, (
+        f"the post-SIGKILL wait was {final_wait}s, not the declared "
+        f"{LOCAL_SERVICE_RETIRE_FORCE_SECONDS}s force budget"
+    )
+    # Positive control on the three bounds above: they are not all satisfied by one
+    # shared number -- the force window is measurably longer than the grace window.
+    assert final_wait > graceful
+
+    # An unkillable generation is never declared retired, and nothing it still owns
+    # is removed on its behalf.
+    assert harness.registry.record_path.exists() is True
+    assert harness.registry.socket_path.exists() is True
+
+
+# Written as a strict xfail while `verified_orphan_diagnostics` spelled attempted_action,
+# result AND reason as literals inside a list comprehension, so every survivor got a
+# byte-identical row. It now passes because `reason` is derived from real data -- it varies
+# across untracked_no_ledger_record, unreadable_service_record, superseded_by_recorded_generation
+# and identity_<LocalProcessReason>.
+#
+# Be precise about what that does and does not establish, because the difference matters to
+# anyone reading this as evidence: `attempted_action` and `result` are STILL constants, so this
+# test proves survivors are now distinguishable, NOT that a bounded repair is ever attempted.
+# The queue's "attempted action, result, and failure reason" requirement remains open.
+def test_verified_orphan_diagnostics_must_distinguish_a_recorded_survivor(tmp_path):
+    """The three reported fields must be derived from the survivor, not fixed literals.
+
+    ``verified_orphan_diagnostics`` currently spells ``attempted_action``,
+    ``result`` and ``reason`` as constants inside a list comprehension, so two
+    materially different survivors get byte-identical rows. One of those literals
+    is also simply untrue: a pre-identity ("legacy") service record on disk names
+    pid 7001 and its socket, but the tracked-group resolver drops it for missing
+    host/boot proof, so 7001 surfaces as "untracked" while its ledger record is
+    sitting right there. Reporting ``untracked_no_ledger_record`` for it hides the
+    one survivor whose identity a bounded repair could actually verify.
+    """
+    service_dir = tmp_path / "services"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    recorded_socket = service_dir / "legacy.sock"
+    recordless_socket = service_dir / "ghost.sock"
+    record_path = service_dir / "legacy.service.json"
+    record_path.write_text(
+        registry_mod.json.dumps(
+            {"service": "legacy", "socket": str(recorded_socket), "pid": 7001, "version": 1}
+        ),
+        encoding="utf-8",
+    )
+    table = _table([
+        (7001, 1, 7001, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {recorded_socket}", 8001),
+        (7002, 1, 7002, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {recordless_socket}", 8002),
+    ])
+
+    rows = registry_mod.verified_orphan_diagnostics(service_dir, table)
+    by_pid = {row["pid"]: row for row in rows}
+
+    # Positive controls: the two survivors really are both reported, and the record
+    # really is on disk -- neither assertion below is comparing two empty things.
+    assert set(by_pid) == {7001, 7002}
+    assert record_path.exists() is True
+    assert registry_mod.tracked_local_service_groups(service_dir, table) == [], (
+        "positive control: the legacy record must NOT produce a tracked group"
+    )
+
+    recorded_row = (by_pid[7001]["attempted_action"], by_pid[7001]["result"], by_pid[7001]["reason"])
+    recordless_row = (by_pid[7002]["attempted_action"], by_pid[7002]["result"], by_pid[7002]["reason"])
+    assert by_pid[7001]["reason"] != "untracked_no_ledger_record", (
+        f"pid 7001 has a ledger record at {record_path}; the reported reason denies it exists"
+    )
+    assert recorded_row != recordless_row, (
+        "a survivor with a ledger record and one without produced identical action/result/reason: "
+        "these three fields cannot vary, so no repair outcome can ever be reported through them"
+    )
 
 
 def _directory_snapshot(root: Path) -> dict[str, bytes]:

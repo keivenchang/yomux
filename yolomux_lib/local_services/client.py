@@ -19,10 +19,13 @@ from ..server_logs import emit_server_log
 from .registry import LOCAL_SERVICE_START_TIMEOUT_SECONDS
 from .registry import LocalServiceRegistry
 from .registry import LocalServiceSpec
-from .registry import local_service_transport_error
 from .rpc import LOCAL_RPC_DEADLINE_REASONS
 from .rpc import LOCAL_RPC_VERSION
+from .rpc import LOCAL_SERVICE_DEADLINE_REASONS
+from .rpc import LOCAL_SERVICE_LIFECYCLE_REASONS
+from .rpc import LOCAL_SERVICE_REASON_TIMEOUT
 from .rpc import LocalRpcError
+from .rpc import local_service_failure_reason
 from .rpc import local_service_response_is_prehandler_busy
 from .rpc import new_envelope
 from .rpc import request as local_service_request
@@ -199,16 +202,18 @@ def local_service_failure_is_transient(
     if response.get("ok") is True or response.get("terminal") is True:
         return False
     transport_error = str(response.get("_transport_error") or "").strip().lower()
-    if transport_error == "timeout":
+    if transport_error == LOCAL_SERVICE_REASON_TIMEOUT:
         return True
-    if transport_error in {"absent", "refused"}:
+    if transport_error in LOCAL_SERVICE_LIFECYCLE_REASONS:
         return capabilities is None or capabilities.lifecycle_recovery
-    error = str(response.get("error") or "").strip().lower()
     # A deadline breach is the same physical event as the `timeout` above -- the peer could not
-    # answer in time -- so it must be retryable for the same reason.  Matching one hand-written
-    # spelling here silently made every real breach terminal, because `rpc` raises
-    # `peer_handler_slow`/`unattributed_latency` and never that spelling.
-    if transport_error == "rpc" and error in LOCAL_RPC_DEADLINE_REASONS:
+    # answer in time -- so it must be retryable for the same reason.  The shared classifier now
+    # types it directly; the error-text arm stays because a peer that predates the typed reason,
+    # or a payload minted by another producer, still spells it only in `error`.
+    if transport_error in LOCAL_SERVICE_DEADLINE_REASONS:
+        return True
+    error = str(response.get("error") or "").strip().lower()
+    if error in LOCAL_RPC_DEADLINE_REASONS:
         return True
     try:
         status = int(response.get("status") or 0)
@@ -290,7 +295,7 @@ class LocalServiceClient:
 
     @staticmethod
     def _transport_error(exc: OSError | LocalRpcError) -> str:
-        return local_service_transport_error(exc)
+        return local_service_failure_reason(exc)
 
     def _emit_transport_error(self, failure: TransportFailure) -> None:
         exc = failure.error
@@ -373,7 +378,7 @@ class LocalServiceClient:
         # reaps that child, serializes replacement startup, and this one retry
         # preserves the caller's original typed transport failure if recovery
         # cannot establish a serving socket.
-        if response.get("_transport_error") not in {"absent", "refused"}:
+        if response.get("_transport_error") not in LOCAL_SERVICE_LIFECYCLE_REASONS:
             if error is not None:
                 self._report_transport_error(error)
             return response, binary
@@ -419,7 +424,7 @@ class LocalServiceClient:
         """Query an existing service for bytes without turning observation into launch demand."""
 
         response, binary, error = self._request_until_not_busy(payload, timeout, probe=probe)
-        if error is not None and response.get("_transport_error") not in {"absent", "refused"}:
+        if error is not None and response.get("_transport_error") not in LOCAL_SERVICE_LIFECYCLE_REASONS:
             self._report_transport_error(error)
         return response, binary
 
