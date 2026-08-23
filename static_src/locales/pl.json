@@ -2584,6 +2584,7 @@
   "debug.system.roster.collapse": "Ukryj szczegóły usługi {service}",
   "debug.system.roster.column.service": "Usługa",
   "debug.system.roster.column.latency": "Opóźnienie śr / maks",
+  "debug.system.roster.column.starts": "Uruchomienia",
   "debug.system.roster.column.restarts": "Restarty",
   "debug.system.roster.column.requests": "Żądania",
   "debug.system.roster.column.errors": "Błędy",

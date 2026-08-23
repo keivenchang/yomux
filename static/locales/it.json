@@ -402,6 +402,7 @@
   "debug.system.roster.column.requests": "Richieste",
   "debug.system.roster.column.restarts": "Riavvii",
   "debug.system.roster.column.service": "Servizio",
+  "debug.system.roster.column.starts": "Avvii",
   "debug.system.roster.coverage.partial": "parziale",
   "debug.system.roster.detail.eventsChat": "Eventi e chat",
   "debug.system.roster.detail.process": "Processo",

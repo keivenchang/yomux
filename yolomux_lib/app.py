@@ -50,8 +50,10 @@ from .workspace import session_files
 from .workspace import published_caches
 from .local_services import registry as local_services_registry
 from .local_services.client import deferred_transport_errors
+from .local_services.client import local_service_failure_is_busy
 from .local_services.client import local_service_failure_is_transient
 from .local_services.client import local_service_polling_capabilities
+from .local_services.client import release_local_service_lease_eventually
 from .local_services.rpc import local_service_traffic_snapshot
 from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
@@ -131,6 +133,7 @@ from .control import send_yolomux_control_request
 from .browser_diagnostic_receipts import JAVASCRIPT_MAX_SAFE_INTEGER
 from .diagnostic_redaction import redact_diagnostic_value
 from .search.search_indexer import SearchIndexerClient
+from .jobd import JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
 from .jobd import JobClient
 from .observability.pricing_catalog import PricingCatalog
 from .observability.pricing_catalog import PricingRefreshCoordinator
@@ -408,6 +411,15 @@ JOBD_PRODUCT_POLL_INITIAL_SECONDS = 0.25
 JOBD_PRODUCT_POLL_MAX_SECONDS = 1.0
 
 
+def remaining_jobd_rpc_timeout(deadline_at: float) -> float:
+    """Return the bounded transport budget remaining before one operation deadline."""
+
+    return min(
+        JOBD_PRODUCT_RPC_TIMEOUT_SECONDS,
+        max(0.0, deadline_at - time.time()),
+    )
+
+
 class SessionFilesJobdUnavailable(RuntimeError):
     """jobd could not materialize a session-files product (submit rejected or product not ready).
 
@@ -485,7 +497,10 @@ class JobdInteractionLease:
                 return
             self._holders -= 1
             if self._holders == 0 and self._lease_id:
-                self._job_client.registry.release_lease(self._lease_id)
+                release_local_service_lease_eventually(
+                    self._job_client.registry.release_lease,
+                    self._lease_id,
+                )
                 self._lease_id = ""
 
     @property
@@ -551,13 +566,23 @@ def wait_for_jobd_product(
     """
     deadline = time.monotonic() + wait_seconds
     poll_seconds = JOBD_PRODUCT_POLL_INITIAL_SECONDS
+    state = "pending"
     while stop_event is None or not stop_event.is_set():
-        meta, body = job_client.product(coalesce_key)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, None, state
+        meta, body = job_client.product(
+            coalesce_key,
+            timeout=min(JOBD_PRODUCT_RPC_TIMEOUT_SECONDS, remaining),
+        )
         if not meta.get("ok"):
-            raise JobdProductRpcUnavailable("jobd product rpc unavailable")
-        state = str(meta.get("state") or "")
-        if body and state in {"ready", "stale"} and int(meta.get("generation") or 0) >= generation:
-            return meta, body, state
+            if not local_service_failure_is_busy(meta):
+                raise JobdProductRpcUnavailable("jobd product rpc unavailable")
+            state = "busy"
+        else:
+            state = str(meta.get("state") or "")
+            if body and state in {"ready", "stale"} and int(meta.get("generation") or 0) >= generation:
+                return meta, body, state
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None, None, state
@@ -2596,6 +2621,11 @@ class WatchBridge:
         with app.client_events.lock:
             has_client_event_subscribers = bool(app.client_events.subscribers)
         if descriptor_changed and has_client_event_subscribers:
+            # The SSE worker owns several non-filesystem channels, so its existence is not
+            # filesystem-watch demand. A descriptor is the one demand owner for watchd; route
+            # the first descriptor through the idempotent lifecycle entry point so an existing
+            # core/status/operation stream starts watchd exactly when it gains file state.
+            app.start_client_event_watcher()
             app.start_client_watch_snapshot_publish()
         return {
             "ok": True,
@@ -3240,6 +3270,12 @@ class WatchBridge:
                 if not app.sync_watchd_descriptors(record):
                     record.watchd_stop_event.wait(1.0)
                     continue
+                # The descriptor set is the sole demand owner for watchd. Once the final
+                # descriptor has been removed successfully, do not arm another revision wait:
+                # release the lease in ``finally`` while the parent event worker keeps serving
+                # unrelated SSE channels.
+                if not record.watchd_descriptor_ids:
+                    break
                 response = app.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
                 if response.get("ok") is not True:
                     app.publish_watchd_failure(record, response, action="wait_revision")
@@ -3263,13 +3299,27 @@ class WatchBridge:
         finally:
             lease_id = record.watchd_lease_id
             if lease_id:
-                app.watch_client.release_lease(lease_id)
+                release_local_service_lease_eventually(
+                    app.watch_client.release_lease,
+                    lease_id,
+                )
+            restart_for_demand = False
             with self.state.lock:
                 if self.state.event_watcher_record is record and record.watchd_worker is worker:
                     record.watchd_worker = None
                     record.watchd_lease_id = ""
                     record.watchd_pid = 0
                     record.filesystem_healthy = False
+                    # Descriptor publication and worker retirement share this lock. A new
+                    # descriptor either lands before this check and is restarted here, or lands
+                    # after the worker slot is clear and restarts through the normal update path.
+                    restart_for_demand = (
+                        bool(self.state.descriptors)
+                        and not record.stop_event.is_set()
+                        and not record.watchd_stop_event.is_set()
+                    )
+            if restart_for_demand:
+                app.start_watchd_revision_watcher(record)
 
     def watchd_runtime_status(self, app) -> dict[str, Any]:
         """Return the bridge mirror without making a status route call watchd.
@@ -3336,6 +3386,10 @@ class WatchBridge:
             worker = record.watchd_worker
             if worker is not None and worker.is_alive():
                 return False
+            # This event belongs to the child watcher slot. A failed thread launch sets it in
+            # rollback so no half-started child can run; the next atomic claim of that same empty
+            # slot clears it. Parent shutdown is fenced independently by ``stop_event`` above.
+            record.watchd_stop_event.clear()
             worker = threading.Thread(target=app.watchd_revision_loop, args=(record,), name="watchd-revision", daemon=True)
             record.watchd_worker = worker
 
@@ -4143,7 +4197,10 @@ class WatchBridge:
             return False
         response, _body = app.status_client.snapshot(app.sessions, timeout=1.0)
         if response.get("ok") is not True:
-            app.status_client.release_generation_lease(lease_id)
+            release_local_service_lease_eventually(
+                app.status_client.release_generation_lease,
+                lease_id,
+            )
             with self.state.lock:
                 if self.state.event_watcher_record is record:
                     record.status_generation_retry_at = time.monotonic() + 1.0
@@ -4161,7 +4218,10 @@ class WatchBridge:
                 snapshot_payload = decoded_snapshot
         with self.state.lock:
             if self.state.event_watcher_record is not record or record.stop_event.is_set():
-                app.status_client.release_generation_lease(lease_id)
+                release_local_service_lease_eventually(
+                    app.status_client.release_generation_lease,
+                    lease_id,
+                )
                 return False
             record.status_generation_stop_event.clear()
             record.status_generation_lease_id = lease_id
@@ -4181,7 +4241,10 @@ class WatchBridge:
             record.status_generation_worker = None
             record.status_generation_lease_id = ""
         if lease_id:
-            app.status_client.release_generation_lease(lease_id)
+            release_local_service_lease_eventually(
+                app.status_client.release_generation_lease,
+                lease_id,
+            )
         if worker is not None and worker is not threading.current_thread():
             worker.join(timeout=2.0)
 
@@ -4357,20 +4420,30 @@ class WatchBridge:
 
     def start_client_event_watcher(self, app) -> None:
         now = time.monotonic()
+        retained_record = None
         with self.state.lock:
             current = self.state.event_watcher_record
             if current.worker is not None and current.worker.is_alive():
-                # A retained client-event worker must not make a previously failed tmux signal
-                # watcher permanent. New SSE subscribers are the lifecycle re-entry point.
-                app.start_tmux_signal_event_watcher()
-                return
-            record = ClientEventWatcherRecord(
-                next_attention_ack_poll_at=now + app.server_attention_ack_event_poll_seconds(),
-                next_tmux_signal_poll_at=now + app.server_tmux_signal_event_poll_seconds(),
-            )
-            worker = threading.Thread(target=app.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
-            record.worker = worker
-            self.state.event_watcher_record = record
+                retained_record = current
+                watchd_demanded = bool(self.state.descriptors)
+            else:
+                record = ClientEventWatcherRecord(
+                    next_attention_ack_poll_at=now + app.server_attention_ack_event_poll_seconds(),
+                    next_tmux_signal_poll_at=now + app.server_tmux_signal_event_poll_seconds(),
+                )
+                worker = threading.Thread(target=app.client_event_watch_loop, args=(record,), name="client-event-watch", daemon=True)
+                record.worker = worker
+                self.state.event_watcher_record = record
+                watchd_demanded = bool(self.state.descriptors)
+
+        if retained_record is not None:
+            # A retained client-event worker must not make a previously failed child watcher
+            # permanent. New SSE subscribers are the lifecycle re-entry point, while watchd is
+            # repaired only when the descriptor owner says filesystem demand exists.
+            app.start_tmux_signal_event_watcher()
+            if watchd_demanded:
+                app.start_watchd_revision_watcher(retained_record)
+            return
 
         def rollback() -> None:
             owned = False
@@ -4390,18 +4463,19 @@ class WatchBridge:
             rollback()
             raise
         common.start_thread_with_rollback(worker, rollback)
-        try:
-            app.start_watchd_revision_watcher(record)
-        except RuntimeError as exc:
-            # watchd owns both native watching and its polling fallback. The web
-            # process reports a typed unavailable state and never scans locally.
-            app.log_event(
-                None,
-                "watchd_error",
-                f"watchd revision bridge failed to start: {exc}",
-                {"diagnostic": str(exc)},
-                message_key="events.message.clientEvent.directoryWatchFailed",
-            )
+        if watchd_demanded:
+            try:
+                app.start_watchd_revision_watcher(record)
+            except RuntimeError as exc:
+                # watchd owns both native watching and its polling fallback. The web
+                # process reports a typed unavailable state and never scans locally.
+                app.log_event(
+                    None,
+                    "watchd_error",
+                    f"watchd revision bridge failed to start: {exc}",
+                    {"diagnostic": str(exc)},
+                    message_key="events.message.clientEvent.directoryWatchFailed",
+                )
 
     def stop_client_event_watcher(self, app) -> None:
         app.stop_tmux_signal_event_watcher()
@@ -7334,10 +7408,9 @@ class SystemStatusProjector:
             }
             for group in tracked_groups
         ]
-        untracked_orphans = local_services_registry.untracked_local_service_processes(
+        untracked_orphans = local_services_registry.verified_orphan_diagnostics(
             service_dir,
             table,
-            tracked_groups,
         )
         evidence = sorted(Path("/tmp").glob(f"yolomux-overload-{port}-*.json")) if port else []
         return {
@@ -8894,7 +8967,7 @@ class TmuxWebtermApp:
             canonical=True,
             code=code,
             origin=f"local_services.{service_name}",
-            retryable=False,
+            retryable=local_service_failure_is_busy(failure),
             details={
                 "service": service_name,
                 "operation_id": str(operation_id),
@@ -14010,7 +14083,14 @@ class TmuxWebtermApp:
         polling_capabilities = local_service_polling_capabilities(self.job_client)
         with deferred_transport_errors(self.job_client) as deferred_transport:
             while not self.jobd_operation_service.stop_event.is_set():
-                response = self.job_client.result(job_id)
+                rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                if rpc_timeout <= 0:
+                    if deferred_transport is not None:
+                        deferred_transport.publish()
+                    raise self.jobd_deadline_failure(
+                        transient_polls, last_transient, "result",
+                    )
+                response = self.job_client.result(job_id, timeout=rpc_timeout)
                 job = response.get("job") if isinstance(response.get("job"), dict) else {}
                 state = str(job.get("status") or "")
                 if response.get("ok") is not True:
@@ -14038,17 +14118,8 @@ class TmuxWebtermApp:
                 if remaining <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise JobdOperationUnavailable(
-                        "jobd result deadline expired",
-                        {
-                            "error": "jobd result deadline expired",
-                            "status": "deadline_expired",
-                            "transient_polls": transient_polls,
-                            "last_transient_error": str(last_transient.get("error") or ""),
-                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                        },
-                        code="deadline_expired",
-                        status=HTTPStatus.GATEWAY_TIMEOUT,
+                    raise self.jobd_deadline_failure(
+                        transient_polls, last_transient, "result",
                     )
                 self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
@@ -14078,7 +14149,18 @@ class TmuxWebtermApp:
                         {"error": "jobd product completion cancelled", "status": "producer_abandoned"},
                         code="producer_abandoned",
                     )
-                metadata, body = self.job_client.product(producer.product_key)
+                rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                if rpc_timeout <= 0:
+                    if deferred_transport is not None:
+                        deferred_transport.publish()
+                    raise self.jobd_deadline_failure(
+                        transient_polls,
+                        last_transient,
+                    )
+                metadata, body = self.job_client.product(
+                    producer.product_key,
+                    timeout=rpc_timeout,
+                )
                 state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
                 if not isinstance(metadata, dict) or metadata.get("ok") is not True:
                     failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
@@ -14093,17 +14175,9 @@ class TmuxWebtermApp:
                     if remaining <= 0:
                         if deferred_transport is not None:
                             deferred_transport.publish()
-                        raise JobdOperationUnavailable(
-                            "jobd product deadline expired",
-                            {
-                                "error": "jobd product deadline expired",
-                                "status": "deadline_expired",
-                                "transient_polls": transient_polls,
-                                "last_transient_error": str(last_transient.get("error") or ""),
-                                "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                            },
-                            code="deadline_expired",
-                            status=HTTPStatus.GATEWAY_TIMEOUT,
+                        raise self.jobd_deadline_failure(
+                            transient_polls,
+                            last_transient,
                         )
                     wait_event = cancel_event or self.jobd_operation_service.stop_event
                     wait_event.wait(min(poll_seconds, remaining))
@@ -14124,7 +14198,18 @@ class TmuxWebtermApp:
                         )
                     return product
                 if state == "none" and metadata.get("inflight") is not True:
-                    response = self.job_client.result(producer.job_id)
+                    result_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                    if result_timeout <= 0:
+                        if deferred_transport is not None:
+                            deferred_transport.publish()
+                        raise self.jobd_deadline_failure(
+                            transient_polls,
+                            last_transient,
+                        )
+                    response = self.job_client.result(
+                        producer.job_id,
+                        timeout=result_timeout,
+                    )
                     job = response.get("job") if isinstance(response.get("job"), dict) else {}
                     job_state = str(job.get("status") or "")
                     if response.get("ok") is not True:
@@ -14150,17 +14235,9 @@ class TmuxWebtermApp:
                 if remaining <= 0:
                     if deferred_transport is not None:
                         deferred_transport.publish()
-                    raise JobdOperationUnavailable(
-                        "jobd product deadline expired",
-                        {
-                            "error": "jobd product deadline expired",
-                            "status": "deadline_expired",
-                            "transient_polls": transient_polls,
-                            "last_transient_error": str(last_transient.get("error") or ""),
-                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                        },
-                        code="deadline_expired",
-                        status=HTTPStatus.GATEWAY_TIMEOUT,
+                    raise self.jobd_deadline_failure(
+                        transient_polls,
+                        last_transient,
                     )
                 wait_event = cancel_event or self.jobd_operation_service.stop_event
                 wait_event.wait(min(poll_seconds, remaining))
@@ -14169,6 +14246,28 @@ class TmuxWebtermApp:
             "jobd product completion stopped",
             {"error": "jobd product completion stopped", "status": "producer_abandoned"},
             code="producer_abandoned",
+        )
+
+    @staticmethod
+    def jobd_deadline_failure(
+        transient_polls: int,
+        last_transient: Mapping[str, Any],
+        subject: str = "product",
+    ) -> JobdOperationUnavailable:
+        """Build the one deadline failure shared by every jobd polling edge."""
+
+        message = f"jobd {subject} deadline expired"
+        return JobdOperationUnavailable(
+            message,
+            {
+                "error": message,
+                "status": "deadline_expired",
+                "transient_polls": transient_polls,
+                "last_transient_error": str(last_transient.get("error") or ""),
+                "last_transient_transport": str(last_transient.get("_transport_error") or ""),
+            },
+            code="deadline_expired",
+            status=HTTPStatus.GATEWAY_TIMEOUT,
         )
 
     def accept_jobd_product_operation(
@@ -14547,7 +14646,16 @@ class TmuxWebtermApp:
         transient_polls = 0
         last_transient: dict[str, Any] = {}
         while not self.jobd_operation_service.stop_event.is_set():
-            metadata, body = self.job_client.product(producer.product_key)
+            rpc_timeout = remaining_jobd_rpc_timeout(deadline_at)
+            if rpc_timeout <= 0:
+                raise self.jobd_deadline_failure(
+                    transient_polls,
+                    last_transient,
+                )
+            metadata, body = self.job_client.product(
+                producer.product_key,
+                timeout=rpc_timeout,
+            )
             state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
             if not isinstance(metadata, dict) or metadata.get("ok") is not True:
                 failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
@@ -14565,17 +14673,9 @@ class TmuxWebtermApp:
                 last_transient = failure
                 remaining = deadline_at - time.time()
                 if remaining <= 0:
-                    raise JobdOperationUnavailable(
-                        "jobd product deadline expired",
-                        {
-                            "error": "jobd product deadline expired",
-                            "status": "deadline_expired",
-                            "transient_polls": transient_polls,
-                            "last_transient_error": str(last_transient.get("error") or ""),
-                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
-                        },
-                        code="deadline_expired",
-                        status=HTTPStatus.GATEWAY_TIMEOUT,
+                    raise self.jobd_deadline_failure(
+                        transient_polls,
+                        last_transient,
                     )
                 self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
                 poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
@@ -14589,10 +14689,38 @@ class TmuxWebtermApp:
                     schedule["transient_polls"] = transient_polls
                 return dict(product), body, schedule
             if state == "none" and metadata.get("inflight") is not True:
-                response = self.job_client.result(producer.job_id)
+                result_timeout = remaining_jobd_rpc_timeout(deadline_at)
+                if result_timeout <= 0:
+                    raise self.jobd_deadline_failure(
+                        transient_polls,
+                        last_transient,
+                    )
+                response = self.job_client.result(
+                    producer.job_id,
+                    timeout=result_timeout,
+                )
                 job = response.get("job") if isinstance(response.get("job"), dict) else {}
                 job_state = str(job.get("status") or "")
-                if response.get("ok") is not True or job_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                if response.get("ok") is not True:
+                    if local_service_failure_is_transient(response):
+                        transient_polls += 1
+                        last_transient = dict(response)
+                    else:
+                        failure = dict(response)
+                        typed_failure = self.typed_filesystem_operation_failure(failure)
+                        if typed_failure is not None:
+                            filesystem_error, status = typed_failure
+                            raise JobdOperationUnavailable(
+                                str(filesystem_error.get("error") or "filesystem operation failed"),
+                                {"filesystem_error": filesystem_error, "status": int(status)},
+                                code=str(filesystem_error.get("user_message", {}).get("key") or "filesystem_error"),
+                                status=status,
+                            )
+                        raise JobdOperationUnavailable(
+                            str(failure.get("error") or "jobd producer unavailable"),
+                            failure,
+                        )
+                elif job_state in {"failed", "cancelled", "superseded", "timed_out"}:
                     failure = dict(job) if job else dict(response)
                     typed_failure = self.typed_filesystem_operation_failure(failure)
                     if typed_failure is not None:
@@ -14609,15 +14737,9 @@ class TmuxWebtermApp:
                     )
             remaining = deadline_at - time.time()
             if remaining <= 0:
-                raise JobdOperationUnavailable(
-                    "jobd product deadline expired",
-                    {
-                        "error": "jobd product deadline expired",
-                        "status": "deadline_expired",
-                        "transient_polls": transient_polls,
-                    },
-                    code="deadline_expired",
-                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                raise self.jobd_deadline_failure(
+                    transient_polls,
+                    last_transient,
                 )
             self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
             poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)

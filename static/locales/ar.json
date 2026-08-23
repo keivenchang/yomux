@@ -420,6 +420,7 @@
   "debug.system.roster.column.requests": "الطلبات",
   "debug.system.roster.column.restarts": "عمليات إعادة التشغيل",
   "debug.system.roster.column.service": "الخدمة",
+  "debug.system.roster.column.starts": "عمليات البدء",
   "debug.system.roster.coverage.partial": "جزئي",
   "debug.system.roster.detail.eventsChat": "الأحداث والدردشة",
   "debug.system.roster.detail.process": "العملية",

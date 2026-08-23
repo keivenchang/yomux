@@ -2926,6 +2926,12 @@ def test_active_client_lease_prevents_idle_exit_until_released(tmp_path):
     })
     assert released == {"ok": True, "leases": 0}
     assert binary == b""
+    # claim_gated_idle_due (the one shared transition/deadline owner every
+    # local service routes through) refreshed the deadline on the last
+    # claimed check above, so release starts the idle_seconds countdown --
+    # it does not report idle at the same instant it lost its last claim.
+    assert service._idle() is False, "release must start the countdown, not report idle at the same instant"
+    monotonic_now[0] += 1.0
     assert service._idle() is True
 
 

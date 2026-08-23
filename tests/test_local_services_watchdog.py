@@ -278,6 +278,61 @@ def test_preflight_is_clear_with_no_lease_or_leftovers(tmp_path):
     }
 
 
+def test_preflight_leaves_a_still_serving_service_alone_when_only_its_launcher_crashed(tmp_path):
+    """A service's launcher dying is not itself grounds for a restart or a kill.
+
+    Only a genuinely idle group left by a dead launcher gets reconciled; a
+    service still answering client work must be left untouched, and only
+    the previous restart-hostile silent-orphan behavior would have differed.
+    """
+    service_dir = tmp_path / "services"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    jobd_socket = service_dir / "jobd.sock"
+    record = FixtureLocalServiceRecordBuilder(
+        service="jobd",
+        socket_path=jobd_socket,
+        pid=500,
+        fields={"launcher_pid": 700, "launcher_port": 8881, "protocol_version": 1},
+    ).build()
+    (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
+    # The launcher (700) is dead -- absent from the table -- but the service
+    # (500) itself is alive and, in this case, still serving a client.
+    table = _table([(500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60")])
+    kills = []
+
+    result = preflight_port(
+        8881,
+        tmp_path,
+        table,
+        kill=lambda pid, sig: kills.append((pid, sig)),
+        table_reader=lambda: table,
+        sleep=lambda _s: None,
+        service_status_reader=lambda _group: {"ok": True, "pid": 500, "clients": 1},
+    )
+
+    assert result["ok"] is True
+    assert result["reaped_pids"] == []
+    assert kills == []
+
+    # Companion: the same dead-launcher group, but genuinely idle this time --
+    # proving the first case's silence is the "has a client" discriminator,
+    # not a fixture bug that would have never reaped anything either way.
+    idle_kills = []
+    idle_result = preflight_port(
+        8881,
+        tmp_path,
+        table,
+        kill=lambda pid, sig: idle_kills.append((pid, sig)),
+        table_reader=lambda: table,
+        sleep=lambda _s: None,
+        service_status_reader=lambda _group: {"ok": True, "pid": 500, "clients": 0},
+    )
+
+    assert idle_result["ok"] is True
+    assert idle_result["reaped_pids"] == [500]
+    assert idle_kills == [(500, signal.SIGTERM), (500, signal.SIGKILL)]
+
+
 def test_evidence_summary_is_bounded_and_redacted(tmp_path):
     command_canary = "command-canary-8f1a3c7d"
     path_canary = "socket-path-canary-4b9e2d6a"

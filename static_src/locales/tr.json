@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "{service} ayrıntılarını gizle",
   "debug.system.roster.column.service": "Hizmet",
   "debug.system.roster.column.latency": "Gecikme ort / maks",
+  "debug.system.roster.column.starts": "Başlatmalar",
   "debug.system.roster.column.restarts": "Yeniden başlatmalar",
   "debug.system.roster.column.requests": "İstekler",
   "debug.system.roster.column.errors": "Hatalar",

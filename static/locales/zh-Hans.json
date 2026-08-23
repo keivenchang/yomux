@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "请求数",
   "debug.system.roster.column.restarts": "重启次数",
   "debug.system.roster.column.service": "服务",
+  "debug.system.roster.column.starts": "启动次数",
   "debug.system.roster.coverage.partial": "部分",
   "debug.system.roster.detail.eventsChat": "事件与聊天",
   "debug.system.roster.detail.process": "进程",

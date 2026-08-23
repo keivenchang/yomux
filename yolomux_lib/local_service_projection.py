@@ -33,7 +33,7 @@ nothing and retains nothing.
 The snapshot is the schema. ``LocalServicesSnapshot.payload()`` renders the dict the
 HTTP projection publishes, including ``schema_version``.
 
-WHY ``schema_version`` IS 3
+WHY ``schema_version`` IS 4
 ---------------------------
 ``static_src/js/yolomux/85_debug_panel.js`` guards the whole normalized Local-services
 render on ``schema_version === <this number>`` (exact, not ``>=``), so any shape change
@@ -49,6 +49,9 @@ Each bump is one shape change, and the front-end guard moves with it in the same
   ``alerting``/``reason_code``. Removing a published key is a shape change, so the guard
   moves to 3 and a schema-2 payload is now refused rather than rendered through the new
   table.
+* Lifecycle accounting moved it to ``4``: each health metric block now separates all verified
+  process starts from unexpected restarts and demand-driven starts. Legacy replacements remain
+  explicitly partial rather than being relabelled after the fact.
 
 WHY THE COUNTERS SAY ``web_process``
 ------------------------------------
@@ -92,8 +95,8 @@ LOCAL_SERVICE_INVENTORY: tuple[str, ...] = ("indexd", "statsd", "jobd", "statusd
 # Bumping this is a browser-visible change: `85_debug_panel.js` guards the whole
 # Local-services render on this exact number. M3 preserved 1 deliberately; M8 moved it to 2
 # because every row grew a `health` block; W13 moved it to 3 when the dead `alert` summary
-# was removed from the payload. See the module docstring for the shape each version froze.
-LOCAL_SERVICES_SCHEMA_VERSION = 3
+# was removed; lifecycle accounting moved it to 4. See the module docstring for each shape.
+LOCAL_SERVICES_SCHEMA_VERSION = 4
 
 # How many of a resource's retained transition rows the HTTP projection publishes. The
 # store keeps 128 per resource; six services times 128 rows would put ~5000 rows into
@@ -119,6 +122,10 @@ COVERAGE_UNAVAILABLE = "unavailable"
 # measured one. The store's own `coverage` cannot say this -- it only marks partial when
 # an epoch change loses a final sample -- so the projection says it.
 COVERAGE_COUNTERS_NOT_OBSERVED = "counters_not_observed"
+# Existing schema-1 retained documents counted every process replacement but did not retain the
+# expected-absence fact needed to distinguish demand starts from failures. New observations are
+# classified, while this reason keeps the older portion from reading as an exact zero.
+COVERAGE_LIFECYCLE_LEGACY_UNCLASSIFIED = "legacy_lifecycle_unclassified"
 # The retained history starts before this web process did, so the ledger counters cover
 # less time than the restart count and transitions beside them.
 COVERAGE_WEB_PROCESS_SCOPE = "web_process_scope"
@@ -551,6 +558,21 @@ class RetainedHealth:
             retained_state = COVERAGE_UNAVAILABLE
             retained_reasons = []
 
+        if observed:
+            lifecycle_state = (
+                COVERAGE_FULL
+                if aggregate.get("lifecycle_classification_exact") is True
+                else COVERAGE_PARTIAL
+            )
+            lifecycle_reasons = (
+                []
+                if lifecycle_state == COVERAGE_FULL
+                else [COVERAGE_LIFECYCLE_LEGACY_UNCLASSIFIED]
+            )
+        else:
+            lifecycle_state = COVERAGE_UNAVAILABLE
+            lifecycle_reasons = []
+
         # The ledger totals are exact and continuous for this web process, including across
         # a peer restart. They are partial only against the retained history window, which
         # survives a web restart and can therefore start earlier than these counters do.
@@ -559,6 +581,8 @@ class RetainedHealth:
         return {
             "retained_counters": retained_state,
             "retained_counter_reasons": sorted(retained_reasons),
+            "lifecycle": lifecycle_state,
+            "lifecycle_reasons": lifecycle_reasons,
             "counters": COVERAGE_PARTIAL if predates else COVERAGE_FULL,
             "counter_reasons": [COVERAGE_WEB_PROCESS_SCOPE] if predates else [],
             "counter_scope": COUNTER_SCOPE_WEB_PROCESS,
@@ -596,6 +620,9 @@ class RetainedHealth:
         }
         return {
             "restart_count": measurement(aggregate.get("restart_count") if observed else None, **unobserved),
+            "process_start_count": measurement(aggregate.get("process_start_count") if observed else None, **unobserved),
+            "demand_start_count": measurement(aggregate.get("demand_start_count") if observed else None, **unobserved),
+            "unexpected_restart_count": measurement(aggregate.get("unexpected_restart_count") if observed else None, **unobserved),
             "observations": measurement(aggregate.get("observations") if observed else None, **unobserved),
             # `accepted` is every attempt this process made, including the ones that never
             # reached the service. That is the request count a monitor has to report: an

@@ -5,6 +5,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from threading import Event
@@ -31,6 +32,7 @@ from tests.serving_process import pid_is_serving
 from tests.helpers.local_service_records import FixtureLeaseRecordBuilder
 from tests.helpers.local_service_records import FixtureLocalServiceRecordBuilder
 from tests.helpers.local_service_records import FixtureProcessRecordBuilder
+from tests.helpers.local_service_records import rmtree_within
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1034,7 +1036,12 @@ def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, m
 
     client = approvald.ApprovalClient()
 
-    assert client.socket_path.parent == Path("/tmp")
+    # `safe_socket_path`'s length fallback nests inside its own private digest-named
+    # directory now, never a bare file directly under `/tmp` -- a caller deriving a
+    # sibling path (e.g. a `.service.json` record) must never inherit `/tmp` itself as
+    # `.parent`. See yolomux_lib/local_services/rpc.py:safe_socket_path.
+    assert client.socket_path.parent != Path("/tmp")
+    assert client.socket_path.parent.parent == Path("/tmp")
     expected_service_dir = state_dir / "services"
     assert client.registry.service_dir == expected_service_dir
     assert client.registry.lock_path.parent == expected_service_dir
@@ -1533,6 +1540,12 @@ class _NeverExitingProcess:
     def poll(self):
         return None
 
+    def wait(self):
+        # A live replacement daemon: `_reap_exited_child`/`_start_child_reaper`
+        # block here until the child exits, which this fixture never does, so
+        # model the real Popen contract instead of leaving `.wait()` missing.
+        Event().wait()
+
 
 def _publication_registry(tmp_path, *, clock, spawned, protocol_version=1):
     return LocalServiceRegistry(
@@ -1681,6 +1694,214 @@ def test_registry_writes_the_service_record_through_exactly_one_validator(tmp_pa
     ]
     assert call_lines == ["self._write_record(record)"]
     assert source.count("def _publish_record(") == 1
+
+
+def test_registry_write_record_refuses_typed_when_its_directory_vanishes_mid_write(tmp_path, monkeypatch):
+    """Reproduce the current first failing boundary, not the retracted theory.
+
+    A historical incident reached ``atomic_write_text(...); path.chmod(mode)``
+    after a pytest temp directory had already been deleted by test teardown.
+    That is a plain same-process synchronous write race with no child process
+    involved anywhere in this path -- not evidence of an orphan child that
+    needed reaping. ``_write_record`` must refuse typed through the existing
+    refusal surface instead of letting a raw ``OSError`` escape.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    record = {
+        **current_host_identity().process_record_fields(
+            pid=os.getpid(),
+            start_identity=registry_mod.process_start_identity(os.getpid()),
+        ),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    }
+
+    real_replace = registry_mod.os.replace
+
+    def replace_then_remove_directory(src, dst):
+        # Simulates a directory disappearing between the temp-file publish
+        # (os.replace) and the trailing os.chmod inside atomic_write_text --
+        # the exact historical incident line, reproduced deterministically.
+        real_replace(src, dst)
+        rmtree_within(registry.record_path.parent, tmp_path)
+
+    monkeypatch.setattr(registry_mod.os, "replace", replace_then_remove_directory)
+
+    assert registry._write_record(record) is False
+    assert "record write failed" in registry._record_refusal_reason
+    assert registry.record_path.exists() is False
+    assert list(tmp_path.glob("**/*.tmp")) == []
+
+
+def test_rmtree_within_refuses_the_shared_system_temp_root(tmp_path):
+    # Regression: the three "directory vanishes mid-write" tests above previously called
+    # bare `shutil.rmtree(registry.record_path.parent, ignore_errors=True)`. A real
+    # `safe_socket_path` length-fallback bug made `record_path.parent` resolve to the
+    # literal system temp root instead of somewhere owned, and `ignore_errors=True` let
+    # that wrong target delete silently, wiping every other worker's shared basetemp.
+    # `rmtree_within` must refuse loudly instead of ever touching that root or a
+    # known-shared directory (pytest's own `pytest-of-<user>` basetemp, this repo's own
+    # `yop-*` per-process TMPDIR root) even when the target is not literally under `tmp_path`
+    # -- `safe_socket_path`'s own private digest-named fallback directory is NOT one of
+    # these shared names and remains a legitimate, safe deletion target (covered by the
+    # three sibling tests above, which construct exactly that case under deep xdist paths).
+    system_temp_root = Path(tempfile.gettempdir())
+
+    with pytest.raises(AssertionError, match="shared directory"):
+        rmtree_within(system_temp_root, tmp_path)
+
+    assert system_temp_root.exists() is True
+
+
+def test_rmtree_within_refuses_a_named_shared_directory_outside_owned_root(tmp_path):
+    shared_lookalike = Path(tempfile.gettempdir()) / "pytest-of-someone-else"
+
+    with pytest.raises(AssertionError, match="shared directory"):
+        rmtree_within(shared_lookalike, tmp_path)
+
+
+def test_registry_publish_record_surfaces_the_same_write_race_as_a_typed_refusal(tmp_path, monkeypatch):
+    """The same race surfaces through ``_publish_record()`` as a typed
+    refusal, not a raw uncaught exception escaping the caller.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    status = {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 2.0}
+
+    real_replace = registry_mod.os.replace
+    replace_calls = []
+
+    def replace_then_remove_directory(src, dst):
+        real_replace(src, dst)
+        replace_calls.append(True)
+        rmtree_within(registry.record_path.parent, tmp_path)
+
+    monkeypatch.setattr(registry_mod.os, "replace", replace_then_remove_directory)
+
+    result = registry._publish_record(status)
+
+    assert result is False
+    assert replace_calls == [True]
+    assert registry.record_path.exists() is False
+    assert "record write failed" in registry.status()["failure_reason"]
+    assert registry.recently_healthy() is False
+
+
+def test_registry_fences_a_real_child_after_its_fixture_directory_is_removed(tmp_path, monkeypatch):
+    """A genuinely live child (real PID, real process), not a mock, whose
+    service directory is removed while it is still running.
+
+    The two tests above reproduce the same-process write-race boundary with
+    ``os.getpid()`` standing in for the record's identity; this test spawns a
+    real, separate child process to prove two properties the historical
+    "orphan child" theory conflated: (1) no further ``atomic_write_text`` call
+    happens for this registry once its directory is gone, and (2) the real
+    child does not silently vanish -- it must surface through the existing
+    untracked-process diagnostic surface rather than being invisible, and
+    must never be signalled without ledger-proven identity (Rejected
+    Shortcuts: no broad host sweeper, no signal without authority).
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    # `untracked_local_service_processes` (the only surface with kill
+    # authority feeding it) requires the live command to literally carry a
+    # `yolomux_lib.` `-m` module plus `--socket <path>`, so a bare sleep
+    # child would always be invisible to it for reasons unrelated to this
+    # regression -- mirror the real launch argv shape instead (the trailing
+    # tokens after `-c SCRIPT` become inert extra sys.argv entries to the
+    # interpreter, so this still just sleeps).
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            "-m",
+            "yolomux_lib.fixture_stand_in",
+            "--socket",
+            str(registry.socket_path),
+        ]
+    )
+    try:
+        record = {
+            **current_host_identity().process_record_fields(
+                pid=child.pid,
+                start_identity=registry_mod.process_start_identity(child.pid),
+            ),
+            "service": "fixture",
+            "socket": str(registry.socket_path),
+            "protocol_version": 1,
+            "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+            "launcher_pid": os.getpid(),
+        }
+        assert registry._write_record(record) is True
+        assert registry.record_path.exists() is True
+
+        # The directory is gone before the *next* write attempt starts (not
+        # mid-write like the two tests above) -- the real child keeps running
+        # underneath a service directory that no longer exists.
+        rmtree_within(registry.record_path.parent, tmp_path)
+        assert registry.record_path.parent.exists() is False
+
+        write_calls: list[str] = []
+        real_atomic_write_text = registry_mod.atomic_write_text
+
+        def counting_atomic_write_text(path, text, mode=None):
+            write_calls.append(str(path))
+            return real_atomic_write_text(path, text, mode=mode)
+
+        monkeypatch.setattr(registry_mod, "atomic_write_text", counting_atomic_write_text)
+
+        status = {"ok": True, "version": 1, "pid": child.pid, "started_at": 1.0}
+        result = registry._publish_record(status)
+
+        # Untracked-process discovery is diagnostics-only and must find the
+        # real child by process-table + module/socket evidence alone, since
+        # the ledger record that would have proven authority is gone.
+        table = registry_mod.bounded_process_table()
+        tracked = registry_mod.tracked_local_service_groups(registry.record_path.parent, table)
+        untracked = registry_mod.untracked_local_service_processes(registry.record_path.parent, table, tracked)
+        untracked_pids = {int(row["pid"]) for row in untracked if "pid" in row}
+
+        measured = {
+            "publish_after_removal_result": result,
+            "write_calls_after_removal": write_calls,
+            "child_still_alive": child.poll() is None,
+            "tracked_groups_after_removal": tracked,
+        }
+        # This directly answers the coordinator's rejected-audit correction:
+        # measure, don't assume, whether `_write_record` silently resurrects
+        # the removed directory and writes into it, or whether the removal is
+        # durably fenced. This owner already proved one successful publish
+        # into this directory before it was removed, so a later write from
+        # the SAME owner must refuse rather than `mkdir` the directory back
+        # into existence -- zero atomic_write_text calls, zero chmod, and the
+        # directory stays gone.
+        assert write_calls == [], measured
+        assert result is False, measured
+        assert registry.record_path.parent.exists() is False, measured
+
+        # Whichever branch above is true in this codebase, the real live
+        # child must never be dropped from the untracked-process diagnostic
+        # surface, and tracked_local_service_groups (the only surface with
+        # kill authority) must not fabricate authority over a record it did
+        # not itself just prove -- i.e. no signal escapes this test.
+        assert child.pid in untracked_pids or child.pid in {
+            int(pid) for group in tracked for pid in group.get("member_pids", ())
+        }, measured
+    finally:
+        child.terminate()
+        deadline = time.monotonic() + 5.0
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
 
 
 def test_registry_reclaims_a_poisoned_invalid_pid_record_as_record_only_cleanup(tmp_path, monkeypatch):
@@ -1873,6 +2094,244 @@ def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_pat
     assert registry._upgrade_required is None
     assert registry.record_path.exists() is False
     assert registry.socket_path.exists() is False
+
+
+def test_registry_retire_incompatible_service_escalates_to_sigkill_when_wedged(tmp_path, monkeypatch):
+    """A generation that answers the RPC shutdown request but never actually exits
+    (ignores SIGTERM) must be force-terminated, not left running under the shared
+    socket forever. This is the same graceful-then-forced contract
+    ``shutdown_owned_local_services`` already proves for the multi-service path,
+    applied here to the single-service incompatible-generation retirement path.
+    """
+    now = [100.0]
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+    )
+    actions = []
+    signals_sent = []
+    alive = {4242: True}
+    registry._write_record({
+        **_process_record(4242),
+        "service": "statsd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 22,
+    })
+    registry.socket_path.touch()
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        if method == "shutdown":
+            # The RPC layer acknowledges the request, but the process itself is
+            # wedged and never actually exits -- SIGTERM below must also be tried
+            # before anything is declared retired.
+            return {"ok": True}
+        return {
+            "ok": False,
+            "error_code": "upgrade_required",
+            "version": 22,
+            "required_protocol_version": 22,
+            "pid": 4242,
+        }
+
+    def fake_kill(pid, sig):
+        signals_sent.append(sig)
+        if sig == signal.SIGKILL:
+            alive[pid] = False
+        # SIGTERM is deliberately a no-op here: the wedged process ignores it.
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None,
+    )
+    monkeypatch.setattr(registry_mod.os, "kill", fake_kill)
+
+    assert registry._retire_incompatible_service() is True
+
+    assert actions == ["ping", "shutdown"]
+    assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.exists() is False
+
+
+def _directory_snapshot(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_registry_two_private_roots_never_cross_talk(tmp_path, monkeypatch):
+    """Two managed, auto-derived roots never share election, records, or files.
+
+    Nothing in the registry discovers or merges across two different
+    ``YOLOMUX_ROOT`` values -- each root is private by construction, so
+    starting or retiring a service in one must leave the other byte-for-byte
+    unchanged.
+    """
+    root_a = tmp_path / "root_a"
+    root_b = tmp_path / "root_b"
+    clock_a, clock_b = [100.0], [100.0]
+    spawned_a: list[bool] = []
+    spawned_b: list[bool] = []
+    registry_a = _publication_registry(root_a, clock=clock_a, spawned=spawned_a)
+    registry_b = _publication_registry(root_b, clock=clock_b, spawned=spawned_b)
+
+    def _fake_request_after_spawn(spawned):
+        # Ping/status only succeed once this registry's own popen has actually
+        # run, so ensure_started must take the real bounded-startup path
+        # (spawn, then observe healthy) instead of short-circuiting on an
+        # already-healthy cache hit that never spawns anything.
+        def fake_request(_method, payload=None, timeout=0.2, protocol_version=None):
+            if not spawned:
+                return {}
+            return {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 1.0}
+
+        return fake_request
+
+    monkeypatch.setattr(registry_a, "_request", _fake_request_after_spawn(spawned_a))
+    monkeypatch.setattr(registry_b, "_request", _fake_request_after_spawn(spawned_b))
+
+    assert registry_a.ensure_started() is True
+    snapshot_a_before = _directory_snapshot(root_a)
+    assert snapshot_a_before, "sanity: registry_a actually wrote something"
+    assert root_b.exists() is False, "starting registry_a must not create anything under root_b"
+
+    assert registry_b.ensure_started() is True
+    snapshot_a_after = _directory_snapshot(root_a)
+    assert snapshot_a_after == snapshot_a_before, "starting registry_b changed root_a's files"
+
+    # Retire registry_b's service; root_a must still be untouched.
+    monkeypatch.setattr(registry_b, "_request", lambda *a, **k: {"ok": False, "error_code": "upgrade_required", "version": 2, "pid": os.getpid()})
+    registry_b.invalidate_rpc_health()
+    assert registry_b.ensure_started() is False
+    assert _directory_snapshot(root_a) == snapshot_a_before, "an operation on registry_b changed root_a's files"
+
+    # Each registry took the real bounded-startup path (popen, then observe
+    # healthy) exactly once for its own root -- never for the other's.
+    assert spawned_a == [True]
+    assert spawned_b == [True]
+    assert _directory_snapshot(root_b), "sanity: registry_b actually wrote something under its own root"
+
+
+def test_registry_incompatible_generations_share_one_root_both_directions(tmp_path, monkeypatch):
+    """A deliberately caller-shared root retains exactly one compatible owner.
+
+    An older generation meeting a live newer service must refuse typed and
+    leave the newer generation's record untouched (no adoption, no
+    corruption); a newer generation meeting a live older service must retire
+    it cleanly and publish its own record in the same shared directory.
+    """
+    older_pid = 4242
+
+    # Direction 1: an older registry (protocol 1) meets a live newer service
+    # (protocol 2) it never wrote itself -- must refuse typed, never adopt.
+    registry_old = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 1),
+        popen=lambda *a, **k: (_ for _ in ()).throw(AssertionError("an older generation must never spawn over a live newer one")),
+    )
+    actions_old: list[str] = []
+    monkeypatch.setattr(
+        registry_old,
+        "_request",
+        lambda method, payload=None, timeout=0.2: actions_old.append(method) or {"ok": False, "error_code": "upgrade_required", "version": 2, "pid": older_pid + 1},
+    )
+
+    assert registry_old.ensure_started() is False
+    assert "shutdown" not in actions_old
+    assert registry_old.status()["upgrade_required"]["required_protocol_version"] == 2
+    assert registry_old.record_path.exists() is False
+
+    # Direction 2: a newer registry (protocol 2), sharing the SAME service_dir,
+    # meets a real persisted record written by a genuinely separate
+    # older-generation registry object (protocol 1).
+    registry_seed = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 1))
+    registry_seed._write_record({
+        **_process_record(older_pid),
+        "service": "statusd",
+        "socket": str(registry_seed.socket_path),
+        "protocol_version": 1,
+    })
+    registry_seed.socket_path.touch()
+
+    registry_new = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 2))
+    assert registry_new.socket_path == registry_seed.socket_path
+    assert registry_new.record_path == registry_seed.record_path
+
+    actions_new: list[str] = []
+    alive = {older_pid: True}
+
+    def fake_request_new(method, payload=None, timeout=0.2):
+        actions_new.append(method)
+        if method == "shutdown":
+            alive[older_pid] = False
+            return {"ok": True}
+        return {"ok": False, "error_code": "upgrade_required", "version": 1, "required_protocol_version": 1, "pid": older_pid}
+
+    monkeypatch.setattr(registry_new, "_request", fake_request_new)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None)
+
+    assert registry_new._retire_incompatible_service() is True
+
+    assert actions_new == ["ping", "shutdown"]
+    assert registry_new._upgrade_required is None
+    assert registry_new.record_path.exists() is False, "the old generation's record must be fully removed"
+    assert registry_new.socket_path.exists() is False, "the old generation's socket artifact must be fully removed"
+    # Only in this (retirement) direction was the shared record actually
+    # touched -- direction 1 above proved a refusal never writes anything.
+
+
+def test_registry_two_callers_share_one_root_with_compatible_generations(tmp_path, monkeypatch):
+    """Two callers deliberately pointed at the same root, same protocol, reuse
+    the one live service; the second caller neither spawns a duplicate nor
+    retires the first caller's record.
+
+    Distinct from test_registry_incompatible_generations_share_one_root_both_directions
+    above (mismatched protocol): here both callers report the SAME
+    protocol_version, so caller-shared-root-retain requires exactly one
+    compatible owner to be reused, never replaced.
+    """
+    pid = 4242
+    registry_a = LocalServiceRegistry(tmp_path, LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3))
+    registry_a._write_record({
+        **_process_record(pid),
+        "service": "statusd",
+        "socket": str(registry_a.socket_path),
+        "protocol_version": 3,
+    })
+    registry_a.socket_path.touch()
+
+    registry_b = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 3),
+        popen=lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("a compatible-generation caller must reuse the live service, never spawn a second one")
+        ),
+    )
+    assert registry_b.socket_path == registry_a.socket_path
+    assert registry_b.record_path == registry_a.record_path
+
+    actions_b: list[str] = []
+
+    def fake_request_b(method, payload=None, timeout=0.2):
+        actions_b.append(method)
+        if method == "shutdown":
+            raise AssertionError("a compatible-generation caller must never retire the live service it shares a root with")
+        return {"ok": True, "version": 3, "pid": pid, "started_at": 1.0}
+
+    monkeypatch.setattr(registry_b, "_request", fake_request_b)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda p: p == pid)
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda p: f"proc:{p + 1000}" if p == pid else None)
+
+    assert registry_b.ensure_started() is True
+    assert "shutdown" not in actions_b
+    republished = json.loads(registry_b.record_path.read_text())
+    assert republished["pid"] == pid, "the second caller must keep reusing the first caller's live pid"
+    assert republished["protocol_version"] == 3
 
 
 def test_registry_retires_ledger_proven_older_service_with_its_recorded_protocol(tmp_path, monkeypatch):
@@ -2124,6 +2583,72 @@ def _write_service_record(service_dir, name, pid, socket_path):
     (service_dir / f"{name}.service.json").write_text(
         registry_mod.json.dumps(FixtureLocalServiceRecordBuilder(service=name, socket_path=socket_path, pid=pid).build()),
         encoding="utf-8",
+    )
+
+
+def test_shutdown_owned_local_services_escalates_gracefully_and_spares_unrelated_launcher_groups(tmp_path):
+    service_dir = tmp_path / "services"
+    service_dir.mkdir(parents=True, exist_ok=True)
+    target_socket = service_dir / "jobd.sock"
+    bystander_socket = service_dir / "statusd.sock"
+
+    target_record = FixtureLocalServiceRecordBuilder(
+        service="jobd", socket_path=target_socket, pid=500,
+        fields={"launcher_pid": 700, "launcher_port": 8881},
+    ).build()
+    (service_dir / "jobd.service.json").write_text(registry_mod.json.dumps(target_record), encoding="utf-8")
+
+    bystander_record = FixtureLocalServiceRecordBuilder(
+        service="statusd", socket_path=bystander_socket, pid=600,
+        fields={"launcher_pid": 999, "launcher_port": 9999},
+    ).build()
+    (service_dir / "statusd.service.json").write_text(registry_mod.json.dumps(bystander_record), encoding="utf-8")
+
+    initial = _table([
+        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {target_socket} --idle-seconds 60", 1500),
+        (501, 500, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501),
+        (600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600),
+        (601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601),
+    ])
+    # After the SIGTERM pass: the jobd leader (500) has exited; its worker (501) is a
+    # wedged holdout that must be force-killed. The unrelated launcher's group (600/601)
+    # is completely untouched -- still alive with an unchanged identity.
+    survivors = _table([
+        (501, 1, 500, 1.0, "python3 -c multiprocessing-spawn-worker", 1501),
+        (600, 1, 600, 1.0, f"python3 -m yolomux_lib.statusd --serve --socket {bystander_socket} --idle-seconds 60", 1600),
+        (601, 600, 600, 1.0, "python3 -c multiprocessing-spawn-worker", 1601),
+    ])
+
+    tables = [initial, survivors]
+
+    def table_reader():
+        return tables.pop(0) if len(tables) > 1 else tables[0]
+
+    kills = []
+
+    def kill(pid, signum):
+        kills.append((pid, signum))
+
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+
+    result = registry_mod.shutdown_owned_local_services(
+        8881,
+        service_dir,
+        launcher_pid=700,
+        table_reader=table_reader,
+        kill=kill,
+        sleep=sleep,
+        grace_seconds=2.5,
+    )
+
+    assert sleeps == [2.5], "the caller's exact grace budget must reach sleep(), not a hardcoded or dropped value"
+    assert result == {"signalled": [500], "terminated": [501]}
+    assert kills == [(500, signal.SIGTERM), (501, signal.SIGKILL)], "graceful must precede forced, and only the owned group is touched"
+    assert 600 not in [pid for pid, _signum in kills] and 601 not in [pid for pid, _signum in kills], (
+        "an unrelated launcher's process group must never be signalled"
     )
 
 

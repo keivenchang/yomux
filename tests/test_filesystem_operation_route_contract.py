@@ -35,7 +35,7 @@ class _RefusingFilesystemJob:
         self.calls.append(("produce", task, payload, kwargs))
         raise AssertionError("a refused filesystem request must not reach jobd")
 
-    def product(self, product_key):
+    def product(self, product_key, timeout=0.5):
         self.calls.append(("product", product_key))
         raise AssertionError("a refused filesystem request must not read a product")
 

@@ -11,6 +11,7 @@ from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_default_tmux_runtime
 from tests.tmux_runtime import start_isolated_tmux_runtime
 from tests.tmux_runtime import stop_isolated_tmux_runtime
+from yolomux_lib import app as app_module
 from yolomux_lib import tmux_signals
 from yolomux_lib import tmux_utils
 from yolomux_lib.server import TmuxWebtermHTTPServer
@@ -54,6 +55,42 @@ def test_tmux_signal_watcher_status_preserves_typed_absence_states():
     assert exited["healthy"] is False
     assert exited["reason_code"] == "control_client_exited"
     assert exited["reason"] == "tmux control-mode start failed: refused"
+
+
+def test_non_filesystem_client_event_stream_does_not_start_watchd_until_a_descriptor_exists():
+    release_worker = threading.Event()
+    watchd_starts = []
+    watchd_running = [False]
+    fake_app = SimpleNamespace()
+    fake_app.server_attention_ack_event_poll_seconds = lambda: 30.0
+    fake_app.server_tmux_signal_event_poll_seconds = lambda: 30.0
+    fake_app.client_event_watch_loop = lambda _record: release_worker.wait(2.0)
+    fake_app.start_tmux_signal_event_watcher = lambda: None
+    def start_watchd(record):
+        if watchd_running[0]:
+            return False
+        watchd_running[0] = True
+        watchd_starts.append(record)
+        return True
+
+    fake_app.start_watchd_revision_watcher = start_watchd
+    bridge = app_module.WatchBridge(fake_app)
+
+    bridge.start_client_event_watcher(fake_app)
+    record = bridge.state.event_watcher_record
+    assert record.worker is not None and record.worker.is_alive()
+    assert watchd_starts == []
+
+    # A descriptor is the demand transition. Re-entering through the same SSE lifecycle starts
+    # watchd once; another subscriber cannot install a duplicate bridge worker.
+    bridge.state.descriptors["browser-1"] = object()
+    bridge.start_client_event_watcher(fake_app)
+    bridge.start_client_event_watcher(fake_app)
+    assert watchd_starts == [record]
+
+    release_worker.set()
+    record.worker.join(timeout=2.0)
+    assert record.worker.is_alive() is False
 
 
 def test_client_event_lifecycle_requires_a_live_tmux_control_client(

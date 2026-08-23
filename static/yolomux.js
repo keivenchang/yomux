@@ -59752,6 +59752,38 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
+// The range-level cost total (snapshot.cost_report) belongs to exactly ONE bucket at a
+// time -- whichever one is currently latest -- never zero, never two: debugGraphCostSummaryForBuckets
+// SUMS every bucket carrying rangeReport===true, so two flagged buckets double the total and zero
+// flagged buckets silently reports 0. A delta only carries the buckets that actually changed, so if
+// the position that is latest right now was not itself touched by this delta (an older bucket was
+// corrected instead, or the latest position only just advanced), the per-bucket loop below would
+// never flag it -- while a PREVIOUS delta's now-stale latest bucket, if it WAS touched this round,
+// would have already lost its flag when jsDebugCurrentBucketRecord rebuilt it. This reconciliation
+// is the one owner that always leaves exactly the current latest bucket (if its record already
+// exists) holding the flag, regardless of which buckets this specific delta happened to touch.
+function debugGraphReconcileRangeCostOwner(latest, rangeCost) {
+  const latestKey = latest
+    ? `${Math.floor(Number(latest.start) * 1000)}:${Math.max(jsDebugGraphRawBucketMs, Number(latest.duration) * 1000)}`
+    : null;
+  for (const [key, bucket] of jsDebugGraphBuckets) {
+    if (key === latestKey || !bucket.costSummary || bucket.costSummary.rangeReport !== true) continue;
+    bucket.costSummary = {...bucket.costSummary, rangeReport: false};
+  }
+  if (!latestKey || !rangeCost) return;
+  const latestBucket = jsDebugGraphBuckets.get(latestKey);
+  if (!latestBucket) return;
+  // Only patch if this round's own per-bucket loop did NOT already flag this exact bucket --
+  // when the delta's own touched bucket IS the latest position, jsDebugCurrentBucketRecord
+  // already merged its own modelComponents with rangeCost.components once; re-patching here
+  // too would concatenate a second, duplicate copy of every range-level component/model/
+  // source row (a real bug an independent audit caught: totals stayed correct since this
+  // patch always overwrites totalMicroUsd/etc outright, but the per-model cost breakdown
+  // would double). Skipping when already-flagged this round is the exact, minimal fix.
+  if (latestBucket.costSummary?.rangeReport === true) return;
+  debugGraphApplyServerCostSummary(latestBucket, jsDebugCurrentCostSummary(rangeCost));
+}
+
 function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
   const buckets = Array.isArray(delta?.buckets) ? delta.buckets : [];
   const tombstones = Array.isArray(delta?.tombstones) ? delta.tombstones : [];
@@ -59767,6 +59799,7 @@ function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} =
       snapshot.cost_report,
     ));
   });
+  debugGraphReconcileRangeCostOwner(latest, snapshot.cost_report);
   updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
@@ -60022,7 +60055,10 @@ function debugSystemTmuxSignalWatcherIsIssue(watcher = {}) {
 // held "alive" forever and a step forwards produced a false red.
 // Health metrics that are whole counts. They share the one metric-envelope cell renderer with the
 // three process metrics; only the number formatting differs.
-const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set(['restart_count', 'observations', 'request_count', 'error_count', 'completed_count']);
+const DEBUG_SYSTEM_HEALTH_COUNT_KEYS = new Set([
+  'restart_count', 'process_start_count', 'demand_start_count', 'unexpected_restart_count',
+  'observations', 'request_count', 'error_count', 'completed_count',
+]);
 // The three measurements the local-service projection publishes per process, versus the retained
 // health measurements. They carry different DOM attributes because they have different producers
 // and different coverage, and `tests/test_gate_panels.py` pins the process set exactly.
@@ -60040,7 +60076,7 @@ const DEBUG_SYSTEM_ROSTER_COLUMNS = Object.freeze([
   {key: 'uptime_seconds', labelKey: 'debug.system.localServices.field.uptime', priority: 'primary'},
   {key: 'rss_bytes', labelKey: 'debug.system.localServices.field.memory', priority: 'secondary'},
   {key: 'cpu_now_percent', labelKey: 'debug.graph.chart.cpu', priority: 'secondary'},
-  {key: 'restart_count', labelKey: 'debug.system.roster.column.restarts', coverage: 'retained', priority: 'secondary'},
+  {key: 'process_start_count', labelKey: 'debug.system.roster.column.starts', priority: 'secondary'},
   {key: 'request_count', labelKey: 'debug.system.roster.column.requests', coverage: 'counters', priority: 'secondary'},
   {key: 'error_count', labelKey: 'debug.system.roster.column.errors', coverage: 'counters', priority: 'secondary'},
 ]);
@@ -60053,7 +60089,8 @@ const DEBUG_SYSTEM_HEALTH_REASON_TEXT = Object.freeze({
   observer_unattached: 'the backend-health observer is not attached to this web process',
   resource_unobserved: 'the observer has never recorded this service',
   counters_not_observed: 'the observer never read a counter sample, so every retained total would be a structural zero',
-  web_process_scope: 'the retained history starts before this web process, so these counts cover less time than the restarts beside them',
+  legacy_lifecycle_unclassified: 'older retained process replacements did not record whether the preceding absence was expected',
+  web_process_scope: 'the retained history starts before this web process, so these counts cover less time than the process history beside them',
   missed_final_sample: 'a restart happened before the final counter sample could be read',
   history_corrupt: 'the retained history file was unreadable and was reset',
   history_unreadable: 'the retained history file could not be read and was reset',
@@ -60332,7 +60369,9 @@ function debugSystemHealthCoverage(health = {}) {
 // the number in that cell actually came from.
 function debugSystemHealthColumnCoverage(health, column) {
   const coverage = debugSystemHealthCoverage(health);
-  const value = column.coverage === 'retained' ? coverage.retained_counters : coverage.counters;
+  const value = column.coverage === 'retained'
+    ? coverage.retained_counters
+    : (column.coverage === 'lifecycle' ? coverage.lifecycle : coverage.counters);
   return String(value || 'unavailable');
 }
 
@@ -60362,9 +60401,12 @@ function debugSystemHealthCoverageNotes(health = {}) {
   if (String(coverage.counters || '') === 'partial') {
     notes.push(`Requests, errors and response times are PARTIAL: ${debugSystemHealthReasonListText(coverage.counter_reasons) || 'no reason was published'}.`);
   }
+  if (String(coverage.lifecycle || '') === 'partial') {
+    notes.push(`Restart classification is PARTIAL: ${debugSystemHealthReasonListText(coverage.lifecycle_reasons) || 'no reason was published'}.`);
+  }
   const retained = String(coverage.retained_counters || '');
   if (retained === 'partial') {
-    notes.push(`Retained totals (restarts, observations) are PARTIAL: ${debugSystemHealthReasonListText(coverage.retained_counter_reasons) || 'no reason was published'}.`);
+    notes.push(`Retained counter totals (observations) are PARTIAL: ${debugSystemHealthReasonListText(coverage.retained_counter_reasons) || 'no reason was published'}.`);
   } else if (retained === 'unavailable') {
     notes.push(`Retained totals are unavailable: ${debugSystemHealthReasonText(health.unavailable_reason_code || 'observer_unattached')}.`);
   }
@@ -60395,6 +60437,9 @@ function debugSystemHealthDetailText(health = {}) {
   const metrics = health.metrics && typeof health.metrics === 'object' ? health.metrics : {};
   const parts = [
     `observer samples: ${debugSystemMetricText(metrics.observations, 'observations')}`,
+    `process starts: ${debugSystemMetricText(metrics.process_start_count, 'process_start_count')}`,
+    `demand starts: ${debugSystemMetricText(metrics.demand_start_count, 'demand_start_count')}`,
+    `unexpected restarts: ${debugSystemMetricText(metrics.unexpected_restart_count, 'unexpected_restart_count')}`,
     `completed requests: ${debugSystemMetricText(metrics.completed_count, 'completed_count')}`,
   ];
   // A pid and a revision are identifiers, not quantities: `4,242` is not a pid anyone can grep for.
@@ -60470,7 +60515,8 @@ const DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID = 'local-services';
 // Every metric column a row can carry, in one list, so a row whose metrics are absent by
 // STRUCTURE spells that absence once instead of repeating the column names per row.
 const DEBUG_SYSTEM_ROSTER_METRIC_KEYS = Object.freeze([
-  'cpu_now_percent', 'rss_bytes', 'uptime_seconds', 'restart_count',
+  'cpu_now_percent', 'rss_bytes', 'uptime_seconds', 'process_start_count',
+  'unexpected_restart_count', 'demand_start_count',
   'request_count', 'error_count', 'latency_average_ms', 'latency_max_ms',
 ]);
 const debugSystemRosterAbsentMetrics = reasonCode =>
@@ -60535,8 +60581,10 @@ function debugSystemRosterWebRow(payload = {}, port = '') {
       uptime_seconds: server.uptime_seconds,
       // The backend-health observer runs IN this web process and observes the six local services;
       // it has never observed this process, so these four have no series at all. Rendering them as
-      // 0 restarts / 0 requests / 0 errors / 0 ms would be four fabricated measurements.
-      restart_count: absent,
+      // 0 starts / 0 restarts / 0 requests / 0 errors / 0 ms would be fabricated measurements.
+      process_start_count: absent,
+      unexpected_restart_count: absent,
+      demand_start_count: absent,
       request_count: absent,
       error_count: absent,
       latency_average_ms: absent,
@@ -60610,7 +60658,9 @@ function debugSystemRosterServiceRow(service = {}) {
       cpu_now_percent: metrics.cpu_now_percent,
       rss_bytes: metrics.rss_bytes,
       uptime_seconds: metrics.uptime_seconds,
-      restart_count: healthMetrics.restart_count,
+      process_start_count: healthMetrics.process_start_count,
+      unexpected_restart_count: healthMetrics.unexpected_restart_count,
+      demand_start_count: healthMetrics.demand_start_count,
       request_count: healthMetrics.request_count,
       error_count: healthMetrics.error_count,
       latency_average_ms: healthMetrics.latency_average_ms,
@@ -60866,8 +60916,8 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 }
 
 // The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
-// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed
-// from the payload. The guard is exact, not `>=`: rendering an older payload through the roster
+// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed;
+// lifecycle accounting bumped it to 4. The guard is exact, not `>=`: rendering an older payload through the roster
 // would print absent health as though it had been measured, which is the defect the version number
 // exists to prevent.
 //
@@ -60878,7 +60928,7 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 // condition the roster already covers is the divergent-copies defect; the roster says it in one
 // typed state now, and the legacy view is gone.
 function debugSystemLocalServicesSchemaSupported(payload = {}) {
-  return Number(payload.local_services?.schema_version) === 3;
+  return Number(payload.local_services?.schema_version) === 4;
 }
 
 // The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather

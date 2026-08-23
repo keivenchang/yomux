@@ -373,8 +373,9 @@ class StatsCurrentClient:
         payload: Mapping[str, object] | None = None,
         *,
         timeout: float = 0.5,
+        bypass_cached_upgrade: bool = False,
     ) -> dict[str, Any]:
-        if self._upgrade_required is not None:
+        if self._upgrade_required is not None and not bypass_cached_upgrade:
             return dict(self._upgrade_required)
         response, _binary = self._transport.dispatch(
             action,
@@ -453,13 +454,21 @@ class StatsCurrentClient:
             timeout=LEASE_TIMEOUT_SECONDS,
         )
 
-    def release_lease(self, lease_id: str) -> dict[str, Any]:
+    def release_lease(
+        self,
+        lease_id: str,
+        *,
+        bypass_cached_upgrade: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(lease_id, str) or not lease_id:
             raise ValueError("lease_id must be a non-empty string")
         return self._call(
             "release",
             {"lease_id": lease_id},
             timeout=LEASE_TIMEOUT_SECONDS,
+            # A terminal renewal still leaves a real lease in statsd. Cleanup may dispatch once,
+            # but the cached fence remains installed for every subsequent normal operation.
+            bypass_cached_upgrade=bypass_cached_upgrade,
         )
 
     def register_collector_context(

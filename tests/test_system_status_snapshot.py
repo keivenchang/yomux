@@ -436,7 +436,7 @@ def test_the_served_bodies_split_the_roster_from_the_advanced_diagnostics(
 
     core = _poll_until_published(runtime, "/api/system-status", headers)
     assert core["ok"] is True
-    assert isinstance(core["local_services"], dict) and core["local_services"]["schema_version"] == 3
+    assert isinstance(core["local_services"], dict) and core["local_services"]["schema_version"] == 4
     assert "generated_at" in core and "server" in core and "cpu_budget" in core
     for key in system_status_snapshot.SYSTEM_STATUS_ADVANCED_KEYS:
         assert key not in core, f"{key} must not ride the five-second poll"

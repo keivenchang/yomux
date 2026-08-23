@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "Verzoeken",
   "debug.system.roster.column.restarts": "Herstarts",
   "debug.system.roster.column.service": "Dienst",
+  "debug.system.roster.column.starts": "Opstartbeurten",
   "debug.system.roster.coverage.partial": "gedeeltelijk",
   "debug.system.roster.detail.eventsChat": "Gebeurtenissen en chat",
   "debug.system.roster.detail.process": "Proces",

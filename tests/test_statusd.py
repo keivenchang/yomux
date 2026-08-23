@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import shutil
+import socket
+import subprocess
+import sys
 import time
 import types
 import uuid
@@ -26,6 +30,7 @@ from yolomux_lib import statusd
 from yolomux_lib import statusd_client
 from yolomux_lib.local_services import client as local_service_client_module
 from yolomux_lib.local_services import rpc
+from yolomux_lib.local_services import runtime as local_service_runtime
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.statusd_client import StatusClient
 from yolomux_lib.statusd_protocol import validate_inventory
@@ -1429,6 +1434,75 @@ def test_statusd_idle_reaps_dead_client_leases(monkeypatch, tmp_path):
     assert service.leases == {}
 
 
+def test_statusd_status_probe_does_not_reset_the_idle_clock(tmp_path):
+    """``handle()`` must not restamp the idle clock on every dispatched RPC.
+
+    The listener's ``on_client`` callback (wired in ``run()``) already excludes
+    same-process connections before ``handle()`` runs; a redundant stamp inside
+    ``handle()`` would defeat that exclusion for a same-process diagnostic call.
+    """
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock", idle_seconds=5.0)
+    assert not service.leases
+    service.last_client_at = time.monotonic() - 6.0
+    assert service.idle_due() is True, "baseline: no leases and idle_seconds elapsed must already report idle"
+
+    service.last_client_at = time.monotonic() - 6.0
+    response, _body = service.handle({"action": "status", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+    assert response["ok"] is True
+
+    assert service.idle_due() is True, "a status probe reset the idle clock via handle()"
+
+
+def test_statusd_external_status_probe_never_refreshes_demand_but_a_real_lease_does(tmp_path, monkeypatch):
+    """Cross the real listener boundary (not a direct ``handle()`` call) to
+    prove an external health/status poller with zero leases cannot refresh
+    the idle deadline, while acquiring a real lease does.
+    """
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock", idle_seconds=5.0)
+    worker = Thread(target=service.run, daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not service.socket_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert service.socket_path.exists()
+
+        monkeypatch.setattr(local_service_runtime, "peer_pid", lambda _connection: os.getpid() + 999_000)
+
+        service.last_client_at = time.monotonic() - 6.0
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(statusd.STATUSD_SERVICE_NAME, "status", {"action": "status", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        assert service.idle_due() is True, "an external status probe with no lease refreshed the idle clock"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(statusd.STATUSD_SERVICE_NAME, "lease", {"action": "lease", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "client_pid": os.getpid()})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        lease_id = str(response["lease_id"])
+        assert service.idle_due() is False, "acquiring a real lease did not refresh demand"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(service.socket_path))
+            envelope = rpc.new_envelope(statusd.STATUSD_SERVICE_NAME, "release", {"action": "release", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "lease_id": lease_id})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        service.last_client_at = time.monotonic() - 6.0
+        assert service.idle_due() is True, "idle grace window did not elapse after the final lease released"
+    finally:
+        service.stop_event.set()
+        worker.join(timeout=3.0)
+
+
 def test_statusd_listener_exits_after_reaping_an_abandoned_lease(tmp_path):
     socket_path = tmp_path / "services" / "statusd.sock"
     service = statusd.PersistentStatusService(socket_path, idle_seconds=1.0)
@@ -1647,3 +1721,65 @@ def test_web_read_forwards_stale_bytes_when_statusd_build_fails_after_invalidati
     assert stale_body == fresh_body
     assert service.status()["build_count"] == 1
     assert thread.is_alive() is False
+
+
+def test_statusd_orphan_diagnostics_reports_without_signalling_and_retains_age(tmp_path):
+    """The bounded host-local repair path's diagnostic half, exercised for real.
+
+    A genuinely live child with no ledger record must surface as one typed,
+    diagnostics-only row (never a signal or unlink -- see Rejected Shortcuts
+    in DOIT.p1.e5.backend-lifetime-supervision.md) through statusd's own
+    orphan_diagnostics RPC, and a second pass must report a strictly larger
+    retained age for the same still-alive pid instead of rediscovering it as
+    brand new.
+    """
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(60)",
+            "-m",
+            "yolomux_lib.fixture_stand_in",
+            "--socket",
+            str(service.socket_path.parent / "orphan-fixture.sock"),
+        ]
+    )
+    try:
+        first_response, _ = service.handle({"action": "orphan_diagnostics", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+        assert first_response["ok"] is True
+        first_rows = {row["pid"]: row for row in first_response["orphans"]}
+        assert child.pid in first_rows, first_response
+        first_row = first_rows[child.pid]
+        assert first_row["attempted_action"] == "none"
+        assert first_row["result"] == "reported_only"
+        assert first_row["reason"] == "untracked_no_ledger_record"
+        assert first_row["age_seconds"] == 0.0
+
+        time.sleep(0.05)
+        second_response, _ = service.handle({"action": "orphan_diagnostics", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+        second_rows = {row["pid"]: row for row in second_response["orphans"]}
+        assert child.pid in second_rows, second_response
+        assert second_rows[child.pid]["age_seconds"] > first_row["age_seconds"]
+        assert child.poll() is None, "diagnostics-only reporting must never signal the ambiguous survivor"
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        if child.poll() is None:
+            child.kill()
+            child.wait()  # unconditional -- SIGKILL guarantees eventual return
+        if child.stdout is not None and not child.stdout.closed:
+            child.stdout.close()
+        if child.stdin is not None and not child.stdin.closed:
+            child.stdin.close()
+        if child.stderr is not None and not child.stderr.closed:
+            child.stderr.close()
+        if sys.exc_info()[0] is None:
+            assert child.returncode is not None, "orphan-diagnostics child was not reaped after cleanup"
+
+    third_response, _ = service.handle({"action": "orphan_diagnostics", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
+    assert child.pid not in {row["pid"] for row in third_response["orphans"]}, "a reaped pid must not remain in retained state forever"

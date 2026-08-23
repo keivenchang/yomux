@@ -1,8 +1,12 @@
 from pathlib import Path
+import os
+import socket
 import threading
 import time
 
 from yolomux_lib import approvald
+from yolomux_lib.local_services import rpc
+from yolomux_lib.local_services import runtime as local_service_runtime
 
 
 class FakeEventLog:
@@ -176,3 +180,75 @@ def test_approvald_event_callback_writes_session_event_with_target(tmp_path, mon
         "message_key": "events.message.yolo.approved",
         "message_params": {},
     }]
+
+
+def test_approvald_status_probe_does_not_reset_the_idle_clock(tmp_path):
+    """``handle()`` must not restamp the idle clock on every dispatched RPC.
+
+    The listener's ``on_client`` callback (wired in ``run()``) already excludes
+    same-process connections before ``handle()`` runs; a redundant stamp inside
+    ``handle()`` would defeat that exclusion for a same-process diagnostic call.
+    """
+    item = approvald.PersistentApprovalService(tmp_path / "approvald.sock", idle_seconds=5.0)
+
+    assert not item.leases
+    assert not item.records
+    item.last_client_at = time.monotonic() - 6.0
+    assert item.idle_due() is True, "baseline: no leases/records and idle_seconds elapsed must already report idle"
+
+    item.last_client_at = time.monotonic() - 6.0
+    response, _body = item.handle({"action": "status"})
+    assert response["ok"] is True
+
+    assert item.idle_due() is True, "a status probe reset the idle clock via handle()"
+
+
+def test_approvald_external_status_probe_never_refreshes_demand_but_a_real_lease_does(tmp_path, monkeypatch):
+    """Cross the real listener boundary (not a direct ``handle()`` call) to
+    prove an external health/status poller with zero leases/records cannot
+    refresh the idle deadline, while acquiring a real lease does.
+    """
+    socket_path = tmp_path / "approvald.sock"
+    item = approvald.PersistentApprovalService(socket_path, idle_seconds=5.0)
+    worker = threading.Thread(target=item.run, daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while not item.socket_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert item.socket_path.exists()
+
+        monkeypatch.setattr(local_service_runtime, "peer_pid", lambda _connection: os.getpid() + 999_000)
+
+        item.last_client_at = time.monotonic() - 6.0
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(item.socket_path))
+            envelope = rpc.new_envelope("approvald", "status", {"action": "status"})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        assert item.idle_due() is True, "an external status probe with no lease/record refreshed the idle clock"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(item.socket_path))
+            envelope = rpc.new_envelope("approvald", "lease", {"action": "lease", "client_pid": os.getpid()})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        lease_id = str(response["lease_id"])
+        assert item.idle_due() is False, "acquiring a real lease did not refresh demand"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(2.0)
+            client.connect(str(item.socket_path))
+            envelope = rpc.new_envelope("approvald", "release", {"action": "release", "lease_id": lease_id})
+            rpc.write_message(client, envelope, envelope.payload)
+            _envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response["ok"] is True
+        item.last_client_at = time.monotonic() - 6.0
+        assert item.idle_due() is True, "idle grace window did not elapse after the final lease released"
+    finally:
+        item.stop_event.set()
+        worker.join(timeout=3.0)

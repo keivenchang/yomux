@@ -26,7 +26,7 @@ from yolomux_lib import common
 from yolomux_lib.control import send_yolomux_control_request
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES, safe_socket_path
 from yolomux_lib.local_services.command_router import LocalServiceCommandRouter
-from yolomux_lib.local_services.runtime import acquire_client_lease, reap_dead_client_leases, release_client_lease
+from yolomux_lib.local_services.runtime import acquire_client_lease, claim_gated_idle_due, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import run_local_rpc_service
 from yolomux_lib.settings import stats_prune_local_time
 from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
@@ -1219,6 +1219,13 @@ class StatsCurrentService:
         self.worker: threading.Thread | None = None
         self.leases: dict[str, object] = {}
         self.started_at, self.last_client_at = self.clock(), self.monotonic()
+        # Distinct from last_client_at: this one tracks RPC *traffic* (any
+        # served request, including a bare status/ping) purely to gate the
+        # vacuum quiet-check below. last_client_at tracks real demand (a
+        # claim) and must only move through claim_gated_idle_due -- the two
+        # cannot share one field without a diagnostic RPC corrupting the
+        # shutdown deadline.
+        self.last_rpc_at = self.monotonic()
         self._pending_full = True
         self._pending_dirty: set[materializer.DirtyCell] = set()
         self._next_materialization_at: float | None = None
@@ -1421,7 +1428,7 @@ class StatsCurrentService:
         holds ``work_lock`` for the whole SQLite pass, so on a busy box it would
         block every arriving RPC past the append deadline. Quiet means no RPC has
         been served within ``idle_seconds`` -- ``_on_client`` stamps
-        ``last_client_at`` on every served request -- so while requests keep
+        ``last_rpc_at`` on every served request -- so while requests keep
         arriving compaction DEFERS and re-checks on the next idle tick instead of
         stalling live traffic. A permanently busy box would then never reclaim the
         pruned free-list, so once compaction has been owed longer than
@@ -1438,7 +1445,7 @@ class StatsCurrentService:
         # the cap measures from when compaction was first due, not the last run.
         if self._vacuum_due_since is None:
             self._vacuum_due_since = now
-        quiet = now - self.last_client_at >= self.idle_seconds
+        quiet = now - self.last_rpc_at >= self.idle_seconds
         capped = now - self._vacuum_due_since >= VACUUM_MAX_DEFER_SECONDS
         if not quiet and not capped:
             # Due, but the box is busy and the cap has not elapsed. The worker
@@ -4104,7 +4111,12 @@ class StatsCurrentService:
         # Deliberately does NOT prune. Retention cleanup is nightly maintenance,
         # and running it here would charge one unlucky browser request the whole
         # delete while the observer's next sample waits on the same writer lock.
-        self.last_client_at = self.monotonic()
+        #
+        # Stamps last_rpc_at (RPC traffic), never last_client_at (the shared
+        # owner's claim clock) -- a bare status/ping/snapshot request must
+        # never count as demand. Only claim_gated_idle_due (via _idle) may
+        # move last_client_at.
+        self.last_rpc_at = self.monotonic()
 
     def _resolved_prune_time(self) -> prune_schedule.PruneTime:
         """Re-read the preference so a change takes effect without a restart."""
@@ -4214,13 +4226,13 @@ class StatsCurrentService:
                 or self._pending_coverage_refresh
                 or bool(self._pending_ring_dirty)
             )
-        idle = (
-            not self.leases
-            and not self._building
-            and not pending
-            and self.monotonic() - self.last_client_at >= self.idle_seconds
-        )
-        return idle
+        has_claim = bool(self.leases) or self._building or pending
+        # claim_gated_idle_due is the one shared owner of the transition/
+        # deadline algorithm every local service routes through; only this
+        # service's own claim predicate (a lease, an in-flight build, or
+        # pending materializer work) varies. on_client is wired to a no-op
+        # for this reason -- see run() below and last_rpc_at above.
+        return claim_gated_idle_due(self, has_claim, now=self.monotonic)
 
     def run(self) -> int:
         return run_local_rpc_service(

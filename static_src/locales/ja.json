@@ -2492,6 +2492,7 @@
   "debug.system.roster.collapse": "{service} の詳細を隠す",
   "debug.system.roster.column.service": "サービス",
   "debug.system.roster.column.latency": "レイテンシ 平均 / 最大",
+  "debug.system.roster.column.starts": "起動回数",
   "debug.system.roster.column.restarts": "再起動回数",
   "debug.system.roster.column.requests": "リクエスト",
   "debug.system.roster.column.errors": "エラー",

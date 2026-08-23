@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import errno
+import threading
 import traceback
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from contextlib import nullcontext
 from contextvars import ContextVar
@@ -12,21 +12,119 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
 from time import monotonic as monotonic_clock
+from time import sleep as sleep_for
 from typing import Any
 
 from ..server_logs import emit_server_log
 from .registry import LOCAL_SERVICE_START_TIMEOUT_SECONDS
 from .registry import LocalServiceRegistry
 from .registry import LocalServiceSpec
+from .registry import local_service_transport_error
 from .rpc import LOCAL_RPC_DEADLINE_REASONS
 from .rpc import LOCAL_RPC_VERSION
-from .rpc import LOCAL_SERVICE_ERROR_BUSY
 from .rpc import LocalRpcError
+from .rpc import local_service_response_is_prehandler_busy
 from .rpc import new_envelope
 from .rpc import request as local_service_request
+from .rpc import retry_local_service_prehandler_busy
 from .rpc import safe_socket_path
 from .runtime import redact_local_service_text
 from .runtime import local_service_exception_cause
+
+
+LOCAL_SERVICE_LEASE_RELEASE_RETRY_SECONDS = 1.0
+
+
+class LocalServiceLeaseRelease:
+    """Keep one release owned until the peer acknowledges it or rejects it terminally."""
+
+    def __init__(
+        self,
+        release: Callable[[str], Mapping[str, Any]],
+        lease_id: str,
+        *,
+        retry_seconds: float,
+        expected_errors: tuple[type[Exception], ...],
+    ) -> None:
+        self.release = release
+        self.lease_id = lease_id
+        self.retry_seconds = max(0.001, float(retry_seconds))
+        self.expected_errors = expected_errors
+        self.completed = threading.Event()
+        self.terminal_response: dict[str, Any] | None = None
+        self._thread: threading.Thread | None = None
+
+    def _attempt(self) -> bool:
+        try:
+            response = self.release(self.lease_id)
+        except self.expected_errors:
+            return False
+        if response.get("ok") is True:
+            self.completed.set()
+            return True
+        error_code = str(response.get("error_code") or "").strip().lower()
+        error = str(response.get("error") or "").strip().lower()
+        terminal = response.get("terminal") is True or "upgrade_required" in {error_code, error}
+        if not terminal and local_service_failure_is_transient(response):
+            return False
+        self.terminal_response = dict(response)
+        self.completed.set()
+        reason = redact_local_service_text(error_code or error or response.get("status") or "request_failed")
+        emit_server_log(
+            "error",
+            "local-service:lease-release",
+            f"lease release stopped: {reason}",
+            category="lifecycle",
+            dedupe_key=f"local-service:lease-release:{reason}",
+            dedupe_seconds=5.0,
+            route="local-service:lease-release",
+            event="lease-release",
+            delivery="terminal",
+        )
+        return True
+
+    def _retry(self) -> None:
+        while not self.completed.wait(self.retry_seconds):
+            if self._attempt():
+                return
+
+    def start(self) -> "LocalServiceLeaseRelease":
+        """Attempt synchronously once, then retain a process-lifetime retry owner if needed."""
+
+        if self._attempt():
+            return self
+        worker = threading.Thread(
+            target=self._retry,
+            name="local-service-lease-release",
+            daemon=True,
+        )
+        self._thread = worker
+        worker.start()
+        return self
+
+
+def release_local_service_lease_eventually(
+    release: Callable[[str], Mapping[str, Any]],
+    lease_id: str,
+    *,
+    retry_seconds: float | None = None,
+    expected_errors: tuple[type[Exception], ...] = (OSError, LocalRpcError),
+) -> LocalServiceLeaseRelease:
+    """Release now or keep retrying bounded attempts for this web process's lifetime."""
+
+    normalized = str(lease_id or "")
+    if not normalized:
+        raise ValueError("lease_id must be non-empty")
+    return LocalServiceLeaseRelease(
+        release,
+        normalized,
+        retry_seconds=(
+            LOCAL_SERVICE_LEASE_RELEASE_RETRY_SECONDS
+            if retry_seconds is None
+            else retry_seconds
+        ),
+        expected_errors=expected_errors,
+    ).start()
 
 
 @dataclass(frozen=True)
@@ -116,7 +214,13 @@ def local_service_failure_is_transient(
         status = int(response.get("status") or 0)
     except (TypeError, ValueError):
         status = 0
-    return status == HTTPStatus.SERVICE_UNAVAILABLE or error in {"refreshing", LOCAL_SERVICE_ERROR_BUSY}
+    return status == HTTPStatus.SERVICE_UNAVAILABLE or error == "refreshing" or local_service_failure_is_busy(response)
+
+
+def local_service_failure_is_busy(response: Mapping[str, Any]) -> bool:
+    """Return whether the peer explicitly refused the request before running its handler."""
+
+    return local_service_response_is_prehandler_busy(response)
 
 
 class LocalServiceClient:
@@ -186,13 +290,7 @@ class LocalServiceClient:
 
     @staticmethod
     def _transport_error(exc: OSError | LocalRpcError) -> str:
-        if isinstance(exc, TimeoutError):
-            return "timeout"
-        if isinstance(exc, OSError) and exc.errno == errno.ENOENT:
-            return "absent"
-        if isinstance(exc, OSError) and exc.errno == errno.ECONNREFUSED:
-            return "refused"
-        return "rpc"
+        return local_service_transport_error(exc)
 
     def _emit_transport_error(self, failure: TransportFailure) -> None:
         exc = failure.error
@@ -229,6 +327,32 @@ class LocalServiceClient:
                 return
         self._emit_transport_error(failure)
 
+    def _request_until_not_busy(
+        self,
+        payload: dict[str, Any],
+        timeout: float,
+        request_binary: bytes = b"",
+        *,
+        probe: bool = False,
+    ) -> tuple[dict[str, Any], bytes, TransportFailure | None]:
+        """Retry explicit pre-handler overload only, within the caller's original RPC budget."""
+
+        def attempt(attempt_timeout: float) -> tuple[dict[str, Any], bytes, TransportFailure | None]:
+            return self._request_once(
+                payload,
+                attempt_timeout,
+                request_binary,
+                probe=probe,
+            )
+
+        return retry_local_service_prehandler_busy(
+            attempt,
+            lambda result: result[0],
+            timeout,
+            clock=monotonic_clock,
+            sleep=sleep_for,
+        )
+
     def request_with_binary(
         self,
         payload: dict[str, Any],
@@ -237,7 +361,12 @@ class LocalServiceClient:
         *,
         probe: bool = False,
     ) -> tuple[dict[str, Any], bytes]:
-        response, binary, error = self._request_once(payload, timeout, request_binary, probe=probe)
+        response, binary, error = self._request_until_not_busy(
+            payload,
+            timeout,
+            request_binary,
+            probe=probe,
+        )
         # A missing or refused socket is a demand against a service that may
         # have completed idle shutdown while its launcher still owns an
         # unreaped child. The shared registry is the only lifecycle owner: it
@@ -260,7 +389,12 @@ class LocalServiceClient:
             if error is not None:
                 self._report_transport_error(error)
             return response, binary
-        response, binary, retry_error = self._request_once(payload, timeout, request_binary, probe=probe)
+        response, binary, retry_error = self._request_until_not_busy(
+            payload,
+            timeout,
+            request_binary,
+            probe=probe,
+        )
         if retry_error is not None:
             self._report_transport_error(retry_error)
         return response, binary
@@ -272,10 +406,22 @@ class LocalServiceClient:
     def request_if_running(self, payload: dict[str, Any], timeout: float = 0.5, *, probe: bool = False) -> dict[str, Any]:
         """Query an existing service without turning observation into launch demand."""
 
-        response, _binary, error = self._request_once(payload, timeout, probe=probe)
+        response, _binary = self.request_with_binary_if_running(payload, timeout=timeout, probe=probe)
+        return response
+
+    def request_with_binary_if_running(
+        self,
+        payload: dict[str, Any],
+        timeout: float = 0.5,
+        *,
+        probe: bool = False,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Query an existing service for bytes without turning observation into launch demand."""
+
+        response, binary, error = self._request_until_not_busy(payload, timeout, probe=probe)
         if error is not None and response.get("_transport_error") not in {"absent", "refused"}:
             self._report_transport_error(error)
-        return response
+        return response, binary
 
     def ensure_started(self) -> bool:
         started = self.registry.ensure_started()

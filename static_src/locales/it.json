@@ -2538,6 +2538,7 @@
   "debug.system.roster.collapse": "Nascondi i dettagli di {service}",
   "debug.system.roster.column.service": "Servizio",
   "debug.system.roster.column.latency": "Latenza media / max",
+  "debug.system.roster.column.starts": "Avvii",
   "debug.system.roster.column.restarts": "Riavvii",
   "debug.system.roster.column.requests": "Richieste",
   "debug.system.roster.column.errors": "Errori",

@@ -609,13 +609,14 @@ def test_supervisor_returns_promptly_retries_with_bounded_backoff_and_starts_onc
         assert time.monotonic() - started < 0.1
         assert current.start() is False
         assert collected.wait(1)
+        assert wait_until(lambda: current.status()["supervisor"]["phase"] == "running")
         status = current.status()
         assert status["leased"] is True
         assert status["supervisor"] == {
             "phase": "running",
             "alive": True,
             "failure_count": 2,
-            "last_failure": "LeaseUnavailable",
+            "last_failure": "",
             "retry_delay_seconds": 0.0,
             "retry_in_seconds": 0.0,
         }

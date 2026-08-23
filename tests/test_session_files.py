@@ -291,8 +291,9 @@ def test_session_files_route_returns_operation_receipt_then_publishes_and_replay
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 7}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, *, timeout):
             assert job_id == "job-session-files-ready"
+            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
             assert release_result.wait(2.0), "test did not release the accepted job"
             return {
                 "ok": True,
@@ -444,8 +445,9 @@ def test_session_files_operation_failure_preserves_exception_type_and_frames(
         def product(self, *_args, **_kwargs):
             return {"ok": True, "state": "pending", "generation": 9}, b""
 
-        def result(self, job_id):
+        def result(self, job_id, *, timeout):
             assert job_id == "job-session-files-failed"
+            assert 0 < timeout <= app_module.JOBD_PRODUCT_RPC_TIMEOUT_SECONDS
             return {
                 "ok": False,
                 "error": "service socket is absent",

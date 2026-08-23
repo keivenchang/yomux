@@ -24,12 +24,15 @@ from .tmux.tmux_utils import tmux
 from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
+from .local_services.runtime import claim_gated_idle_due
 from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .local_services.command_router import CommonDaemonActions
 from .local_services.command_router import LocalServiceCommandRouter
+from .local_services.registry import bounded_process_table
+from .local_services.registry import verified_orphan_diagnostics
 from .local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_CODE_REVISION
@@ -67,6 +70,7 @@ STATUSD_COMMAND_ROUTER = LocalServiceCommandRouter({
     "activity_summary": "_handle_activity_summary", "wait_generation": "_handle_wait_generation",
     "invalidate": "_handle_invalidate", "lease": "_handle_lease", "release": "_handle_release",
     "shutdown": "_handle_shutdown", "shutdown_if_idle": "_handle_shutdown_if_idle",
+    "orphan_diagnostics": "_handle_orphan_diagnostics",
 })
 
 
@@ -164,6 +168,11 @@ class PersistentStatusService(LocalRpcServiceState):
         self.refresh_worker: threading.Thread | None = None
         self.refresh_requested_sessions: tuple[str, ...] | None = None
         self.refresh_build_sessions: tuple[str, ...] | None = None
+        # First-observed wall-clock time per ambiguous survivor pid, so a
+        # repeated diagnostic pass can report retained age instead of
+        # re-discovering the same orphan as brand new every call. A pid that
+        # stops appearing (reaped, exited, or reused) is pruned the next pass.
+        self._orphan_first_seen: dict[int, float] = {}
         self.refresh_retry_at = 0.0
         self.session_payload_cache: dict[str, dict[str, Any]] = {}
         self.session_capture_due_at: dict[str, float] = {}
@@ -640,7 +649,10 @@ class PersistentStatusService(LocalRpcServiceState):
             # A test worker or a crashed web process cannot release its lease. Reap before
             # deciding idleness so its abandoned lease cannot pin a private daemon forever.
             reap_dead_client_leases(self.leases)
-            return not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds
+            # claim_gated_idle_due is the one shared owner of the
+            # transition/deadline algorithm every local service routes
+            # through; statusd's claim predicate is a held lease.
+            return claim_gated_idle_due(self, bool(self.leases))
 
     def status(self) -> dict[str, object]:
         with self.lock:
@@ -664,6 +676,29 @@ class PersistentStatusService(LocalRpcServiceState):
                 },
             }
 
+    def orphan_diagnostics(self) -> list[dict[str, Any]]:
+        """Bounded, typed report of every ambiguous local-service survivor.
+
+        Diagnostics-only: reports never signal or unlink (see
+        ``verified_orphan_diagnostics``). ``attempted_action``/``result`` are
+        carried straight through; only ``age_seconds`` is added here, using
+        this daemon's own retained first-seen bookkeeping across supervision
+        passes rather than any per-process wall-clock birth time.
+        """
+        with self.lock:
+            table = bounded_process_table()
+            rows = verified_orphan_diagnostics(self.socket_path.parent, table)
+            now = self.wall_clock()
+            seen_pids = set()
+            for row in rows:
+                pid = int(row["pid"])
+                seen_pids.add(pid)
+                first_seen = self._orphan_first_seen.setdefault(pid, now)
+                row["age_seconds"] = max(0.0, now - first_seen)
+            for stale_pid in set(self._orphan_first_seen) - seen_pids:
+                del self._orphan_first_seen[stale_pid]
+            return rows
+
     def _handle_ping(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         return CommonDaemonActions.ping(
             STATUSD_SERVICE_NAME,
@@ -675,6 +710,9 @@ class PersistentStatusService(LocalRpcServiceState):
 
     def _handle_status(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         return CommonDaemonActions.status(self.status)
+
+    def _handle_orphan_diagnostics(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        return {"ok": True, "orphans": self.orphan_diagnostics()}, b""
 
     @staticmethod
     def _bad_request(error: StatusProtocolError) -> tuple[dict[str, Any], bytes]:
@@ -734,7 +772,10 @@ class PersistentStatusService(LocalRpcServiceState):
         return self._handle_shutdown({}, b"")
 
     def handle(self, request: dict[str, Any], request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        self.last_client_at = time.monotonic()
+        # Deliberately does NOT stamp last_client_at here; the listener's
+        # on_client callback already does that for every non-self connection
+        # before handle() runs.  Restamping unconditionally here would count a
+        # same-process diagnostic RPC as external demand.
         try:
             request = validate_request(request)
         except StatusProtocolError as error:
@@ -748,7 +789,11 @@ class PersistentStatusService(LocalRpcServiceState):
             socket_path=self.socket_path, lock_path=self.lock_path, service_name=STATUSD_SERVICE_NAME,
             stop_event=self.stop_event, handle=self.handle,
             on_idle=self.idle_due,
-            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            # idle_due refreshes last_client_at directly whenever a lease is
+            # held; a connection-level callback here would count a bare
+            # diagnostic RPC as demand regardless of whether any real claim
+            # exists.
+            on_client=lambda: None,
             concurrent_handlers=STATUSD_CONCURRENT_HANDLER_LIMIT,
         )
 

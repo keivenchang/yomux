@@ -8,10 +8,47 @@ from dataclasses import dataclass
 from dataclasses import field
 import json
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 from yolomux_lib.infra.host_identity import HostIdentity
 from yolomux_lib.infra.host_identity import current_host_identity
+
+
+# Directory names that identify a directory as SHARED (owned by no single test), never a
+# safe deletion target, however this function is reached. `pytest-of-<user>` is pytest's own
+# basetemp root; `yop-*` is this repo's `tests/conftest.py` per-process TMPDIR root -- both
+# are ancestors real deletions must never cross.
+_SHARED_DIRECTORY_NAME_PREFIXES = ("pytest-of-", "yop-")
+
+
+def rmtree_within(target: Path, owned_root: Path) -> None:
+    """Delete `target` only if it cannot be the shared system temp root or a directory tree
+    other tests/processes depend on.
+
+    A test simulating "the record directory vanishes mid-write" must never be able to
+    delete the shared basetemp or the bare system temp directory -- a path-length safety
+    fallback (`safe_socket_path`) can legitimately place a registry's record under a
+    privately-digest-named directory directly under the system temp dir rather than under
+    `owned_root` (the test's own `tmp_path`); that is still safe to delete (it is unique to
+    this one candidate path, not shared), so containment is checked by BLOCKING the known
+    shared ancestors rather than requiring strict containment under `owned_root` alone.
+    Historically this used `shutil.rmtree(..., ignore_errors=True)` with no check at all: a
+    wrong target failed silently and deleted the shared `/tmp` root itself. This raises
+    loudly instead of silently skipping past a dangerous target.
+    """
+    resolved_target = target.resolve()
+    resolved_root = owned_root.resolve()
+    system_temp_dir = Path(tempfile.gettempdir()).resolve()
+    contained = resolved_target.is_relative_to(resolved_root)
+    is_system_temp_root = resolved_target == system_temp_dir
+    is_shared_directory = resolved_target.name.startswith(_SHARED_DIRECTORY_NAME_PREFIXES)
+    if not contained and (is_system_temp_root or is_shared_directory):
+        raise AssertionError(
+            f"refusing to rmtree {resolved_target}: a shared directory, not inside owned root {resolved_root}"
+        )
+    shutil.rmtree(resolved_target, ignore_errors=True)
 
 
 @dataclass(frozen=True)

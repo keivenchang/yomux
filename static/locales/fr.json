@@ -402,6 +402,7 @@
   "debug.system.roster.column.requests": "Requêtes",
   "debug.system.roster.column.restarts": "Redémarrages",
   "debug.system.roster.column.service": "Service ",
+  "debug.system.roster.column.starts": "Démarrages",
   "debug.system.roster.coverage.partial": "partiel",
   "debug.system.roster.detail.eventsChat": "Évènements et discussion",
   "debug.system.roster.detail.process": "Processus",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import hashlib
 import json
 import multiprocessing
@@ -43,10 +44,12 @@ from .common import inline_json_product_metadata
 from .common import product_filename
 from .common import tail_file_lines
 from ..local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
+from ..local_services.rpc import LOCAL_SERVICE_ERROR_BUSY
 from ..local_services.rpc import LOCAL_RPC_VERSION, new_envelope, request as local_service_request, safe_socket_path  # noqa: F401 - public transport-version compatibility export
 from ..local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
+from ..local_services.runtime import claim_gated_idle_due
 from ..local_services.runtime import local_service_exception_cause
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import reap_dead_client_leases
@@ -108,8 +111,11 @@ from ..web import html_preview_document
 # leases. A v22 peer can only retain/return whole byte products, so mixed peers must be fenced.
 # v24: queued-delivery journal compaction runs as registered maintenance work rather than burning
 # request-thread CPU. A v23 daemon rejects that task, so an upgraded web process must retire it.
-JOBD_PROTOCOL_VERSION = 24
+# v25: shutdown admission refusal identifies itself as pre-handler busy so clients can retry it.
+# A v24 daemon returns an indistinguishable generic busy response and must not remain attached.
+JOBD_PROTOCOL_VERSION = 25
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
+JOBD_PRODUCT_RPC_TIMEOUT_SECONDS = 0.5
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
 # owner pins it up with a registry lease (`JobClient.start_for_scheduler`, called at
@@ -1099,18 +1105,39 @@ class PersistentJobBroker:
         self.session_files_accepted_requester_counters: dict[str, int] = {}
         self.session_files_requester_counters: dict[str, int] = {}
         self.request_counters: dict[str, int] = {}
+        self.contention_counters: dict[str, int] = {}
+        self.request_counter_lock = threading.Lock()
         self.scheduler_pump_failures = 0
         self.scheduler_pump_last_failure: dict[str, str] = {}
         self.executors: dict[str, ProcessPoolExecutor | None] = {lane: None for lane in JOBD_LANE_PRIORITIES}
         self.state_lock = threading.RLock()
+        # Submission acceptance and shutdown share this short critical section. A shutdown that
+        # wins it closes admission before setting the pending-drain flag; a submission that wins it
+        # has one accepted record that shutdown must drain before stopping the broker.
+        self.lifecycle_admission_lock = threading.Lock()
+        self.shutdown_requested = threading.Event()
         self.scheduler_event = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
         self.scheduler_start_lock = threading.Lock()
         self.scheduler_readiness_thread: threading.Thread | None = None
+        # Ping/status are lifecycle control-plane actions. A scheduler pump may own `state_lock`,
+        # but that must never make the registry lose the daemon's identity or call it unhealthy.
+        # Publish full status snapshots atomically after locked reads; a contended status returns
+        # the last complete snapshot with an explicit busy marker instead of reading mutable state.
+        self._last_status_snapshot: dict[str, Any] = {}
+        # Construction is single-threaded, so the canonical status builder can publish the initial
+        # zero-work snapshot without taking a second path that will drift from live status fields.
+        self.common_status()
 
     def _bump_counter(self, task: str, name: str) -> None:
         counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0, "timed_out": 0})
         counters[name] = counters.get(name, 0) + 1
+
+    def _record_request_action(self, action: str, *, contention: bool = False) -> None:
+        action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
+        with self.request_counter_lock:
+            counters = self.contention_counters if contention else self.request_counters
+            counters[action_counter] = counters.get(action_counter, 0) + 1
 
     @staticmethod
     def _session_files_requester_key(payload: dict[str, Any]) -> str:
@@ -1597,6 +1624,8 @@ class PersistentJobBroker:
             # Queue submission wakes the scheduler, but worker completion otherwise waits for the
             # 50 ms maintenance poll before `_handle_finished_futures` can publish the product.
             future.add_done_callback(lambda _completed: self.scheduler_event.set())
+        with self.state_lock:
+            self._finish_requested_shutdown_if_drained()
 
     def _record_scheduler_pump_failure(self, exc: Exception, traceback_text: str) -> None:
         self.scheduler_pump_failures += 1
@@ -1708,30 +1737,37 @@ class PersistentJobBroker:
         coalesce_key = str(submission["coalesce_key"])
         fresh_only = submission.get("fresh_only") is True
         reusable_states = {"queued", "running"} if fresh_only else {"queued", "running", "completed"}
-        existing_id = self.coalesced.get((task, coalesce_key))
-        existing = self.records.get(existing_id or "")
-        if existing is not None and existing.generation >= generation and existing.status in reusable_states:
-            self._bump_counter(task, "coalesced")
-            return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
-        if self._queued_count(lane=self._lane_for_priority(priority)) >= JOBD_MAX_QUEUE:
-            return {"ok": False, "error": "queue full"}
-        self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
-        self._supersede_stale_queued(coalesce_key, generation)
-        record = self._queue_record(
-            task,
-            payload,
-            priority,
-            generation,
-            coalesce_key,
-            deadline_at,
-            payload_bytes=payload_bytes,
-        )
-        self._bump_counter(task, "accepted")
-        if task == "session_files_view":
-            requester_key = self._session_files_requester_key(payload)
-            counters = self.session_files_accepted_requester_counters
-            counters[requester_key] = counters.get(requester_key, 0) + 1
-        return {"ok": True, "coalesced": False, "job": self._record_payload(record)}
+        with self.lifecycle_admission_lock:
+            if self.shutdown_requested.is_set():
+                return {
+                    "ok": False,
+                    "error": LOCAL_SERVICE_ERROR_BUSY,
+                    "admission_rejected": True,
+                }
+            existing_id = self.coalesced.get((task, coalesce_key))
+            existing = self.records.get(existing_id or "")
+            if existing is not None and existing.generation >= generation and existing.status in reusable_states:
+                self._bump_counter(task, "coalesced")
+                return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
+            if self._queued_count(lane=self._lane_for_priority(priority)) >= JOBD_MAX_QUEUE:
+                return {"ok": False, "error": "queue full"}
+            self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
+            self._supersede_stale_queued(coalesce_key, generation)
+            record = self._queue_record(
+                task,
+                payload,
+                priority,
+                generation,
+                coalesce_key,
+                deadline_at,
+                payload_bytes=payload_bytes,
+            )
+            self._bump_counter(task, "accepted")
+            if task == "session_files_view":
+                requester_key = self._session_files_requester_key(payload)
+                counters = self.session_files_accepted_requester_counters
+                counters[requester_key] = counters.get(requester_key, 0) + 1
+            return {"ok": True, "coalesced": False, "job": self._record_payload(record)}
 
     def _submit(self, request: dict[str, Any]) -> dict[str, Any]:
         self._refresh_records()
@@ -1842,9 +1878,21 @@ class PersistentJobBroker:
             return response, b""
         return response, b""
 
+    def _control_plane_identity(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "version": JOBD_PROTOCOL_VERSION,
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "source_epoch": self.source_epoch,
+        }
+
     def common_status(self) -> dict[str, Any]:
         reap_dead_client_leases(self.leases)
         self._refresh_records()
+        with self.request_counter_lock:
+            request_counters = dict(self.request_counters)
+            contention_counters = dict(self.contention_counters)
         active_records = [
             self._record_payload(record)
             for record in self.records.values()
@@ -1857,12 +1905,8 @@ class PersistentJobBroker:
             for process in executor._processes.values()
             if process.pid is not None
         })
-        return {
-            "ok": True,
-            "version": JOBD_PROTOCOL_VERSION,
-            "pid": os.getpid(),
-            "started_at": self.started_at,
-            "source_epoch": self.source_epoch,
+        status = {
+            **self._control_plane_identity(),
             "socket": str(self.socket_path),
             "clients": len(self.leases),
             "worker_count": sum(self._lane_capacity(lane) for lane in JOBD_LANE_PRIORITIES),
@@ -1911,7 +1955,8 @@ class PersistentJobBroker:
             "source_change_counters": dict(self.source_change_counters),
             "session_files_accepted_requester_counters": dict(self.session_files_accepted_requester_counters),
             "session_files_requester_counters": dict(self.session_files_requester_counters),
-            "request_counters": dict(self.request_counters),
+            "request_counters": request_counters,
+            "contention_counters": contention_counters,
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
             # A retained WORK-ITEM failure, not a daemon condition. This scans the bounded record
             # ring, so one failed or timed-out job keeps describing a daemon that has served every
@@ -1929,12 +1974,10 @@ class PersistentJobBroker:
             "generation": max(self.latest_generation.values(), default=0),
             "idle_seconds": self.idle_seconds,
         }
+        self._last_status_snapshot = copy.deepcopy(status)
+        return status
 
     def handle(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        with self.state_lock:
-            return self._handle_locked(request)
-
-    def _handle_locked(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
         protocol_version = request.get("protocol_version", JOBD_PROTOCOL_VERSION)
         if protocol_version != JOBD_PROTOCOL_VERSION:
             return {
@@ -1943,8 +1986,45 @@ class PersistentJobBroker:
                 "required_protocol_version": JOBD_PROTOCOL_VERSION,
             }, b""
         action = str(request.get("action") or "")
-        action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
-        self.request_counters[action_counter] = self.request_counters.get(action_counter, 0) + 1
+        self._record_request_action(action)
+        # Every broker action is documented as zero-wait. Contention with the scheduler pump is
+        # therefore overload, not permission for an RPC handler to sit behind this lock until the
+        # caller's transport deadline turns a healthy broker into an ERROR.
+        if not self.state_lock.acquire(blocking=False):
+            self._record_request_action(action, contention=True)
+            if action == "ping":
+                return self._handle_ping(request, b"")
+            if action == "status":
+                snapshot = copy.deepcopy(self._last_status_snapshot)
+                with self.request_counter_lock:
+                    snapshot["request_counters"] = dict(self.request_counters)
+                    snapshot["contention_counters"] = dict(self.contention_counters)
+                return {**snapshot, "busy": True}, b""
+            # Shutdown closes admission through its own short lock and lets already accepted work
+            # drain. It does not need the contended state lock merely to record that transition.
+            if action == "shutdown":
+                refusal = self._retirement_shutdown_epoch_refusal(request)
+                if refusal is not None:
+                    return refusal, b""
+                self._request_shutdown()
+                if request.get("retirement_handshake") is True:
+                    # The lock owner may have accepted work after the last published status
+                    # snapshot. Conservatively report draining so a replacing registry never
+                    # treats stale zero-work telemetry as permission to terminate that work.
+                    return {
+                        **self._control_plane_identity(),
+                        "shutdown": True,
+                        "draining": True,
+                    }, b""
+                return {"ok": True, "shutdown": True}, b""
+            return {"ok": False, "error": LOCAL_SERVICE_ERROR_BUSY, "state_lock_rejected": True}, b""
+        try:
+            return self._handle_locked(request)
+        finally:
+            self.state_lock.release()
+
+    def _handle_locked(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+        action = str(request.get("action") or "")
         if action in JOBD_ARTIFACT_ACTION_METHODS:
             self._refresh_records()
             response = self.product_store.handle(action, request, b"")
@@ -1953,7 +2033,7 @@ class PersistentJobBroker:
         return response if response is not None else ({"ok": False, "error": "unknown jobd action"}, b"")
 
     def _handle_ping(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at, "source_epoch": self.source_epoch}, b""
+        return self._control_plane_identity(), b""
 
     def _handle_status(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return self.common_status(), b""
@@ -1997,8 +2077,39 @@ class PersistentJobBroker:
     def _handle_release(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
         return release_client_lease(self.leases, request.get("lease_id")), b""
 
-    def _handle_shutdown(self, _request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
-        self.stop_event.set()
+    def _request_shutdown(self) -> None:
+        with self.lifecycle_admission_lock:
+            self.shutdown_requested.set()
+        self.scheduler_event.set()
+
+    def _retirement_shutdown_epoch_refusal(
+        self,
+        request: dict[str, object],
+    ) -> dict[str, object] | None:
+        if request.get("retirement_handshake") is not True:
+            return None
+        expected_source_epoch = request.get("expected_source_epoch")
+        if expected_source_epoch is None or expected_source_epoch == self.source_epoch:
+            return None
+        return {
+            **self._control_plane_identity(),
+            "ok": False,
+            "error": "source_epoch_mismatch",
+            "shutdown": False,
+        }
+
+    def _handle_shutdown(self, request: dict[str, object], _body: bytes) -> tuple[dict[str, object], bytes]:
+        refusal = self._retirement_shutdown_epoch_refusal(request)
+        if refusal is not None:
+            return refusal, b""
+        self._request_shutdown()
+        drained = self._finish_requested_shutdown_if_drained()
+        if request.get("retirement_handshake") is True:
+            return {
+                **self._control_plane_identity(),
+                "shutdown": True,
+                "draining": not drained,
+            }, b""
         return {"ok": True, "shutdown": True}, b""
 
     def _handle_shutdown_if_idle(self, request: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes]:
@@ -2018,6 +2129,15 @@ class PersistentJobBroker:
                 self._pump()
             except Exception as exc:
                 self._record_scheduler_pump_failure(exc, traceback.format_exc())
+
+    def _has_active_work(self) -> bool:
+        return bool(self._queued_count()) or any(record.status == "running" for record in self.records.values())
+
+    def _finish_requested_shutdown_if_drained(self) -> bool:
+        if self.shutdown_requested.is_set() and not self._has_active_work():
+            self.stop_event.set()
+            return True
+        return False
 
     def _start_scheduler(self) -> None:
         with self.scheduler_start_lock:
@@ -2049,12 +2169,14 @@ class PersistentJobBroker:
     def _idle_should_stop(self) -> bool:
         with self.state_lock:
             reap_dead_client_leases(self.leases)
-            return (
-                not self.leases
-                and not self._queued_count()
-                and not any(record.status == "running" for record in self.records.values())
-                and time.monotonic() - self.last_client_at >= self.idle_seconds
-            )
+            if self._finish_requested_shutdown_if_drained():
+                return True
+            # claim_gated_idle_due is the one shared owner of the
+            # transition/deadline algorithm every local service routes
+            # through; jobd's claim predicate is a held lease OR real
+            # queued/running work (a bare diagnostic status poll from the
+            # backend-health observer is neither).
+            return claim_gated_idle_due(self, self.leases or self._has_active_work())
 
     def _on_shutdown(self) -> None:
         self.scheduler_event.set()
@@ -2074,7 +2196,12 @@ class PersistentJobBroker:
             stop_event=self.stop_event,
             handle=self.handle,
             on_idle=self._idle_should_stop,
-            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            # _idle_should_stop refreshes last_client_at directly whenever a
+            # lease or active work exists (see above); a connection-level
+            # callback here would count a bare diagnostic RPC (e.g. the
+            # backend-health observer's periodic status poll) as demand
+            # regardless of whether any real claim exists.
+            on_client=lambda: None,
             on_idle_failure=self._record_scheduler_pump_failure,
             on_start=self._start_scheduler_after_listener_accepts,
             on_shutdown=self._on_shutdown,
@@ -2134,16 +2261,19 @@ class JobClient(LocalServiceClient):
     def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0) -> dict[str, Any]:
         return self.request({"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms})
 
-    def result(self, job_id: str) -> dict[str, Any]:
-        return self.request({"action": "result", "job_id": job_id})
+    def result(self, job_id: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> dict[str, Any]:
+        return self.request_if_running({"action": "result", "job_id": job_id}, timeout=timeout)
 
-    def product(self, coalesce_key: str, timeout: float = 0.5) -> tuple[dict[str, Any], bytes]:
+    def product(self, coalesce_key: str, timeout: float = JOBD_PRODUCT_RPC_TIMEOUT_SECONDS) -> tuple[dict[str, Any], bytes]:
         """Return the newest completed product bytes for an identity (last-known-good).
 
         The metadata `state` is ready | stale | pending | none; the caller maps a transport
         failure to unavailable. Bytes are empty unless a completed product exists.
         """
-        return self.request_with_binary({"action": "product", "coalesce_key": coalesce_key}, timeout=timeout)
+        return self.request_with_binary_if_running(
+            {"action": "product", "coalesce_key": coalesce_key},
+            timeout=timeout,
+        )
 
     def artifact_open(self, coalesce_key: str, generation: int) -> dict[str, Any]:
         return self.request({"action": "artifact_open", "coalesce_key": coalesce_key, "generation": generation})
@@ -2224,6 +2354,7 @@ class JobClient(LocalServiceClient):
             "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {},
             "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {},
             "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {},
+            "contention_counters": payload.get("contention_counters") if isinstance(payload.get("contention_counters"), dict) else {},
             "generation": int(payload.get("generation") or 0),
             "last_success": float(payload.get("last_success") or 0.0),
         }, fields_after_failure={

@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -6,6 +7,7 @@ from yolomux_lib.filesystem import search
 from yolomux_lib.infra import jobd
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
+from yolomux_lib.local_services import runtime as local_service_runtime
 
 
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
@@ -193,6 +195,53 @@ def test_indexer_service_leases_prevent_idle_exit_then_allow_shutdown(tmp_path):
     worker.join(timeout=1.0)
     assert worker.is_alive() is False
     assert service.socket_path.exists() is False
+
+
+def test_indexd_status_probe_does_not_reset_the_idle_clock(tmp_path):
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock", idle_seconds=5.0)
+    assert not service.leases
+    service.last_client_at = time.monotonic() - 6.0
+    assert service.idle_due() is True, "baseline: no leases and idle_seconds elapsed must already report idle"
+
+    service.last_client_at = time.monotonic() - 6.0
+    response = service.handle({"action": "status"})
+    assert response["ok"] is True
+    assert service.idle_due() is True, "a status probe reset the idle clock via handle()"
+
+
+def test_indexd_external_status_probe_never_refreshes_demand_but_a_real_lease_does(tmp_path, monkeypatch):
+    """Cross the real listener boundary (not a direct ``handle()`` call) to
+    prove an external health/status poller with zero leases cannot refresh
+    the idle deadline, while acquiring a real lease does.
+    """
+    socket_path = tmp_path / "indexer.sock"
+    service = search_indexer.PersistentSearchIndexer(socket_path, idle_seconds=5.0)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = search_indexer.SearchIndexerClient(socket_path)
+    try:
+        deadline = time.monotonic() + 2.0
+        while not client.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert client.healthy() is True
+
+        monkeypatch.setattr(local_service_runtime, "peer_pid", lambda _connection: os.getpid() + 999_000)
+
+        service.last_client_at = time.monotonic() - 6.0
+        status_response = client.request({"action": "status"})
+        assert status_response["ok"] is True
+        assert service.idle_due() is True, "an external status probe with no lease refreshed the idle clock"
+
+        lease = client.registry.acquire_lease()
+        assert lease["ok"] is True
+        assert service.idle_due() is False, "acquiring a real lease did not refresh demand"
+
+        assert client.registry.release_lease(lease["lease_id"])["ok"] is True
+        service.last_client_at = time.monotonic() - 6.0
+        assert service.idle_due() is True, "idle grace window did not elapse after the final lease released"
+    finally:
+        service.stop_event.set()
+        worker.join(timeout=3.0)
 
 
 def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tmp_path):

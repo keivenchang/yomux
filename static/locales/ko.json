@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "요청",
   "debug.system.roster.column.restarts": "재시작",
   "debug.system.roster.column.service": "서비스",
+  "debug.system.roster.column.starts": "시작 횟수",
   "debug.system.roster.coverage.partial": "부분",
   "debug.system.roster.detail.eventsChat": "이벤트 및 채팅",
   "debug.system.roster.detail.process": "프로세스",

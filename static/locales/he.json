@@ -402,6 +402,7 @@
   "debug.system.roster.column.requests": "בקשות",
   "debug.system.roster.column.restarts": "הפעלות מחדש",
   "debug.system.roster.column.service": "שירות",
+  "debug.system.roster.column.starts": "הפעלות",
   "debug.system.roster.coverage.partial": "חלקי",
   "debug.system.roster.detail.eventsChat": "אירועים וצ׳אט",
   "debug.system.roster.detail.process": "תהליך",

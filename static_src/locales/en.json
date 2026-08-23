@@ -2512,6 +2512,7 @@
   "debug.system.roster.collapse": "Hide details for {service}",
   "debug.system.roster.column.service": "Service",
   "debug.system.roster.column.latency": "Latency avg / max",
+  "debug.system.roster.column.starts": "Starts",
   "debug.system.roster.column.restarts": "Restarts",
   "debug.system.roster.column.requests": "Requests",
   "debug.system.roster.column.errors": "Errors",

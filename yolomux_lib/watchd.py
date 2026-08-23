@@ -38,6 +38,7 @@ from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
+from .local_services.runtime import claim_gated_idle_due
 from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
@@ -1492,7 +1493,12 @@ class PersistentWatchService:
         try:
             if self._reap_locked(dead_lease_ids):
                 self._refresh_configuration_locked()
-            return not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds
+            # The descriptor set is the sole demand owner for watchd (see
+            # start_watchd_revision_watcher in app.py); claim_gated_idle_due
+            # is the one shared owner of the transition/deadline algorithm
+            # every local service routes through -- only this service's own
+            # claim predicate (a held lease) varies.
+            return claim_gated_idle_due(self, bool(self.leases))
         finally:
             self.lock.release()
 
@@ -1524,7 +1530,12 @@ class PersistentWatchService:
             }
 
     def handle(self, request: dict[str, Any], request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        self.last_client_at = time.monotonic()
+        # Deliberately does NOT stamp last_client_at here, and the listener's
+        # on_client callback (wired in run()) is a no-op.  Only a lease/
+        # descriptor claim arriving or departing may move the idle deadline
+        # (see _handle_lease/_release_locked/_reap_locked) -- a status/ping/
+        # snapshot RPC, self-connected or external, must never masquerade as
+        # demand for a service whose sole demand owner is the descriptor set.
         try:
             request = validate_request(request)
         except WatchProtocolError as error:
@@ -1650,7 +1661,15 @@ class PersistentWatchService:
             stop_event=self.stop_event,
             handle=self.handle,
             on_idle=self.idle_due,
-            on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            # The descriptor set is the sole demand owner for watchd (see
+            # start_watchd_revision_watcher in app.py): only a lease/descriptor
+            # claim arriving or departing may move the idle deadline, which
+            # _handle_lease/_release_locked/_reap_locked already do directly.
+            # A connection-level callback here would count status/ping/snapshot
+            # RPCs -- and, before excluding same-process peers, this daemon's
+            # own traffic -- as demand regardless of whether any real claim
+            # exists.
+            on_client=lambda: None,
             on_shutdown=self.shutdown_workers,
             concurrent_handlers=WATCHD_CONCURRENT_HANDLER_LIMIT,
         )

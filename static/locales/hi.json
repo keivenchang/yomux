@@ -396,6 +396,7 @@
   "debug.system.roster.column.requests": "अनुरोध",
   "debug.system.roster.column.restarts": "पुनरारंभ",
   "debug.system.roster.column.service": "सेवा",
+  "debug.system.roster.column.starts": "शुरुआतें",
   "debug.system.roster.coverage.partial": "आंशिक",
   "debug.system.roster.detail.eventsChat": "घटनाएँ और चैट",
   "debug.system.roster.detail.process": "प्रक्रिया",

@@ -48,8 +48,8 @@ def _open_daemons_with_frozen_poll(browser):
     assert browser.execute_async_script(_FREEZE_SYSTEM_POLL_SCRIPT) is True
 
 
-def _schema_two_payload_script(states=None):
-    """One browser fixture builder for a schema-2 `/api/system-status` payload."""
+def _schema_four_payload_script(states=None):
+    """One browser fixture builder for a schema-4 `/api/system-status` payload."""
     return """
         const inventory = arguments[0];
         const states = arguments[1];
@@ -63,9 +63,12 @@ def _schema_two_payload_script(states=None):
           pid: index < 3 ? 4200 + index : 0, observed_at: 1900, since_revision: 700,
           since_wall_time: 1000, state_age_seconds: 900,
           transitions: [], transitions_total: 0, transitions_truncated: false, errors_by_reason: {},
-          coverage: {retained_counters: 'full', retained_counter_reasons: [], counters: 'full', counter_reasons: [], counter_scope: 'web_process'},
+          coverage: {retained_counters: 'full', retained_counter_reasons: [], lifecycle: 'full', lifecycle_reasons: [], counters: 'full', counter_reasons: [], counter_scope: 'web_process'},
           metrics: {
             restart_count: index < 3 ? measured(index) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
+            process_start_count: index < 3 ? measured(index + 1) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
+            demand_start_count: index < 3 ? measured(index) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
+            unexpected_restart_count: index < 3 ? measured(0) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
             observations: measured(10),
             request_count: index < 3 ? measured(100 + index) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
             error_count: index < 3 ? measured(0) : absent('unavailable', 'resource_unobserved', 'The health observer has not recorded this service yet'),
@@ -85,7 +88,7 @@ def _schema_two_payload_script(states=None):
           owner: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {budget_percent: 30},
           tmux_signal_watcher: {state: 'attached', demanded: true, sessions: ['debug'], process_pid: 9001},
           local_services: {
-            schema_version: 3,
+            schema_version: 4,
             inventory,
             totals: {processes: 6, cpu_percent: 12, rss_bytes: 799014912},
             health: {available: true, reason_code: '', port: 7999, observer_epoch: 'ab12cd34', revision: 812, written_at: 1900, age_seconds: 2, history_coverage: 'full', history_reset_reason: '', persistence_state: 'ok', persistence_reason_code: '', resources: 6},
@@ -192,7 +195,7 @@ def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
         webapp.control_server.stop()
 
     local_services = payload["local_services"]
-    assert local_services["schema_version"] == 3, local_services
+    assert local_services["schema_version"] == 4, local_services
     assert tuple(local_services["inventory"]) == SYSTEM_STATUS_SERVICE_IDS, local_services
     services = local_services["services"]
     assert tuple(service["id"] for service in services) == SYSTEM_STATUS_SERVICE_IDS, services
@@ -232,7 +235,7 @@ def test_h3_every_roster_row_remains_rendered_in_inventory_order(browser, tmp_pa
     _open_daemons_with_frozen_poll(browser)
     rows = run_when_browser_ready(
         browser,
-        _schema_two_payload_script()
+        _schema_four_payload_script()
         + """
         return Array.from(document.querySelectorAll('[data-subsystem-row]')).map(row => ({
           id: row.dataset.subsystemId || '',
@@ -283,7 +286,7 @@ def test_a_degraded_service_renders_the_word_issue_in_the_red_tone(browser, tmp_
     _open_daemons_with_frozen_poll(browser)
     painted = run_when_browser_ready(
         browser,
-        _schema_two_payload_script()
+        _schema_four_payload_script()
         + """
         const statusOf = id => {
           const row = document.querySelector(`[data-subsystem-row][data-subsystem-id="${id}"]`);
@@ -329,7 +332,7 @@ def test_the_default_daemons_view_is_a_roster_not_a_card_wall(browser, tmp_path)
     _open_daemons_with_frozen_poll(browser)
     layout = run_when_browser_ready(
         browser,
-        _schema_two_payload_script()
+        _schema_four_payload_script()
         + """
         const view = document.querySelector('[data-js-debug-system]');
         const regions = Array.from(view.querySelectorAll('[data-js-debug-system-region]')).map(node => node.dataset.jsDebugSystemRegion);
@@ -439,7 +442,7 @@ def test_advanced_diagnostics_are_fetched_only_while_their_disclosure_is_open(br
     _open_daemons_with_frozen_poll(browser)
     run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + "return true;",
+        _schema_four_payload_script() + "return true;",
         list(SYSTEM_STATUS_SERVICE_IDS),
         DEFAULT_ROSTER_STATES,
         globals_required={"refreshDebugSystemViews": "function"},
@@ -565,7 +568,7 @@ def test_roster_disclosure_opens_by_mouse_enter_and_space_without_opening_anothe
     _open_daemons_with_frozen_poll(browser)
     run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + "return true;",
+        _schema_four_payload_script() + "return true;",
         list(SYSTEM_STATUS_SERVICE_IDS),
         DEFAULT_ROSTER_STATES,
         globals_required={"refreshDebugSystemViews": "function"},
@@ -699,7 +702,7 @@ def test_roster_refresh_preserves_expansion_focus_and_scroll(browser, tmp_path):
     _open_daemons_with_frozen_poll(browser)
     result = run_when_browser_ready(
         browser,
-        _schema_two_payload_script()
+        _schema_four_payload_script()
         + """
         const view = document.querySelector('[data-js-debug-system]');
         document.querySelector('[data-js-debug-roster-toggle="statsd"]').click();
@@ -789,7 +792,7 @@ def test_the_first_poll_after_creation_and_after_a_rerender_replaces_no_region(b
     _open_daemons_with_frozen_poll(browser)
     result = run_when_browser_ready(
         browser,
-        _schema_two_payload_script()
+        _schema_four_payload_script()
         + """
         const WATCHED = ['roster', 'advanced'];
         const regionsOf = view => Object.fromEntries(
@@ -887,7 +890,7 @@ def test_system_panel_reports_each_typed_tmux_signal_watcher_state(browser, tmp_
             ok: true, generated_at: Date.now() / 1000,
             server: {}, owner: {}, refresh: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {},
             top_endpoints: [], top_background_work: [],
-            local_services: {schema_version: 3, inventory: [], totals: {}, services: []},
+            local_services: {schema_version: 4, inventory: [], totals: {}, services: []},
             tmux_signal_watcher: watcher,
           };
           refreshDebugSystemViews();
@@ -947,7 +950,7 @@ def test_system_status_corruption_recovery_names_quarantine_and_destination_in_o
           server: {}, owner: {}, refresh: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {},
           top_endpoints: [], top_background_work: [],
           local_services: {
-            schema_version: 3,
+            schema_version: 4,
             inventory: [],
             services: [],
             recovery_events: [{
@@ -1003,7 +1006,7 @@ def test_h4_long_rendered_values_wrap_without_overflow_or_truncation(browser, tm
     _open_daemons_with_frozen_poll(browser)
     metrics = run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + """
+        _schema_four_payload_script() + """
         const longToken = arguments[2];
         const payload = jsDebugSystemState.payload;
         const target = payload.local_services.services.find(service => service.id === 'statsd');
@@ -1070,7 +1073,7 @@ def test_roster_fits_desktop_laptop_and_phone_widths_without_hiding_a_value(brow
     prove nothing about the column layout, so each device class also sets the container's own inline
     size and the pass/fail line is read from the measured container, exactly as the query is.
     """
-    secondary_columns = {"rss_bytes", "cpu_now_percent", "restart_count", "request_count", "error_count"}
+    secondary_columns = {"rss_bytes", "cpu_now_percent", "process_start_count", "request_count", "error_count"}
     # The container-query breakpoint, in px. Below it the five secondary metrics leave the row.
     # Measured, not chosen: the nine-column table needs 702px of min-content in Chrome, so the old
     # 72rem threshold dropped five columns while ~18rem of panel sat unused. See the comment on the
@@ -1082,7 +1085,7 @@ def test_roster_fits_desktop_laptop_and_phone_widths_without_hiding_a_value(brow
     _open_daemons_with_frozen_poll(browser)
     run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + "return true;",
+        _schema_four_payload_script() + "return true;",
         list(SYSTEM_STATUS_SERVICE_IDS),
         DEFAULT_ROSTER_STATES,
         globals_required={"refreshDebugSystemViews": "function"},
@@ -1192,7 +1195,7 @@ def test_roster_fits_desktop_laptop_and_phone_widths_without_hiding_a_value(brow
             """
         )
         assert detail["droppedShown"] is True, detail
-        assert detail["droppedLabels"] == ["Memory", "CPU", "Restarts", "Requests", "Errors"], detail
+        assert detail["droppedLabels"] == ["Memory", "CPU", "Starts", "Requests", "Errors"], detail
         # The two that never drop are read from the row itself, not from a copy beneath it.
         for column in ("latency", "uptime_seconds"):
             assert column in detail["visibleColumns"], (column, detail)
@@ -1290,7 +1293,7 @@ def test_the_roster_row_is_two_readable_lines_at_phone_width(browser, tmp_path):
     _open_daemons_with_frozen_poll(browser)
     run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + "return true;",
+        _schema_four_payload_script() + "return true;",
         list(SYSTEM_STATUS_SERVICE_IDS),
         DEFAULT_ROSTER_STATES,
         globals_required={"refreshDebugSystemViews": "function"},
@@ -1358,7 +1361,7 @@ def test_the_summary_strip_is_the_one_pinned_layer_and_it_really_pins(browser, t
     _open_daemons_with_frozen_poll(browser)
     run_when_browser_ready(
         browser,
-        _schema_two_payload_script() + "return true;",
+        _schema_four_payload_script() + "return true;",
         list(SYSTEM_STATUS_SERVICE_IDS),
         DEFAULT_ROSTER_STATES,
         globals_required={"refreshDebugSystemViews": "function"},

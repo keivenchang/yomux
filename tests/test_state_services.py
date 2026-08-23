@@ -124,7 +124,7 @@ def test_jobd_product_wait_stops_before_another_rpc_when_its_owner_is_cancelled(
     product_calls = []
 
     class Client:
-        def product(self, key):
+        def product(self, key, timeout=0.5):
             product_calls.append(key)
             stop_event.set()
             return {"ok": True, "state": "pending", "generation": 1}, b""
