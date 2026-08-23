@@ -54945,6 +54945,14 @@ function debugGraphApplyServerCostSummary(bucket, source) {
     activeCatalogRevision: String(source.active_catalog_revision || '').slice(0, 160),
     freshness: String(source.freshness || '').slice(0, 80),
   };
+  // own_components is this bucket's true per-tick local cost breakdown, set ONLY when the
+  // bucket is genuinely touched by a real tick (jsDebugCurrentBucketRecord) -- never by the
+  // range-cost reconcile patch, which reads this field back out but must never overwrite it.
+  // Without this separate, stable field, a bucket that stays latest-and-untouched across many
+  // rounds would either lose its own components (patched with range-only data) or accumulate a
+  // new copy of the range components every round (patched on top of its own last patched
+  // result) -- both real bugs found by independent audits.
+  if (Array.isArray(source.own_components)) bucket.ownCostComponents = debugGraphCostRows(source.own_components);
 }
 
 function debugGraphApplyHostMetricProcesses(target, source, valueKey = 'totalPercent') {
@@ -59640,9 +59648,11 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
       unpriced_count: !hasBucketPrice && bucketUsageTokens !== null ? 1 : 0,
       unpriced_token_quantity: !hasBucketPrice ? bucketUsageTokens ?? 0 : 0,
       components: modelComponents,
+      own_components: modelComponents,
     };
     if (bucketApiListMicroUsd !== null) record.cost_summary.api_list_micro_usd = bucketApiListMicroUsd;
-  } else if (modelComponents.length) record.cost_summary = {components: modelComponents};
+  } else if (modelComponents.length) record.cost_summary = {components: modelComponents, own_components: modelComponents};
+  else if (includeRangeCost) record.cost_summary = {own_components: modelComponents};
   if (includeRangeCost && rangeCost) record.cost_summary = {...(record.cost_summary || {}), ...jsDebugCurrentCostSummary(rangeCost), components: [...modelComponents, ...jsDebugCurrentCostSummary(rangeCost).components]};
   return record;
 }
@@ -59762,7 +59772,7 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
 // would have already lost its flag when jsDebugCurrentBucketRecord rebuilt it. This reconciliation
 // is the one owner that always leaves exactly the current latest bucket (if its record already
 // exists) holding the flag, regardless of which buckets this specific delta happened to touch.
-function debugGraphReconcileRangeCostOwner(latest, rangeCost) {
+function debugGraphReconcileRangeCostOwner(latest, rangeCost, touchedLatestThisRound) {
   const latestKey = latest
     ? `${Math.floor(Number(latest.start) * 1000)}:${Math.max(jsDebugGraphRawBucketMs, Number(latest.duration) * 1000)}`
     : null;
@@ -59770,26 +59780,23 @@ function debugGraphReconcileRangeCostOwner(latest, rangeCost) {
     if (key === latestKey || !bucket.costSummary || bucket.costSummary.rangeReport !== true) continue;
     bucket.costSummary = {...bucket.costSummary, rangeReport: false};
   }
-  if (!latestKey || !rangeCost) return;
+  if (!latestKey || !rangeCost || touchedLatestThisRound) return;
+  // touchedLatestThisRound (an explicit flag from the caller, not costSummary.rangeReport) is
+  // the only correct signal for "did jsDebugCurrentBucketRecord already merge this bucket this
+  // round" -- rangeReport stays true across every subsequent round once EITHER that merge OR
+  // this very patch sets it, so reusing it here to mean "handled this round" silently froze a
+  // bucket's cost data the moment it stayed latest-and-untouched for two or more consecutive
+  // rounds (found by a third independent audit).
   const latestBucket = jsDebugGraphBuckets.get(latestKey);
   if (!latestBucket) return;
-  // Only patch if this round's own per-bucket loop did NOT already flag this exact bucket --
-  // when the delta's own touched bucket IS the latest position, jsDebugCurrentBucketRecord
-  // already merged its own modelComponents with rangeCost.components once; re-patching here
-  // too would concatenate a second, duplicate copy of every range-level component/model/
-  // source row (a real bug an independent audit caught: totals stayed correct since this
-  // patch always overwrites totalMicroUsd/etc outright, but the per-model cost breakdown
-  // would double). Skipping when already-flagged this round is the exact, minimal fix.
-  if (latestBucket.costSummary?.rangeReport === true) return;
-  // This bucket was NOT touched this round (the guard above returned early for that case),
-  // so its existing costSummary.components are still its own untouched, un-merged bucket-local
-  // rows from an earlier round -- unlike jsDebugCurrentCostSummary(rangeCost) alone, which
-  // carries only the range-level rows. Dropping the bucket's own components here (as an earlier
-  // version of this patch did) silently lost that bucket's per-model cost breakdown the moment
-  // it became latest without being re-touched (found by a second independent audit).
-  const ownComponents = latestBucket.costSummary?.components || [];
+  // ownCostComponents is a separate, stable field holding this bucket's true per-tick local
+  // components, updated only by a real touch (see debugGraphApplyServerCostSummary) -- never by
+  // this patch. Reading costSummary.components here instead would re-merge whatever range
+  // components a PREVIOUS round's patch already appended, growing unboundedly across
+  // consecutive untouched rounds instead of freshening to the current round's range data.
+  const ownComponents = latestBucket.ownCostComponents || [];
   const rangeSummary = jsDebugCurrentCostSummary(rangeCost);
-  debugGraphApplyServerCostSummary(latestBucket, {...rangeSummary, components: [...ownComponents, ...rangeSummary.components]});
+  debugGraphApplyServerCostSummary(latestBucket, {...rangeSummary, components: [...ownComponents, ...rangeSummary.components], own_components: ownComponents});
 }
 
 function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} = {}) {
@@ -59799,15 +59806,14 @@ function applyJsDebugCurrentDelta(snapshot, delta, {forceGraphRefresh = false} =
     if (tombstone?.kind === 'bucket') debugGraphDeleteServerRecord(tombstone.start, tombstone.duration);
   });
   const latest = Array.isArray(snapshot?.buckets) ? snapshot.buckets.at(-1) : null;
+  let touchedLatestThisRound = false;
   buckets.forEach(bucket => {
+    const isLatest = bucket.start === latest?.start && bucket.duration === latest?.duration;
+    if (isLatest) touchedLatestThisRound = true;
     debugGraphDeleteServerRecord(bucket.start, bucket.duration);
-    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(
-      bucket,
-      bucket.start === latest?.start && bucket.duration === latest?.duration,
-      snapshot.cost_report,
-    ));
+    debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, isLatest, snapshot.cost_report));
   });
-  debugGraphReconcileRangeCostOwner(latest, snapshot.cost_report);
+  debugGraphReconcileRangeCostOwner(latest, snapshot.cost_report, touchedLatestThisRound);
   updateJsDebugCurrentSnapshotState(snapshot, {forceGraphRefresh});
 }
 
