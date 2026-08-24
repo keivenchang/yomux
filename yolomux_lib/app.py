@@ -2876,6 +2876,7 @@ class WatchBridge:
         revision_number = int(revision.get("revision") or 0)
         watch_generation = int(revision.get("watch_generation") or 0)
         active_watch_generation = int(revision.get("active_watch_generation") or 0)
+        failed_watch_generation = int(revision.get("failed_watch_generation") or 0)
         changed_paths = [
             Path(path)
             for path in revision.get("changed_paths", [])
@@ -2993,9 +2994,49 @@ class WatchBridge:
             record.watchd_revision = revision_number
             record.watchd_applied_generation = watch_generation
             record.watchd_active_generation = active_watch_generation
+            record.watchd_failed_generation = failed_watch_generation
             record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
             record.filesystem_roots = roots
-            record.watchd_state = "polling" if revision.get("fallback") else ("ready" if record.filesystem_healthy else "errored")
+            if revision.get("fallback"):
+                record.watchd_state = "polling"
+            elif record.filesystem_healthy:
+                record.watchd_state = "ready"
+            elif failed_watch_generation > 0 and failed_watch_generation == watch_generation:
+                # A failed initial scan leaves the previous generation active and an exact-file
+                # configuration may legitimately publish no roots. The producer's explicit,
+                # generation-scoped failure therefore precedes both inferred idle and starting.
+                record.watchd_state = "errored"
+            elif active_watch_generation < watch_generation:
+                # STARTING, not failed. Directory demand exposes its roots here, while exact-file
+                # demand can legitimately publish neither roots nor change paths. The generation
+                # boundary is authoritative for both: `_activate_watch_generation` is the only
+                # writer of `active_watch_generation` and the two serving flags, so both-false on
+                # a newer generation means the daemon has not decided native-versus-polling yet.
+                #
+                # `_mark_watch_generation_unhealthy` is the opposite case and stays `errored`
+                # above: it records the exact failed generation before inferred starting or idle.
+                record.watchd_state = "starting"
+            elif not daemon_reported_scope:
+                # RESTING, not failed. `native_watch_loop` clears BOTH `native_healthy` and
+                # `polling_fallback` in its `if not shallow_paths:` branch, so every revision
+                # published before the first root is registered says `healthy: false,
+                # fallback: false` with an EMPTY `last_error`. MEASURED on live :7220 at
+                # 22:15:08 -- pid appears, one sample reads `errored`/`issue`, the next reads
+                # `polling`/`running` -- so this fired once per watchd spawn, and its retained
+                # `restart_count` was 99 inside one 44.7-minute uptime.
+                #
+                # Keyed to `daemon_reported_scope` (the RAW pre-authorization signal above), NOT
+                # to the scoped `roots` beside it: a co-tenant revision whose roots all fall
+                # outside this server's authorization also empties `roots`, and calling that
+                # resting would hide a daemon not serving work it holds.
+                #
+                # Handled like `polling`: the ROW reports the service healthy while
+                # `filesystem_healthy` stays False, so no consumer trusts a mirror that is not live.
+                record.watchd_state = "idle"
+            else:
+                # The generation is activated and the daemon holds work, yet neither native nor
+                # polling is serving it. A real degradation, and it keeps its yellow row.
+                record.watchd_state = "errored"
             # Empty intersection (a revision that touches only other tenants' roots) leaves nothing
             # authorized to mirror: skip the signature update and the history write entirely so this
             # server records no co-tenant state, while the epoch/revision bookkeeping above still
@@ -3349,14 +3390,25 @@ class WatchBridge:
             epoch = record.watchd_epoch
             revision = record.watchd_revision
             bridge_pid = int(record.watchd_pid or 0)
+            watch_generation = record.watchd_applied_generation
+            active_watch_generation = record.watchd_active_generation
+            failed_watch_generation = record.watchd_failed_generation
         identity = local_service_projection.registry_process_identity(app.watch_client.registry)
         return local_service_projection.local_service_runtime_row(
             "watchd",
             pid=identity.pid,
             started_at=identity.started_at,
             version=identity.protocol_version,
-            healthy=state in {"ready", "polling"},
-            last_failure="" if state in {"starting", "ready", "polling"} else state,
+            # `idle` joins `polling` here for the same reason: both are states in which the daemon
+            # answers correctly while native watching is not the thing serving. See the resting
+            # branch in `apply_watchd_revision` -- an idle-because-nothing-is-registered watchd is
+            # not a fault, and only `errored` may reach `last_failure`.
+            healthy=state in {"ready", "polling", "idle"},
+            last_failure=(
+                ""
+                if state in {"starting", "ready", "polling", "idle"}
+                else ("watch_generation_scan_failed" if failed_watch_generation == watch_generation else state)
+            ),
             resources=app.watch_client.registry.resources(identity.pid),
             fields_before_failure={
                 "clients": 1 if lease_id else 0,
@@ -3364,6 +3416,9 @@ class WatchBridge:
                 "cache": {"ready": revision > 0},
                 "epoch": epoch,
                 "revision": revision,
+                "watch_generation": watch_generation,
+                "active_watch_generation": active_watch_generation,
+                "failed_watch_generation": failed_watch_generation,
                 "fallback": state == "polling",
                 # The daemon can already have a verified PID while the bridge is still waiting
                 # for its first revision. The health reducer uses this typed transition instead
@@ -4295,6 +4350,9 @@ class WatchBridge:
                             if isinstance(snapshot_payload, dict):
                                 self.state.auto_approve_payload = copy.deepcopy(snapshot_payload)
                         if isinstance(snapshot_payload, dict):
+                            session_order = snapshot_payload.get("session_order")
+                            if isinstance(session_order, list):
+                                app.apply_session_roster(session_order)
                             patch = app.auto_approve_client_event_patch(previous_payload, snapshot_payload)
                             if patch is None:
                                 retry_seconds = 0.25
@@ -4361,6 +4419,8 @@ class WatchBridge:
             # The retained statusd roster is the sole agent-window authority. A topology event
             # must retire it so its next snapshot cannot keep a dead pane as a transition row.
             app.status_client.invalidate("tmux-topology")
+            if event_type == "sessions-changed":
+                app.refresh_sessions(maintenance=False)
         app.tmux_signal_cache.clear()
         with self.state.lock:
             record = self.state.event_watcher_record
@@ -9351,7 +9411,7 @@ class TmuxWebtermApp:
     def refresh_sessions(self, maintenance: bool = True) -> list[str]:
         sessions, error = list_tmux_session_names()
         if error is None:
-            self.sessions = sessions
+            self.apply_session_roster(sessions)
             if not maintenance:
                 return []
             self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
@@ -9360,6 +9420,21 @@ class TmuxWebtermApp:
             self.activity_ledger.flush()
             return []
         return [error]
+
+    def apply_session_roster(self, sessions: list[str]) -> bool:
+        """Install one tmux-session roster and invalidate metadata on membership transitions."""
+
+        roster = list(dict.fromkeys(session.strip() for session in sessions if isinstance(session, str) and session.strip()))
+        membership_changed = set(roster) != set(self.sessions)
+        self.sessions = roster
+        if membership_changed and not self.status_service_mode:
+            # Record the transition only after installing the roster. A build that started before
+            # this instant cannot have observed the new membership, so the existing single-flight
+            # web owner must either start now or queue one publishing follow-up behind that older
+            # build. statusd owns roster production only; it has no browser metadata consumer and
+            # must not publish a second transcript-metadata stream from its internal app.
+            self.start_transcripts_payload_refresh(publish=True, not_before=time.monotonic())
+        return membership_changed
 
     def rotate_activity_heartbeats_if_due(self, now: float | None = None) -> int:
         moment = time.monotonic() if now is None else float(now)
@@ -15526,7 +15601,7 @@ class TmuxWebtermApp:
         if tmux_has_exact_session(session):
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
 
-        self.sessions = [item for item in self.sessions if item != session]
+        self.apply_session_roster([item for item in self.sessions if item != session])
         diagnostic = f"session no longer exists: {session}"
         return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
 
@@ -15547,7 +15622,7 @@ class TmuxWebtermApp:
                     error=message_descriptor("common.requestFailed", "request failed"),
                 ),
             }, HTTPStatus.SERVICE_UNAVAILABLE
-        self.sessions = sessions
+        self.apply_session_roster(sessions)
         return {"session": clean_session, "exists": clean_session in sessions, "ok": True}, HTTPStatus.OK
 
     def create_next_session_plan(self) -> tuple[dict[str, Any], HTTPStatus]:

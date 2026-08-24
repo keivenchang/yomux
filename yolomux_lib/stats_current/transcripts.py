@@ -25,6 +25,7 @@ DEFAULT_MAX_BYTES_PER_SCAN = 4 * 1024 * 1024
 DEFAULT_MAX_RECORDS_PER_SCAN = 4096
 LEGACY_REPAIR_MAX_BYTES_PER_SCAN = 8 * 1024 * 1024
 LEGACY_REPAIR_MAX_RECORDS_PER_SCAN = 8192
+_MAX_CONSECUTIVE_LIVE_PRIORITY_SCANS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,10 +161,18 @@ class _FileCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class _SourceOrder:
+    sources: tuple[str, ...]
+    historical_cycle: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _ScanReceipt:
     receipt_id: int
     files: dict[str, _FileCheckpoint]
     next_source: str | None
+    next_historical_source: str | None
+    live_priority_scans: int
     appended_bytes: int
     legacy_repair_complete: bool
     legacy_repair_root_ids: tuple[str, ...]
@@ -203,6 +212,8 @@ class StatsCurrentTranscriptUsageScanner:
         self._inflight: _ScanReceipt | None = None
         self._active_checkpoints: dict[str, _FileCheckpoint] | None = None
         self._next_source: str | None = None
+        self._next_historical_source: str | None = None
+        self._live_priority_scans = 0
         self._clock = clock
         self._legacy_repair_choices_cache: dict[str, _FileChoice] | None = None
         self._legacy_repair_roots_cache: tuple[str, ...] | None = None
@@ -273,12 +284,18 @@ class StatsCurrentTranscriptUsageScanner:
             seen_tombstones: set[tuple[str, str, str, str, str]] = set()
             repair_scan_bytes = 0
             repair_scan_records = 0
-            ordered_sources = self._ordered_sources(
+            source_order = self._ordered_sources(
                 choices,
                 inspections,
                 direct_sources,
             )
+            ordered_sources = list(source_order.sources)
+            historical_sources = set(source_order.historical_cycle)
             proposed_next_source = self._next_source
+            proposed_next_historical_source = self._next_historical_source
+            proposed_live_priority_scans = self._live_priority_scans
+            live_work = False
+            historical_work = False
             last_source_index: int | None = None
             try:
                 for source_index, source in enumerate(ordered_sources):
@@ -288,6 +305,12 @@ class StatsCurrentTranscriptUsageScanner:
                         )
                         break
                     last_source_index = source_index
+                    if source in historical_sources:
+                        historical_index = source_order.historical_cycle.index(source)
+                        proposed_next_historical_source = source_order.historical_cycle[
+                            (historical_index + 1)
+                            % len(source_order.historical_cycle)
+                        ]
                     choice = choices[source]
                     inspection = inspections.get(source)
                     if inspection is None:
@@ -295,6 +318,14 @@ class StatsCurrentTranscriptUsageScanner:
                     bytes_before = counters.bytes_read
                     records_before = counters.records_parsed
                     atoms, tombstones = self._scan_choice(choice, inspection, counters)
+                    if (
+                        counters.bytes_read > bytes_before
+                        or counters.records_parsed > records_before
+                    ):
+                        if source in historical_sources:
+                            historical_work = True
+                        else:
+                            live_work = True
                     if choice.repair_only:
                         repair_scan_bytes += counters.bytes_read - bytes_before
                         repair_scan_records += counters.records_parsed - records_before
@@ -335,8 +366,11 @@ class StatsCurrentTranscriptUsageScanner:
                         break
             except Exception:
                 self._inflight = _ScanReceipt(
-                    receipt_id, checkpoints, self._next_source, counters.appended_bytes,
-                    False, (), dict(self._committed.legacy_fork_repair),
+                    receipt_id, checkpoints, self._next_source,
+                    self._next_historical_source, self._live_priority_scans,
+                    counters.appended_bytes, False, (), dict(
+                        self._committed.legacy_fork_repair
+                    ),
                 )
                 self._rollback_inflight()
                 raise
@@ -348,6 +382,15 @@ class StatsCurrentTranscriptUsageScanner:
                 proposed_next_source = ordered_sources[
                     (last_source_index + 1) % len(ordered_sources)
                 ]
+            if historical_work:
+                proposed_live_priority_scans = 0
+            elif live_work and historical_sources:
+                proposed_live_priority_scans = min(
+                    _MAX_CONSECUTIVE_LIVE_PRIORITY_SCANS,
+                    self._live_priority_scans + 1,
+                )
+            elif not historical_sources:
+                proposed_live_priority_scans = 0
             backlog_files = self._backlog_files(choices, inspections)
             legacy_repair_complete = repair_active and all(
                 source in self._files
@@ -414,8 +457,10 @@ class StatsCurrentTranscriptUsageScanner:
                 ),
             }
             self._inflight = _ScanReceipt(
-                receipt_id, checkpoints, proposed_next_source, counters.appended_bytes,
-                legacy_repair_complete, repair_root_ids, repair_status,
+                receipt_id, checkpoints, proposed_next_source,
+                proposed_next_historical_source, proposed_live_priority_scans,
+                counters.appended_bytes, legacy_repair_complete, repair_root_ids,
+                repair_status,
             )
             return TranscriptUsageScanResult(
                 tuple(scanned),
@@ -451,6 +496,8 @@ class StatsCurrentTranscriptUsageScanner:
                     durable.persisted_at = time.perf_counter()
                     durable.state.pop("_allow_offset_rewind", None)
             self._next_source = receipt.next_source
+            self._next_historical_source = receipt.next_historical_source
+            self._live_priority_scans = receipt.live_priority_scans
             committed = self._committed
             appended_bytes = committed.appended_bytes
             last_visible_append_at = committed.last_visible_append_at
@@ -568,14 +615,18 @@ class StatsCurrentTranscriptUsageScanner:
         choices: Mapping[str, _FileChoice],
         inspections: Mapping[str, _Inspection],
         direct_sources: set[str],
-    ) -> list[str]:
-        """Keep live tails current, then rotate all historical work fairly.
+    ) -> _SourceOrder:
+        """Keep live tails prompt without letting them starve historical work.
 
-        A brand-new direct Codex roster transcript has no durable EOF checkpoint yet, so
+        A direct Codex roster transcript may not have a durable EOF checkpoint yet, so
         its unread bytes need the same priority as a previously completed file that
-        started growing. Partially consumed files keep their historical cursor position,
-        and Claude's newest-project ordering remains the owner for its cold candidates.
-        Backlog and repair share one cursor tier so either can resume after a bounded scan.
+        started growing. A bounded scan's partially consumed direct transcript returns
+        to live priority when its physical size advances beyond the last observed size;
+        an unchanged cold backlog or zero-offset incomplete record still yields to the
+        historical cursor. Claude's newest-project ordering remains the owner for its
+        cold candidates. After two consecutive live-only commits, one historical source
+        leads the next scan before live resumes. A separate committed cursor rotates
+        that bounded turn across backlog and repair sources.
         """
 
         live: list[str] = []
@@ -612,23 +663,46 @@ class StatsCurrentTranscriptUsageScanner:
                 and source in direct_sources
                 and not repair_only
                 and choices[source].kind == "codex"
-                and offset == 0
-                and observed_size == 0
                 and int(inspection.stat.st_size) > offset
+                and (
+                    (offset == 0 and observed_size == 0)
+                    or (
+                        offset > 0
+                        and int(inspection.stat.st_size) > observed_size
+                    )
+                )
             ):
                 live.append(source)
             else:
                 historical.append(source)
-        return [
-            *self._rotate_sources(live),
-            *self._rotate_sources(historical),
-        ]
+        live = self._rotate_sources(live)
+        historical = self._rotate_sources_from(
+            historical,
+            self._next_historical_source or self._next_source,
+        )
+        if (
+            live
+            and historical
+            and self._live_priority_scans
+            >= _MAX_CONSECUTIVE_LIVE_PRIORITY_SCANS
+        ):
+            sources = [historical[0], *live, *historical[1:]]
+        else:
+            sources = [*live, *historical]
+        return _SourceOrder(tuple(sources), tuple(historical))
 
     def _rotate_sources(self, sources: list[str]) -> list[str]:
-        if not sources or not self._next_source:
+        return self._rotate_sources_from(sources, self._next_source)
+
+    @staticmethod
+    def _rotate_sources_from(
+        sources: list[str],
+        next_source: str | None,
+    ) -> list[str]:
+        if not sources or not next_source:
             return sources
         try:
-            start = sources.index(self._next_source)
+            start = sources.index(next_source)
         except ValueError:
             start = 0
         return [*sources[start:], *sources[:start]]

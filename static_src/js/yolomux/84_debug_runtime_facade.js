@@ -135,10 +135,7 @@ function setDebugGraphChartVisible(key, visible) {
     debugRuntimeState.graphVisibleCharts.delete(chartKey);
   }
   saveJsDebugStatsUiPreferences();
-  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
-  // while a graph control is focused, but deferring the user's own activation
-  // leaves aria-pressed and the chart body visibly stale until focus moves.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
 }
 
 function jsDebugGraphRangeOptionIndex(rangeSeconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {

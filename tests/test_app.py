@@ -2725,6 +2725,31 @@ def test_tmux_session_exists_payload_is_read_only_and_refreshes_roster(monkeypat
     assert webapp.sessions == ["1", "3"]
 
 
+@pytest.mark.parametrize(("status_service_mode", "expected_refreshes"), ((True, 0), (False, 1)))
+def test_roster_adoption_publishes_metadata_only_from_web_consumer(
+    monkeypatch,
+    status_service_mode,
+    expected_refreshes,
+):
+    monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["one", "two"], None))
+    webapp = app_module.TmuxWebtermApp(["one"], status_service_mode=status_service_mode)
+    refreshes = []
+    monkeypatch.setattr(
+        webapp,
+        "start_transcripts_payload_refresh",
+        lambda *, publish, not_before: refreshes.append((publish, not_before)) or True,
+    )
+    try:
+        assert webapp.refresh_sessions(maintenance=False) == []
+    finally:
+        if not status_service_mode:
+            webapp.control_server.stop()
+
+    assert webapp.sessions == ["one", "two"]
+    assert len(refreshes) == expected_refreshes
+    assert all(publish is True and not_before > 0 for publish, not_before in refreshes)
+
+
 def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: ([], "tmux discovery failed"))
@@ -17747,6 +17772,8 @@ def test_update_check_recurring_work_excludes_disabled_idle_sleep():
 def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(monkeypatch):
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     webapp.sessions = ["1", "2"]
+    webapp.status_service_mode = False
+    webapp.start_transcripts_payload_refresh = lambda **_kwargs: True
     webapp.refresh_sessions = lambda maintenance=True: []
 
     invalid_window, invalid_window_status = webapp.tmux_select_window("1", "bad")

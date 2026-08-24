@@ -314,6 +314,8 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
         (async () => {
           const nativeFetch = window.fetch.bind(window);
           let sessionFilesFetches = 0;
+          let releaseSessionFilesFetch = null;
+          let sessionFilesSignal = null;
           try {
             await window.__yolomuxTestWaitFor(
               () => clientPushCanSupplyData() === true && clientEventTransportState.connected === true,
@@ -324,7 +326,16 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
               const url = new URL(String(input), location.href);
               if (url.pathname === '/api/session-files') {
                 sessionFilesFetches += 1;
-                return new Promise(() => {});
+                sessionFilesSignal = options.signal || null;
+                return new Promise(resolve => {
+                  releaseSessionFilesFetch = () => resolve(new Response(JSON.stringify({
+                    ...pushPayload,
+                    files: [],
+                    repos: [],
+                    errors: [],
+                    loaded: true,
+                  }), {status: 200, headers: {'Content-Type': 'application/json'}}));
+                });
               }
               return nativeFetch(input, options);
             };
@@ -340,7 +351,7 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             try {
               terminal = await window.__yolomuxTestWaitFor(() => {
                 const demand = clientEventDemandDescriptor();
-                if (!pushApplied && demand.channels.includes('files')) {
+                if (!pushApplied && releaseSessionFilesFetch && demand.channels.includes('files')) {
                   const request = clientSessionFilesWatchRequests()[0] || {
                     session: pushPayload.session,
                     hours: 24,
@@ -359,13 +370,34 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
             } catch (error) {
               waitError = String(error?.stack || error);
             }
+            const sessionFilesSignalAbortedAfterPush = sessionFilesSignal?.aborted === true;
+            releaseSessionFilesFetch?.();
+            const lifecycle = await window.__yolomuxTestWaitFor(() => {
+              const state = window.__yolomuxFixtureLifecycle?.operationState?.();
+              if (!state) return null;
+              return !state.pending.length
+                && state.batchQueued === 0
+                && state.batchPending === 0
+                && state.batchOperations === 0
+                && state.startupActive === 0
+                && state.startupQueued === 0
+                && state.activityRefreshing !== true
+                && state.watchRootsPending === false
+                && state.finderWatchReady === true
+                ? state
+                : null;
+            }, {timeoutMs, description: 'finite stale session-files response lifecycle settlement'});
             const loading = panel.querySelector('.changes-loading');
+            const rowAfterStaleResponse = panel.querySelector(`[data-open-change-file="${CSS.escape(path)}"]`);
             done({
               elapsedMs: performance.now() - started,
               terminal,
               waitError,
               sessionFilesFetches,
               pushApplied,
+              sessionFilesSignalAbortedAfterPush,
+              lifecycle,
+              rowAfterStaleResponse: rowAfterStaleResponse?.textContent || '',
               loading: loading?.textContent?.trim() || '',
               ariaBusy: loading?.getAttribute('aria-busy') || '',
               payload: {
@@ -397,6 +429,10 @@ def test_differ_only_open_reaches_content_or_typed_error_within_bound(gate_brows
         f"Differ remained outside content/error terminal states for {observed:.3f}s; "
         f"backend requests={requests!r}; snapshot={metrics!r}"
     )
+    assert metrics["sessionFilesFetches"] == 1 and metrics["pushApplied"] is True, metrics
+    assert metrics["sessionFilesSignalAbortedAfterPush"] is False, metrics
+    assert metrics["lifecycle"]["startupActive"] == 0 and metrics["lifecycle"]["startupQueued"] == 0, metrics
+    assert metrics["rowAfterStaleResponse"] and metrics["payload"]["files"] == 1, metrics
     assert metrics["panelActive"] is True and metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 

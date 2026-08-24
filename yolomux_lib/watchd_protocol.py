@@ -14,9 +14,9 @@ WATCHD_PROTOCOL_VERSION = 1
 # (no protocol bump), but a daemon still running the v2 code registers the whole
 # recursive workspace and silently ignores the new exclude_rules. The registry
 # retires a same-protocol daemon only when this code revision differs, so this
-# bump is what forces a stale v2 daemon to be shut down and respawned from the
-# v3 code BEFORE any descriptor is sent, instead of relying on a manual restart.
-WATCHD_CODE_REVISION = "watchd-v3"
+# bump is what forces a stale same-protocol daemon to be shut down and respawned
+# from current code BEFORE any descriptor is sent, instead of relying on a manual restart.
+WATCHD_CODE_REVISION = "watchd-v4"
 WATCHD_SERVICE_NAME = "watchd"
 WATCHD_MAX_PATHS = 256
 # Daemon-wide ceiling on the native (recursive=False) registration UNION -- the exact

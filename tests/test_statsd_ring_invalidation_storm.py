@@ -19,6 +19,7 @@ from yolomux_lib.stats_current import scheduler
 from yolomux_lib.stats_current import storage
 from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from tests.helpers.gate_stats import commit_scan
+from tools.mockers.transcript import append_record
 from tools.mockers.transcript import codex_meta
 from tools.mockers.transcript import codex_usage
 from tools.mockers.transcript import write_records
@@ -322,6 +323,163 @@ def test_new_codex_roster_transcript_precedes_legacy_repair_backlog(tmp_path, mo
 
     assert scan.budget_exhausted is True
     assert any(item.atom.model == "gpt-live" for item in scan.items)
+
+
+def test_partially_consumed_codex_roster_tail_precedes_legacy_repair_backlog(
+    tmp_path,
+    monkeypatch,
+):
+    sessions = tmp_path / ".codex" / "sessions"
+    live = sessions / "2026" / "07" / "16" / "rollout-live.jsonl"
+    repair = sessions / "2026" / "01" / "01" / "rollout-repair.jsonl"
+    write_records(live, [
+        codex_meta("live-thread", model="gpt-live"),
+        {"type": "turn_context", "timestamp": 1, "payload": {"model": "gpt-live"}},
+        codex_usage(2, 10, 4, 2),
+    ])
+    write_records(repair, [
+        codex_meta(
+            "repair-child",
+            "live-thread",
+            forked_from_id="live-thread",
+            thread_source="subagent",
+        ),
+        codex_meta("live-thread", model="gpt-live"),
+        codex_usage(2, 20, 8, 4),
+        {"type": "inter_agent_communication_metadata", "timestamp": 3, "payload": {}},
+    ])
+
+    def candidates(*, root: object = None, limit: int = 256):
+        return [live, repair] if limit >= 1 << 30 else [live]
+
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
+    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=2)
+    rows = [{"key": "live", "kind": "codex", "transcript": str(live)}]
+
+    first = scanner.scan(rows)
+    commit_scan(scanner, first)
+    live_record = scanner._files[str(live)]
+    assert 0 < live_record.offset < live.stat().st_size
+    assert "usage_committed_eof_size" not in live_record.durable_record.state
+    assert scanner._next_source == str(repair)
+    append_record(live, codex_usage(3, 30, 12, 6))
+
+    second = scanner.scan(rows)
+
+    assert any(item.atom.event_id == "codex:live-thread:3" for item in second.items)
+    assert str(repair) not in scanner._files
+
+
+def test_continuously_growing_codex_tail_cannot_starve_legacy_repair(
+    tmp_path,
+    monkeypatch,
+):
+    sessions = tmp_path / ".codex" / "sessions"
+    live = sessions / "2026" / "07" / "16" / "rollout-live.jsonl"
+    repair = sessions / "2026" / "01" / "01" / "rollout-repair.jsonl"
+    write_records(live, [])
+    write_records(repair, [
+        codex_meta(
+            "repair-child",
+            "live-thread",
+            forked_from_id="live-thread",
+            thread_source="subagent",
+        ),
+        codex_meta("live-thread", model="gpt-live"),
+        codex_usage(2, 20, 8, 4),
+        {"type": "inter_agent_communication_metadata", "timestamp": 3, "payload": {}},
+    ])
+
+    def candidates(*, root: object = None, limit: int = 256):
+        return [live, repair] if limit >= 1 << 30 else [live]
+
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
+    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=1)
+    rows = [{"key": "live", "kind": "codex", "transcript": str(live)}]
+    live_records = [
+        codex_meta("live-thread", model="gpt-live"),
+        {"type": "turn_context", "timestamp": 1, "payload": {"model": "gpt-live"}},
+        codex_usage(2, 10, 4, 2),
+        codex_usage(3, 20, 8, 4),
+        codex_usage(4, 30, 12, 6),
+        codex_usage(5, 40, 16, 8),
+    ]
+    live_advances = []
+    repair_advances = []
+    previous_live_offset = 0
+    previous_repair_offset = 0
+
+    for record in live_records:
+        append_record(live, record)
+        result = scanner.scan(rows)
+        commit_scan(scanner, result)
+        live_offset = scanner._files[str(live)].offset
+        repair_offset = (
+            scanner._files[str(repair)].offset
+            if str(repair) in scanner._files
+            else 0
+        )
+        live_advances.append(live_offset > previous_live_offset)
+        repair_advances.append(repair_offset > previous_repair_offset)
+        previous_live_offset = live_offset
+        previous_repair_offset = repair_offset
+
+    assert live_advances[0] is True
+    assert all(any(live_advances[index:index + 2]) for index in range(5))
+    assert any(repair_advances[:3])
+    assert str(repair) in scanner._files
+    assert scanner._files[str(repair)].offset > 0
+
+
+@pytest.mark.parametrize("repair_count", [1, 2, 4])
+def test_continuous_live_growth_rotates_every_repair_source_within_tier_bound(
+    tmp_path,
+    monkeypatch,
+    repair_count,
+):
+    sessions = tmp_path / ".codex" / "sessions"
+    live = sessions / "2026" / "07" / "16" / "rollout-live.jsonl"
+    write_records(live, [])
+    repairs = []
+    for index in range(repair_count):
+        repair = sessions / "2026" / "01" / "01" / f"rollout-repair-{index}.jsonl"
+        write_records(repair, [
+            codex_meta(
+                f"repair-child-{index}",
+                "live-thread",
+                forked_from_id="live-thread",
+                thread_source="subagent",
+            ),
+            codex_meta("live-thread", model="gpt-live"),
+        ])
+        repairs.append(repair)
+
+    def candidates(*, root: object = None, limit: int = 256):
+        return [live, *repairs] if limit >= 1 << 30 else [live]
+
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
+    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=1)
+    rows = [{"key": "live", "kind": "codex", "transcript": str(live)}]
+
+    for scan_index in range(3 * repair_count):
+        record = (
+            codex_meta("live-thread", model="gpt-live")
+            if scan_index == 0
+            else {
+                "type": "response_item",
+                "timestamp": scan_index + 1,
+                "payload": {"text": "live"},
+            }
+        )
+        append_record(live, record)
+        result = scanner.scan(rows)
+        commit_scan(scanner, result)
+
+    assert all(
+        str(repair) in scanner._files
+        and scanner._files[str(repair)].offset > 0
+        for repair in repairs
+    )
 
 
 def test_repair_cursor_precedes_partially_consumed_historical_backlog(tmp_path, monkeypatch):

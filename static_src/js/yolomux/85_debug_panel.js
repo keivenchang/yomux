@@ -7179,9 +7179,9 @@ function renderYoCostPanels(options = {}) {
   return rendered;
 }
 
-function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
+function refreshDebugGraphSurfaces({force = true} = {}) {
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force, deferFocusedControl});
+    refreshDebugGraphElement(graph, {force});
   }
   renderYoCostPanels({force});
 }
@@ -7278,15 +7278,6 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
   applyDebugSubTab(panel);
   for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
-}
-
-function debugGraphFocusedControl(graph) {
-  const active = typeof document !== 'undefined' ? document.activeElement : null;
-  if (!graph || !active || !graph.contains(active)) return null;
-  // These controls live outside the replaceable graph body. Keeping either
-  // focused must not defer an accepted history paint until focusout.
-  if (active.matches?.('[data-js-debug-range-slider], [data-js-debug-resolution-override]')) return null;
-  return active.closest?.('.js-debug-graph-controls') || null;
 }
 
 function syncDebugGraphControls(graph, nowMs = Date.now()) {
@@ -7460,22 +7451,18 @@ function syncDebugGraphLiveTicker() {
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
-  if (!graph || graph.dataset.jsDebugGraphRefreshPending !== 'true' || debugGraphFocusedControl(graph)) return false;
+  if (!graph || graph.dataset.jsDebugGraphRefreshPending !== 'true') return false;
   delete graph.dataset.jsDebugGraphRefreshPending;
   return refreshDebugGraphElement(graph, {force: true});
 }
 
-function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
+function refreshDebugGraphElement(graph, {force = false} = {}) {
   if (!graph) return false;
   if (jsDebugGraphRangeSliderDragging) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
   if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel'))) {
-    graph.dataset.jsDebugGraphRefreshPending = 'true';
-    return false;
-  }
-  if (deferFocusedControl && debugGraphFocusedControl(graph)) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
@@ -7770,7 +7757,7 @@ function setDebugGraphServiceLoadMode(value) {
   if (normalized === debugRuntimeState.serviceLoadMode) return false;
   debugRuntimeState.serviceLoadMode = normalized;
   saveJsDebugStatsUiPreferences();
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
   return true;
 }
 
@@ -8141,6 +8128,7 @@ function handleDebugGraphPointerMove(event, panel) {
       clearDebugGraphTouchCandidate(candidate);
       jsDebugGraphLastPointerType = 'mouse';
       debugGraphClearInteractionLines(panel);
+      flushDeferredDebugGraphInteractionRefresh(panel);
       return;
     } else {
       debugGraphSetInteractionLines(panel, ratio);
@@ -8204,8 +8192,10 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
   } else {
     debugGraphSetInteractionLines(panel, end);
-    flushDeferredDebugGraphInteractionRefresh(panel);
   }
+  // Every pointer-up ends this interaction, so release the repaint it deferred. The zoom branch
+  // previously stranded the pending flag when its non-forced refresh hit the render throttle.
+  flushDeferredDebugGraphInteractionRefresh(panel);
 }
 
 function handleDebugGraphPointerCancel(event, panel) {
@@ -8221,19 +8211,23 @@ function handleDebugGraphPointerCancel(event, panel) {
 }
 
 function cancelDebugGraphSelection(panel) {
+  let interactionEnded = false;
   if (jsDebugGraphTouchCandidateState?.panel === panel) {
     clearDebugGraphTouchCandidate();
     jsDebugGraphLastPointerType = 'mouse';
     debugGraphClearInteractionLines(panel);
+    interactionEnded = true;
   }
   const selection = jsDebugGraphSelectionState;
-  if (selection?.panel !== panel) return;
-  if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
-    try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+  if (selection?.panel === panel) {
+    if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
+      try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+    }
+    debugGraphClearSelectionRects(panel);
+    jsDebugGraphSelectionState = null;
+    interactionEnded = true;
   }
-  debugGraphClearSelectionRects(panel);
-  jsDebugGraphSelectionState = null;
-  flushDeferredDebugGraphInteractionRefresh(panel);
+  if (interactionEnded) flushDeferredDebugGraphInteractionRefresh(panel);
 }
 
 function handleDebugGraphControlEvent(event, panel) {
@@ -8304,14 +8298,12 @@ function handleDebugGraphControlEvent(event, panel) {
       jsDebugGraphRangeSliderDragging = true;
       return setDebugGraphRangeFromSlider(slider, {render: false});
     }
-    if (event.type === 'change') {
+    const dragEnded = event.type === 'change' || event.type === 'pointerup' || event.type === 'pointercancel';
+    if (dragEnded) {
       jsDebugGraphRangeSliderDragging = false;
-      return setDebugGraphRangeFromSlider(slider, {snap: true});
-    }
-    if (event.type === 'pointerup') return false;
-    if (event.type === 'pointercancel') {
-      jsDebugGraphRangeSliderDragging = false;
-      return false;
+      const changed = event.type === 'change' && setDebugGraphRangeFromSlider(slider, {snap: true});
+      flushDeferredDebugGraphInteractionRefresh(panel);
+      return changed;
     }
     return false;
   }

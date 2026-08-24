@@ -51881,10 +51881,7 @@ function setDebugGraphChartVisible(key, visible) {
     debugRuntimeState.graphVisibleCharts.delete(chartKey);
   }
   saveJsDebugStatsUiPreferences();
-  // A direct toggle/close owns this mutation. Passive SSE/timer paints defer
-  // while a graph control is focused, but deferring the user's own activation
-  // leaves aria-pressed and the chart body visibly stale until focus moves.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
 }
 
 function jsDebugGraphRangeOptionIndex(rangeSeconds = debugRuntimeState.graphRangeSeconds, nowMs = Date.now()) {
@@ -52931,9 +52928,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  // Reset is a completed activation, so replacing its focused button is safe and
-  // must not leave the visible charts on the retired zoom domain until focusout.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
 }
 
 function debugEventCounts() {
@@ -62113,9 +62108,9 @@ function renderYoCostPanels(options = {}) {
   return rendered;
 }
 
-function refreshDebugGraphSurfaces({force = true, deferFocusedControl = true} = {}) {
+function refreshDebugGraphSurfaces({force = true} = {}) {
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
-    refreshDebugGraphElement(graph, {force, deferFocusedControl});
+    refreshDebugGraphElement(graph, {force});
   }
   renderYoCostPanels({force});
 }
@@ -62212,15 +62207,6 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   if (!panel) return;
   applyDebugSubTab(panel);
   for (const view of debugPanelSubviewDescriptors()) view.render(panel, options);
-}
-
-function debugGraphFocusedControl(graph) {
-  const active = typeof document !== 'undefined' ? document.activeElement : null;
-  if (!graph || !active || !graph.contains(active)) return null;
-  // These controls live outside the replaceable graph body. Keeping either
-  // focused must not defer an accepted history paint until focusout.
-  if (active.matches?.('[data-js-debug-range-slider], [data-js-debug-resolution-override]')) return null;
-  return active.closest?.('.js-debug-graph-controls') || null;
 }
 
 function syncDebugGraphControls(graph, nowMs = Date.now()) {
@@ -62394,22 +62380,18 @@ function syncDebugGraphLiveTicker() {
 }
 
 function flushDeferredDebugGraphRefresh(graph) {
-  if (!graph || graph.dataset.jsDebugGraphRefreshPending !== 'true' || debugGraphFocusedControl(graph)) return false;
+  if (!graph || graph.dataset.jsDebugGraphRefreshPending !== 'true') return false;
   delete graph.dataset.jsDebugGraphRefreshPending;
   return refreshDebugGraphElement(graph, {force: true});
 }
 
-function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
+function refreshDebugGraphElement(graph, {force = false} = {}) {
   if (!graph) return false;
   if (jsDebugGraphRangeSliderDragging) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
   if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel'))) {
-    graph.dataset.jsDebugGraphRefreshPending = 'true';
-    return false;
-  }
-  if (deferFocusedControl && debugGraphFocusedControl(graph)) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
   }
@@ -62704,7 +62686,7 @@ function setDebugGraphServiceLoadMode(value) {
   if (normalized === debugRuntimeState.serviceLoadMode) return false;
   debugRuntimeState.serviceLoadMode = normalized;
   saveJsDebugStatsUiPreferences();
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
   return true;
 }
 
@@ -63075,6 +63057,7 @@ function handleDebugGraphPointerMove(event, panel) {
       clearDebugGraphTouchCandidate(candidate);
       jsDebugGraphLastPointerType = 'mouse';
       debugGraphClearInteractionLines(panel);
+      flushDeferredDebugGraphInteractionRefresh(panel);
       return;
     } else {
       debugGraphSetInteractionLines(panel, ratio);
@@ -63138,8 +63121,10 @@ function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
   } else {
     debugGraphSetInteractionLines(panel, end);
-    flushDeferredDebugGraphInteractionRefresh(panel);
   }
+  // Every pointer-up ends this interaction, so release the repaint it deferred. The zoom branch
+  // previously stranded the pending flag when its non-forced refresh hit the render throttle.
+  flushDeferredDebugGraphInteractionRefresh(panel);
 }
 
 function handleDebugGraphPointerCancel(event, panel) {
@@ -63155,19 +63140,23 @@ function handleDebugGraphPointerCancel(event, panel) {
 }
 
 function cancelDebugGraphSelection(panel) {
+  let interactionEnded = false;
   if (jsDebugGraphTouchCandidateState?.panel === panel) {
     clearDebugGraphTouchCandidate();
     jsDebugGraphLastPointerType = 'mouse';
     debugGraphClearInteractionLines(panel);
+    interactionEnded = true;
   }
   const selection = jsDebugGraphSelectionState;
-  if (selection?.panel !== panel) return;
-  if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
-    try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+  if (selection?.panel === panel) {
+    if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
+      try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+    }
+    debugGraphClearSelectionRects(panel);
+    jsDebugGraphSelectionState = null;
+    interactionEnded = true;
   }
-  debugGraphClearSelectionRects(panel);
-  jsDebugGraphSelectionState = null;
-  flushDeferredDebugGraphInteractionRefresh(panel);
+  if (interactionEnded) flushDeferredDebugGraphInteractionRefresh(panel);
 }
 
 function handleDebugGraphControlEvent(event, panel) {
@@ -63238,14 +63227,12 @@ function handleDebugGraphControlEvent(event, panel) {
       jsDebugGraphRangeSliderDragging = true;
       return setDebugGraphRangeFromSlider(slider, {render: false});
     }
-    if (event.type === 'change') {
+    const dragEnded = event.type === 'change' || event.type === 'pointerup' || event.type === 'pointercancel';
+    if (dragEnded) {
       jsDebugGraphRangeSliderDragging = false;
-      return setDebugGraphRangeFromSlider(slider, {snap: true});
-    }
-    if (event.type === 'pointerup') return false;
-    if (event.type === 'pointercancel') {
-      jsDebugGraphRangeSliderDragging = false;
-      return false;
+      const changed = event.type === 'change' && setDebugGraphRangeFromSlider(slider, {snap: true});
+      flushDeferredDebugGraphInteractionRefresh(panel);
+      return changed;
     }
     return false;
   }
@@ -65188,15 +65175,25 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
   }, sessionFilesProducerDeadlineMs);
 }
 
-function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+function retireSessionFilesResponseOwner(destination = 'differ') {
   const state = sessionFilesStateForDestination(destination);
   state.guard.invalidate();
   const controller = state.abortController;
   state.abortController = null;
+  return controller;
+}
+
+function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+  const controller = retireSessionFilesResponseOwner(destination);
   if (!controller || controller.signal.aborted) return;
   const error = new Error(reason);
   error.name = 'AbortError';
   controller.abort(error);
+}
+
+function sessionFilesRequestIsActiveForDestination(destination = 'differ') {
+  const controller = sessionFilesStateForDestination(destination).abortController;
+  return Boolean(controller && !controller.signal.aborted);
 }
 
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
@@ -65365,7 +65362,7 @@ async function fetchSessionFiles(options = {}) {
     sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
     for (const mirrorDestination of sessionFilesDestinationsForRequest(request, session)) {
       if (mirrorDestination === destination) continue;
-      applySessionFilesPayloadToDestination(mirrorDestination, nextPayload, request, session);
+      applySessionFilesPeerPayloadToDestination(mirrorDestination, nextPayload, request, session);
     }
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -65440,7 +65437,11 @@ function applySessionFilesPayloadToDestination(destination, payload, request, se
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
+  // The accepted payload owns the visible state, but aborting an already-dispatched finite
+  // request turns a successful server response into a client-side status 0. Fence its stale commit
+  // with the existing generation guard and let the transport settle normally.
+  retireSessionFilesResponseOwner(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
   setSessionFilesSignatureForDestination(destination, signature);
   sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -65450,6 +65451,13 @@ function applySessionFilesPayloadToDestination(destination, payload, request, se
     renderSessionButtons();
   }
   return true;
+}
+
+function applySessionFilesPeerPayloadToDestination(destination, payload, request, session) {
+  // Equal request parameters let an idle destination reuse this payload; they do not transfer
+  // ownership away from a destination whose own request is still in flight.
+  if (sessionFilesRequestIsActiveForDestination(destination)) return false;
+  return applySessionFilesPayloadToDestination(destination, payload, request, session);
 }
 
 function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
@@ -65478,7 +65486,8 @@ function applySessionFilesOperationFailureToDestination(destination, result, con
   };
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload);
+  retireSessionFilesResponseOwner(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
   setSessionFilesSignatureForDestination(destination, signature);
   sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   renderSessionFilesDestination(destination, {force: true});

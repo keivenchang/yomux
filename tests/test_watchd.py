@@ -23,6 +23,7 @@ from yolomux_lib.filesystem import search as search_module
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem.paths import FilesystemAccessPolicy, FS_ACCESS_POLICY_VERSION
 from yolomux_lib.watchd import PersistentWatchService
+from yolomux_lib.backend_health.observer import observed_health
 from yolomux_lib.local_services import rpc
 from yolomux_lib.common import TmuxPaneInfo
 from yolomux_lib.infra.common import AgentInfo
@@ -1909,8 +1910,15 @@ def test_watchd_reconcile_bumps_repo_generation_on_same_commit_branch_switch(tmp
     assert ".git" not in json.dumps(revision)
 
 
-def test_watchd_initial_scan_failure_does_not_activate_polling_generation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope_kind", ("root", "exact-file"))
+def test_watchd_initial_scan_failure_does_not_activate_polling_generation(tmp_path, monkeypatch, scope_kind):
     service, _root, _signature = _polling_generation_service(tmp_path)
+    if scope_kind == "exact-file":
+        watched_file = tmp_path / "watched.txt"
+        service.configuration = EffectiveWatchConfiguration(
+            files=(str(watched_file),),
+            watch_paths=(str(tmp_path),),
+        )
 
     def fail_scan(*_args, **_kwargs):
         raise OSError("initial scan failed")
@@ -1921,12 +1929,27 @@ def test_watchd_initial_scan_failure_does_not_activate_polling_generation(tmp_pa
 
     service.native_watch_loop()
 
+    assert len(service.revisions) == 2, "the failed generation must publish a new state revision"
     failure = service.revisions[-1]
     assert failure["watch_generation"] == 2
     assert failure["active_watch_generation"] == 1
+    assert failure["failed_watch_generation"] == 2
     assert failure["healthy"] is False and failure["fallback"] is False
+    assert failure["last_error"] == "initial scan failed"
+    assert bool(failure["roots"]) is (scope_kind == "root")
     assert service.scanned_watch_generation == 1
     assert service.last_error == "initial scan failed"
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord()
+    webapp.client_watch_service.event_watcher_record = record
+    webapp.apply_watchd_revision(record, failure)
+
+    assert record.watchd_state == "errored"
+    assert record.watchd_failed_generation == 2
+    row = webapp.watchd_runtime_status()
+    assert row["last_failure"] == "watch_generation_scan_failed"
+    assert observed_health({**row, "pid": 100}) == ("degraded", "service_unhealthy")
 
 
 def test_watchd_initial_scan_failure_with_native_yield_waits_without_activation(tmp_path, monkeypatch):
@@ -2148,7 +2171,9 @@ def test_watchd_native_periodic_scan_failure_requires_successful_fallback_scan(t
     native_activation, failure, fallback_activation = service.revisions[-3:]
     assert native_activation["healthy"] is True and native_activation["fallback"] is False
     assert failure["healthy"] is False and failure["fallback"] is False
+    assert failure["failed_watch_generation"] == 2
     assert fallback_activation["healthy"] is False and fallback_activation["fallback"] is True
+    assert fallback_activation["failed_watch_generation"] == 0
     assert fallback_activation["watch_generation"] == fallback_activation["active_watch_generation"] == 2
     assert service.scanned_watch_generation == 2
     assert calls == 3
@@ -4164,3 +4189,92 @@ def test_native_registration_never_exceeds_the_cap_after_any_accepted_upsert(tmp
         assert len(service.effective_configuration().shallow_registration_paths()) <= WATCHD_MAX_NATIVE_REGISTRATIONS
         if not response["ok"]:
             assert response["error_code"] == "native_capacity_exceeded"
+
+
+def test_watchd_with_nothing_registered_is_resting_not_errored():
+    """A running watchd with no registered roots must not read as a failed daemon.
+
+    MEASURED on live :7220 (v0.7.12, native watchfiles disabled) over 44.7 minutes: watchd took
+    24 health transitions including five real `service_unhealthy` episodes at retained revisions
+    11927, 11937, 11945, 11960 and 11964, while statsd took zero. The daemon snapshot captured at
+    one of those moments says exactly why it is not a scan failure:
+
+        {"clients": 0, "descriptors": 0, "roots": 0, "healthy": false,
+         "fallback": false, "last_error": ""}
+
+    Nothing registered, and NO error. `native_watch_loop` takes the `if not shallow_paths:` branch
+    (`watchd.py`), which clears BOTH `native_healthy` and `polling_fallback`, so every revision
+    published in that window carries `healthy: false, fallback: false`. The bridge's two-way
+    ternary in `apply_watchd_revision` has no branch for it and lands on `errored`, which
+    `watchd_runtime_status` turns into `healthy=False` + `last_failure="errored"`, which
+    `observed_health` reduces to `degraded`/`service_unhealthy` -- a yellow daemon row and a
+    yellow topbar triangle for a daemon that is up, answering, and simply has no work.
+
+    watchd is demand-scoped and idle-exits, so this window recurs on every attach/detach cycle:
+    its retained `restart_count` was 99 across that same uptime.
+
+    The `roots` list is the discriminator, and it is already parsed by the bridge. This pins BOTH
+    directions, because the fix must not quiet a genuine fault: nothing registered is resting,
+    while the SAME flags with roots present is still a real degradation.
+    """
+    def reduce(revision):
+        webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+        record = ClientEventWatcherRecord()
+        webapp.client_watch_service.event_watcher_record = record
+        webapp.apply_watchd_revision(record, revision)
+        row = webapp.watchd_runtime_status()
+        # pid is forced positive so this measures the RUNNING branch of the reducer; an absent
+        # watchd is already covered by `test_absent_watchd_is_not_an_alarm`.
+        return record.watchd_state, observed_health({**row, "pid": 100})
+
+    base = {"epoch": "e1", "revision": 1}
+
+    # Nothing registered, no error: resting. This is the live episode.
+    state, reduced = reduce({**base, "healthy": False, "fallback": False, "roots": []})
+    assert state != "errored", f"a watchd with nothing registered is not errored, got {state!r}"
+    assert reduced == ("ready", "none"), reduced
+
+    # The three states that already behaved correctly must not move.
+    assert reduce({**base, "healthy": False, "fallback": True, "roots": ["/repo"]}) == ("polling", ("ready", "none"))
+    assert reduce({**base, "healthy": True, "fallback": False, "roots": ["/repo"]}) == ("ready", ("ready", "none"))
+
+    # The SECOND transient window, found by measuring the first fix instead of trusting it: the
+    # bug still reproduced once at 22:45:01 on the patched runtime. Roots ARE registered, so the
+    # `daemon_reported_scope` guard above does not apply, but the generation has not been
+    # ACTIVATED yet -- `_activate_watch_generation` is the only writer of both
+    # `active_watch_generation` and the two serving flags, and NO call site passes both flags
+    # false. So both-false with `active_watch_generation < watch_generation` means the daemon has
+    # not yet decided native-versus-polling for this generation, which is a start, not a fault.
+    state, reduced = reduce({
+        **base, "healthy": False, "fallback": False, "roots": ["/repo"],
+        "watch_generation": 4, "active_watch_generation": 3,
+    })
+    assert state == "starting", state
+    assert reduced == ("starting", "service_starting"), reduced
+
+    # Exact-file-only demand has no directory roots or change paths in a state revision. Its
+    # generation still distinguishes a pending activation from a daemon with no work.
+    state, reduced = reduce({
+        **base, "healthy": False, "fallback": False, "roots": [],
+        "watch_generation": 4, "active_watch_generation": 3,
+    })
+    assert state == "starting", state
+    assert reduced == ("starting", "service_starting"), reduced
+
+    # Once that exact-file generation is active and carries no change, the empty scope is idle.
+    state, reduced = reduce({
+        **base, "healthy": False, "fallback": False, "roots": [],
+        "watch_generation": 4, "active_watch_generation": 4,
+    })
+    assert state == "idle", state
+    assert reduced == ("ready", "none"), reduced
+
+    # THE NEGATIVE CONTROL: identical flags and roots registered, but the generation IS activated.
+    # That is `_mark_watch_generation_unhealthy` -- it clears both flags, records `last_error`, and
+    # leaves `active_watch_generation` at the generation -- so it must stay a visible degradation.
+    state, reduced = reduce({
+        **base, "healthy": False, "fallback": False, "roots": ["/repo"],
+        "watch_generation": 4, "active_watch_generation": 4,
+    })
+    assert state == "errored", state
+    assert reduced == ("degraded", "service_unhealthy"), reduced

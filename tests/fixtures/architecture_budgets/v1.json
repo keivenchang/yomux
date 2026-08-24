@@ -1,7 +1,7 @@
 {
   "class_budgets": {
     "yolomux_lib/app.py:TmuxWebtermApp": {
-      "methods": 560,
+      "methods": 561,
       "self_fields": 97
     },
     "yolomux_lib/infra/background_owner.py:BackgroundOwnerRegistry": {
@@ -30,7 +30,7 @@
     },
     "yolomux_lib/watchd.py:PersistentWatchService": {
       "methods": 63,
-      "self_fields": 36
+      "self_fields": 37
     }
   },
   "extension_families": {
@@ -172,12 +172,12 @@
     "static_src/js/yolomux/10_core_utils.js": 7101,
     "static_src/js/yolomux/20_layout_state.js": 7092,
     "static_src/js/yolomux/40_file_explorer_files.js": 5946,
-    "static_src/js/yolomux/85_debug_panel.js": 8437,
+    "static_src/js/yolomux/85_debug_panel.js": 8429,
     "static_src/js/yolomux/99_terminal_boot.js": 6954,
-    "yolomux_lib/app.py": 17475,
+    "yolomux_lib/app.py": 17550,
     "yolomux_lib/search/file_index.py": 4468,
     "yolomux_lib/server.py": 3368,
-    "yolomux_lib/stats_current/service.py": 5049,
+    "yolomux_lib/stats_current/service.py": 5095,
     "yolomux_lib/workspace/session_files.py": 4154
   },
   "lane_ownership": [
@@ -1372,7 +1372,7 @@
       "writer": "static_src/js/yolomux/85_debug_panel.js"
     },
     {
-      "count": 4,
+      "count": 3,
       "name": "jsDebugGraphRangeSliderDragging",
       "owner": "static_src/js/yolomux/84_debug_observation.js",
       "writer": "static_src/js/yolomux/85_debug_panel.js"
@@ -1994,11 +1994,11 @@
     "tests/helpers/fixture_http_server.py": 161,
     "tests/i18n_locale_registry.test.js": 270,
     "tests/i18n_structured_message.test.js": 267,
-    "tests/layout_async.test.js": 9038,
+    "tests/layout_async.test.js": 9159,
     "tests/layout_restore.test.js": 5079,
     "tests/open_file_missing_guard.test.js": 368,
     "tests/side_panes.test.js": 728,
-    "tests/stats_current_panel.test.js": 4350,
+    "tests/stats_current_panel.test.js": 4598,
     "tests/stats_current_ui.test.js": 3233,
     "tests/subsystems/app_darwin_memory.py": 68,
     "tests/subsystems/app_jobd_product.py": 131,
@@ -2012,7 +2012,7 @@
     "tests/test_aged_state.py": 111,
     "tests/test_agent_tui.py": 613,
     "tests/test_api_response_parent.py": 1117,
-    "tests/test_app.py": 18625,
+    "tests/test_app.py": 18652,
     "tests/test_approvald.py": 254,
     "tests/test_architecture_budgets.py": 333,
     "tests/test_atomic_file.py": 16,
@@ -2040,7 +2040,7 @@
     "tests/test_browser_finder_fs_repro.py": 46,
     "tests/test_browser_golden.py": 78,
     "tests/test_browser_layout.py": 17540,
-    "tests/test_browser_ring_landing_verify.py": 1036,
+    "tests/test_browser_ring_landing_verify.py": 1155,
     "tests/test_browser_stats_coverage.py": 683,
     "tests/test_browser_stats_widen.py": 1429,
     "tests/test_cache.py": 39,
@@ -2073,7 +2073,7 @@
     "tests/test_fixture_parents.py": 71,
     "tests/test_fs_preflight.py": 137,
     "tests/test_gate_aged_state.py": 757,
-    "tests/test_gate_agent_state.py": 469,
+    "tests/test_gate_agent_state.py": 497,
     "tests/test_gate_api_errors.py": 289,
     "tests/test_gate_auth.py": 141,
     "tests/test_gate_backend_health_indicator.py": 610,
@@ -2088,7 +2088,7 @@
     "tests/test_gate_cross_host_views.py": 213,
     "tests/test_gate_daemon_monitor_acceptance.py": 451,
     "tests/test_gate_daemon_monitor_statsd_recovery.py": 295,
-    "tests/test_gate_differ.py": 1494,
+    "tests/test_gate_differ.py": 1530,
     "tests/test_gate_editor.py": 826,
     "tests/test_gate_f8_harness.py": 714,
     "tests/test_gate_finder.py": 921,
@@ -2109,7 +2109,7 @@
     "tests/test_gate_stats.py": 792,
     "tests/test_gate_stats_nonbrowser.py": 309,
     "tests/test_gate_stats_range.py": 563,
-    "tests/test_gate_stats_ring_buffer.py": 2284,
+    "tests/test_gate_stats_ring_buffer.py": 2494,
     "tests/test_gate_stats_socket_runtime.py": 136,
     "tests/test_gate_sweep_p.py": 33,
     "tests/test_gate_terminal_files.py": 92,
@@ -2208,12 +2208,12 @@
     "tests/test_stats_current_service.py": 4793,
     "tests/test_stats_current_service_performance.py": 29,
     "tests/test_stats_current_storage.py": 1557,
-    "tests/test_stats_current_transcripts.py": 1340,
+    "tests/test_stats_current_transcripts.py": 1401,
     "tests/test_stats_current_usage.py": 225,
     "tests/test_stats_replay_ledger.py": 1850,
     "tests/test_stats_resolution.py": 140,
     "tests/test_stats_v7_to_v8_migration.py": 595,
-    "tests/test_statsd_ring_invalidation_storm.py": 412,
+    "tests/test_statsd_ring_invalidation_storm.py": 570,
     "tests/test_statusd.py": 1785,
     "tests/test_statusd_protocol.py": 86,
     "tests/test_system_status_latency_probe.py": 580,
@@ -2233,7 +2233,7 @@
     "tests/test_ui_pins.py": 103,
     "tests/test_uploads.py": 173,
     "tests/test_watch_diff_route_contract.py": 585,
-    "tests/test_watchd.py": 4166,
+    "tests/test_watchd.py": 4280,
     "tests/test_watchd_demand_lifecycle.py": 226,
     "tests/test_web.py": 232,
     "tests/test_webdriver_lease.py": 254,
