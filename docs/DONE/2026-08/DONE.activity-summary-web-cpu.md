@@ -1,6 +1,6 @@
 # Archived Activity-Summary Web CPU
 
-Archive status: this completed intermediate offload is retained as measurement history. The active contract is `DOIT.p0.activity-summary-disable.md`, followed only after acceptance by `DOIT.p1.e5.activity-summary-async-replacement.md`; this file is not an active queue.
+Archive status: this completed intermediate offload is retained as measurement history. At archive time, the active contract was `DOIT.p0.activity-summary-disable.md`, followed only after acceptance by `DOIT.p1.e5.activity-summary-async-replacement.md`; those later queues were abandoned on 2026-08-23 without calling their requirements complete.
 
 - [x] Measure `activity_summary_payload` phases on current `357ab4416` and separate web-process compute from daemon wait. Baseline evidence: corrected coordinator captures attribute 247/421 (58.7%) and 215/413 (52.1%) web-process samples to `activity_summary_payload`; isolated port 17775 warm request exceeded 90.002 seconds and accumulated 78.100 seconds of total web-process CPU while the route owner continued after client timeout.
 - [x] Add a failing regression that proves the expensive aggregate is not assembled in a `yolomux.py` request thread and preserves the exact client-visible payload contract.

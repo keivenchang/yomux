@@ -1,6 +1,6 @@
-# DOIT.p1.e2.merge-macos-boot-tmux-env.md - Land origin/fix/macos-boot-tmux-env
+# Land origin/fix/macos-boot-tmux-env
 
-Queued 2026-08-18 for the v0.7.9 goal (item 8). A land, not a build.
+Queued 2026-08-18 for the v0.7.9 goal (item 8). Landed and accepted on real macOS hardware by 2026-08-20.
 
 ## What it fixes
 
