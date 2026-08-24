@@ -883,6 +883,67 @@ def test_budgeted_round_robin_commits_cursor_before_advancing_to_late_fork(tmp_p
     _commit(cold_scanner, cold)
 
 
+def test_cross_tier_fairness_cursors_advance_only_after_commit(tmp_path, monkeypatch):
+    sessions = tmp_path / ".codex" / "sessions"
+    live = sessions / "2026" / "07" / "16" / "rollout-live.jsonl"
+    repair = sessions / "2026" / "01" / "01" / "rollout-repair.jsonl"
+    _write_records(live, [])
+    _write_records(repair, [
+        _codex_meta(
+            "repair-child",
+            "live-thread",
+            forked_from_id="live-thread",
+            thread_source="subagent",
+        ),
+        _codex_meta("live-thread", model="gpt-live"),
+    ])
+
+    def candidates(*, root: object = None, limit: int = 256):
+        return [live, repair] if limit >= 1 << 30 else [live]
+
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
+    scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=1)
+    rows = [{"key": "live", "kind": "codex", "transcript": str(live)}]
+    _append_record(live, _codex_meta("live-thread", model="gpt-live"))
+
+    uncommitted = scanner.scan(rows)
+    assert scanner._live_priority_scans == 0
+    assert scanner._next_historical_source is None
+    scanner.rollback(uncommitted.receipt_id)
+    assert scanner._live_priority_scans == 0
+    assert scanner._next_historical_source is None
+
+    replayed = scanner.scan(rows)
+    _commit(scanner, replayed)
+    assert scanner._live_priority_scans == 1
+    _append_record(live, {
+        "type": "response_item",
+        "timestamp": 2,
+        "payload": {"text": "live"},
+    })
+    _commit(scanner, scanner.scan(rows))
+    assert scanner._live_priority_scans == 2
+    _append_record(live, {
+        "type": "response_item",
+        "timestamp": 3,
+        "payload": {"text": "live"},
+    })
+
+    forced = scanner.scan(rows)
+    assert set(scanner._inflight.files) == {str(repair)}
+    assert scanner._live_priority_scans == 2
+    assert scanner._next_historical_source is None
+    scanner.rollback(forced.receipt_id)
+    assert scanner._live_priority_scans == 2
+    assert scanner._next_historical_source is None
+
+    replayed_forced = scanner.scan(rows)
+    assert set(scanner._inflight.files) == {str(repair)}
+    _commit(scanner, replayed_forced)
+    assert scanner._live_priority_scans == 0
+    assert scanner._next_historical_source == str(repair)
+
+
 def test_live_tails_advance_before_new_historical_backlog(tmp_path):
     sessions = tmp_path / ".codex" / "sessions" / "2026" / "07" / "16"
     active_a = sessions / "rollout-a-active.jsonl"

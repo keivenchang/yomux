@@ -53,6 +53,7 @@ class ClientEventWatcherRecord:
     watchd_synced_generation: int = 0
     watchd_applied_generation: int = 0
     watchd_active_generation: int = 0
+    watchd_failed_generation: int = 0
     watchd_descriptor_ids: set[str] = field(default_factory=set)
     watchd_descriptor_generations: dict[str, int] = field(default_factory=dict)
     watchd_state: str = "starting"

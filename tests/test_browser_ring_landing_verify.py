@@ -429,7 +429,11 @@ def _graph_state(driver) -> dict[str, object]:
           cacheGeneration: Number(generation?.cache_generation || 0),
           sourceGeneration: Number(generation?.source_generation || 0),
           generationCostTokens: Number(generation?.cost_report?.total_tokens || 0),
+          controllerGenerationKey: generation && typeof jsDebugCurrentStatsGenerationKey === 'function'
+            ? jsDebugCurrentStatsGenerationKey(generation)
+            : '',
           paintedGenerationKey: String(jsDebugCurrentStatsClientState.paintedGenerationKey || ''),
+          pendingGenerationKey: String(jsDebugCurrentStatsClientState.pendingGenerationKey || ''),
           graphGenerationKey: graph?.dataset?.jsDebugStatsGenerationKey || '',
           serverSequence: Number(jsDebugStatsServerSequence || 0),
           historyState: graph?.dataset?.jsDebugHistoryState || '',
@@ -438,6 +442,7 @@ def _graph_state(driver) -> dict[str, object]:
           graphRenderPending: graph?.dataset?.jsDebugGraphRefreshPending || '',
           renderPaths: renderNodes.length,
           renderedCharts: document.querySelectorAll('.js-debug-panel .js-debug-chart svg').length,
+          focusedChartToggle: document.activeElement?.dataset?.jsDebugChartToggle || '',
           zeroBars,
           gapRects,
           costRows,
@@ -450,27 +455,85 @@ def _graph_state(driver) -> dict[str, object]:
     )
 
 
-def _wait_pair(driver, range_seconds: int, resolution_seconds: int) -> dict[str, object]:
+def _pair_state_ready(
+    state: dict[str, object],
+    range_seconds: int,
+    requested_resolution: int | str,
+    resolution_seconds: int,
+) -> dict[str, object] | bool:
+    if (
+        state["range"] != range_seconds
+        or state["requested"] != requested_resolution
+        or state["resolution"] != resolution_seconds
+    ):
+        return False
+    controller_key = state["controllerGenerationKey"]
+    if (
+        not controller_key
+        or state["pendingGenerationKey"]
+        or state["paintedGenerationKey"] != controller_key
+        or state["graphGenerationKey"] != controller_key
+    ):
+        return False
+    if state["historyState"] != "ready" or state["busy"] != "false":
+        return False
+    if state["renderPaths"] < 1 or state["renderedCharts"] < 1:
+        return False
+    return state
+
+
+def _wait_pair(
+    driver,
+    range_seconds: int,
+    requested_resolution: int | str,
+    resolution_seconds: int,
+) -> dict[str, object]:
     def ready(_driver):
-        state = _graph_state(driver)
-        if state["range"] != range_seconds or state["resolution"] != resolution_seconds:
-            return False
-        if not state["paintedGenerationKey"] or state["graphGenerationKey"] != state["paintedGenerationKey"]:
-            return False
-        if state["historyState"] != "ready" or state["busy"] != "false":
-            return False
-        if state["renderPaths"] < 1 or state["renderedCharts"] < 1:
-            return False
-        return state
+        return _pair_state_ready(
+            _graph_state(driver),
+            range_seconds,
+            requested_resolution,
+            resolution_seconds,
+        )
 
     try:
         return WebDriverWait(driver, 20, poll_frequency=0.05).until(ready)
     except TimeoutException as error:
         raise AssertionError({
             "expected_range": range_seconds,
+            "expected_requested_resolution": requested_resolution,
             "expected_resolution": resolution_seconds,
             "graph": _graph_state(driver),
         }) from error
+
+
+@pytest.mark.e2e
+def test_ring_pair_wait_rejects_stale_auto_paint_during_explicit_selection() -> None:
+    stale_auto_paint = {
+        "range": 3_600,
+        "requested": 60,
+        "resolution": 60,
+        "controllerGenerationKey": "3600:60:60:12:42",
+        "paintedGenerationKey": "3600:AUTO:60:11:41",
+        "pendingGenerationKey": "3600:60:60:12:42",
+        "graphGenerationKey": "3600:AUTO:60:11:41",
+        "historyState": "ready",
+        "busy": "false",
+        "renderPaths": 1,
+        "renderedCharts": 12,
+        "generationCostTokens": 12,
+        "costRows": [{"label": "Total", "tokens": 0}],
+    }
+
+    assert _pair_state_ready(stale_auto_paint, 3_600, 60, 60) is False
+    converged = {
+        **stale_auto_paint,
+        "paintedGenerationKey": stale_auto_paint["controllerGenerationKey"],
+        "pendingGenerationKey": "",
+        "graphGenerationKey": stale_auto_paint["controllerGenerationKey"],
+        "costRows": [{"label": "Total", "tokens": 12}],
+    }
+    assert _pair_state_ready(converged, 3_600, 60, 60) is converged
 
 
 def _set_range_from_slider(driver, target: int) -> None:
@@ -584,14 +647,60 @@ def _show_gpu_util_and_cost_summary(driver) -> None:
         )
 
 
+def _prove_focused_chart_control_converges(driver) -> dict[str, object]:
+    baseline = _graph_state(driver)
+    accepted = driver.execute_script(
+        """
+        const toggle = document.querySelector('.js-debug-panel [data-js-debug-chart-toggle="costSummary"]');
+        toggle.focus({preventScroll: true});
+        const controller = jsDebugCurrentStatsClientState.client.controller();
+        const current = controller.generation();
+        const candidate = JSON.parse(JSON.stringify(current));
+        candidate.source_generation += 1;
+        candidate.cache_generation += 1;
+        return {
+          key: toggle.dataset.jsDebugChartToggle,
+          focused: document.activeElement === toggle,
+          accepted: controller.acceptSnapshot(candidate),
+        };
+        """
+    )
+    assert accepted == {"key": "costSummary", "focused": True, "accepted": True}, accepted
+
+    def converged(_driver):
+        state = _graph_state(driver)
+        if state["controllerGenerationKey"] == baseline["controllerGenerationKey"]:
+            return False
+        if state["focusedChartToggle"] != "costSummary":
+            return False
+        if state["pendingGenerationKey"]:
+            return False
+        if state["paintedGenerationKey"] != state["controllerGenerationKey"]:
+            return False
+        if state["graphGenerationKey"] != state["controllerGenerationKey"]:
+            return False
+        if state["renderPaths"] < 1:
+            return False
+        return state
+
+    try:
+        return WebDriverWait(driver, 10, poll_frequency=0.05).until(converged)
+    except TimeoutException as error:
+        raise AssertionError({
+            "baseline": baseline,
+            "accepted": accepted,
+            "graph": _graph_state(driver),
+        }) from error
+
+
 def _exercise_pairs(driver) -> tuple[list[dict[str, object]], dict[str, object]]:
     results = []
-    _wait_pair(driver, 900, 10)
+    _wait_pair(driver, 900, "AUTO", 10)
     for range_seconds, resolution_seconds in PAIRS:
         started = time.monotonic()
         _set_range_from_slider(driver, range_seconds)
         _set_resolution_from_select(driver, resolution_seconds)
-        state = _wait_pair(driver, range_seconds, resolution_seconds)
+        state = _wait_pair(driver, range_seconds, resolution_seconds, resolution_seconds)
         results.append({
             "range": range_seconds,
             "resolution": resolution_seconds,
@@ -618,7 +727,7 @@ def _exercise_pairs(driver) -> tuple[list[dict[str, object]], dict[str, object]]
         assert state["bootRejections"] == [], state
     _set_range_from_slider(driver, 300)
     _set_resolution_from_select(driver, 10)
-    return results, _wait_pair(driver, 300, 10)
+    return results, _wait_pair(driver, 300, 10, 10)
 
 
 def _load_real_stats_page(
@@ -748,6 +857,10 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         assert latest_statsd_pid == initial_statsd["pid"]
 
         _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
+        _wait_pair(browser, 900, "AUTO", 10)
+        _show_gpu_util_and_cost_summary(browser)
+        focused_control = _prove_focused_chart_control_converges(browser)
+        _load_real_stats_page(request, browser, runtime, gate_auth_credentials)
         _show_gpu_util_and_cost_summary(browser)
         first_pairs, first_zero_gap = _exercise_pairs(browser)
         matching_gap = [
@@ -784,7 +897,7 @@ def test_ring_landing_real_page_restart_and_zero_gap(
         _show_gpu_util_and_cost_summary(browser)
         _set_range_from_slider(browser, 300)
         _set_resolution_from_select(browser, 10)
-        restarted = _wait_pair(browser, 300, 10)
+        restarted = _wait_pair(browser, 300, 10, 10)
         browser_ready_ms = round((time.monotonic() - browser_started) * 1000, 1)
         matching_restart_gap = [
             span for span in restarted["noData"]
@@ -822,6 +935,12 @@ def test_ring_landing_real_page_restart_and_zero_gap(
             "pairs": first_pairs,
             "zero_bars": first_zero_gap["zeroBars"],
             "gap_rects": first_zero_gap["gapRects"],
+            "focused_control": {
+                "key": focused_control["focusedChartToggle"],
+                "controller_generation_key": focused_control["controllerGenerationKey"],
+                "graph_generation_key": focused_control["graphGenerationKey"],
+                "render_paths": focused_control["renderPaths"],
+            },
             "restart": {
                 "server_ready_ms": server_ready_ms,
                 "browser_ready_ms": browser_ready_ms,
@@ -1009,7 +1128,7 @@ def test_ring_landing_republishes_rebuildable_and_gaps_unrebuildable_owed_cells(
         _show_gpu_util_and_cost_summary(browser)
         _set_range_from_slider(browser, 3_600)
         _set_resolution_from_select(browser, 60)
-        rendered = _wait_pair(browser, 3_600, 60)
+        rendered = _wait_pair(browser, 3_600, 60, 60)
         rendered_total = next(
             row["tokens"] for row in rendered["costRows"] if row["label"] == "Total"
         )

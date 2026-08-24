@@ -8,8 +8,7 @@ import sys
 import threading
 import time
 import zipfile
-from concurrent.futures import Future
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from pathlib import Path
@@ -2264,17 +2263,17 @@ def test_jobd_coalesces_identical_in_flight_point_reads_into_one_execution(tmp_p
 @pytest.mark.parametrize("task", ["session_files_view", "metadata_warm_view"])
 def test_jobd_completion_validates_and_aggregates_json_result_with_one_parse(tmp_path, monkeypatch, task):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    result = json.dumps({
-        "profile": {"phases": {}, "work": {"sessions": 1}},
-    }).encode("utf-8")
-    decoded_inputs = []
+    result = json.dumps({"profile": {"phases": {}, "work": {"sessions": 1}}}).encode("utf-8")
+    decoded_inputs, owner_thread = [], threading.get_ident()
     real_loads = jobd.json.loads
 
     def counted_loads(value, *args, **kwargs):
-        decoded_inputs.append(value)
+        if threading.get_ident() == owner_thread:
+            decoded_inputs.append(value)
         return real_loads(value, *args, **kwargs)
 
     monkeypatch.setattr(jobd.json, "loads", counted_loads)
+    with ThreadPoolExecutor(max_workers=1) as executor: foreign_decode = executor.submit(json.loads, '{"foreign":true}').result()
     completed = service._queue_record(task, {}, "maintenance", 1, f"{task}:completed")
     completed.status = "running"
     completed.future = Future()
@@ -2290,6 +2289,7 @@ def test_jobd_completion_validates_and_aggregates_json_result_with_one_parse(tmp
     assert completed.status == "completed"
     assert malformed.status == "failed"
     assert "Expecting value" in malformed.error
+    assert foreign_decode == {"foreign": True}
     assert decoded_inputs == [result.decode("utf-8"), "not-json"]
     assert service.product_counters[task]["completed"] == 1
     assert service.product_counters[task]["failed"] == 1

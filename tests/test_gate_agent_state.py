@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 import shlex
@@ -378,6 +379,32 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
     ) as fixture:
         initial = _wait_for_realistic_browser_roster(fixture.browser, fixture.runtime.sessions)
         initial_revision = max(initial["revisions"])
+        initial_metadata_payload = fixture.runtime.app.build_transcripts_payload()
+        assert len(initial_metadata_payload.get("sessions", {})) == INITIAL_REALISTIC_SESSION_COUNT
+        real_build_transcripts_payload = fixture.runtime.app.build_transcripts_payload
+        metadata_builds = 0
+
+        def stale_then_current_metadata_payload():
+            nonlocal metadata_builds
+            metadata_builds += 1
+            if metadata_builds == 1:
+                return copy.deepcopy(initial_metadata_payload)
+            return real_build_transcripts_payload()
+
+        monkeypatch.setattr(
+            fixture.runtime.app,
+            "build_transcripts_payload",
+            stale_then_current_metadata_payload,
+        )
+        # The status-roster transition must own convergence. A later cache-expiry request used to
+        # rescue the standalone test by accident, while the loaded full gate remained on the first
+        # 12-session build. Remove that unrelated fallback from this exact race: the authoritative
+        # 14-session status revision must queue the second metadata build itself.
+        monkeypatch.setattr(
+            fixture.runtime.app,
+            "start_metadata_refresh_for_request",
+            lambda _requested_at, *, publish, defer=False: (False, 0),
+        )
         added = _add_mock_agent_sessions(fixture.runtime, REALISTIC_SESSION_COUNT - INITIAL_REALISTIC_SESSION_COUNT)
         expected = sorted(fixture.runtime.sessions)
         metadata_requests_before = fixture.browser.execute_script(
@@ -450,6 +477,7 @@ def test_f6_realistic_consumers_converge_to_the_published_roster_revision(
     metadata_published = scheduler["published_by_type"].get("transcripts_changed", {"events": 0, "bytes": 0})
     assert published["events"] > 0 and published["bytes"] > 0, scheduler
     assert metadata_published["events"] > 0 and metadata_published["bytes"] > 0, scheduler
+    assert metadata_builds >= 2, {"metadata_builds": metadata_builds, "result": result}
     advanced = [
         observation
         for observation in result["observations"]

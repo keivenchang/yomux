@@ -1031,9 +1031,7 @@ function clearDebugGraphZoom({render = true} = {}) {
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   requestJsDebugHistoryForCurrentDomain();
-  // Reset is a completed activation, so replacing its focused button is safe and
-  // must not leave the visible charts on the retired zoom domain until focusout.
-  refreshDebugGraphSurfaces({deferFocusedControl: false});
+  refreshDebugGraphSurfaces();
 }
 
 function debugEventCounts() {

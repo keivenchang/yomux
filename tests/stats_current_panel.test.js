@@ -3024,7 +3024,6 @@ test('focused Reset Zoom immediately repaints the shared full-range domain and s
     sourceFunction('clearDebugGraphZoom', 'debugEventCounts'),
     sourceFunction('debugGraphDomain', 'debugGraphBucketRate'),
     sourceFunction('refreshDebugGraphSurfaces', 'createDebugPanel'),
-    sourceFunction('debugGraphFocusedControl', 'syncDebugGraphControls'),
     sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons'),
     sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel'),
   ].join('\n');
@@ -3333,6 +3332,100 @@ test('accepted current stats generations are not declared painted before a rende
   assert.deepEqual([...context.result.calls], [13]);
   assert.equal(context.result.state.paintedGenerationKey, '300:10:10:11:12');
   assert.equal(context.result.state.pendingGenerationKey, '300:10:10:12:13');
+});
+
+test('a focused stable graph control preserves focus while a newer generation commits', () => {
+  const paintSource = [
+    sourceFunction('commitJsDebugCurrentStatsPaint', 'paintJsDebugCurrentStatsGeneration'),
+    sourceFunction('paintJsDebugCurrentStatsGeneration', 'ensureJsDebugCurrentStatsClient'),
+  ].join('\n');
+  const refreshSource = sourceFunction('refreshDebugGraphElement', 'bindDebugCostSummaryTabButtons');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const toggle = {dataset: {jsDebugChartToggle: 'costSummary'}};
+    const panel = {};
+    const scrollOwner = {scrollTop: 0, scrollLeft: 0};
+    let bodyPaints = 0;
+    let acceptedSnapshot = null;
+    let renderResult = false;
+    const body = {replaceChildren() { bodyPaints += 1; }};
+    const graph = {
+      className: '',
+      dataset: {jsDebugGraphRenderedAt: '1', jsDebugStatsGenerationKey: '300:10:10:11:12'},
+      closest(selector) {
+        if (selector === '.js-debug-panel') return panel;
+        if (selector === '.js-debug-graph-view') return scrollOwner;
+        return null;
+      },
+      querySelector(selector) { return selector === '[data-js-debug-graph-body]' ? body : null; },
+      setAttribute() {},
+    };
+    const document = {
+      activeElement: toggle,
+      createElement() { return {childNodes: [], set innerHTML(_value) {}}; },
+    };
+    const jsDebugCurrentStatsClientState = {
+      paintedGenerationKey: '300:10:10:11:12',
+      pendingGenerationKey: '',
+    };
+    const jsDebugHistoryReadiness = {phase: 'ready'};
+    let jsDebugGraphRangeSliderDragging = false;
+    function jsDebugStatsPanelVisible() { return true; }
+    function jsDebugCurrentStatsGenerationKey(value) {
+      return [value.range_seconds, value.requested_resolution, value.resolution_seconds, value.source_generation, value.cache_generation].join(':');
+    }
+    function applyJsDebugCurrentSnapshot(snapshot) {
+      acceptedSnapshot = snapshot;
+      renderResult = refreshDebugGraphElement(graph, {force: true});
+    }
+    function debugGraphInteractionBelongsToPanel() { return false; }
+    function debugGraphClassName() { return 'js-debug-graph'; }
+    function debugGraphBodyHtml() { return '<svg data-new-generation></svg>'; }
+    function preserveDebugGraphBodyControls() {}
+    function syncDebugGraphControls() {}
+    function restoreElementScrollPosition() {}
+    function bindDebugCostSummaryTabButtons() {}
+    function clientPerfStart() { return null; }
+    function clientPerfEnd() {}
+    function jsDebugHistoryReadinessStateName() { return 'ready'; }
+    function jsDebugHistoryReadinessBusy() { return false; }
+    function resolveDebugGraphResolutionChange() {}
+    function syncDebugGraphLiveTicker() {}
+    ${paintSource}
+    ${refreshSource}
+    const snapshot = {
+      range_seconds: 300,
+      requested_resolution: 10,
+      resolution_seconds: 10,
+      source_generation: 12,
+      cache_generation: 13,
+    };
+    const accepted = paintJsDebugCurrentStatsGeneration(snapshot);
+    result = {
+      accepted,
+      acceptedCacheGeneration: acceptedSnapshot.cache_generation,
+      renderResult,
+      bodyPaints,
+      focusPreserved: document.activeElement === toggle,
+      paintedGenerationKey: jsDebugCurrentStatsClientState.paintedGenerationKey,
+      pendingGenerationKey: jsDebugCurrentStatsClientState.pendingGenerationKey,
+      graphGenerationKey: graph.dataset.jsDebugStatsGenerationKey,
+      refreshPending: graph.dataset.jsDebugGraphRefreshPending || '',
+    };
+  `, context);
+  assert.deepEqual({...context.result}, {
+    accepted: true,
+    acceptedCacheGeneration: 13,
+    renderResult: true,
+    bodyPaints: 1,
+    focusPreserved: true,
+    paintedGenerationKey: '300:10:10:12:13',
+    pendingGenerationKey: '',
+    graphGenerationKey: '300:10:10:12:13',
+    refreshPending: '',
+  });
+  assert.doesNotMatch(source, /debugGraphFocusedControl|deferFocusedControl/);
+  assert.doesNotMatch(debugRuntimeSource, /deferFocusedControl/);
 });
 
 test('hidden panels start the document-visible client and paint only when opened', () => {
@@ -3685,13 +3778,168 @@ test('stats and cost renders defer while a chart gesture owns their live DOM', (
       closest: () => panel,
       querySelector() { replacements += 1; return null; },
     };
-    function debugGraphFocusedControl() { return false; }
     ${interactionSource}
     ${refreshSource}
     const rendered = refreshDebugGraphElement(graph, {force: true});
     result = {rendered, replacements, pending: graph.dataset.jsDebugGraphRefreshPending};
   `, statsContext);
   assert.deepEqual({...statsContext.result}, {rendered: false, replacements: 0, pending: 'true'});
+
+  const zoomContext = {result: null};
+  vm.runInNewContext(`
+    const graph = {dataset: {jsDebugGraphRefreshPending: 'true'}};
+    const panel = {
+      dataset: {},
+      matches: () => false,
+      querySelectorAll: selector => selector === '[data-js-debug-graph]' ? [graph] : [],
+    };
+    let jsDebugGraphSelectionState = {
+      panel,
+      pointerId: null,
+      pointerType: 'mouse',
+      startRatio: 0.1,
+      currentRatio: 0.7,
+      resolutionMs: 10000,
+      domain: {startMs: 0, endMs: 600000},
+    };
+    let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphZoomDomain = null;
+    let jsDebugGraphLastPointerType = 'mouse';
+    const jsDebugGraphZoomMinBuckets = 3;
+    const jsDebugGraphZoomMinRatio = 0.04;
+    let forcedRepaints = 0;
+    const document = {querySelectorAll: () => []};
+    function flushDeferredDebugGraphRefresh(target) {
+      if (target.dataset.jsDebugGraphRefreshPending !== 'true') return false;
+      delete target.dataset.jsDebugGraphRefreshPending;
+      forcedRepaints += 1;
+      return true;
+    }
+    function renderYoCostPanels() { return false; }
+    function debugGraphSelectionRatioForEvent() { return 0.7; }
+    function debugGraphClearSelectionRects() {}
+    function debugGraphSetInteractionLines() {}
+    function syncDebugGraphResolutionOverride() {}
+    function syncJsDebugStatsDeliveryMode() {}
+    function refreshDebugGraphSurfaces() {}
+    function requestJsDebugHistoryForCurrentDomain() {}
+    function syncDebugGraphControls() {}
+    ${interactionSource}
+    ${sourceFunction('flushDeferredDebugGraphInteractionRefresh', 'clearDebugGraphTouchCandidate')}
+    ${sourceFunction('handleDebugGraphPointerUp', 'handleDebugGraphPointerCancel')}
+    handleDebugGraphPointerUp({pointerId: 1}, panel);
+    result = {
+      interactionLive: jsDebugGraphSelectionState !== null,
+      pending: graph.dataset.jsDebugGraphRefreshPending || '',
+      forcedRepaints,
+      zoomed: jsDebugGraphZoomDomain !== null,
+    };
+  `, zoomContext);
+  assert.deepEqual({...zoomContext.result}, {
+    interactionLive: false,
+    pending: '',
+    forcedRepaints: 1,
+    zoomed: true,
+  });
+
+  const sliderContext = {result: null};
+  vm.runInNewContext(`
+    const graph = {dataset: {jsDebugGraphRefreshPending: 'true'}};
+    const panel = {
+      dataset: {},
+      contains: () => true,
+      matches: () => false,
+      querySelectorAll: selector => selector === '[data-js-debug-graph]' ? [graph] : [],
+    };
+    const slider = {
+      closest: selector => selector === '[data-js-debug-range-slider]' ? slider : null,
+    };
+    let jsDebugGraphRangeSliderDragging = true;
+    let forcedRepaints = 0;
+    function flushDeferredDebugGraphRefresh(target) {
+      if (target.dataset.jsDebugGraphRefreshPending !== 'true') return false;
+      delete target.dataset.jsDebugGraphRefreshPending;
+      forcedRepaints += 1;
+      return true;
+    }
+    function renderYoCostPanels() { return false; }
+    ${sourceFunction('flushDeferredDebugGraphInteractionRefresh', 'clearDebugGraphTouchCandidate')}
+    ${sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel')}
+    handleDebugGraphControlEvent({type: 'pointerup', target: slider}, panel);
+    result = {
+      dragging: jsDebugGraphRangeSliderDragging,
+      pending: graph.dataset.jsDebugGraphRefreshPending || '',
+      forcedRepaints,
+    };
+  `, sliderContext);
+  assert.deepEqual({...sliderContext.result}, {
+    dragging: false,
+    pending: '',
+    forcedRepaints: 1,
+  });
+
+  const candidateExitContext = {result: null};
+  vm.runInNewContext(`
+    const graph = {dataset: {jsDebugGraphRefreshPending: 'true'}};
+    const panel = {
+      dataset: {},
+      matches: () => false,
+      querySelectorAll: selector => selector === '[data-js-debug-graph]' ? [graph] : [],
+    };
+    let jsDebugGraphSelectionState = null;
+    let jsDebugGraphTouchCandidateState = null;
+    let jsDebugGraphLastPointerType = 'touch';
+    let forcedRepaints = 0;
+    function candidate() {
+      return {panel, pointerId: 1, rect: {}, armTimer: null, startedAtMs: 0};
+    }
+    function flushDeferredDebugGraphRefresh(target) {
+      if (target.dataset.jsDebugGraphRefreshPending !== 'true') return false;
+      delete target.dataset.jsDebugGraphRefreshPending;
+      forcedRepaints += 1;
+      return true;
+    }
+    function renderYoCostPanels() { return false; }
+    function clearTimeout() {}
+    function debugGraphPointerRatioFromRect() { return 0.5; }
+    function debugGraphTouchCandidateDecision() { return 'scroll'; }
+    function debugGraphClearInteractionLines() {}
+    function debugGraphSetInteractionLines() {}
+    function debugGraphSetHoverTooltip() {}
+    function debugGraphSetSelectionRects() {}
+    function debugGraphSelectionRatioForEvent() { return null; }
+    function startDebugGraphSelection() {}
+    ${sourceFunction('flushDeferredDebugGraphInteractionRefresh', 'clearDebugGraphTouchCandidate')}
+    ${sourceFunction('clearDebugGraphTouchCandidate', 'debugGraphTouchCandidateDecision')}
+    ${sourceFunction('handleDebugGraphPointerMove', 'handleDebugGraphPointerUp')}
+    ${sourceFunction('cancelDebugGraphSelection', 'handleDebugGraphControlEvent')}
+    jsDebugGraphTouchCandidateState = candidate();
+    handleDebugGraphPointerMove({pointerId: 1, clientX: 1, clientY: 1, timeStamp: 1}, panel);
+    const scrollExit = {
+      candidateLive: jsDebugGraphTouchCandidateState !== null,
+      pending: graph.dataset.jsDebugGraphRefreshPending || '',
+      forcedRepaints,
+    };
+    graph.dataset.jsDebugGraphRefreshPending = 'true';
+    jsDebugGraphTouchCandidateState = candidate();
+    cancelDebugGraphSelection(panel);
+    const cancelExit = {
+      candidateLive: jsDebugGraphTouchCandidateState !== null,
+      pending: graph.dataset.jsDebugGraphRefreshPending || '',
+      forcedRepaints,
+    };
+    result = {scrollExit, cancelExit};
+  `, candidateExitContext);
+  assert.deepEqual({...candidateExitContext.result.scrollExit}, {
+    candidateLive: false,
+    pending: '',
+    forcedRepaints: 1,
+  });
+  assert.deepEqual({...candidateExitContext.result.cancelExit}, {
+    candidateLive: false,
+    pending: '',
+    forcedRepaints: 2,
+  });
 
   const costContext = {result: null};
   vm.runInNewContext(`
@@ -3770,7 +4018,7 @@ test('API SSE log preserves reader position through updates and forced rebuilds'
   const reconcileText = slice(coreSource, 'function reconcilePanelBody(', '\nfunction elementScrollAnchor(');
   assert.ok(reconcileText.indexOf('anchor.capture(body)') < reconcileText.indexOf('body.innerHTML = html'));
   assert.ok(reconcileText.indexOf('body.innerHTML = html') < reconcileText.indexOf('anchor.restore?.(body, value)'));
-  const refreshText = sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl');
+  const refreshText = sourceFunction('refreshDebugPanelFromEvents', 'syncDebugGraphControls');
   assert.doesNotMatch(refreshText, /document\.activeElement === log/);
   assert.doesNotMatch(refreshText, /options\.force === true \? log\.scrollHeight/);
   assert.match(coreSource, /renderDebugPanels\(\{force: true, scrollLogToBottom: true\}\)/);
@@ -4057,7 +4305,7 @@ test('debug subviews share one complete lifecycle descriptor registry', () => {
     assert.match(factory, new RegExp(`${hook} = debugSubviewNoop`), `${hook} has an explicit no-op default`);
   }
   assert.match(sourceFunction('debugPanelHtml', 'relocalizeDebugPanelChrome'), /debugSubview\(id\)\.html\(\)/);
-  assert.match(sourceFunction('refreshDebugPanelFromEvents', 'debugGraphFocusedControl'), /view\.render\(panel, options\)/);
+  assert.match(sourceFunction('refreshDebugPanelFromEvents', 'syncDebugGraphControls'), /view\.render\(panel, options\)/);
   assert.match(source.slice(source.indexOf('function bindDebugPanel(')), /view\.bind\(panel\)/);
   assert.match(sourceFunction('syncDebugLogsPolling', 'requestJsDebugHistoryForCurrentDomain'), /return pollDebugLogs\(\{force: true\}\)[\s\S]*return debugSubview\(debugRuntimeState\.subTab\)\.activate\(\{pollNow\}\)[\s\S]*return syncDebugSubviewActivation\(\{pollNow: true\}\)/);
   assert.match(sourceFunction('relocalizeDebugPanelChrome', 'yoCostPanelHtml'), /view\.relocalize\(panel\)/);
@@ -4334,7 +4582,7 @@ test('Daemon load defaults coarse CPU to Max and one shared selector repaints Av
   const setterSource = sourceFunction('setDebugGraphServiceLoadMode', 'setDebugGraphChartLayout');
   const handlerSource = sourceFunction('handleDebugGraphControlEvent', 'bindDebugPanel');
   assert.match(setterSource, /debugRuntimeState\.serviceLoadMode = normalized/);
-  assert.match(setterSource, /refreshDebugGraphSurfaces\(\{deferFocusedControl: false\}\)/, 'mode changes repaint immediately instead of waiting for focusout');
+  assert.match(setterSource, /refreshDebugGraphSurfaces\(\)/, 'mode changes repaint through the shared owner');
   assert.match(handlerSource, /event\.type === 'change' && serviceLoadMode[\s\S]*setDebugGraphServiceLoadMode/);
   assert.equal(debugRuntimeSource.includes("serviceLoadMode: 'auto'"), true, 'fresh state chooses Avg for fine buckets and Max for coarse CPU buckets');
   assert.match(debugRuntimeSource, /debugRuntimeState\.serviceLoadMode = normalizedDebugGraphServiceLoadPreference\(saved\.serviceLoadMode\)/);

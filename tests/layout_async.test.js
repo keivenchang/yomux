@@ -5054,7 +5054,69 @@ async function runLayoutAsyncSuite() {
     assert.deepEqual(canonical(urlModes), canonical(modes), 'the editor field normalizer delegates each per-file mode to its transport-specific owner');
   });
 
-  await testAsync('session-files record lets an accepted push invalidate older HTTP work', async () => {
+  await testAsync('session-files peer responses preserve each destination request owner in both completion orders', async () => {
+    for (const firstDestination of ['finder', 'differ']) {
+      const secondDestination = firstDestination === 'finder' ? 'differ' : 'finder';
+      const pending = [];
+      const api = loadYolomux('', ['1']);
+      const slots = api.emptyLayoutSlots();
+      slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+      slots.left = api.paneStateWithTabs([api.finderItemId, api.differItemId], api.differItemId);
+      slots.right = api.paneStateWithTabs(['1'], '1');
+      api.setLayoutSlotsForTest(slots);
+      api.setFileExplorerModeForTest('diff');
+      api.setFileExplorerChangesSelectedSessionForTest('1');
+      api.setFileExplorerFinderSelectedSessionForTest('1');
+      api.setFetchForTest((url, options = {}) => {
+        assert.ok(String(url).startsWith('/api/session-files?'));
+        const request = deferredFetch();
+        pending.push({...request, signal: options.signal || null});
+        return request.promise;
+      });
+
+      const requests = {
+        finder: api.fetchSessionFilesForTest({destination: 'finder', session: '1', silent: true, force: true}),
+        differ: api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true}),
+      };
+      assert.equal(pending.length, 2, 'Finder and Differ own distinct transports for the matching request');
+      const requestForDestination = {finder: pending[0], differ: pending[1]};
+      requestForDestination[firstDestination].resolve(jsonResponse({
+        session: '1',
+        loaded: true,
+        repos: [{repo: `/${firstDestination}-first`}],
+        files: [],
+        errors: [],
+        from_ref: 'HEAD',
+        to_ref: 'current',
+      }));
+      await requests[firstDestination];
+      const secondState = secondDestination === 'finder'
+        ? api.fileExplorerFinderSessionFilesStateForTest()
+        : api.fileExplorerSessionFilesStateForTest();
+      assert.equal(requestForDestination[secondDestination].signal?.aborted, false, `${firstDestination} completion cannot abort ${secondDestination}`);
+      assert.equal(secondState.loading, true, `${secondDestination} keeps its active generation while the peer result is available`);
+
+      requestForDestination[secondDestination].resolve(jsonResponse({
+        session: '1',
+        loaded: true,
+        repos: [{repo: `/${secondDestination}-newer`}],
+        files: [],
+        errors: [],
+        from_ref: 'HEAD',
+        to_ref: 'current',
+      }));
+      await requests[secondDestination];
+      const finderState = api.fileExplorerFinderSessionFilesStateForTest();
+      const differState = api.fileExplorerSessionFilesStateForTest();
+      assert.equal(finderState.payload.repos[0].repo, `/${secondDestination}-newer`, 'the later owner result refreshes Finder after both requests settle');
+      assert.equal(differState.payload.repos[0].repo, `/${secondDestination}-newer`, 'the later owner result refreshes Differ after both requests settle');
+      assert.equal(finderState.loading, false);
+      assert.equal(differState.loading, false);
+      assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'peer completion order emits no diagnostic failure');
+    }
+  });
+
+  await testAsync('authoritative session-files push fences stale HTTP without aborting its finite transport', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
     const slots = api.emptyLayoutSlots();
@@ -5082,12 +5144,11 @@ async function runLayoutAsyncSuite() {
       errors: [],
       from_ref: 'HEAD',
       to_ref: 'current',
-    }, {session: '1', from_ref: 'HEAD', to_ref: 'current'}), true, 'the matching push applies');
+    }, {session: '1', from_ref: 'HEAD', to_ref: 'current'}), true, 'the matching authoritative push applies');
     assert.equal(api.fileExplorerSessionFilesStateForTest().loading, false, 'the push settles visible loading');
     await flushAsyncWork();
-    assert.equal(pending[0].signal?.aborted, true, 'the accepted push aborts its superseded HTTP transport');
-    assert.equal(api.fixtureLifecycleOperationStateForTest().startupActive, 0, 'the superseded session-files transport releases startup capacity');
-    assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'superseded HTTP work retires without a diagnostic failure');
+    assert.equal(pending[0].signal?.aborted, false, 'the push leaves the already-dispatched finite transport alive');
+    assert.equal(api.fixtureLifecycleOperationStateForTest().startupActive, 1, 'the finite transport remains owned until its response settles');
     pending[0].resolve(jsonResponse({
       session: '1',
       loaded: true,
@@ -5100,9 +5161,69 @@ async function runLayoutAsyncSuite() {
     }));
     await request;
     const state = api.fileExplorerSessionFilesStateForTest();
-    assert.equal(state.payload.repos[0].repo, '/push', 'the older HTTP completion cannot replace the pushed payload');
+    assert.equal(state.payload.repos[0].repo, '/push', 'the stale HTTP completion cannot replace the pushed payload');
     assert.equal(state.loading, false, 'stale finally cannot change the settled push state');
     assert.equal(state.signature, api.sessionFilesPayloadSignatureForPayloadForTest(state.payload), 'payload and signature remain one record snapshot');
+    assert.equal(api.fixtureLifecycleOperationStateForTest().startupActive, 0, 'the settled finite transport releases startup capacity');
+    const event = api.jsDebugEventsForTest().find(item => item.type === 'api' && item.endpoint === '/api/session-files');
+    assert.equal(event?.status, 200, 'the finite HTTP transport settles as a successful response');
+    assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'stale HTTP completion emits no diagnostic failure');
+  });
+
+  await testAsync('session-files operation failure fences stale HTTP without aborting its finite transport', async () => {
+    const api = loadYolomux('', ['1']);
+    const slots = api.emptyLayoutSlots();
+    slots[api.layoutTreeKey] = api.splitNode('row', api.leafNode('left'), api.leafNode('right'));
+    slots.left = api.paneStateWithTabs([api.differItemId], api.differItemId);
+    slots.right = api.paneStateWithTabs(['1'], '1');
+    api.setLayoutSlotsForTest(slots);
+    api.setFileExplorerModeForTest('diff');
+    api.setFileExplorerChangesSelectedSessionForTest('1');
+    const receipt = {
+      state: 'queued',
+      request: {id: 'r-session-files-failure'},
+      operation: {
+        id: 'op-session-files-failure',
+        kind: 'session_files',
+        context: {session: '1', from_ref: 'HEAD', to_ref: 'current'},
+        events_url: '/api/client-events?operation_id=op-session-files-failure',
+        cursor: {epoch: 'session-files-failure', seq: 0},
+      },
+    };
+    api.setFetchForTest(url => {
+      assert.ok(String(url).startsWith('/api/session-files?'));
+      return Promise.resolve(jsonResponse(receipt, 202));
+    });
+    await api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+
+    const pending = deferredFetch();
+    let pendingSignal = null;
+    api.setFetchForTest((url, options = {}) => {
+      assert.ok(String(url).startsWith('/api/session-files?'));
+      pendingSignal = options.signal || null;
+      return pending.promise;
+    });
+    const staleRequest = api.fetchSessionFilesForTest({destination: 'differ', session: '1', silent: true, force: true});
+    assert.equal(api.applyApiOperationTerminalForTest({
+      operation: {id: receipt.operation.id, cursor: {epoch: 'session-files-failure', seq: 1}},
+      result: {state: 'failed', error: {message: {key: 'error.requestFailed', fallback: 'session files failed'}}},
+      status: 500,
+    }), true, 'the operation failure owns the visible terminal payload');
+    assert.equal(pendingSignal?.aborted, false, 'the operation failure leaves the already-dispatched finite transport alive');
+    pending.resolve(jsonResponse({
+      session: '1',
+      loaded: true,
+      repos: [{repo: '/stale'}],
+      files: [],
+      errors: [],
+      from_ref: 'HEAD',
+      to_ref: 'current',
+    }));
+    await staleRequest;
+    const state = api.fileExplorerSessionFilesStateForTest();
+    assert.equal(state.payload.operation_error.message.fallback, 'session files failed', 'the stale HTTP completion cannot replace the terminal failure');
+    assert.equal(state.loading, false);
+    assert.equal(api.jsDebugFailureEventsForTest().length, 0, 'terminal ownership emits no client diagnostic failure');
   });
 
   await testAsync('duplicate session-files receipt reuses its retained terminal result', async () => {

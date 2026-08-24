@@ -1611,12 +1611,12 @@ def test_restart_persisted_snapshot_is_current_until_first_warm_publication(
     assert restarted._delta_repairs == 0
 
 
-def test_restart_read_treats_the_precrash_open_bucket_as_a_gap(
+def test_restart_read_closes_an_uncontradicted_precrash_open_bucket_without_losing_cost(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / storage.DATABASE_FILENAME
     monotonic_now = [0.0]
-    wall_now = [1_800_000_000.0]
+    wall_now = [1_800_000_000.5]
     initial = service_module.StatsCurrentService(
         tmp_path / "initial.sock",
         database,
@@ -1626,10 +1626,27 @@ def test_restart_read_treats_the_precrash_open_bucket_as_a_gap(
     )
     with storage.Store.open(database) as store:
         initial.writer = store
-        initial._build_once(store, True, frozenset())
+        accepted, binary = initial.handle_with_binary(
+            _real_ingest_request(wall_now[0] - 0.25)
+        )
+        assert accepted["accepted"] == 2
+        assert binary == b""
+        work = initial._take_work()
+        assert work is not None
+        initial._build_once(store, *work)
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS
         assert initial._flush_ring_if_due() is not None
         historical_open_start = math.floor(wall_now[0])
+        before = store.read_ring_window(
+            range_seconds=300,
+            resolution_seconds=1,
+            window_end=historical_open_start + 1,
+        )
+        persisted = service_module._decode_ring_bucket(next(
+            row for row in before.rows if row.bucket_start == historical_open_start
+        ))
+        assert persisted.wire["open"] is True
+        assert persisted.wire["series"]["usage_tokens"]["value"] == 12
 
         wall_now[0] += 120
         restarted = service_module.StatsCurrentService(
@@ -1649,7 +1666,9 @@ def test_restart_read_treats_the_precrash_open_bucket_as_a_gap(
     buckets = {bucket["start"]: bucket for bucket in snapshot["buckets"]}
     assert list(buckets) == list(range(snapshot["window_start"], snapshot["window_end"]))
     assert buckets[historical_open_start - 1]["series"] == {}
-    assert buckets[historical_open_start]["series"] == {}
+    assert buckets[historical_open_start]["open"] is False
+    assert buckets[historical_open_start]["series"]["usage_tokens"]["value"] == 12
+    assert snapshot["cost_report"]["total_tokens"] == 12
     assert buckets[snapshot["window_end"] - 1]["series"] == {}
     assert all(bucket["open"] is False for bucket in snapshot["buckets"])
     ring_gaps = [
@@ -1768,8 +1787,23 @@ def test_warm_snapshot_uses_published_cache_without_a_current_ring_owner(
     assert binary == expected.binary
 
 
-def test_snapshot_falls_back_when_requested_pair_lags_the_ring_publication(
+@pytest.mark.parametrize(
+    ("range_seconds", "requested_resolution", "retained_resolution", "advanced_resolution"),
+    (
+        (300, 1, 1, 10),
+        (300, 10, 10, 1),
+        (900, 60, 60, 10),
+        (1_800, resolution.AUTO, 60, 10),
+        (3_600, 300, 300, 60),
+        (3_600, resolution.AUTO, 300, 60),
+    ),
+)
+def test_snapshot_keeps_the_requested_resolution_cursor_when_another_resolution_advances(
     tmp_path: Path,
+    range_seconds: int,
+    requested_resolution: int | str,
+    retained_resolution: int,
+    advanced_resolution: int,
 ) -> None:
     database = tmp_path / storage.DATABASE_FILENAME
     monotonic_now = [0.0]
@@ -1787,14 +1821,24 @@ def test_snapshot_falls_back_when_requested_pair_lags_the_ring_publication(
         monotonic_now[0] = service_module.RING_FLUSH_SECONDS
         assert service._flush_ring_if_due() is not None
         assert service._cache is not None
-        expected = service._cache.entries[(300, 1, None)]
-        ten_second_layer = service._cache.generation.layer(10)
-        ten_second_window = store.read_ring_window(
-            range_seconds=300,
-            resolution_seconds=10,
-            window_end=ten_second_layer.end,
+        retained_layer = service._cache.generation.layer(retained_resolution)
+        retained_before = store.read_ring_window(
+            range_seconds=range_seconds,
+            resolution_seconds=retained_resolution,
+            window_end=retained_layer.end,
         )
-        carrier = ten_second_window.rows[-1]
+        expected_cursor = service._ring_published_cursors[retained_resolution]
+        advanced_layer = service._cache.generation.layer(advanced_resolution)
+        advanced_window = store.read_ring_window(
+            range_seconds=next(
+                range_value
+                for range_value in resolution.RANGE_SECONDS
+                if resolution.is_supported(range_value, advanced_resolution)
+            ),
+            resolution_seconds=advanced_resolution,
+            window_end=advanced_layer.end,
+        )
+        carrier = advanced_window.rows[-1]
         publication = store.publish_ring_buckets(
             buckets=(storage.RingBucketWrite(
                 resolution_seconds=carrier.resolution_seconds,
@@ -1802,16 +1846,182 @@ def test_snapshot_falls_back_when_requested_pair_lags_the_ring_publication(
                 bucket_json=carrier.bucket_json,
                 complete=carrier.complete,
             ),),
-            source_generation=ten_second_window.source_generation,
+            source_generation=advanced_window.source_generation,
             published_at=wall_now,
         )
         assert publication.ring_generation > carrier.ring_generation
+        retained_after = store.read_ring_window(
+            range_seconds=range_seconds,
+            resolution_seconds=retained_resolution,
+            window_end=retained_layer.end,
+        )
         metadata, binary = service.handle_with_binary(
-            _snapshot_request(requested_resolution=1, client_id="ring-pair-fallback")
+            _snapshot_request(
+                range_seconds=range_seconds,
+                requested_resolution=requested_resolution,
+                client_id="ring-resolution-local-cursor",
+            )
+        )
+        snapshot = protocol.validate_snapshot(json.loads(binary))
+        delta_metadata, delta_binary = service.handle_with_binary(
+            _delta_request(
+                range_seconds=range_seconds,
+                resolution_seconds=retained_resolution,
+                client_id="ring-resolution-local-cursor",
+                after_cache_generation=snapshot["cache_generation"],
+            )
         )
 
-    assert metadata == expected.metadata
-    assert binary == expected.binary
+    assert (
+        retained_after.ring_generation,
+        retained_after.source_generation,
+        retained_after.published_at,
+    ) == (
+        retained_before.ring_generation,
+        retained_before.source_generation,
+        retained_before.published_at,
+    )
+    assert metadata["source_generation"] == retained_before.source_generation
+    assert service._ring_published_cursors[retained_resolution] == expected_cursor
+    state = service._ring_views[(range_seconds, retained_resolution, None)]
+    assert state.persisted is True
+    assert state.snapshot is not None
+    assert delta_metadata["not_modified"] is True
+    assert delta_binary == b""
+
+
+def test_unpublished_resolution_keeps_a_zero_cursor_when_another_resolution_publishes(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / storage.DATABASE_FILENAME
+    with storage.Store.open(database) as store:
+        store.initialize_ring_storage()
+        _publish(
+            store,
+            _bucket(1, 1_800_000_000, value=1),
+            source_generation=1,
+            published_at=1_800_000_001.0,
+        )
+        untouched = store.read_ring_window(
+            range_seconds=3_600,
+            resolution_seconds=60,
+            window_end=1_800_000_060,
+        )
+
+    assert untouched.rows == ()
+    assert untouched.source_generation == 0
+    assert untouched.ring_generation == 0
+    assert untouched.published_at == 0.0
+
+
+def test_seeded_slow_ring_view_cannot_fall_back_to_the_startup_zero_cache(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / storage.DATABASE_FILENAME
+    monotonic_now = [0.0]
+    wall_now = [1_800_000_000.0]
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        database,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    with storage.Store.open(database) as store:
+        service.writer = store
+        service._build_once(store, True, frozenset())
+        assert service._cache is not None
+        startup = protocol.validate_snapshot(json.loads(
+            service._cache.entries[(3_600, 60, None)].binary
+        ))
+        assert startup["source_generation"] == 0
+        assert startup["cost_report"]["total_tokens"] == 0
+
+        accepted, binary = service.handle_with_binary(
+            _real_ingest_request(wall_now[0] - 0.25)
+        )
+        assert accepted["accepted"] == 2
+        assert binary == b""
+        work = service._take_work()
+        assert work is not None
+        service._build_once(store, *work)
+        monotonic_now[0] = service_module.RING_FLUSH_SECONDS
+        first_publication = service._flush_ring_if_due()
+        assert first_publication is not None
+        seeded_cursor = service._ring_published_cursors[60]
+
+        fast_request = _cpu_append_request(wall_now[0] + 9.75)
+        fast_request["observations"][0]["event_id"] = "cpu-fast-generation"
+        wall_now[0] += 10.0
+        accepted, binary = service.handle_with_binary(fast_request)
+        assert accepted["accepted"] == 1
+        assert binary == b""
+        work = service._take_work()
+        assert work is not None
+        service._build_once(store, *work)
+        assert service._cache is not None
+        fast_cell = materializer.DirtyCell(
+            10,
+            math.floor(wall_now[0] / 10) * 10,
+        )
+        fast_writes = service._ring_writes(
+            service._cache.generation,
+            frozenset({fast_cell}),
+        )
+        assert len(fast_writes) == 1
+        second_publication = store.publish_ring_buckets(
+            buckets=fast_writes,
+            source_generation=service._cache.generation.source_generation,
+            published_at=wall_now[0],
+        )
+        assert second_publication.ring_generation > first_publication.ring_generation
+        assert service._ring_published_cursors[60] == seeded_cursor
+
+        explicit_pending, explicit_pending_binary = service.handle_with_binary(
+            _snapshot_request(
+                range_seconds=3_600,
+                requested_resolution=60,
+                client_id="seeded-explicit-slow-view",
+            )
+        )
+        auto_pending, auto_pending_binary = service.handle_with_binary(
+            _snapshot_request(
+                range_seconds=1_800,
+                requested_resolution=resolution.AUTO,
+                client_id="seeded-auto-slow-view",
+            )
+        )
+        assert explicit_pending["status"] == "pending"
+        assert explicit_pending_binary == b""
+        assert auto_pending["status"] == "pending"
+        assert auto_pending_binary == b""
+        work = service._take_work()
+        assert work is not None
+        service._build_once(store, *work)
+
+        explicit_metadata, explicit_binary = service.handle_with_binary(
+            _snapshot_request(
+                range_seconds=3_600,
+                requested_resolution=60,
+                client_id="seeded-explicit-slow-view",
+            )
+        )
+        explicit = protocol.validate_snapshot(json.loads(explicit_binary))
+        auto_metadata, auto_binary = service.handle_with_binary(
+            _snapshot_request(
+                range_seconds=1_800,
+                requested_resolution=resolution.AUTO,
+                client_id="seeded-auto-slow-view",
+            )
+        )
+        auto = protocol.validate_snapshot(json.loads(auto_binary))
+
+    assert explicit_metadata["source_generation"] > 0
+    assert explicit["cost_report"]["total_tokens"] == 12
+    assert auto_metadata["source_generation"] > 0
+    assert auto["resolution_seconds"] == 60
+    assert auto["cost_report"]["total_tokens"] == 12
+    assert service._ring_published_cursors[60] == seeded_cursor
 
 
 def test_populated_ring_serves_a_dense_explicit_gap_snapshot_after_its_horizon(

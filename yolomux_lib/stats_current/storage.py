@@ -2581,12 +2581,6 @@ class Store:
         window_start = end - range_value
         expected_starts = tuple(range(window_start, end, resolution_value))
         with _transaction(connection):
-            publication = connection.execute(
-                "SELECT ring_generation, source_generation, published_at "
-                "FROM aggregate_publication WHERE singleton = 1"
-            ).fetchone()
-            if publication is None:
-                raise SchemaMismatchError("aggregate publication row is missing")
             store_row = connection.execute(
                 "SELECT source_generation FROM schema_meta WHERE singleton = 1"
             ).fetchone()
@@ -2602,6 +2596,25 @@ class Store:
                     (resolution_value,),
                 )
             }
+            # aggregate_publication allocates a process-wide transaction generation, but a
+            # transaction may update only a subset of resolutions. The newest populated physical
+            # slot is therefore the durable publication cursor for THIS resolution. Using the
+            # global allocator here made a 1s/10s-only publication falsely invalidate still-current
+            # 60s/300s windows and sent their requests back to an older warm-cache body.
+            latest_slot = max(
+                (
+                    row
+                    for row in slot_rows.values()
+                    if row[1] is not None and row[2] is not None
+                ),
+                key=lambda row: int(row[5]),
+                default=None,
+            )
+            resolution_publication = (
+                (0, 0, 0.0)
+                if latest_slot is None
+                else (int(latest_slot[5]), int(latest_slot[4]), float(latest_slot[6]))
+            )
             # Bounded by the requested window, not by the whole ledger: a store that has
             # accumulated invalidations outside this window must not make this read grow.
             stale_starts = {
@@ -2655,9 +2668,9 @@ class Store:
             end,
             tuple(rows),
             tuple(missing),
-            int(publication[1]),
-            int(publication[0]),
-            float(publication[2]),
+            resolution_publication[1],
+            resolution_publication[0],
+            resolution_publication[2],
             store_generation,
             tuple(sorted(stale_starts)),
         )

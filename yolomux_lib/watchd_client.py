@@ -134,6 +134,7 @@ class WatchClient(LocalServiceClient):
             "revision": int(payload.get("revision") or 0),
             "watch_generation": int(payload.get("watch_generation") or 0),
             "active_watch_generation": int(payload.get("active_watch_generation") or 0),
+            "failed_watch_generation": int(payload.get("failed_watch_generation") or 0),
             "clients": int(payload.get("clients") or 0),
             "descriptors": int(payload.get("descriptors") or 0),
             "roots": int(payload.get("roots") or 0),

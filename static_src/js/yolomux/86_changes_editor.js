@@ -1032,15 +1032,25 @@ function scheduleSessionFilesProducerDeadline(destination, payload) {
   }, sessionFilesProducerDeadlineMs);
 }
 
-function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+function retireSessionFilesResponseOwner(destination = 'differ') {
   const state = sessionFilesStateForDestination(destination);
   state.guard.invalidate();
   const controller = state.abortController;
   state.abortController = null;
+  return controller;
+}
+
+function retireSessionFilesRequest(destination = 'differ', reason = 'session-files request superseded') {
+  const controller = retireSessionFilesResponseOwner(destination);
   if (!controller || controller.signal.aborted) return;
   const error = new Error(reason);
   error.name = 'AbortError';
   controller.abort(error);
+}
+
+function sessionFilesRequestIsActiveForDestination(destination = 'differ') {
+  const controller = sessionFilesStateForDestination(destination).abortController;
+  return Boolean(controller && !controller.signal.aborted);
 }
 
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
@@ -1209,7 +1219,7 @@ async function fetchSessionFiles(options = {}) {
     sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
     for (const mirrorDestination of sessionFilesDestinationsForRequest(request, session)) {
       if (mirrorDestination === destination) continue;
-      applySessionFilesPayloadToDestination(mirrorDestination, nextPayload, request, session);
+      applySessionFilesPeerPayloadToDestination(mirrorDestination, nextPayload, request, session);
     }
     recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
@@ -1284,7 +1294,11 @@ function applySessionFilesPayloadToDestination(destination, payload, request, se
   const wasLoading = sessionFilesLoadingForDestination(destination);
   const shouldRender = wasLoading || signature !== sessionFilesSignatureForDestination(destination);
   if (wasLoading) setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload, {retirementReason: 'session-files push applied'});
+  // The accepted payload owns the visible state, but aborting an already-dispatched finite
+  // request turns a successful server response into a client-side status 0. Fence its stale commit
+  // with the existing generation guard and let the transport settle normally.
+  retireSessionFilesResponseOwner(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
   setSessionFilesSignatureForDestination(destination, signature);
   sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload));
@@ -1294,6 +1308,13 @@ function applySessionFilesPayloadToDestination(destination, payload, request, se
     renderSessionButtons();
   }
   return true;
+}
+
+function applySessionFilesPeerPayloadToDestination(destination, payload, request, session) {
+  // Equal request parameters let an idle destination reuse this payload; they do not transfer
+  // ownership away from a destination whose own request is still in flight.
+  if (sessionFilesRequestIsActiveForDestination(destination)) return false;
+  return applySessionFilesPayloadToDestination(destination, payload, request, session);
 }
 
 function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
@@ -1322,7 +1343,8 @@ function applySessionFilesOperationFailureToDestination(destination, result, con
   };
   const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
   setSessionFilesLoadingForDestination(destination, false);
-  setSessionFilesPayloadForDestination(destination, nextPayload);
+  retireSessionFilesResponseOwner(destination);
+  setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
   setSessionFilesSignatureForDestination(destination, signature);
   sessionFilesCacheForDestination(destination).set(sessionFilesCacheKey(session, destination), {payload: nextPayload, signature});
   renderSessionFilesDestination(destination, {force: true});

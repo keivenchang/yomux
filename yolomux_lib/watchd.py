@@ -427,6 +427,7 @@ class PersistentWatchService:
         self.watch_generation = 0
         self.scanned_watch_generation = 0
         self.active_watch_generation = 0
+        self.failed_watch_generation = 0
         self.configuration = EffectiveWatchConfiguration()
         self.configuration_hash = self._configuration_hash(self.configuration)
         self.revisions: list[dict[str, Any]] = []
@@ -517,6 +518,7 @@ class PersistentWatchService:
         self.configuration = configuration
         self.configuration_hash = signature
         self.watch_generation += 1
+        self.failed_watch_generation = 0
         self.native_healthy = False
         self.reconfigure_event.set()
         self.native_stop_event.set()
@@ -540,6 +542,7 @@ class PersistentWatchService:
             "current_revision": self.revision,
             "watch_generation": self.watch_generation,
             "active_watch_generation": self.active_watch_generation,
+            "failed_watch_generation": self.failed_watch_generation,
             "changed": False,
             "reset": False,
             "revision": {},
@@ -595,6 +598,7 @@ class PersistentWatchService:
             "revision": 0,
             "watch_generation": self.watch_generation,
             "active_watch_generation": self.active_watch_generation,
+            "failed_watch_generation": self.failed_watch_generation,
             "kind": "snapshot",
             "token": f"{self.epoch}:0",
             "roots": list(self.configuration.roots),
@@ -603,6 +607,7 @@ class PersistentWatchService:
             "root_generations": dict(self.root_generations),
             "healthy": self.native_healthy,
             "fallback": self.polling_fallback,
+            "last_error": self.last_error,
         }
         return latest
 
@@ -658,6 +663,7 @@ class PersistentWatchService:
             "revision": self.revision,
             "watch_generation": self.watch_generation,
             "active_watch_generation": self.active_watch_generation,
+            "failed_watch_generation": self.failed_watch_generation,
             "kind": "full",
             "token": f"{self.epoch}:{self.revision}",
             "roots": list(configuration.roots),
@@ -675,6 +681,7 @@ class PersistentWatchService:
             "root_generations": dict(self.root_generations),
             "healthy": self.native_healthy,
             "fallback": self.polling_fallback,
+            "last_error": self.last_error,
             "created_at": time.time(),
         }
 
@@ -724,6 +731,7 @@ class PersistentWatchService:
                 "revision": self.revision,
                 "watch_generation": self.watch_generation,
                 "active_watch_generation": self.active_watch_generation,
+                "failed_watch_generation": self.failed_watch_generation,
                 "kind": kind,
                 "token": f"{self.epoch}:{self.revision}",
                 "roots": list(self.configuration.roots),
@@ -737,6 +745,7 @@ class PersistentWatchService:
                 "root_generations": dict(self.root_generations),
                 "healthy": self.native_healthy,
                 "fallback": self.polling_fallback,
+                "last_error": self.last_error,
                 "created_at": time.time(),
             }
             self.revisions.append(revision)
@@ -1261,10 +1270,12 @@ class PersistentWatchService:
                 self.active_watch_generation != generation
                 or self.native_healthy != native_healthy
                 or self.polling_fallback != polling_fallback
+                or self.failed_watch_generation != 0
             )
             self.native_healthy = native_healthy
             self.polling_fallback = polling_fallback
             self.active_watch_generation = generation
+            self.failed_watch_generation = 0
             if error is not None:
                 self.last_error = str(error)[:256]
             if publish_activation:
@@ -1278,12 +1289,19 @@ class PersistentWatchService:
         with self.lock:
             if generation != self.watch_generation:
                 return False
-            publish_failure = self.native_healthy or self.polling_fallback
+            failure_text = str(error)[:256]
+            publish_failure = (
+                self.native_healthy
+                or self.polling_fallback
+                or self.failed_watch_generation != generation
+                or self.last_error != failure_text
+            )
             self.native_healthy = False
             self.polling_fallback = False
+            self.failed_watch_generation = generation
             if self.scanned_watch_generation == generation:
                 self.scanned_watch_generation = 0
-            self.last_error = str(error)[:256]
+            self.last_error = failure_text
             if publish_failure:
                 self.publish_revision(kind="state", changed_paths=[])
         return True
@@ -1519,6 +1537,7 @@ class PersistentWatchService:
                 "revision": self.revision,
                 "watch_generation": self.watch_generation,
                 "active_watch_generation": self.active_watch_generation,
+                "failed_watch_generation": self.failed_watch_generation,
                 "clients": len(self.leases),
                 "descriptors": len(self.descriptors),
                 "roots": len(self.configuration.roots),

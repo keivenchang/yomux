@@ -990,6 +990,26 @@ def _ring_gap_bucket(
     )
 
 
+def _project_ring_bucket_for_window(
+    item: DecodedRingBucket,
+    right_edge_start: int,
+) -> DecodedRingBucket:
+    if not item.wire["open"] or item.wire["start"] == right_edge_start:
+        return item
+    gap = _ring_gap_bucket(
+        int(item.wire["start"]),
+        int(item.wire["duration"]),
+        cache_generation=item.cache_generation,
+        generated_at=item.generated_at,
+        ring_generation=item.ring_generation,
+    )
+    return replace(
+        item,
+        wire={**item.wire, "open": False},
+        no_data=(*item.no_data, *gap.no_data),
+    )
+
+
 def _merge_ring_no_data(
     buckets: tuple[DecodedRingBucket, ...],
 ) -> list[dict[str, object]]:
@@ -3780,7 +3800,18 @@ class StatsCurrentService:
                 # so this owner declines the whole persisted view and lets the live cache answer,
                 # rather than fabricating a zero the store's own facts disagree with.
                 return RingSnapshotRead(None, "ring_contradicted")
-            decoded = tuple(_decode_ring_bucket(row) for row in window.rows)
+            right_edge_start = window.window_end - resolution_seconds
+            decoded = tuple(
+                _project_ring_bucket_for_window(item, right_edge_start)
+                for item in (_decode_ring_bucket(row) for row in window.rows)
+            )
+            # `open` records that this was the right edge WHEN PUBLISHED, not that the bucket
+            # remains incomplete forever. Once it is historical, the durable invalidation ledger
+            # above is the sole contradiction owner: an uncontradicted row still represents every
+            # fact in its source generation and can close without dropping its retained series or
+            # cost detail. Its unobserved tail remains an explicit persisted-ring gap; replacing
+            # the WHOLE bucket with that gap made a crash turn a known 12-token lower bound into
+            # zero until the delayed materializer publication happened to replace it.
             latest = max(
                 decoded,
                 key=lambda item: (
@@ -3801,13 +3832,7 @@ class StatsCurrentService:
                     return RingSnapshotRead(None, "pair_unavailable")
                 generated_at = latest.generated_at
                 cache_generation = latest.cache_generation
-            right_edge_start = window.window_end - resolution_seconds
             gap_starts = set(window.missing_bucket_starts)
-            gap_starts.update(
-                int(item.wire["start"])
-                for item in decoded
-                if item.wire["open"] and item.wire["start"] != right_edge_start
-            )
             decoded_by_start = {
                 int(item.wire["start"]): item
                 for item in decoded
@@ -3926,6 +3951,24 @@ class StatsCurrentService:
                         True,
                         None,
                     )
+            if ring_cursor is not None:
+                cache_entry = cache.entries.get(selected_key)
+                if (
+                    cache_entry is not None
+                    and self._entry_cursor(cache_entry) > ring_cursor
+                ):
+                    # A contradicted persisted view retains its last accepted cursor as a
+                    # freshness floor. Once the forced materializer build advances this exact
+                    # view beyond that floor, the warm entry is authoritative without waiting
+                    # for the next coalesced ring flush. An older startup entry must remain a
+                    # miss: serving it is the source-0 regression this floor prevents.
+                    return PublishedSnapshotOwner(
+                        True,
+                        cache_entry,
+                        False,
+                        True,
+                        ring_cursor,
+                    )
             return PublishedSnapshotOwner(
                 True,
                 shared_entry if ring_cursor is not None else cache.entries.get(selected_key),
@@ -3934,8 +3977,9 @@ class StatsCurrentService:
                 ring_cursor,
             )
 
-    def _clear_ring_resolution_locked(self, resolution_seconds: int) -> None:
-        self._ring_published_cursors.pop(resolution_seconds, None)
+    def _clear_ring_views_locked(self, resolution_seconds: int) -> None:
+        """Drop unreadable wires while retaining the accepted resolution cursor floor."""
+
         for key in tuple(self._ring_views):
             if key[1] == resolution_seconds:
                 self._ring_views.pop(key, None)
@@ -4313,10 +4357,12 @@ class StatsSnapshotProjector:
                                 persisted=True,
                             )
                         else:
-                            # SQLite is authoritative for the remembered cursor.
-                            # Drop the whole resolution owner atomically and fall
-                            # back to the exact per-view materializer entry.
-                            self._clear_ring_resolution_locked(parsed.resolution_seconds)
+                            # SQLite is authoritative for the remembered cursor's wire, but the
+                            # cursor remains the freshness floor for every fallback. Drop only the
+                            # unreadable views: an older retained materializer entry cannot answer
+                            # this request, while a forced newer entry may recover before the next
+                            # coalesced ring flush.
+                            self._clear_ring_views_locked(parsed.resolution_seconds)
                 owner = self._published_snapshot_owner(parsed, private_source_id)
 
             entry = (
