@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
-// The Daemons roster front end: the System panel renders `local_services` schema 4 -- the
+// The Daemons roster front end: the System panel renders `local_services` schema 5 -- the
 // snapshot-level `health` provenance block and the per-row `health` block -- through the ONE
 // metric-envelope cell renderer, as ONE service roster with one disclosure per row.
 //
@@ -233,7 +233,7 @@ function serviceRow(id, overrides = {}, healthOverrides = {}) {
 
 function localServices(overrides = {}, serviceOverrides = {}) {
   return {
-    schema_version: 4,
+    schema_version: 5,
     inventory: ['statsd'],
     services: [serviceRow('statsd', overrides.serviceExtra || {}, serviceOverrides)],
     health: healthSnapshot(overrides.health || {}),
@@ -322,11 +322,11 @@ function renderAlerts(healthOverrides = {}) {
 
 // -- the guard ---------------------------------------------------------------------------------
 
-test('the panel guard renders schema 4, the version yolomux_lib/local_service_projection.py publishes', () => {
+test('the panel guard renders schema 5, the version yolomux_lib/local_service_projection.py publishes', () => {
   const guarded = [...source.matchAll(/Number\(payload\.local_services\?\.schema_version\) === (\d+)/g)].map(match => match[1]);
-  assert.deepEqual(guarded, ['4'], 'the panel must guard exactly once, on the published schema version');
+  assert.deepEqual(guarded, ['5'], 'the panel must guard exactly once, on the published schema version');
   const projection = fs.readFileSync('yolomux_lib/local_service_projection.py', 'utf8');
-  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 4$/m, 'producer and consumer pin the same number');
+  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 5$/m, 'producer and consumer pin the same number');
 });
 
 test('an unsupported schema renders every health column as its reason, never as a number', () => {
@@ -393,7 +393,7 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
   // payload from a genuinely newer schema need not carry `inventory` or `services` at all, and then
   // the adapter produced NO service rows and the roster rendered as though the web process were the
   // only thing running. Nothing anywhere said the panel could not read it.
-  for (const shape of [{schema_version: 5}, {schema_version: 5, inventory: [], services: []}]) {
+  for (const shape of [{schema_version: 6}, {schema_version: 6, inventory: [], services: []}]) {
     const html = renderRoster(shape);
     const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'local-services'], JSON.stringify(shape));
@@ -408,7 +408,7 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
 
   // NEGATIVE CONTROL: a SUPPORTED payload with an empty inventory has genuinely nothing to list
   // and must not grow a warning row.
-  const supported = renderRoster({schema_version: 4, inventory: [], services: []});
+  const supported = renderRoster({schema_version: 5, inventory: [], services: []});
   const supportedIds = [...supported.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(supportedIds, ['web', 'tmux-signal-watcher']);
   assert.doesNotMatch(supported, /schema_unsupported/);
@@ -421,7 +421,7 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   // The rule is now absolute rather than field-by-field: an unreadable payload is never iterated
   // and never read, so there is no per-service row for any of it to reach.
   const future = {
-    schema_version: 5,
+    schema_version: 6,
     inventory: ['statsd'],
     services: [serviceRow('statsd', {pid: 4242, state: 'running'})],
   };
@@ -436,9 +436,9 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   const detail = slice(html, 'id="js-debug-roster-detail-local-services"', '</tr>');
   assert.match(detail, /the backend published a local-services schema this panel does not render/);
 
-  // NEGATIVE CONTROL: the SAME fixture at schema 4 renders all of it, so the assertions above are
+  // NEGATIVE CONTROL: the SAME fixture at schema 5 renders all of it, so the assertions above are
   // measuring the guard and not a fixture that never had the data.
-  const supported = {...future, schema_version: 4};
+  const supported = {...future, schema_version: 5};
   const supportedRow = rosterRow(renderStatsdOpen(supported), 'statsd');
   assert.match(supportedRow, /data-subsystem-metric="rss_bytes" data-metric-state="measured"/);
   assert.match(slice(renderStatsdOpen(supported), 'id="js-debug-roster-detail-statsd"', '</tr>'), /observer samples: 450/);
@@ -464,7 +464,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   };
   const hostile = {
     // Familiar-LOOKING, so nothing about its shape warns a reader off it. Only the version differs.
-    schema_version: 5,
+    schema_version: 6,
     health: {
       available: true,
       port: Number(sentinels.port),
@@ -512,9 +512,9 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   assert.doesNotMatch(rosterRow(renderRoster(hostile), 'web'), /js-debug-roster-qualifier/);
   assert.equal(renderAlerts(hostile), '', 'an unreadable payload cannot raise a health or recovery alert');
 
-  // NEGATIVE CONTROL: at schema 4 the SAME payload renders those sentinels, so the sweep above is
+  // NEGATIVE CONTROL: at schema 5 the SAME payload renders those sentinels, so the sweep above is
   // measuring the guard and not a fixture that never carried the values.
-  const readable = {...hostile, schema_version: 4};
+  const readable = {...hostile, schema_version: 5};
   const supported = renderRoster(readable, {expanded: [sentinels.inventory]});
   for (const key of ['port', 'inventory', 'label', 'pid']) {
     assert.equal(supported.includes(sentinels[key]), true, `${key} must render when the schema IS supported`);
@@ -525,7 +525,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   const direct = source.split('\n')
     .filter(line => line.includes('payload.local_services') && !line.trim().startsWith('//'));
   assert.deepEqual(direct.map(line => line.trim()), [
-    'return Number(payload.local_services?.schema_version) === 4;',
+    'return Number(payload.local_services?.schema_version) === 5;',
     "return payload.local_services && typeof payload.local_services === 'object' ? payload.local_services : {};",
   ], 'exactly two direct reads survive: the version guard, and the one owner it gates');
   assert.match(sourceFunction('debugSystemRenderableLocalServices', 'debugSystemRolesHtml'),
@@ -581,11 +581,12 @@ test('there is no second Daemons renderer and no second service-state classifier
   for (const builder of ['debugSystemLocalServicesCardHtml', 'debugSystemLocalServicesTableHtml', 'updateDebugSystemLocalServicesCard']) {
     assert.doesNotMatch(advanced, new RegExp(builder), 'Advanced must not build a second local-services view');
   }
-  // One definition and exactly two readers: the guarded reader that empties the block, and the
-  // roster adapter that turns a false answer into the typed row. Anything else reading the version
-  // directly would be a second place the rule could drift.
-  assert.equal(source.match(/debugSystemLocalServicesSchemaSupported\(/g).length, 3,
-    'the schema guard has one definition, the guarded reader, and the roster row adapter');
+  // One definition and exactly three readers: the guarded reader that empties the block, the
+  // roster adapter that turns a false answer into the typed row, and the publisher that sends only
+  // that safe row to the triangle reducer. Anything else reading the version directly would be a
+  // second place the rule could drift.
+  assert.equal(source.match(/debugSystemLocalServicesSchemaSupported\(/g).length, 4,
+    'the schema guard has one definition, the guarded reader, roster adapter, and triangle publisher');
 });
 
 test('a running daemon whose transport failed is an issue with its typed reason, not "down"', () => {

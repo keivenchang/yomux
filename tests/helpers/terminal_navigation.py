@@ -120,6 +120,7 @@ def terminal_navigation_ack_metrics(browser: Any, tmp_path: Path) -> dict[str, o
               () => !document.querySelector('#term-1 [data-terminal-connection-state="switching"]'),
               {timeoutMs: 2000, intervalMs: 20, description: 'failed tmux switch rollback'}
             );
+            applyBackendHealthPayload({epoch: 'terminal-navigation-fixture', revision: 1, overall_state: 'ready', degraded_resources: []});
             window.fetch = () => Promise.reject(new TypeError('server unavailable'));
             await Promise.allSettled([apiFetch('/api/test-a'), apiFetch('/api/test-b'), apiFetch('/api/test-c')]);
             const degraded = document.querySelector('[data-backend-health="unresponsive"]');
@@ -128,7 +129,7 @@ def terminal_navigation_ack_metrics(browser: Any, tmp_path: Path) -> dict[str, o
             return {
               tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck, topologyTransactionCounts,
               windowCleared: !terminalConnectionStateNode('1'),
-              backendHealth: {shown: Boolean(degraded), cleared: document.querySelector('[data-backend-health]')?.dataset.backendHealth === ''},
+              backendHealth: {shown: Boolean(degraded), recovered: document.querySelector('[data-backend-health]')?.dataset.backendHealth === 'ready'},
             };
           } finally {
             ensureSession = originalEnsureSession;
@@ -173,4 +174,4 @@ def assert_terminal_navigation_ack_semantics(metrics: dict[str, object]) -> None
     assert metrics["windowAck"]["dimmed"] is True, metrics
     assert metrics["windowFrameAck"] == {"state": "switching", "dimmed": True}, metrics
     assert metrics["windowCleared"] is True, metrics
-    assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
+    assert metrics["backendHealth"] == {"shown": True, "recovered": True}, metrics

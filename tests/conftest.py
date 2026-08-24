@@ -107,10 +107,18 @@ def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def isolated_tmux_socket(monkeypatch, tmp_path):
-    sock_dir = tmp_path / "tmux"
-    sock_dir.mkdir()
+def isolated_tmux_socket(monkeypatch):
+    sock_dir = Path(tempfile.mkdtemp(prefix=f"yotmux-{os.getpid()}-", dir="/tmp"))
     monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(sock_dir / "s"))
+    yield
+    try:
+        (sock_dir / "s").unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        sock_dir.rmdir()
+    except OSError:
+        pass
 
 
 def local_socket_capability() -> tuple[bool, str]:

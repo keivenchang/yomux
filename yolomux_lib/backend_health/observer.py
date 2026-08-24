@@ -187,6 +187,7 @@ REASON_TERMINAL_FAILURE = "terminal_failure"
 # failed; a transient running-degraded reconnect window (a lease reacquire reads `errored`/
 # `not_running` with pid>0) is a `degraded`/`service_unhealthy`, not a permanent death.
 REASON_SERVICE_UNHEALTHY = "service_unhealthy"
+REASON_SERVICE_STARTING = "service_starting"
 REASON_UPGRADE_REQUIRED = "upgrade_required"
 REASON_EXITED = "exited"
 # The two ways a row can be self-contradictory or unreadable about its own absence. Both are a
@@ -322,11 +323,17 @@ def observed_health(fields: Mapping[str, Any], probe_outcome: str = PROBE_OK) ->
     if running:
         if transport_reason:
             return "degraded", transport_code
-        if fields.get("healthy") is False or last_failure:
+        if last_failure:
             # A RUNNING service reporting a fault is `service_unhealthy`, NOT `terminal_failure`.
             # The state stays `degraded` -- the warning is preserved, nothing is hidden -- but the
             # machine-readable reason no longer borrows the registry's latched permanent-death
             # token. `terminal_failure` is reserved for the not-running latched fence below.
+            return "degraded", REASON_SERVICE_UNHEALTHY
+        if fields.get("healthy") is False and fields.get("serving_state") == "starting":
+            # The process exists, but its demand bridge has not accepted the first revision yet.
+            # This is an expected non-serving transition, not evidence that the daemon failed.
+            return "starting", REASON_SERVICE_STARTING
+        if fields.get("healthy") is False:
             return "degraded", REASON_SERVICE_UNHEALTHY
         return "ready", REASON_NONE
     if fields.get("terminal_failure"):

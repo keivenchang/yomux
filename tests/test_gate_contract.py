@@ -639,7 +639,7 @@ def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browse
         """
         const published = arguments[0];
         const html = debugSystemRosterHtml({
-          local_services: {schema_version: 4, inventory: ['statsd'], services: [published]},
+          local_services: {schema_version: 5, inventory: ['statsd'], services: [published]},
         }, {nowSeconds: 0});
         const host = document.createElement('div');
         host.innerHTML = html;

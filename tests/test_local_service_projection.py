@@ -28,6 +28,7 @@ import pytest
 from yolomux_lib import app as app_module
 from yolomux_lib import local_service_projection
 from yolomux_lib.backend_health import store as store_module
+from yolomux_lib.backend_health.observer import observed_health
 from yolomux_lib.backend_health.store import BackendHealthStore
 from yolomux_lib.backend_health.store import HealthSnapshot
 from yolomux_lib.backend_health.store import ResourceObservation
@@ -203,6 +204,29 @@ def test_watchd_identity_and_uptime_come_from_the_service_record_with_no_rpc(mon
     assert projected["metrics"]["uptime_seconds"]["state"] == "measured"
     assert projected["metrics"]["rss_bytes"]["state"] == "measured"
     assert projected["state"] == "running"
+
+
+def test_watchd_bridge_startup_does_not_report_a_running_daemon_unhealthy(monkeypatch, tmp_path):
+    client = _watchd_client_with_record(tmp_path, started_at=time.time() - 10.0, pid=os.getpid())
+    webapp = _quiet_app(monkeypatch)
+    try:
+        monkeypatch.setattr(webapp, "watch_client", client)
+        _forbid_rpc(monkeypatch, client.registry)
+        row = webapp.watchd_runtime_status()
+        projected = next(
+            service for service in webapp.runtime_local_services()["services"]
+            if service["service"] == "watchd"
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert row["pid"] == os.getpid()
+    assert row["serving_state"] == "starting"
+    assert row["healthy"] is False
+    assert row["last_failure"] == ""
+    assert observed_health(row) == ("starting", "service_starting")
+    assert projected["state"] == "idle"
+    assert projected["alerting"] is False
 
 
 def test_watchd_without_a_service_record_stays_idle_and_names_why(monkeypatch, tmp_path):
@@ -387,7 +411,7 @@ def test_the_snapshot_schema_is_frozen_and_immutable():
 
     assert tuple(snapshot.__dataclass_fields__) == SNAPSHOT_DATACLASS_FIELDS
     assert tuple(snapshot.rows[0].__dataclass_fields__) == ROW_DATACLASS_FIELDS
-    assert snapshot.schema_version == 4
+    assert snapshot.schema_version == 5
     assert snapshot.observed_at == 160.0
     assert snapshot.inventory == local_service_projection.LOCAL_SERVICE_INVENTORY
     assert snapshot.row("indexd").uptime_seconds == 60.0
@@ -398,7 +422,7 @@ def test_the_snapshot_schema_is_frozen_and_immutable():
         snapshot.row("indexd").fields["pid"] = 99
 
 
-def test_the_rendered_payload_publishes_schema_four_and_the_frozen_inventory():
+def test_the_rendered_payload_publishes_schema_five_and_the_frozen_inventory():
     """Lifecycle metrics changed the row shape, so the version moved with them.
 
     This is the negative control for "a schema change without a version bump": the key set
@@ -409,7 +433,7 @@ def test_the_rendered_payload_publishes_schema_four_and_the_frozen_inventory():
     collector = local_service_projection.LocalServicesCollector(lambda: _stub_producers())
     payload = collector.collect().payload(lambda row: dict(row))
 
-    assert (payload["schema_version"], frozenset(payload)) == (4, SNAPSHOT_PAYLOAD_KEYS)
+    assert (payload["schema_version"], frozenset(payload)) == (5, SNAPSHOT_PAYLOAD_KEYS)
     assert "alert" not in payload
     assert payload["inventory"] == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
     assert [service["service"] for service in payload["services"]] == list(payload["inventory"])

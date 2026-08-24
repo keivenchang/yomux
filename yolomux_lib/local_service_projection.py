@@ -33,7 +33,7 @@ nothing and retains nothing.
 The snapshot is the schema. ``LocalServicesSnapshot.payload()`` renders the dict the
 HTTP projection publishes, including ``schema_version``.
 
-WHY ``schema_version`` IS 4
+WHY ``schema_version`` IS 5
 ---------------------------
 ``static_src/js/yolomux/85_debug_panel.js`` guards the whole normalized Local-services
 render on ``schema_version === <this number>`` (exact, not ``>=``), so any shape change
@@ -52,6 +52,8 @@ Each bump is one shape change, and the front-end guard moves with it in the same
 * Lifecycle accounting moved it to ``4``: each health metric block now separates all verified
   process starts from unexpected restarts and demand-driven starts. Legacy replacements remain
   explicitly partial rather than being relabelled after the fact.
+* Watchd bridge readiness moved it to ``5``: the runtime row now publishes `serving_state`, so a
+  verified process waiting for its first bridge revision is distinct from an unhealthy daemon.
 
 WHY THE COUNTERS SAY ``web_process``
 ------------------------------------
@@ -95,8 +97,9 @@ LOCAL_SERVICE_INVENTORY: tuple[str, ...] = ("indexd", "statsd", "jobd", "statusd
 # Bumping this is a browser-visible change: `85_debug_panel.js` guards the whole
 # Local-services render on this exact number. M3 preserved 1 deliberately; M8 moved it to 2
 # because every row grew a `health` block; W13 moved it to 3 when the dead `alert` summary
-# was removed; lifecycle accounting moved it to 4. See the module docstring for each shape.
-LOCAL_SERVICES_SCHEMA_VERSION = 4
+# was removed; lifecycle accounting moved it to 4; bridge readiness moved it to 5. See the module
+# docstring for each shape.
+LOCAL_SERVICES_SCHEMA_VERSION = 5
 
 # How many of a resource's retained transition rows the HTTP projection publishes. The
 # store keeps 128 per resource; six services times 128 rows would put ~5000 rows into
@@ -159,6 +162,7 @@ class LocalServiceRuntimeRow(TypedDict, total=False):
     started_at: float
     version: int
     healthy: bool
+    serving_state: str
     last_failure: str
     resources: dict[str, Any]
     demand_started: bool

@@ -194,8 +194,7 @@ def start_isolated_tmux_runtime(
             if session_cwd is not None:
                 args.extend(["-c", str(session_cwd)])
             command = commands.get(session)
-            if command is not None:
-                args.append(command)
+            args.append(command if command is not None else "exec /bin/bash --noprofile --norc")
             result = run_isolated_tmux(runtime, *args, timeout=10)
             if result.returncode != 0:
                 raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
@@ -231,7 +230,19 @@ def start_isolated_default_tmux_runtime(monkeypatch, tmp_path: Path, session_cou
     runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=[], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, stopped=False)
     try:
         for session in session_names:
-            result = run_isolated_tmux(runtime, "new-session", "-d", "-s", session, "-x", str(columns), "-y", str(rows), timeout=10)
+            result = run_isolated_tmux(
+                runtime,
+                "new-session",
+                "-d",
+                "-s",
+                session,
+                "-x",
+                str(columns),
+                "-y",
+                str(rows),
+                "exec /bin/bash --noprofile --norc",
+                timeout=10,
+            )
             if result.returncode != 0:
                 raise AssertionError(f"isolated default tmux session failed: {result.stderr or result.stdout}")
         return runtime

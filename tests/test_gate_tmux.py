@@ -111,7 +111,7 @@ def test_gate_d5_kill_session_only_affects_registered_tmux_socket(monkeypatch, t
     socket_two = tmp_path / "socket-two"
     session = f"yt-{uuid.uuid4().hex[:12]}"
     for socket_path in (socket_one, socket_two):
-        created = _tmux(socket_path, "new-session", "-d", "-s", session)
+        created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
         assert created.returncode == 0, created.stderr or created.stdout
     monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(socket_one))
     monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
@@ -156,7 +156,7 @@ def test_gate_d7_kill_session_api_returns_promptly_and_removes_scoped_session(mo
         pytest.skip("tmux is not installed")
     socket_path = tmp_path / "socket"
     session = f"yt-{uuid.uuid4().hex[:12]}"
-    created = _tmux(socket_path, "new-session", "-d", "-s", session)
+    created = _tmux(socket_path, "new-session", "-d", "-s", session, "exec /bin/bash --noprofile --norc")
     assert created.returncode == 0, created.stderr or created.stdout
     monkeypatch.setenv("YOLOMUX_TMUX_SOCKET", str(socket_path))
     monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")

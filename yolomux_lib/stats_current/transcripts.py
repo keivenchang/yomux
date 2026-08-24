@@ -170,6 +170,15 @@ class _ScanReceipt:
     legacy_repair_status: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class _CommittedUsage:
+    """Immutable transcript status published only after a successful durable commit."""
+
+    appended_bytes: int
+    last_visible_append_at: float
+    legacy_fork_repair: dict[str, object]
+
+
 class StatsCurrentTranscriptUsageScanner:
     """Parse each physical transcript once, then only parse complete appended records."""
 
@@ -195,24 +204,26 @@ class StatsCurrentTranscriptUsageScanner:
         self._active_checkpoints: dict[str, _FileCheckpoint] | None = None
         self._next_source: str | None = None
         self._clock = clock
-        self._committed_appended_bytes = 0
-        self._last_visible_append_at = 0.0
         self._legacy_repair_choices_cache: dict[str, _FileChoice] | None = None
         self._legacy_repair_roots_cache: tuple[str, ...] | None = None
-        self._legacy_repair_status: dict[str, object] = {
-            "active": False,
-            "complete": False,
-            "discovered_files": 0,
-            "orphan_files": 0,
-            "complete_files": 0,
-            "remaining_files": 0,
-            "remaining_bytes": 0,
-            "advanced_files": 0,
-            "scan_bytes": 0,
-            "scan_records": 0,
-            "budget_bytes": self._max_bytes_per_scan,
-            "budget_records": self._max_records_per_scan,
-        }
+        self._committed = _CommittedUsage(
+            appended_bytes=0,
+            last_visible_append_at=0.0,
+            legacy_fork_repair={
+                "active": False,
+                "complete": False,
+                "discovered_files": 0,
+                "orphan_files": 0,
+                "complete_files": 0,
+                "remaining_files": 0,
+                "remaining_bytes": 0,
+                "advanced_files": 0,
+                "scan_bytes": 0,
+                "scan_records": 0,
+                "budget_bytes": self._max_bytes_per_scan,
+                "budget_records": self._max_records_per_scan,
+            },
+        )
 
     def scan(self, rows: list[Mapping[str, object]]) -> TranscriptUsageScanResult:
         """Return usage increments discovered since the previous successful pass."""
@@ -325,7 +336,7 @@ class StatsCurrentTranscriptUsageScanner:
             except Exception:
                 self._inflight = _ScanReceipt(
                     receipt_id, checkpoints, self._next_source, counters.appended_bytes,
-                    False, (), dict(self._legacy_repair_status),
+                    False, (), dict(self._committed.legacy_fork_repair),
                 )
                 self._rollback_inflight()
                 raise
@@ -440,9 +451,12 @@ class StatsCurrentTranscriptUsageScanner:
                     durable.persisted_at = time.perf_counter()
                     durable.state.pop("_allow_offset_rewind", None)
             self._next_source = receipt.next_source
+            committed = self._committed
+            appended_bytes = committed.appended_bytes
+            last_visible_append_at = committed.last_visible_append_at
             if receipt.appended_bytes > 0:
-                self._committed_appended_bytes += receipt.appended_bytes
-                self._last_visible_append_at = float(self._clock())
+                appended_bytes += receipt.appended_bytes
+                last_visible_append_at = float(self._clock())
             if receipt.legacy_repair_complete:
                 marker = self._legacy_fork_repair_marker()
                 marker.parent.mkdir(parents=True, exist_ok=True)
@@ -455,24 +469,30 @@ class StatsCurrentTranscriptUsageScanner:
                 )
                 self._legacy_repair_choices_cache = None
                 self._legacy_repair_roots_cache = None
-            self._legacy_repair_status = dict(receipt.legacy_repair_status)
+            # One reference assignment publishes one complete generation only after every
+            # durable write above succeeds. Readers never need the scanner's long-held lock.
+            self._committed = _CommittedUsage(
+                appended_bytes=appended_bytes,
+                last_visible_append_at=last_visible_append_at,
+                legacy_fork_repair=dict(receipt.legacy_repair_status),
+            )
             self._inflight = None
             self._prune_records()
 
     def status(self) -> dict[str, object]:
         """Return bounded evidence of transcript growth that was durably committed."""
 
-        with self._lock:
-            last_append = self._last_visible_append_at
-            now = float(self._clock())
-            return {
-                "committed_appended_bytes": self._committed_appended_bytes,
-                "last_visible_append_at": last_append,
-                "visible_append_age_seconds": (
-                    max(0.0, now - last_append) if last_append > 0 else None
-                ),
-                "legacy_fork_repair": dict(self._legacy_repair_status),
-            }
+        committed = self._committed
+        last_append = committed.last_visible_append_at
+        now = float(self._clock())
+        return {
+            "committed_appended_bytes": committed.appended_bytes,
+            "last_visible_append_at": last_append,
+            "visible_append_age_seconds": (
+                max(0.0, now - last_append) if last_append > 0 else None
+            ),
+            "legacy_fork_repair": dict(committed.legacy_fork_repair),
+        }
 
     def usage_atom_backfill_status(self) -> dict[str, object] | None:
         """Return only cursor progress that has already been durably committed."""

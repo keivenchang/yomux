@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -339,7 +340,8 @@ def test_default_server_kill_server_is_refused_in_every_optin_mode(monkeypatch, 
 def test_exact_target_cannot_kill_a_prefix_named_sibling_session(monkeypatch, tmp_path):
     if shutil.which("tmux") is None:
         pytest.skip("tmux is not installed")
-    socket_path = str(tmp_path / "exact-target.sock")
+    socket_dir = Path(tempfile.mkdtemp(prefix=f"yoexact-{os.getpid()}-", dir="/tmp"))
+    socket_path = str(socket_dir / "s")
     sibling = f"yt-{uuid.uuid4().hex[:8]}-sibling"
     prefix = sibling[: sibling.index("-sibling")]
     created = subprocess.run(
@@ -360,6 +362,7 @@ def test_exact_target_cannot_kill_a_prefix_named_sibling_session(monkeypatch, tm
         assert not tmux_utils.tmux_has_exact_session(sibling)
     finally:
         subprocess.run(["tmux", "-S", socket_path, "kill-server"], capture_output=True, text=True, check=False)
+        shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 # --- one exact-target owner ---------------------------------------------------

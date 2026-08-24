@@ -3365,6 +3365,10 @@ class WatchBridge:
                 "epoch": epoch,
                 "revision": revision,
                 "fallback": state == "polling",
+                # The daemon can already have a verified PID while the bridge is still waiting
+                # for its first revision. The health reducer uses this typed transition instead
+                # of treating `healthy=false` as a daemon failure.
+                "serving_state": state,
                 # watchd is spawned when a client attaches a watch and retires when the
                 # last one detaches. "Absent" is its correct resting state, so it must not
                 # read as an outage; only last_failure below can make it one. This is the ONE

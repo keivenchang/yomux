@@ -24,16 +24,16 @@ def xterm_only_search(session):
     })
 
 
-def saved_layout_state(session):
+def saved_layout_state(session, finder_root):
     return {
         "v": 1,
         "finder": {
-            "root": str(REPO_ROOT),
+            "root": str(finder_root),
             "rootMode": "sync",
             "mode": "files",
             "session": session,
             "showHidden": False,
-            "expanded": [str(REPO_ROOT)],
+            "expanded": [str(finder_root)],
         },
         "preferences": {
             "searchText": "",
@@ -47,19 +47,21 @@ def saved_layout_state(session):
     }
 
 
-def saved_layout_search(session):
+def saved_layout_search(session, finder_root):
     return "?" + urlencode({
         "bootCase": "saved-layout",
         "sessions": f"files,{session},debug,prefs",
         "layout": "row@20(slot1,row@50(left,slot2))",
         "tabs": f"slot1:files;left:{session};slot2:debug,prefs",
         "finder": "files",
-        "state": json.dumps(saved_layout_state(session), separators=(",", ":")),
+        "state": json.dumps(saved_layout_state(session, finder_root), separators=(",", ":")),
     })
 
 
 def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monkeypatch, tmp_path):
-    runtime = start_isolated_browser_app(monkeypatch, tmp_path)
+    finder_root = tmp_path / "finder-root"
+    finder_root.mkdir()
+    runtime = start_isolated_browser_app(monkeypatch, tmp_path, session_cwd=finder_root)
     session = runtime.sessions[0]
     server, thread = start_browser_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     base_url = f"http://127.0.0.1:{server.server_address[1]}/"
@@ -67,7 +69,7 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
     browser._yolomux_server_log_boundary = server._fixture_server_log_boundary
     cases = {
         "fresh-default": "?" + urlencode({"bootCase": "fresh-default", "sessions": session}),
-        "saved-layout": saved_layout_search(session),
+        "saved-layout": saved_layout_search(session, finder_root),
         "malformed-state": "?" + urlencode({"bootCase": "malformed-state", "sessions": session, "state": "{not-json"}),
         "invalid-layout": "?" + urlencode({"bootCase": "invalid-layout", "sessions": session, "layout": "not-a-layout", "tabs": "broken"}),
     }

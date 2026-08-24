@@ -193,6 +193,7 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
     service_pid = 4242
     service_protocol = 25
     source_epoch = "retained-jobd"
+    spawn_generation = "a" * 32
     clock = [100.0]
     state = {"alive": True}
     signals = []
@@ -215,6 +216,7 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
         "socket": str(registry.socket_path),
         "protocol_version": service_protocol,
         "source_epoch": source_epoch,
+        "spawn_generation": spawn_generation,
     })
     registry.socket_path.touch()
 
@@ -259,6 +261,8 @@ def test_registry_bounds_jobd_drain_before_signalling_stuck_replacement(tmp_path
 
     monkeypatch.setattr(registry, "_request", fake_request)
     monkeypatch.setattr(registry_mod, "pid_is_alive", lambda _pid: state["alive"])
+    monkeypatch.setattr(registry_mod, "process_state", lambda _pid: "S" if state["alive"] else "")
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: spawn_generation)
     monkeypatch.setattr(
         registry_mod,
         "process_start_identity",

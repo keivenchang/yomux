@@ -4134,7 +4134,11 @@ def test_no_write_or_chmod_reaches_a_removed_service_directory_from_any_entry_po
     assert writes, "the atomic_write_text spy never observed a real write"
     assert chmods, "the chmod spy never observed a real chmod"
 
-    service_dir = registry.record_path.parent
+    # Long pytest roots can place the socket and record in a short-path fallback,
+    # while the durable lock stays in the configured service directory. The
+    # disappearing directory this invariant fences is the lock's parent: that is
+    # the path file_lock would otherwise recreate and chmod.
+    service_dir = registry.lock_path.parent
     rmtree_within(service_dir, tmp_path)
     assert service_dir.exists() is False
     writes.clear()
