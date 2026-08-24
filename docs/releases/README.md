@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.14 | `v0.7.14` | `v0.7.14^{commit}` | [v0.7.14-evidence.md](v0.7.14-evidence.md) | local-service identity and lease safety, deterministic gate ownership, and YO!stats generation correctness |
 | 0.7.13 | `v0.7.13` | `v0.7.13^{commit}` | [v0.7.13-evidence.md](v0.7.13-evidence.md) | corrects watchd health, YO!stats graph/ring and roster convergence, bounded Codex hot-tail fairness, and session-files request ownership |
 | 0.7.12 | `v0.7.12` | `v0.7.12^{commit}` | [v0.7.12-evidence.md](v0.7.12-evidence.md) | backend lifetime ownership, Stats correctness and responsiveness, and shared daemon-health severity with a documented row-refresh lag |
 | 0.7.8 | `v0.7.8` | `f32ffd898` | [v0.7.8-evidence.md](v0.7.8-evidence.md) | mobile and Stats GUI, bounded background work, macOS compatibility, correctness, and safety fixes |

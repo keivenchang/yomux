@@ -16,8 +16,8 @@ from yolomux_lib.search import search_indexer
 
 
 def _clear_registry():
-    with file_index._REGISTRY_LOCK:
-        file_index._REGISTRY.clear()
+    retirement = file_index.clear_memory_indexes()
+    assert retirement.late == []
 
 
 def _reset_lifecycle_registry():
@@ -429,6 +429,11 @@ def test_reindex_batch_coalesces_dirty_paths_once(monkeypatch, tmp_path, owner_c
     child = package / "child.py"
     child.write_text("child\n", encoding="utf-8")
     index = file_index.RootIndex(root)
+    root_descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        index.replace_root_fd(root_descriptor)
+    finally:
+        os.close(root_descriptor)
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY[str(root)] = index
     calls = []
@@ -453,6 +458,7 @@ def test_reindex_batch_coalesces_dirty_paths_once(monkeypatch, tmp_path, owner_c
         diagnostics = file_index.runtime_diagnostics()["roots"][0]
     finally:
         _clear_registry()
+        index.close_root_fd()
 
     assert len(calls) == 1
     assert index.dirty_paths == {package, sibling}
@@ -541,6 +547,107 @@ def test_disk_index_candidate_prefilter_preserves_punctuation_free_fuzzy_filenam
         conn.close()
 
     assert names == ["2026.md"]
+
+
+def test_search_disk_index_pins_authorized_identity_and_rows_to_one_sqlite_snapshot(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    safe = root / "safe.txt"
+    safe.write_text("safe\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _build_filesystem_index(root)
+    original_candidates = file_index._sqlite_search_candidates
+
+    def replace_generation_then_query(conn, literal_terms):
+        identity = file_index.root_identity(root.stat())
+        mismatched_identity = json.dumps([identity[0], identity[1] + 1], separators=(",", ":"))
+        with sqlite3.connect(file_index._index_disk_path(root)) as writer:
+            writer.execute(
+                "UPDATE metadata SET value = ? WHERE key = ?",
+                (mismatched_identity, file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+            )
+            writer.execute("DELETE FROM entries")
+            writer.execute(
+                "INSERT INTO entries(path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(root / "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt"),
+                    "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt",
+                    "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt",
+                    99,
+                    99,
+                ),
+            )
+        return original_candidates(conn, literal_terms)
+
+    monkeypatch.setattr(file_index, "_sqlite_search_candidates", replace_generation_then_query)
+
+    def match(path, name, relative_path):
+        return {"path": path, "name": name, "relative_path": relative_path}
+
+    result = file_index.search_disk_index(
+        root,
+        SEARCH_SKIP_DIRS,
+        filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+        match,
+        20,
+    )
+
+    assert result is not None
+    entries, _truncated = result
+    assert [entry["name"] for entry in entries] == ["safe.txt"]
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(entries)
+
+
+def test_load_disk_pins_authorized_identity_and_rows_to_one_sqlite_snapshot(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    safe = root / "safe.txt"
+    safe.write_text("safe\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    _build_filesystem_index(root)
+    original_publication_check = file_index._row_serving_snapshot_metadata
+    replaced = False
+
+    def replace_generation_after_validation(metadata):
+        nonlocal replaced
+        accepted = original_publication_check(metadata)
+        if accepted and not replaced:
+            replaced = True
+            identity = file_index.root_identity(root.stat())
+            mismatched_identity = json.dumps([identity[0], identity[1] + 1], separators=(",", ":"))
+            with sqlite3.connect(file_index._index_disk_path(root)) as writer:
+                writer.execute(
+                    "UPDATE metadata SET value = ? WHERE key = ?",
+                    (mismatched_identity, file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+                )
+                writer.execute("DELETE FROM entries")
+                writer.execute(
+                    "INSERT INTO entries(path, name, relative_path, size, mtime) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        str(root / "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt"),
+                        "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt",
+                        "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt",
+                        99,
+                        99,
+                    ),
+                )
+        return accepted
+
+    monkeypatch.setattr(file_index, "_row_serving_snapshot_metadata", replace_generation_after_validation)
+
+    loaded = file_index._load_disk(
+        root,
+        SEARCH_SKIP_DIRS,
+        filesystem.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+    )
+
+    assert replaced is True
+    assert loaded is not None
+    entries, _built_at, _truncated, _signature, _identity = loaded
+    assert [entry[1] for entry in entries] == ["safe.txt"]
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(entries)
 
 
 def test_unchanged_search_index_refresh_skips_entry_rewrite(tmp_path, monkeypatch):
@@ -638,7 +745,14 @@ def test_read_only_search_uses_the_persistent_indexer_snapshot(tmp_path, monkeyp
         file_index.set_background_index_search_requester(None)
         file_index.set_background_owner_refresh_requester(None)
 
-    assert requested == [{"root": str(root), "query": "t5t.md", "limit": 20}]
+    assert len(requested) == 1
+    assert {key: requested[0][key] for key in ("root", "query", "limit")} == {
+        "root": str(root),
+        "query": "t5t.md",
+        "limit": 20,
+    }
+    assert requested[0][file_index.AUTHORIZED_ROOT_IDENTITY_FIELD] == file_index.root_identity(root.stat())
+    assert requested[0]["access_policy"]["version"] == 1
     assert payload == expected
 
 
@@ -775,43 +889,43 @@ def test_inmemory_index_rebuilds_when_exclude_signature_changes(tmp_path, monkey
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     (tmp_path / "visible.txt").write_text("ok", encoding="utf-8")
-    secret = tmp_path / ".ssh" / "id_rsa"
-    secret.parent.mkdir()
-    secret.write_text("secret", encoding="utf-8")
-    skip_dirs = SEARCH_SKIP_DIRS - {".ssh"}
+    excluded = tmp_path / "node_modules" / "package.js"
+    excluded.parent.mkdir()
+    excluded.write_text("package", encoding="utf-8")
+    skip_dirs = SEARCH_SKIP_DIRS - {"node_modules"}
     initial = file_index.build_now(tmp_path, skip_dirs)
-    assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
+    assert any(name == "package.js" for _p, name, _r, _s, _m in initial.entries)
 
     filtered = file_index.build_now(
         tmp_path,
         skip_dirs,
-        exclude_path=lambda path: ".ssh" in path.parts,
-        exclude_signature="test-secret-filter",
+        exclude_path=lambda path: "node_modules" in path.parts,
+        exclude_signature="test-node-modules-filter",
     )
 
-    assert filtered.signature.endswith("|exclude:test-secret-filter")
+    assert filtered.signature.endswith("|exclude:test-node-modules-filter")
     assert any(name == "visible.txt" for _p, name, _r, _s, _m in filtered.entries)
-    assert all(name != "id_rsa" for _p, name, _r, _s, _m in filtered.entries)
+    assert all(name != "package.js" for _p, name, _r, _s, _m in filtered.entries)
 
 
 def test_ensure_index_drops_ready_cache_when_exclude_signature_changes(tmp_path, monkeypatch):
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     (tmp_path / "visible.txt").write_text("ok", encoding="utf-8")
-    secret = tmp_path / ".ssh" / "id_rsa"
-    secret.parent.mkdir()
-    secret.write_text("secret", encoding="utf-8")
-    skip_dirs = SEARCH_SKIP_DIRS - {".ssh"}
+    excluded = tmp_path / "node_modules" / "package.js"
+    excluded.parent.mkdir()
+    excluded.write_text("package", encoding="utf-8")
+    skip_dirs = SEARCH_SKIP_DIRS - {"node_modules"}
     initial = file_index.build_now(tmp_path, skip_dirs)
     assert initial.ready is True
-    assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
+    assert any(name == "package.js" for _p, name, _r, _s, _m in initial.entries)
     monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)
 
     filtered = file_index.ensure_index(
         tmp_path,
         skip_dirs,
-        exclude_path=lambda path: ".ssh" in path.parts,
-        exclude_signature="test-secret-filter",
+        exclude_path=lambda path: "node_modules" in path.parts,
+        exclude_signature="test-node-modules-filter",
     )
 
     assert filtered.ready is False

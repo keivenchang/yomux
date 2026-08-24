@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .git_ops import git_repo_info
+from .git_ops import pinned_git_repo_info
 
 MAX_DIRECTORY_ENTRIES = 1_000
 # Finder must render its directory controls even when one repository has a wedged Git filesystem.
@@ -46,59 +46,39 @@ class _ResolvedDirectoryName(str):
         *,
         symlink_target_stat: os.stat_result | None = None,
         symlink_target_text: str | None = None,
-        symlink_target_pinned: bool = False,
         info: dict[str, Any] | None = None,
     ):
         instance = super().__new__(cls, value)
         instance.resolved = resolved
         instance.symlink_target_stat = symlink_target_stat
         instance.symlink_target_text = symlink_target_text
-        instance.symlink_target_pinned = symlink_target_pinned
         instance.info = info
         return instance
 
 
-def _repo_marker_is_real(marker_path: Path, marker: str) -> bool:
-    if not marker_path.exists():
-        return False
-    if marker == ".git":
-        return marker_path.is_file() or (marker_path / "HEAD").exists()
-    if marker == ".hg":
-        return (marker_path / "requires").exists() or (marker_path / "store").exists()
-    if marker == ".svn":
-        return (marker_path / "wc.db").exists() or (marker_path / "entries").exists()
-    if marker == ".jj":
-        return (marker_path / "repo").exists() or (marker_path / "working_copy").exists()
-    return False
-
-
-def _directory_is_repo(path: Path, *, directory_descriptor: int | None = None) -> bool:
+def _directory_is_repo(directory_descriptor: int) -> bool:
     for marker in REPO_MARKERS:
         try:
-            if directory_descriptor is not None:
-                marker_stat = os.stat(marker, dir_fd=directory_descriptor, follow_symlinks=False)
-                if marker == ".git":
-                    if stat.S_ISREG(marker_stat.st_mode):
-                        return True
-                    if stat.S_ISDIR(marker_stat.st_mode):
-                        os.stat(".git/HEAD", dir_fd=directory_descriptor, follow_symlinks=False)
-                        return True
-                    continue
-                required_children = {
-                    ".hg": ("requires", "store"),
-                    ".svn": ("wc.db", "entries"),
-                    ".jj": ("repo", "working_copy"),
-                }.get(marker, ())
+            marker_stat = os.stat(marker, dir_fd=directory_descriptor, follow_symlinks=False)
+            if marker == ".git":
+                if stat.S_ISREG(marker_stat.st_mode):
+                    return True
                 if stat.S_ISDIR(marker_stat.st_mode):
-                    for required_child in required_children:
-                        try:
-                            os.stat(f"{marker}/{required_child}", dir_fd=directory_descriptor, follow_symlinks=False)
-                            return True
-                        except OSError:
-                            continue
+                    os.stat(".git/HEAD", dir_fd=directory_descriptor, follow_symlinks=False)
+                    return True
                 continue
-            if _repo_marker_is_real(path / marker, marker):
-                return True
+            required_children = {
+                ".hg": ("requires", "store"),
+                ".svn": ("wc.db", "entries"),
+                ".jj": ("repo", "working_copy"),
+            }.get(marker, ())
+            if stat.S_ISDIR(marker_stat.st_mode):
+                for required_child in required_children:
+                    try:
+                        os.stat(f"{marker}/{required_child}", dir_fd=directory_descriptor, follow_symlinks=False)
+                        return True
+                    except OSError:
+                        continue
         except OSError:
             continue
     return False
@@ -108,35 +88,25 @@ def _entry_info(
     path: Path,
     name: str,
     *,
-    resolved: Path | None = None,
+    entry_stat: os.stat_result,
+    resolved: Path,
     repo_info_cache: dict[Path, dict[str, Any]] | None = None,
     repo_info_deadline: float | None = None,
     performance_details: dict[str, float] | None = None,
     symlink_target_stat: os.stat_result | None = None,
     symlink_target_text: str | None = None,
-    symlink_target_pinned: bool = False,
-    entry_stat: os.stat_result | None = None,
-    inspection_path: Path | None = None,
-    inspection_descriptor: int | None = None,
+    inspection_descriptor: int = -1,
+    inspection_handle: paths.SafePathHandle | None = None,
     include_repo_info: bool = True,
 ) -> dict[str, Any]:
     started = _timing_started(performance_details)
-    if entry_stat is None:
-        try:
-            st = path.lstat()
-        except OSError as exc:
-            _record_elapsed(performance_details, "entry_lstat_ms", started)
-            return {"name": name, "kind": "error", "error": str(exc)}
-    else:
-        st = entry_stat
+    st = entry_stat
     _record_elapsed(performance_details, "entry_lstat_ms", started)
     mode = st.st_mode
     if stat.S_ISLNK(mode):
         started = _timing_started(performance_details)
         target_st = symlink_target_stat
         try:
-            if not symlink_target_pinned:
-                target_st = path.stat()
             if target_st is None:
                 raise FileNotFoundError(path)
             target_mode = target_st.st_mode
@@ -165,23 +135,27 @@ def _entry_info(
     }
     if stat.S_ISLNK(mode):
         # Surface where the link points so the Finder row can show "name -> target".
-        if symlink_target_text is not None:
-            info["symlink_target"] = symlink_target_text
-        else:
-            try:
-                info["symlink_target"] = os.readlink(path)
-            except OSError:
-                pass
+        if symlink_target_text is None:
+            raise paths.FilesystemError(
+                "symlink metadata requires descriptor-bound link text",
+                status=500,
+                message_key="fs.error.operationFailed",
+            )
+        info["symlink_target"] = symlink_target_text
     if kind == "dir":
-        if not include_repo_info:
+        started = _timing_started(performance_details)
+        if inspection_descriptor < 0:
+            raise paths.FilesystemError(
+                "repository inspection requires a pinned directory descriptor",
+                status=500,
+                message_key="fs.error.operationFailed",
+            )
+        info["is_repo"] = _directory_is_repo(inspection_descriptor)
+        _record_elapsed(performance_details, "repo_probe_ms", started)
+        if not include_repo_info and info["is_repo"] is True:
             info["repo_info_deferred"] = True
-        else:
-            started = _timing_started(performance_details)
-            repo_path = inspection_path or resolved or path
-            info["is_repo"] = _directory_is_repo(repo_path, directory_descriptor=inspection_descriptor)
-            _record_elapsed(performance_details, "repo_probe_ms", started)
-        if info.get("is_repo") is True:
-            repo_key = resolved if resolved is not None else paths._normalized_scope_path(path)
+        if include_repo_info and info.get("is_repo") is True:
+            repo_key = resolved
             remaining = None if repo_info_deadline is None else repo_info_deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
                 # `is_repo` is still enough to draw a usable, expandable Finder row.  Do not invent
@@ -189,30 +163,59 @@ def _entry_info(
                 info["repo_info_deferred"] = True
             elif repo_info_cache is None:
                 started = _timing_started(performance_details)
-                info["repo"] = git_repo_info(
-                    repo_path,
-                    include_status=False,
-                    timeout=remaining,
-                )
-                display_root = paths._darwin_devfs_live_realpath(resolved) if resolved is not None else path
-                info["repo"]["root"] = str(display_root)
-                info["repo"]["name"] = display_root.name
+                if inspection_handle is None:
+                    raise paths.FilesystemError(
+                        "repository inspection requires a pinned directory handle",
+                        status=500,
+                        message_key="fs.error.operationFailed",
+                    )
+                display_root = resolved
+                try:
+                    repo_payload = pinned_git_repo_info(
+                        inspection_handle,
+                        display_root=display_root,
+                        include_status=False,
+                        timeout=remaining,
+                    )
+                except paths.FilesystemError as error:
+                    if error.message_key != "fs.error.notGitRepo" and error.status not in {413, 504}:
+                        raise
+                    info["repo_info_deferred"] = True
+                else:
+                    repo_payload["root"] = str(display_root)
+                    repo_payload["name"] = display_root.name
+                    info["repo"] = repo_payload
                 _record_elapsed(performance_details, "repo_info_ms", started)
             else:
                 repo = repo_info_cache.get(repo_key)
                 if repo is None:
                     started = _timing_started(performance_details)
-                    repo = git_repo_info(
-                        repo_path,
-                        include_status=False,
-                        timeout=remaining,
-                    )
-                    display_root = paths._darwin_devfs_live_realpath(resolved) if resolved is not None else path
-                    repo["root"] = str(display_root)
-                    repo["name"] = display_root.name
+                    if inspection_handle is None:
+                        raise paths.FilesystemError(
+                            "repository inspection requires a pinned directory handle",
+                            status=500,
+                            message_key="fs.error.operationFailed",
+                        )
+                    display_root = resolved
+                    try:
+                        repo = pinned_git_repo_info(
+                            inspection_handle,
+                            display_root=display_root,
+                            include_status=False,
+                            timeout=remaining,
+                        )
+                    except paths.FilesystemError as error:
+                        if error.message_key != "fs.error.notGitRepo" and error.status not in {413, 504}:
+                            raise
+                        info["repo_info_deferred"] = True
+                    if repo is not None:
+                        repo["root"] = str(display_root)
+                        repo["name"] = display_root.name
                     _record_elapsed(performance_details, "repo_info_ms", started)
-                    repo_info_cache[repo_key] = repo
-                info["repo"] = repo
+                    if repo is not None:
+                        repo_info_cache[repo_key] = repo
+                if repo is not None:
+                    info["repo"] = repo
     # The directory scan already canonicalized the entry for its secret-path check.  Its
     # target stat is the same stat needed for a symlink's physical identity.
     identity_stat = target_st if stat.S_ISLNK(mode) and kind != "symlink-broken" else st
@@ -225,12 +228,12 @@ def _entry_info(
 def _resolved_symlink_target(
     path: Path,
     *,
-    target_text: str | None = None,
+    target_text: str,
 ) -> Path:
     """Resolve a symlink target without carrying raced state into later rows."""
 
     try:
-        target = Path(target_text if target_text is not None else os.readlink(path))
+        target = Path(target_text)
     except OSError:
         return paths._normalized_scope_path(path)
     if not target.is_absolute():
@@ -273,12 +276,13 @@ def _watch_signature_from_entries(
 
 
 def _visible_directory_names(
-    path: Path,
+    root_descriptor: int,
     *,
+    resolved_parent: Path,
+    requested_path: Path,
     child_limit: int | None = None,
     performance_details: dict[str, float] | None = None,
     include_repo_info: bool = True,
-    requested_path: Path | None = None,
     operation: str = "list_directory",
 ) -> tuple[list[str], bool]:
     limit = max(1, min(int(MAX_DIRECTORY_ENTRIES), int(child_limit))) if child_limit is not None else max(1, int(MAX_DIRECTORY_ENTRIES))
@@ -289,27 +293,12 @@ def _visible_directory_names(
     started = _timing_started(performance_details)
     directory_descriptor = None
     try:
-        requested_parent = requested_path or path
-        # `path` is this scan's pinned root, expressed as its `/dev/fd/N`/`/proc/self/fd/N`
-        # descriptor path. On Linux `_normalized_scope_path` already resolves it to the true
-        # directory by following the `/proc/self/fd/N` symlink; on Darwin `/dev/fd/N` isn't a
-        # symlink, so without this it stays raw, and every child's `resolved` built from it below
-        # (used for both display fields AND `_path_is_secret`'s directory-component matching)
-        # would silently defeat secret-directory detection for a child whose parent was swapped
-        # after this exact descriptor's own authorization. See `_darwin_devfs_live_realpath`.
-        resolved_parent = paths._darwin_devfs_live_realpath(paths._normalized_scope_path(path))
-        descriptor_parent = path.parent
-        if descriptor_parent in {Path("/proc/self/fd"), Path("/dev/fd")}:
-            directory_descriptor = os.open(
-                ".",
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-                dir_fd=int(path.name),
-            )
-        else:
-            directory_descriptor = os.open(
-                path,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
-            )
+        requested_parent = requested_path
+        directory_descriptor = os.open(
+            ".",
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=root_descriptor,
+        )
     finally:
         _record_elapsed(performance_details, "scan_resolve_ms", started)
     started = _timing_started(performance_details)
@@ -334,33 +323,33 @@ def _visible_directory_names(
                     truncated = True
                     break
                 entry_path = requested_parent / name
-                paths.name_observed(operation, entry_path)
                 try:
+                    paths._authorize_requested_path(
+                        entry_path,
+                        resolved_parent / name,
+                        operation=operation,
+                    )
                     entry_stat = entry.stat(follow_symlinks=False)
-                except OSError:
+                except (paths.FilesystemError, OSError):
                     continue
                 started = _timing_started(performance_details)
                 try:
                     is_symlink = stat.S_ISLNK(entry_stat.st_mode)
                     target_st = None
                     target_text = None
-                    target_pinned = False
                     if is_symlink:
                         link_fd = None
                         try:
                             link_fd = os.open(
                                 name,
-                                getattr(os, "O_PATH", os.O_RDONLY) | paths.nofollow_flag(),
+                                paths.descriptor_open_flags(paths.metadata_descriptor_flags()),
                                 dir_fd=directory_descriptor,
                             )
                             paths.authority_pinned(operation, entry_path)
                             entry_stat = os.fstat(link_fd)
                             target_text = os.readlink("", dir_fd=link_fd)
-                        except OSError:
-                            try:
-                                target_text = os.readlink(name, dir_fd=directory_descriptor)
-                            except OSError:
-                                target_text = None
+                        except OSError as error:
+                            raise error
                         finally:
                             if link_fd is not None:
                                 os.close(link_fd)
@@ -374,16 +363,26 @@ def _visible_directory_names(
                     _record_elapsed(performance_details, "scan_resolve_ms", started)
                 started = _timing_started(performance_details)
                 try:
-                    is_secret = paths._path_is_secret(entry_path, resolved=resolved)
+                    paths._authorize_requested_path(
+                        entry_path,
+                        resolved,
+                        operation=operation,
+                        observe_name=False,
+                    )
+                    blocked = False
+                except paths.FilesystemError as error:
+                    if error.status != 403:
+                        raise
+                    blocked = True
                 finally:
                     _record_elapsed(performance_details, "scan_secret_filter_ms", started)
-                if is_secret:
+                if blocked:
                     continue
                 try:
                     child_context = (
                         paths.safe_path(
                             str(entry_path),
-                            flags=getattr(os, "O_PATH", os.O_RDONLY),
+                            flags=paths.metadata_descriptor_flags(),
                             resolved_path=resolved,
                             operation=operation,
                             observe_name=False,
@@ -393,7 +392,7 @@ def _visible_directory_names(
                             directory_descriptor,
                             entry_path,
                             resolved,
-                            flags=getattr(os, "O_PATH", os.O_RDONLY),
+                            flags=paths.metadata_descriptor_flags(),
                             operation=operation,
                             observe_name=False,
                         )
@@ -407,7 +406,6 @@ def _visible_directory_names(
                                 if not is_symlink and stat.S_ISLNK(child_handle.stat_result.st_mode):
                                     continue
                                 target_st = child_handle.stat_result if is_symlink else None
-                                target_pinned = is_symlink
                                 info = _entry_info(
                                     entry_path,
                                     name,
@@ -417,10 +415,9 @@ def _visible_directory_names(
                                     performance_details=performance_details,
                                     symlink_target_stat=child_handle.stat_result if is_symlink else None,
                                     symlink_target_text=target_text,
-                                    symlink_target_pinned=is_symlink,
                                     entry_stat=entry_stat if is_symlink else child_handle.stat_result,
-                                    inspection_path=child_handle.descriptor_path(),
                                     inspection_descriptor=child_handle.descriptor,
+                                    inspection_handle=child_handle,
                                     include_repo_info=include_repo_info,
                                 )
                             finally:
@@ -428,7 +425,7 @@ def _visible_directory_names(
                     finally:
                         _record_elapsed(performance_details, "scan_child_context_ms", child_context_started)
                 except paths.FilesystemError as error:
-                    if error.message_key == "fs.error.credentialBlocked":
+                    if error.status == 403:
                         continue
                     if is_symlink and error.status in {403, 404}:
                         info = _entry_info(
@@ -440,7 +437,6 @@ def _visible_directory_names(
                             performance_details=performance_details,
                             symlink_target_stat=None,
                             symlink_target_text=target_text,
-                            symlink_target_pinned=True,
                             entry_stat=entry_stat,
                             include_repo_info=include_repo_info,
                         )
@@ -453,7 +449,6 @@ def _visible_directory_names(
                     resolved,
                     symlink_target_stat=target_st,
                     symlink_target_text=target_text,
-                    symlink_target_pinned=target_pinned,
                     info=info,
                 ))
     finally:
@@ -463,8 +458,9 @@ def _visible_directory_names(
 
 
 def _list_directory_from_pinned_root(
-    raw_path: str,
+    root_descriptor: int,
     *,
+    resolved_root: Path,
     performance_details: dict[str, float] | None = None,
     display_path: Path | None = None,
     root_stat: os.stat_result | None = None,
@@ -496,13 +492,14 @@ def _list_directory_from_pinned_root(
         })
     started = _timing_started(performance_details)
     try:
-        path = Path(raw_path)
+        path = resolved_root
     finally:
         _record_elapsed(performance_details, "validate_ms", started)
     started = _timing_started(performance_details)
     try:
         names, truncated = _visible_directory_names(
-            path,
+            root_descriptor,
+            resolved_parent=resolved_root,
             performance_details=performance_details,
             include_repo_info=include_repo_info,
             requested_path=display_path,
@@ -515,37 +512,13 @@ def _list_directory_from_pinned_root(
     started = _timing_started(performance_details)
     try:
         for name in names:
-            entry_path = path / name
-            if isinstance(name, _ResolvedDirectoryName) and name.info is not None:
-                info = name.info
-                entries.append(info)
-                if performance_details is not None:
-                    if info.get("is_repo") is True:
-                        performance_details["repo_count"] += 1
-                    if info.get("repo_info_deferred") is True:
-                        performance_details["repo_deferred_count"] += 1
-                continue
-            # Security must be checked for every child after resolving symlinks.  Reuse that
-            # canonical result for identity so a row does not resolve/stat the same entry twice.
-            resolved = name.resolved if isinstance(name, _ResolvedDirectoryName) else None
-            if resolved is None:
-                # Retain the standalone helper contract for callers/tests which provide plain
-                # names, while normal listings reuse the security scan's canonical result.
-                resolved = paths._normalized_scope_path(entry_path)
-                if paths._path_is_secret(entry_path, resolved=resolved):
-                    continue
-            info = _entry_info(
-                entry_path,
-                name,
-                resolved=resolved,
-                repo_info_cache=repo_info_cache,
-                repo_info_deadline=repo_info_deadline,
-                performance_details=performance_details,
-                symlink_target_stat=(name.symlink_target_stat if isinstance(name, _ResolvedDirectoryName) else None),
-                symlink_target_text=(name.symlink_target_text if isinstance(name, _ResolvedDirectoryName) else None),
-                symlink_target_pinned=(name.symlink_target_pinned if isinstance(name, _ResolvedDirectoryName) else False),
-                include_repo_info=include_repo_info,
-            )
+            if not isinstance(name, _ResolvedDirectoryName) or name.info is None:
+                raise paths.FilesystemError(
+                    "directory scan returned an entry without descriptor-bound metadata",
+                    status=500,
+                    message_key="fs.error.operationFailed",
+                )
+            info = name.info
             entries.append(info)
             if performance_details is not None:
                 if info.get("is_repo") is True:
@@ -599,7 +572,8 @@ def list_directory(
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_path, flags=directory_flags, operation="list_directory") as handle:
         return _list_directory_from_pinned_root(
-            str(handle.descriptor_path()),
+            handle.descriptor,
+            resolved_root=handle.resolved,
             performance_details=performance_details,
             display_path=handle.requested,
             root_stat=handle.stat_result,
@@ -610,13 +584,14 @@ def list_directory(
 
 def watch_signature(raw_path: str, *, child_limit: int = 0) -> tuple[Any, ...]:
     try:
-        with paths.safe_path(raw_path, flags=getattr(os, "O_PATH", os.O_RDONLY), operation="watch_signature") as handle:
+        with paths.safe_path(raw_path, flags=paths.metadata_descriptor_flags(), operation="watch_signature") as handle:
             file_stat = handle.stat_result
             if not stat.S_ISDIR(file_stat.st_mode) or child_limit <= 0:
                 kind = "dir" if stat.S_ISDIR(file_stat.st_mode) else "file"
                 return (str(handle.requested), kind, int(file_stat.st_mtime_ns), int(file_stat.st_size))
             names, _truncated = _visible_directory_names(
-                handle.descriptor_path(),
+                handle.descriptor,
+                resolved_parent=handle.resolved,
                 child_limit=child_limit,
                 include_repo_info=False,
                 requested_path=handle.requested,

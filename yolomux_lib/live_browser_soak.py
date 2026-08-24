@@ -6,9 +6,7 @@ import hashlib
 import json
 import math
 import os
-import platform
 import re
-import shutil
 import ssl
 import subprocess
 import time
@@ -36,6 +34,7 @@ from .auth import auth_cookie_value
 from .auth import read_auth_users
 from . import browser_diagnostic_receipts
 from .diagnostic_redaction import redact_diagnostic_value
+from .infra.listener_census import unique_listener_pid
 from .tmux.sessions import process_cwd
 
 
@@ -62,7 +61,6 @@ NEGATIVE_SOURCE = "browser"
 NEGATIVE_MESSAGE = "controlled browser failure"
 NEGATIVE_CANARY = "P0-LIVE-SOAK-CANARY-DO-NOT-RETAIN"
 STATS_READINESS_SECONDS = 30
-LISTENER_PROBE_TIMEOUT_SECONDS = 3
 LIVE_SOAK_QUERY_SHAPES = (
     ("sessions", "layout"),
     ("sessions", "layout", "tabs", "state"),
@@ -238,29 +236,8 @@ def validate_arguments(url: str, duration: int, expected_head: str, expected_bun
         raise ValueError("--expected-cwd must be an absolute path")
 
 
-def listener_pids(port: int) -> list[str]:
-    """Find the listening PIDs the way boot.sh:307 port_listener_pids() does: ss on Linux, lsof only as the macOS/no-ss path.
-
-    `lsof -iTCP` walks every open file descriptor on the host, which costs seconds on a box with
-    thousands of FDs and made this gate time out before a browser ever launched. `ss` asks the
-    kernel for one port. docs/DEVELOPMENT.md:286 already states this platform split as the contract.
-    """
-    if platform.system() == "Linux" and shutil.which("ss"):
-        result = subprocess.run(["ss", "-ltnp", f"sport = :{port}"], capture_output=True, text=True, check=False, timeout=LISTENER_PROBE_TIMEOUT_SECONDS)
-        return sorted({match for match in re.findall(r"\bpid=(\d+)", result.stdout)}, key=int)
-    result = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True, check=False, timeout=LISTENER_PROBE_TIMEOUT_SECONDS)
-    return sorted({line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()}, key=int)
-
-
-def listener_pid(port: int) -> int:
-    pids = listener_pids(port)
-    if len(pids) != 1:
-        raise RuntimeError(f"expected exactly one listener on port {port}, found {pids or 'none'}")
-    return int(pids[0])
-
-
 def listener_identity(port: int) -> ListenerIdentity:
-    pid = listener_pid(port)
+    pid = unique_listener_pid(port)
     cwd = process_cwd(pid)
     if not cwd:
         raise RuntimeError(f"cannot resolve listener cwd for PID {pid}")

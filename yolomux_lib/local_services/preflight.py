@@ -44,6 +44,7 @@ from .lifetime import TerminationRequest
 from .lifetime import authorize_service_destruction
 from .lifetime import terminate_authorized_processes
 from .registry import ProcessTableEntry
+from .registry import namespace_dimension
 from .registry import ProcessTableUnavailable
 from .registry import bounded_preflight_process_table
 from .registry import live_process_group
@@ -79,14 +80,23 @@ PREFLIGHT_VERIFY_POLL_SECONDS = 0.25
 def stale_orphans_of_dead_owner(
     record: dict,
     table: dict[int, ProcessTableEntry],
-    *,
-    namespace: Path | None = None,
 ) -> dict[int, dict]:
     """Return fenced records for orphans matching a live-owner member snapshot.
 
-    Each record is stamped with the three dimensions the destructive owner binds
-    for a group-scoped target: the resolver that produced it, the directory the
-    owning lease was read from, and the dead owner's recorded process group.
+    Each record is stamped with the dimensions the destructive owner binds for a
+    group-scoped target: the resolver that produced it and the dead owner's
+    recorded process group.
+
+    The namespace is NOT one of them, and this function no longer takes one.  A
+    server port lease file has never persisted a directory, so the only value
+    that could go in that slot was the one the caller had just handed in -- and
+    the caller then passed the same expression as the expected value, a
+    comparison against itself that no input could fail.  These records carry an
+    empty namespace and the shared owner reports the dimension as structural, so
+    the row says the dimension does not apply instead of reporting a path that
+    reads as a proof and is not one.  The parameter is gone rather than kept and
+    ignored: an argument that cannot change any outcome is the same defect in a
+    different shape.
     """
     try:
         lease_pid = int(record.get("pid") or 0)
@@ -110,7 +120,7 @@ def stale_orphans_of_dead_owner(
         pid: {
             **process_fence_record(record, pid=pid, start_identity=process_table_start_identity(entry)),
             "service": PREFLIGHT_WEB_GROUP_KIND,
-            "namespace": str(namespace) if namespace is not None else "",
+            "namespace": "",
             "pgid": lease_pgid,
         }
         for pid, entry in table.items()
@@ -145,9 +155,15 @@ def stale_idle_service_members(
 ) -> dict[int, dict]:
     """Select fenced members of idle service groups left by a dead launcher.
 
-    Stamped with the same three group-scope dimensions as the web-owner orphans,
-    except that the kind here is the service the record itself names -- these
-    members share a leader that IS an addressable service.
+    Stamped with the same group-scope dimensions as the web-owner orphans, except
+    that the kind here is the service the record itself names -- these members
+    share a leader that IS an addressable service.
+
+    That leader also persists its own directory, so unlike the web-owner orphans
+    these members have a namespace that is genuinely independent of this caller:
+    it is carried out of the leader's record rather than restamped from the
+    directory this function just resolved, so a leader naming another root
+    refuses instead of being silently relabelled.
     """
     members: dict[int, dict] = {}
     service_dir = Path(state_dir) / "services"
@@ -170,7 +186,7 @@ def stale_idle_service_members(
                 pid: {
                     **member_record,
                     "service": str(group["service"]),
-                    "namespace": str(service_dir),
+                    "namespace": str(group["namespace"]),
                     "pgid": int(group["pgid"]),
                 }
                 for pid, member_record in group["member_records"].items()
@@ -181,27 +197,39 @@ def stale_idle_service_members(
 def _stale_orphan_request(
     stale_record: dict[str, Any],
     *,
+    resolved_namespace: Path,
     table: dict[int, ProcessTableEntry],
     generation_reader: Callable[[int], str | None],
     process_group_reader: Callable[[int], int | None],
 ) -> TerminationRequest:
     """Bind one stale orphan to every dimension it genuinely carries, or refuse.
 
-    ``expected_kind`` and ``expected_namespace`` are read back out of the record
-    the resolver stamped, so a record that reached this loop from anywhere else
-    -- a hand-built dict, a different resolver, a record for another directory --
-    carries no kind or the wrong one and produces zero signals. The dimension
-    that is MEASURED rather than structural is the process group: the resolver
-    proved it from the dead owner's lease, and the owner re-reads it live off the
-    running pid immediately before signalling.
+    ``expected_kind`` is read back out of the record the resolver stamped, so a
+    record that reached this loop from anywhere else -- a hand-built dict, a
+    different resolver -- carries no kind and produces zero signals. It cannot
+    refuse a record that carries the WRONG kind, because both sides are then one
+    expression; that gap is the service-kind twin of the namespace one below and
+    is called out here rather than papered over.
+
+    The namespace no longer comes out of the record on both sides. Both halves
+    come from the shared owner, which compares a PERSISTED directory against the
+    one this preflight resolved and reports the dimension as structural for a
+    target that persists none -- a web port lease has never had the field. The
+    dimension that is MEASURED rather than structural is the process group: the
+    resolver proved it from the dead owner's lease, and the owner re-reads it
+    live off the running pid immediately before signalling.
     """
 
+    fenced = dict(stale_record)
+    fenced["namespace"], expected_namespace = namespace_dimension(
+        stale_record.get("namespace"), resolved_namespace
+    )
     return TerminationRequest(
         authorization=authorize_service_destruction(
-            stale_record,
-            diagnostic=process_record_diagnostic(stale_record, table=table),
+            fenced,
+            diagnostic=process_record_diagnostic(fenced, table=table),
             expected_kind=str(stale_record.get("service") or ""),
-            expected_namespace=str(stale_record.get("namespace") or ""),
+            expected_namespace=expected_namespace,
             live_generation_reader=generation_reader,
             claim_state=PREFLIGHT_CLAIM_STATE,
             require_claim=True,
@@ -293,7 +321,7 @@ def preflight_port(
                 "failures": {},
                 "diagnostic": owner_diagnostic.as_dict(),
             }
-    stale_records = stale_orphans_of_dead_owner(record, table, namespace=Path(state_dir))
+    stale_records = stale_orphans_of_dead_owner(record, table)
     stale_records.update(stale_idle_service_members(port, state_dir, table, service_status_reader))
     stale = sorted(stale_records)
     reaped: list[int] = []
@@ -311,6 +339,7 @@ def preflight_port(
                 [
                     _stale_orphan_request(
                         stale_records[pid],
+                        resolved_namespace=Path(state_dir) / "services",
                         table=table,
                         generation_reader=generation_reader,
                         process_group_reader=process_group_reader,

@@ -3,6 +3,8 @@
 
 import ast
 from contextlib import contextmanager
+import errno
+import hashlib
 import importlib.util
 import json
 import math
@@ -15,6 +17,7 @@ import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -591,7 +594,7 @@ def test_check_runner_launches_slowest_lanes_first(monkeypatch):
     final_lane = check.Lane("timing", "timing", (), run_last=True)
 
     def run(mode):
-        def record(selected):
+        def record(selected, **_kwargs):
             events.append((mode, [lane.name for lane in selected]))
             return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
         return record
@@ -795,11 +798,11 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         events.append(("lock", enabled, lock_path))
         yield enabled
 
-    def fake_run_parallel(selected):
+    def fake_run_parallel(selected, *, output_root=None):
         events.append(("run", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
-    def fake_run_serial(selected):
+    def fake_run_serial(selected, *, output_root=None):
         events.append(("serial", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
@@ -840,7 +843,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
 
     check = load_check_module()
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
-    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
     monkeypatch.setattr(
         check,
         "run_certification_phase",
@@ -867,7 +870,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
 def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeypatch, capsys, reason):
     check = load_check_module()
     monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
-    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
     monkeypatch.setattr(
         check,
         "run_certification_phase",
@@ -905,7 +908,7 @@ def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
 
     monkeypatch.setattr(check, "expensive_tool_lock", fake_expensive_tool_lock)
     monkeypatch.setattr(check, "active_yolomux_server_records", fail_active_records)
-    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(selected[0].name, selected[0].label, True, 0.0, "")])
+    monkeypatch.setattr(check, "run_parallel", lambda selected, **_kwargs: [check.LaneResult(selected[0].name, selected[0].label, True, 0.0, "")])
     monkeypatch.setattr(check, "performance_report_path", lambda _value: report_path)
 
     def fail_certification(*, evidence_dir):
@@ -917,7 +920,7 @@ def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
 
     assert events == [("lock", False)]
     payload = json.loads(report_path.read_text(encoding="utf-8"))
-    assert payload["schema"] == 3
+    assert payload["schema"] == 4
     assert payload["certification"] is None
     assert payload["selected_lanes"] == ["whitespace"]
 
@@ -953,7 +956,7 @@ def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path)
         "lanes": [{"label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "test_durations": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
         "mode": "parallel",
         "pytest_workers": {"browser": check.pytest_worker_counts()[1], "e2e": check.pytest_worker_counts()[2], "nonbrowser": check.pytest_worker_counts()[0]},
-        "schema": 3,
+        "schema": 4,
         "selected_lanes": ["demo"],
         "wall_seconds": 1.5,
     }
@@ -1044,6 +1047,276 @@ def test_run_lane_exports_its_identity_to_every_step(monkeypatch):
 
     assert result.ok
     assert environments[0][check.CHECK_LANE_ENV] == "pytest-e2e"
+
+
+@pytest.mark.parametrize(("returncode", "expected_ok"), ((0, True), (7, False)))
+def test_run_lane_retains_complete_private_output_with_hash_and_true_exit(
+    tmp_path, returncode, expected_ok
+):
+    check = load_check_module()
+    probe = tmp_path / "lane_probe.py"
+    stdout = "stdout-begin\n" + ("o" * 8192) + "\nstdout-end\n"
+    stderr = "stderr-begin\n" + ("e" * 8192) + "\nstderr-end\n"
+    probe.write_text(
+        "import sys\n"
+        f"sys.stdout.write({stdout!r})\n"
+        f"sys.stderr.write({stderr!r})\n"
+        f"raise SystemExit({returncode})\n",
+        encoding="utf-8",
+    )
+    output_root = check.lane_output_root(Path("/tmp") / f"check-retention-{tmp_path.name}.json")
+    lane = check.Lane("pytest-browser", "browser", (check.Step("probe", [sys.executable, str(probe)]),))
+
+    result = check.run_lane(lane, output_root=output_root)
+
+    assert result.ok is expected_ok
+    assert result.steps[-1].returncode == returncode
+    assert result.output_artifact is not None
+    artifact_path = Path(result.output_artifact.path)
+    retained = artifact_path.read_text(encoding="utf-8")
+    assert stdout in retained and stderr in retained
+    assert retained == result.output
+    assert result.output_artifact.bytes == len(retained.encode("utf-8"))
+    assert result.output_artifact.sha256 == hashlib.sha256(retained.encode("utf-8")).hexdigest()
+    assert artifact_path.parent == output_root
+    assert artifact_path.stat().st_mode & 0o777 == 0o600
+    assert output_root.stat().st_mode & 0o777 == 0o700
+    if returncode:
+        assert retained.endswith(f"exit {returncode}: probe\n")
+
+    payload = check.performance_report_payload(
+        selected=[lane],
+        results=[result],
+        serial=True,
+        elapsed=1.0,
+        child_usage={"user_seconds": 0.0, "system_seconds": 0.0, "max_rss": 1, "max_rss_unit": "KiB"},
+    )
+    lane_payload = payload["lanes"][0]
+    assert lane_payload["output_artifact"] == {
+        "path": str(artifact_path),
+        "sha256": result.output_artifact.sha256,
+        "bytes": result.output_artifact.bytes,
+    }
+    assert "output" not in lane_payload
+    assert len(json.dumps(payload)) < len(retained)
+
+
+def test_run_lane_retains_primary_pytest_failure_and_teardown_gate_error(tmp_path):
+    check = load_check_module()
+    probe = tmp_path / "test_teardown_probe.py"
+    primary_sentinel = "primary-failure-sentinel"
+    teardown_sentinel = "teardown-gate-sentinel"
+    probe.write_text(
+        "import pytest\n"
+        "@pytest.fixture\n"
+        "def gate():\n"
+        "    yield\n"
+        f"    raise RuntimeError({teardown_sentinel!r})\n"
+        "def test_primary(gate):\n"
+        f"    raise AssertionError({primary_sentinel!r})\n",
+        encoding="utf-8",
+    )
+    output_root = check.lane_output_root(Path("/tmp") / f"check-teardown-{tmp_path.name}.json")
+
+    result = check.run_lane(
+        check.Lane(
+            "pytest-browser",
+            "browser",
+            (check.Step("pytest browser", [sys.executable, "-m", "pytest", "-q", str(probe)]),),
+        ),
+        output_root=output_root,
+    )
+
+    assert result.ok is False and result.steps[-1].returncode == 1
+    retained = Path(result.output_artifact.path).read_text(encoding="utf-8")
+    assert primary_sentinel in retained
+    assert teardown_sentinel in retained
+    assert result.output_artifact.sha256 == hashlib.sha256(retained.encode("utf-8")).hexdigest()
+
+
+def test_run_lane_reports_insufficient_space_without_changing_a_passing_verdict(monkeypatch, tmp_path):
+    check = load_check_module()
+    output_root = check.lane_output_root(tmp_path / "runtime.json")
+    monkeypatch.setattr(
+        check.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=check.LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES),
+    )
+
+    result = check.run_lane(
+        check.Lane("probe", "probe", (check.Step("probe", [sys.executable, "-c", "print('ok')"]),)),
+        output_root=output_root,
+    )
+
+    assert result.ok is True and result.steps[-1].returncode == 0
+    assert result.output_artifact is None
+    failure = result.output_retention_failure
+    assert failure is not None
+    assert failure.reason == "insufficient_space"
+    assert failure.attempted_bytes == len(result.output.encode("utf-8"))
+    assert failure.free_bytes == failure.reserve_bytes == check.LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES
+    assert not (output_root / "probe.txt").exists()
+    assert check.lane_output_report_fields(result) == {
+        "output_retention_failure": {
+            "reason": "insufficient_space",
+            "error_type": "OSError",
+            "detail": "retention would cross the reserved free-space floor",
+            "attempted_bytes": failure.attempted_bytes,
+            "free_bytes": check.LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES,
+            "reserve_bytes": check.LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES,
+        }
+    }
+
+
+def test_lane_output_root_is_isolated_under_tmp():
+    check = load_check_module()
+
+    assert check.lane_output_root(Path("/tmp/yolomux-check-runs/check-1.json")) == Path(
+        "/tmp/yolomux-check-runs/check-1.json.artifacts"
+    )
+    assert check.lane_output_root(Path("/tmp/report.artifacts")) == Path(
+        "/tmp/report.artifacts.artifacts"
+    )
+    with pytest.raises(ValueError, match="under /tmp"):
+        check.lane_output_root(REPO_ROOT / "check.json")
+
+
+@pytest.mark.parametrize(("child_returncode", "expected_main"), ((0, 0), (9, 1)))
+def test_main_wires_lane_artifact_into_report_without_false_green(
+    monkeypatch, tmp_path, child_returncode, expected_main
+):
+    check = load_check_module()
+    report = tmp_path / "runtime.json"
+    probe = tmp_path / "runner_probe.py"
+    sentinel = "full-output-sentinel"
+    probe.write_text(
+        f"print({sentinel!r})\n" f"raise SystemExit({child_returncode})\n",
+        encoding="utf-8",
+    )
+    lane = check.Lane(
+        "retention-probe",
+        "retention probe",
+        (
+            check.Step(
+                "probe",
+                [
+                    sys.executable,
+                    str(probe),
+                ],
+            ),
+        ),
+    )
+
+    monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
+    monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+
+    @contextmanager
+    def writer(*_args, **_kwargs):
+        yield None
+
+    monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", writer)
+
+    assert check.main(["--lane", "retention-probe", "--serial", "--no-tool-guard"]) == expected_main
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lane_payload = payload["lanes"][0]
+    artifact = lane_payload["output_artifact"]
+    artifact_path = Path(artifact["path"])
+    retained = artifact_path.read_text(encoding="utf-8")
+    assert artifact_path.parent == check.lane_output_root(report)
+    assert sentinel in retained
+    assert artifact["sha256"] == hashlib.sha256(retained.encode("utf-8")).hexdigest()
+    assert lane_payload["steps"][0]["returncode"] == child_returncode
+    assert lane_payload["ok"] is (child_returncode == 0)
+    assert sentinel not in report.read_text(encoding="utf-8")
+
+
+def test_main_report_named_artifacts_stays_json_beside_a_separate_artifact_directory(
+    monkeypatch, tmp_path
+):
+    check = load_check_module()
+    report = tmp_path / "report.artifacts"
+    probe = tmp_path / "runner_probe.py"
+    probe.write_text("raise SystemExit(9)\n", encoding="utf-8")
+    lane = check.Lane(
+        "retention-probe",
+        "retention probe",
+        (check.Step("probe", [sys.executable, str(probe)]),),
+    )
+    monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
+    monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+
+    @contextmanager
+    def writer(*_args, **_kwargs):
+        yield None
+
+    monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", writer)
+
+    assert check.main(["--lane", "retention-probe", "--serial", "--no-tool-guard"]) == 1
+
+    artifact_root = tmp_path / "report.artifacts.artifacts"
+    assert report.is_file() and artifact_root.is_dir()
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lane_payload = payload["lanes"][0]
+    assert lane_payload["ok"] is False
+    assert lane_payload["steps"][0]["returncode"] == 9
+    assert Path(lane_payload["output_artifact"]["path"]).parent == artifact_root
+
+
+@pytest.mark.parametrize(
+    ("write_error", "expected_error_type"),
+    (
+        (PermissionError("permission-denied-" + ("x" * 1000)), "PermissionError"),
+        (OSError(errno.ENOSPC, "disk-full-" + ("x" * 1000)), "OSError"),
+    ),
+)
+def test_main_reports_bounded_retention_write_failure_without_masking_child_failure(
+    monkeypatch, tmp_path, write_error, expected_error_type
+):
+    check = load_check_module()
+    report = tmp_path / "runtime.json"
+    child_sentinel = "completed-child-failure"
+    probe = tmp_path / "runner_probe.py"
+    probe.write_text(
+        f"print({child_sentinel!r})\nraise SystemExit(9)\n",
+        encoding="utf-8",
+    )
+    lane = check.Lane(
+        "retention-probe",
+        "retention probe",
+        (check.Step("probe", [sys.executable, str(probe)]),),
+    )
+    monkeypatch.setattr(check, "lanes", lambda **_kwargs: [lane])
+    monkeypatch.setattr(check, "performance_report_path", lambda _value: report)
+    monkeypatch.setattr(check.docker_image, "container_available", lambda _root: (False, ""))
+    monkeypatch.setattr(
+        check,
+        "atomic_write_text",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(write_error),
+    )
+
+    @contextmanager
+    def writer(*_args, **_kwargs):
+        yield None
+
+    monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", writer)
+
+    assert check.main(["--lane", "retention-probe", "--serial", "--no-tool-guard"]) == 1
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lane_payload = payload["lanes"][0]
+    assert lane_payload["ok"] is False
+    assert lane_payload["steps"][0]["returncode"] == 9
+    failure = lane_payload["output_retention_failure"]
+    assert failure["reason"] == "write_failed"
+    assert failure["error_type"] == expected_error_type
+    assert len(failure["detail"]) == check.LANE_OUTPUT_FAILURE_DETAIL_CHARS
+    assert failure["attempted_bytes"] > len(child_sentinel)
+    assert failure["free_bytes"] is None
+    assert failure["reserve_bytes"] == check.LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES
+    assert "output_artifact" not in lane_payload and "output" not in lane_payload
 
 
 def test_collection_assigns_class_specific_timeout_ceilings(tmp_path):
@@ -1686,11 +1959,14 @@ def test_certify_verdicts_cannot_reach_green_through_a_refusal(tmp_path):
     assert latency_calibration.certify_verdicts(nodeid="n", label="green", verdicts=green, qualification=qualified, evidence_root=evidence_root)["verdicts"] == green
 
 
+CERTIFICATION_LOAD_FILE_BYTES = 262_144
+
+
 def _burn_cpu_and_disk(deadline_monotonic, scratch):
     """One fixed load unit: a busy CPU loop plus repeated fsynced writes, until the deadline."""
 
     value = 1
-    payload = b"x" * 262144
+    payload = b"x" * CERTIFICATION_LOAD_FILE_BYTES
     with open(scratch, "wb", buffering=0) as handle:
         while time.monotonic() < deadline_monotonic:
             for index in range(200_000):
@@ -1704,21 +1980,22 @@ certification_phase_only = latency_calibration.certification_phase_fixture()
 
 
 def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certification_phase_only, tmp_path):
-    """The phase's own negative control: the qualifier must still separate quiet from loaded here.
-
-    A gate that cannot fail is worse than no gate. `certification_phase_only` has already proved
-    this host qualifies, so the baseline is a real exclusive-phase measurement rather than an
-    injected dict; this then puts real CPU and fsync load on the same box and requires the same
-    thresholds to refuse it. The refusal must name a signal this load actually moved, so the
-    assertion cannot be satisfied by load that was already there.
+    """Prove the qualifier still separates its own qualified baseline from real CPU and fsync load.
+    The refusal must name a signal this load moved, so ambient load cannot satisfy the control.
     """
 
     baseline = certification_phase_only["measurement"]
-    workers = min(4 * (os.cpu_count() or 1), 96)
+    scratch_filesystem = os.statvfs(tmp_path)
+    available_disk_bytes = scratch_filesystem.f_bavail * scratch_filesystem.f_frsize
+    # Keep one file span in reserve per worker so the negative control cannot consume all scratch.
+    disk_worker_limit = available_disk_bytes // (2 * CERTIFICATION_LOAD_FILE_BYTES)
+    assert disk_worker_limit >= 1, f"negative control scratch has only {available_disk_bytes} free bytes"
+    workers = min(4 * (os.cpu_count() or 1), 96, disk_worker_limit)
     deadline = time.monotonic() + 6.0
+    scratch_paths = [tmp_path / f"load-{index}.bin" for index in range(workers)]
     processes = [
-        multiprocessing.Process(target=_burn_cpu_and_disk, args=(deadline, str(tmp_path / f"load-{index}.bin")))
-        for index in range(workers)
+        multiprocessing.Process(target=_burn_cpu_and_disk, args=(deadline, str(scratch_path)))
+        for scratch_path in scratch_paths
     ]
     try:
         for process in processes:
@@ -1730,10 +2007,17 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=10)
-
+        for scratch_path in scratch_paths:
+            with scratch_path.open("r+b", buffering=0) as handle:
+                os.fsync(handle.fileno())
+            scratch_path.unlink()
+        io_signals = ("io_stall_full_fraction", "io_stall_some_fraction")
+        io_limits = {signal: latency_calibration.HOST_QUALIFICATION_LIMITS[signal] for signal in io_signals}
+        io_drain = latency_calibration.certification_host_qualification(
+            evidence_root=Path("/tmp/yolomux-latency-evidence"), limits=io_limits
+        )
+    assert io_drain["qualified"], io_drain
     refusal = latency_calibration.host_qualification(loaded)
-    # Both sides carry the evidence-only signals too: a signal that carries no threshold still has
-    # to be readable here, or the next reader cannot see why it carries none.
     reported = [*latency_calibration.HOST_QUALIFICATION_LIMITS, *latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY]
     evidence = {
         "workers": workers,
@@ -1743,16 +2027,11 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
         "reasons": refusal["reasons"],
     }
     artifact = latency_calibration.write_latency_evidence(
-        nodeid="tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
-        label="host-qualifier-negative-control",
-        payload=evidence,
+        nodeid="tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host", label="host-qualifier-negative-control", payload=evidence,
     )
     print(f"host qualifier negative control: {evidence}; artifact={artifact}")
 
     assert refusal["qualified"] is False, {**evidence, "artifact": str(artifact)}
-    # Non-vacuous: at least one refused signal must be one this load drove past the baseline. Under
-    # ambient load every signal could already be over its limit, which would make the refusal above
-    # true without proving anything about the qualifier.
     moved = [
         reason["signal"]
         for reason in refusal["reasons"]
@@ -1761,14 +2040,9 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
         and float(reason["measured"]) > float(baseline[reason["signal"]])
     ]
     assert moved, {**evidence, "artifact": str(artifact)}
-    # Never one signal away from a gate that cannot fail. `disk_in_flight_max` was retired from the
-    # limits because a fit host reaches HIGHER values on it than a saturated one, so the refusal
-    # must rest on signals this load moves by construction: 96 runnable workers on a 32-thread box
-    # drive procs_running p75 and PSI cpu some-stall in every run, measured at 95-120 against a
-    # post-lane 4-17 and 0.483-0.842 against 0.0018-0.0100. The disk signals are NOT required here:
-    # this unit runs inside the test image, where its scratch writes land on a different filesystem
-    # from the host volumes /proc/diskstats reports, so host disk busy read 0.303 in one run and
-    # 0.918-0.980 in twelve host-side probes of the identical load body.
+    # Require both CPU signals so one fragile signal cannot carry the control; up to 96 workers moved them from 4-17 to 95-120 and 0.0018-0.0100 to 0.483-0.842.
+    # Disk signals are not required because container scratch differs from the host volumes measured by /proc/diskstats; host-side probes of this load read 0.918-0.980.
+    # disk_in_flight_max remains evidence-only because qualified hosts reach higher values than saturated ones.
     over_limit = {reason["signal"] for reason in refusal["reasons"] if reason["reason"] == "over_limit"}
     assert {"procs_running_p75", "cpu_stall_some_fraction"} <= over_limit, {
         **evidence,
@@ -1777,9 +2051,8 @@ def test_certification_host_qualifier_refuses_a_genuinely_loaded_host(certificat
     }
     assert "disk_in_flight_max" not in over_limit, sorted(over_limit)
     assert "disk_in_flight_max" in latency_calibration.HOST_QUALIFICATION_EVIDENCE_ONLY
-    # And it is still measured on both sides, so the drop cost the artifact nothing.
+    # The dropped signal remains measured on both sides, and identical limits apply in both directions.
     assert baseline["disk_in_flight_max"] is not None and loaded["disk_in_flight_max"] is not None
-    # The thresholds are the same in both directions: a busy host is never given a wider limit.
     assert refusal["limits"] == latency_calibration.host_qualification(baseline)["limits"] == dict(latency_calibration.HOST_QUALIFICATION_LIMITS)
 
 
@@ -2540,7 +2813,7 @@ def test_run_certification_phase_refuses_a_certified_result_when_exact_sha_is_di
     monkeypatch.setattr(check, "working_tree_clean_state", lambda: next(states))
     monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": True, "survivors": []})
     monkeypatch.setattr(check.latency_calibration, "host_qualification", lambda **_kwargs: {"qualified": True, "reasons": []})
-    monkeypatch.setattr(check, "run_lane", lambda _lane: check.LaneResult("certification", "latency certification", True, 0.0, "", (check.StepResult("s", "c", 0.0, 0),)))
+    monkeypatch.setattr(check, "run_lane", lambda _lane, **_kwargs: check.LaneResult("certification", "latency certification", True, 0.0, "", (check.StepResult("s", "c", 0.0, 0),)))
     monkeypatch.setattr(check, "certification_junit_admission", lambda _path: {"admitted": True, "reason": "", "detail": "", "outcomes": {nodeid: {"outcome": "passed", "detail": "", "seconds": 0.1} for nodeid in check.CERTIFICATION_NODE_IDS}})
 
     payload, _lane = check.run_certification_phase(evidence_dir=tmp_path / "cert")

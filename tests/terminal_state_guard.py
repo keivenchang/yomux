@@ -39,11 +39,11 @@ TERMINAL_STATE_CONTRACTS = (
     ),
     TerminalStateContract(
         contract_id="differ-queued-producer-completion",
-        owner_path=Path("yolomux_lib/app.py"),
-        owner_token="def start_session_files_operation(",
+        owner_path=Path("yolomux_lib/infra/state_services.py"),
+        owner_token="class SessionFilesOperationLifecycle:",
         proof_path=Path("tests/test_gate_differ.py"),
         proof_test="test_mock_git_differ_queued_producer_completion_settles_every_visible_surface",
-        queued_producer_function="start_session_files_operation",
+        queued_producer_function="start",
     ),
     TerminalStateContract(
         contract_id="jobd-product-operation-completion",

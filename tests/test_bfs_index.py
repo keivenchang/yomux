@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.search import bfs_index
 from yolomux_lib.search import file_index
 
@@ -62,6 +63,38 @@ def test_scan_directory_once_lists_only_direct_children(tmp_path):
     assert result.child_directories == ["sub"]
     # A single listing must not have descended into sub/ or reported its files.
     assert all("mid.txt" != name and "deep.txt" != name for _p, name, _r, _s, _m in result.files)
+
+
+def test_scan_directory_once_pins_every_regular_child_generation(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    child = root / "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt"
+    child.write_text("safe", encoding="utf-8")
+    pinned = []
+
+    class Observer:
+        def name_observed(self, operation, requested_path):
+            pass
+
+        def authority_pinned(self, operation, requested_path):
+            pinned.append((operation, Path(requested_path)))
+
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with filesystem_paths.observe_authorization(Observer()):
+            result = bfs_index.scan_directory_once(
+                root_fd,
+                root,
+                root,
+                set(),
+                None,
+                operation="bfs_index",
+            )
+    finally:
+        os.close(root_fd)
+
+    assert [name for _path, name, _rel, _size, _mtime in result.files] == [child.name]
+    assert pinned == [("bfs_index", child)]
 
 
 def test_deep_chain_open_order_is_breadth_first(tmp_path):
@@ -245,6 +278,48 @@ def test_restart_resumes_shallowest_pending_without_rediscovery(tmp_path):
     assert _entry_rel_paths(root) == sorted([f"d{i}/f{i}.txt" for i in range(3)])
 
 
+def test_resume_pins_root_identity_and_frontier_rows_to_one_sqlite_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "safe").mkdir(parents=True)
+    (root / "safe" / "kept.txt").write_text("safe\n", encoding="utf-8")
+    first = bfs_index.ProgressiveBuild(root, set(), generation=1)
+    with first:
+        assert first.enqueue_startup() is True
+        first.step()
+
+    original_matches = file_index._root_identity_matches
+    replaced = False
+
+    def replace_generation_after_identity_validation(metadata, expected):
+        nonlocal replaced
+        accepted = original_matches(metadata, expected)
+        if accepted and not replaced:
+            replaced = True
+            blocked = "BLOCKED_SENTINEL_DO_NOT_EXPOSE"
+            mismatched_identity = json.dumps([expected[0], expected[1] + 1], separators=(",", ":"))
+            with sqlite3.connect(file_index._index_disk_path(root)) as writer:
+                writer.execute(
+                    "UPDATE metadata SET value = ? WHERE key = ?",
+                    (mismatched_identity, file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+                )
+                writer.execute(
+                    "UPDATE frontier SET root = ?, directory = ? WHERE generation = 1 AND state = 'pending'",
+                    (str(root), str(root / blocked)),
+                )
+        return accepted
+
+    monkeypatch.setattr(file_index, "_root_identity_matches", replace_generation_after_identity_validation)
+    resumed = bfs_index.ProgressiveBuild(root, set(), generation=1)
+    with resumed:
+        loaded = resumed.resume()
+        pending = resumed.frontier.pending()
+
+    assert replaced is True
+    assert loaded == 1
+    assert [Path(item.directory).name for item in pending] == ["safe"]
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(pending)
+
+
 def test_abandoned_generation_cannot_overwrite_a_newer_one(tmp_path):
     # A slow generation-1 worker that publishes after generation 2 took over must
     # abort its transaction rather than overwrite the newer generation's rows.
@@ -396,27 +471,29 @@ def _journal_rows(root):
         ).fetchall()
 
 
-def test_change_journal_table_is_added_compatibly_to_an_existing_v5_store(tmp_path):
-    # Step 1 migration: an existing v5 store that predates the change journal must GAIN the table on
-    # the next open WITHOUT dropping its rows or bumping the version away from 5.
+def test_identityless_v5_store_is_rejected_and_reinitialized_as_v6(tmp_path):
+    # v5 rows have no authorized-root generation. A v6 writer must fail closed and
+    # reinitialize the store instead of preserving rows for a possibly replaced path.
     root = tmp_path / "root"
     root.mkdir()
     (root / "keep.txt").write_text("x", encoding="utf-8")
     bfs_index.build_root_progressively(root, set(), generation=1)
     db_path = file_index._index_disk_path(root)
-    # Simulate a pre-journal v5 store: drop the journal table, keep every entry + version 5.
+    # Simulate an identity-less v5 store.
     with sqlite3.connect(db_path) as conn:
-        conn.execute("DROP TABLE change_journal")
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+        conn.execute("DELETE FROM metadata WHERE key = ?", (file_index.AUTHORIZED_ROOT_IDENTITY_FIELD,))
+        conn.execute("UPDATE metadata SET value = '5' WHERE key = 'version'")
+        conn.execute("PRAGMA user_version=5")
         conn.commit()
-    # Re-opening through the owner recreates the table compatibly; rows and version survive.
+    assert file_index._read_sqlite_index(root, set()) is None
+    # A writable open establishes an empty v6 schema; rows are rebuilt later.
     with file_index._sqlite_index_connection(root) as conn:
         file_index._ensure_sqlite_schema(conn)
     with sqlite3.connect(db_path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "change_journal" in tables
-        assert conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 0
 
 
 def test_publish_journals_each_committed_upsert_with_a_monotonic_revision(tmp_path):
@@ -513,6 +590,12 @@ def test_dirty_subtree_refresh_journals_upserts_and_deletes(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     ri = file_index.RootIndex(root)
+    root_descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        ri.replace_root_fd(root_descriptor)
+    finally:
+        os.close(root_descriptor)
+    ri.published_root_identity = ri.root_fd_identity
     ri.active_generation = 7
     gone = str(root / "gone.txt")
     ri.entry_by_path = {gone: (gone, "gone.txt", "gone.txt", 3, 0)}
@@ -562,7 +645,12 @@ def test_delta_cursor_round_trips_and_rejects_cross_root_and_cross_policy(tmp_pa
     # Step 1 cursor contract: the opaque cursor encodes {root/policy, generation, revision, tombstone}
     # and a decode validates them; a malformed cursor decodes to None.
     encoded = file_index._encode_delta_cursor(
-        root=tmp_path / "root", policy="policy-a", generation=3, revision=42, tombstone_identity="tomb-1"
+        root=tmp_path / "root",
+        policy="policy-a",
+        generation=3,
+        revision=42,
+        tombstone_identity="tomb-1",
+        root_generation=(11, 22),
     )
     decoded = file_index._decode_delta_cursor(encoded)
     assert decoded == {
@@ -571,6 +659,7 @@ def test_delta_cursor_round_trips_and_rejects_cross_root_and_cross_policy(tmp_pa
         "generation": 3,
         "revision": 42,
         "tombstone": "tomb-1",
+        "root_generation": (11, 22),
     }
     assert file_index._decode_delta_cursor("not-a-cursor") is None
     assert file_index._decode_delta_cursor("") is None
@@ -581,22 +670,25 @@ def test_delta_cursor_round_trips_and_rejects_cross_root_and_cross_policy(tmp_pa
 # --------------------------------------------------------------------------
 
 
-def test_v5_schema_has_generation_column_and_coverage_tables(tmp_path):
+def test_v6_schema_has_generation_column_coverage_tables_and_root_identity(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     (root / "a.txt").write_text("x", encoding="utf-8")
     bfs_index.build_root_progressively(root, set(), generation=1)
     with sqlite3.connect(file_index._index_disk_path(root)) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"entries", "metadata", "directory_coverage", "frontier"} <= tables
         columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
         assert "generation" in columns
+        metadata = dict(conn.execute("SELECT key, value FROM metadata"))
+        assert file_index._metadata_root_identity(metadata) == file_index.parse_root_identity(
+            file_index.root_identity(root.stat())
+        )
 
 
-def test_v4_flat_snapshot_migrates_in_place_and_stays_searchable(tmp_path):
-    # A shipped v4 database (flat entries, no generation column, version 4) must
-    # keep its rows readable after the format bump, not be dropped.
+def test_v4_flat_snapshot_is_rejected_without_root_generation_identity(tmp_path):
+    # A v4 database cannot prove which root object produced its rows.
     root = tmp_path / "root"
     root.mkdir()
     file_index.INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -628,16 +720,14 @@ def test_v4_flat_snapshot_migrates_in_place_and_stays_searchable(tmp_path):
         conn.execute("PRAGMA user_version=4")
         conn.commit()
 
-    # Opening for read via the owner path migrates in place and preserves the row.
+    # Opening through the v6 owner fails closed and reinitializes the store.
     loaded = file_index._load_disk(root, set(), "")
-    assert loaded is not None
-    entries, _built, _trunc, _sig = loaded
-    assert any(name == "legacy.txt" for _p, name, _r, _s, _m in entries)
+    assert loaded is None
     with sqlite3.connect(db_path) as conn:
-        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 5
+        assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 6
         assert "generation" in {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
-        assert conn.execute("SELECT value FROM metadata WHERE key='version'").fetchone()[0] == "5"
-        assert file_index._row_serving_snapshot_metadata(dict(conn.execute("SELECT key, value FROM metadata")))
+        assert conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 0
+        assert not file_index._row_serving_snapshot_metadata(dict(conn.execute("SELECT key, value FROM metadata")))
 
 
 def test_post_unindex_clean_generation_is_not_readable_before_first_publish(tmp_path):
@@ -724,6 +814,25 @@ def test_promote_frontier_bumps_pending_durable_rows(tmp_path):
     assert all(reason == file_index.USER_VISIBLE_DEMAND_REASON for _d, _p, reason in after)
     # A second promotion is idempotent: nothing is already lower, so nothing is re-promoted.
     assert file_index.promote_frontier(root) == 0
+
+
+def test_promote_frontier_refuses_a_replaced_root_generation(tmp_path):
+    root = tmp_path / "root"
+    (root / "safe").mkdir(parents=True)
+    build = bfs_index.ProgressiveBuild(root, set(), generation=1)
+    with build:
+        assert build.enqueue_startup() is True
+        build.step()
+    before = _frontier_rows(root)
+    assert before
+
+    authorized_root = tmp_path / "authorized-root"
+    root.rename(authorized_root)
+    root.mkdir()
+    (root / "BLOCKED_SENTINEL_DO_NOT_EXPOSE").mkdir()
+
+    assert file_index.promote_frontier(root) == 0
+    assert _frontier_rows(root) == before
 
 
 def test_promote_frontier_is_a_noop_without_a_snapshot(tmp_path):

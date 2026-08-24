@@ -2,15 +2,37 @@ import os
 import threading
 import time
 
+import pytest
+
 from yolomux_lib import search_indexer
+from yolomux_lib.filesystem import paths
 from yolomux_lib.filesystem import search
 from yolomux_lib.infra import jobd
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.local_services import runtime as local_service_runtime
+from yolomux_lib.search import file_index
 
 
 SEARCH_INDEXER_ENSURE_STARTED = search_indexer.SearchIndexerClient.ensure_started
+
+
+def _access_policy(*roots):
+    return paths.FilesystemAccessPolicy(
+        version=paths.FS_ACCESS_POLICY_VERSION,
+        roots=tuple(str(root) for root in roots),
+    )
+
+
+def _authorized_search_request(root, policy, *, query="needle", limit=20):
+    return {
+        "action": "search",
+        "root": str(root),
+        "query": query,
+        "limit": limit,
+        paths.FS_ACCESS_POLICY_FIELD: policy.descriptor(),
+        file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index.root_identity(root.stat()),
+    }
 
 
 def test_persistent_indexer_coalesces_paths_then_refreshes_one_root(tmp_path, monkeypatch):
@@ -73,29 +95,144 @@ def test_losing_indexer_does_not_unlink_the_owners_socket(tmp_path):
 
 
 def test_persistent_indexer_serves_its_ready_snapshot_to_read_only_servers(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy = _access_policy(root)
     service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
-    expected = {"root": "/repo", "query": "t5t.md", "files": [{"name": "t5t.md"}]}
+    expected = {"root": str(root), "query": "t5t.md", "files": [{"name": "t5t.md"}]}
     calls = []
-    monkeypatch.setattr(search, "search_files", lambda root, query, limit, recursive, cursor=None: calls.append((root, query, limit, recursive, cursor)) or expected)
+    monkeypatch.setattr(
+        search,
+        "_search_files_from_authorized_handle",
+        lambda handle, query, limit, recursive, cursor=None: calls.append(
+            (handle.resolved, file_index.root_identity(handle.stat_result), query, limit, recursive, cursor)
+        ) or expected,
+    )
 
-    response = service.handle({"action": "search", "root": "/repo", "query": "t5t.md", "limit": 20})
+    response = service.handle(_authorized_search_request(root, policy, query="t5t.md"))
 
-    assert calls == [("/repo", "t5t.md", 20, True, None)]
+    assert calls == [(root, file_index.root_identity(root.stat()), "t5t.md", 20, True, None)]
     assert response == {"ok": True, "payload": expected}
 
 
 def test_indexer_search_action_threads_the_opaque_delta_cursor(tmp_path, monkeypatch):
     # Step 4: a delta request carries an opaque cursor; the indexer read path must forward it so the
     # follower gets fenced committed journal deltas, not a fresh snapshot.
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy = _access_policy(root)
     service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
-    expected = {"root": "/repo", "query": "t5t", "changes": [], "cursor": "C2", "more": False}
+    expected = {"root": str(root), "query": "t5t", "changes": [], "cursor": "C2", "more": False}
     calls = []
-    monkeypatch.setattr(search, "search_files", lambda root, query, limit, recursive, cursor=None: calls.append((root, query, limit, recursive, cursor)) or expected)
+    monkeypatch.setattr(
+        search,
+        "_search_files_from_authorized_handle",
+        lambda handle, query, limit, recursive, cursor=None: calls.append(
+            (handle.resolved, query, limit, recursive, cursor)
+        ) or expected,
+    )
 
-    response = service.handle({"action": "search", "root": "/repo", "query": "t5t", "limit": 20, "cursor": "C1"})
+    request = _authorized_search_request(root, policy, query="t5t")
+    request["cursor"] = "C1"
+    response = service.handle(request)
 
-    assert calls == [("/repo", "t5t", 20, True, "C1")]
+    assert calls == [(root, "t5t", 20, True, "C1")]
     assert response == {"ok": True, "payload": expected}
+
+
+@pytest.mark.parametrize("policy_scope", ["narrow", "broad"])
+def test_indexd_search_refuses_a_repointed_authorized_root_generation_without_leaking_metadata(
+    tmp_path,
+    policy_scope,
+):
+    base = tmp_path / "base"
+    allowed = base / "allowed"
+    outside = base / "outside"
+    allowed.mkdir(parents=True)
+    outside.mkdir()
+    (allowed / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = outside / "BLOCKED_SENTINEL_DO_NOT_EXPOSE.txt"
+    blocked.write_text("BLOCKED_SENTINEL_DO_NOT_EXPOSE", encoding="utf-8")
+    policy = _access_policy(allowed if policy_scope == "narrow" else base)
+    request = _authorized_search_request(allowed, policy, query="BLOCKED_SENTINEL")
+    parked = base / "allowed-authorized-generation"
+    allowed.rename(parked)
+    allowed.symlink_to(outside, target_is_directory=True)
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+
+    with pytest.raises(paths.FilesystemError) as caught:
+        service.handle(request)
+
+    rendered = str(caught.value)
+    assert "BLOCKED_SENTINEL" not in rendered
+    assert str(blocked) not in rendered
+    assert all(field not in rendered for field in ("realpath", "file_id", "size"))
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param({"version": paths.FS_ACCESS_POLICY_VERSION, "roots": "not-a-list"}, id="malformed"),
+    ],
+)
+def test_indexd_search_refuses_missing_or_malformed_accepting_policy(tmp_path, descriptor):
+    root = tmp_path / "repo"
+    root.mkdir()
+    request = {
+        "action": "search",
+        "root": str(root),
+        "query": "needle",
+        "limit": 20,
+        file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: file_index.root_identity(root.stat()),
+    }
+    if descriptor is not None:
+        request[paths.FS_ACCESS_POLICY_FIELD] = descriptor
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+
+    with pytest.raises(paths.FilesystemError, match="filesystem access policy is unusable"):
+        service.handle(request)
+
+
+@pytest.mark.parametrize("identity", [None, [], [1], [1, 2, 3], [True, 2], ["1", 2]])
+def test_indexd_search_refuses_missing_or_malformed_authorized_root_identity(tmp_path, identity):
+    root = tmp_path / "repo"
+    root.mkdir()
+    request = {
+        "action": "search",
+        "root": str(root),
+        "query": "needle",
+        "limit": 20,
+        paths.FS_ACCESS_POLICY_FIELD: _access_policy(root).descriptor(),
+        file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: identity,
+    }
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+
+    with pytest.raises(paths.FilesystemError, match="authorized_root_identity_invalid"):
+        service.handle(request)
+
+
+def test_index_search_authority_survives_the_path_only_app_adapter(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    policy = _access_policy(root)
+    authority = _authorized_search_request(root, policy)
+    client = search_indexer.SearchIndexerClient(tmp_path / "indexer.sock")
+    sent = []
+    monkeypatch.setattr(client, "supports", lambda capability: capability == "search")
+    monkeypatch.setattr(client, "request", lambda payload, timeout=0.5: sent.append((payload, timeout)) or {"ok": True})
+
+    def path_only_adapter(payload):
+        return client.search(
+            str(payload.get("root") or ""),
+            str(payload.get("query") or ""),
+            int(payload.get("limit") or 400),
+        )
+
+    monkeypatch.setattr(file_index, "_BACKGROUND_INDEX_SEARCH_REQUESTER", path_only_adapter)
+
+    assert file_index.request_background_index_search(authority) == {"ok": True}
+    assert sent == [({**authority}, search_indexer.INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)]
 
 
 def test_http_search_descriptor_threads_cursor_through_the_jobd_executor(monkeypatch):

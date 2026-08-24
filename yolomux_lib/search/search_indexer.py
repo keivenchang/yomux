@@ -17,6 +17,7 @@ from typing import Any
 
 from . import bfs_index
 from . import file_index
+from ..filesystem import paths
 from ..filesystem import search
 from ..local_service_projection import registry_runtime_row
 from ..infra.common import RUNTIME_DIR
@@ -149,7 +150,7 @@ class PersistentSearchIndexer:
         file_index.unindex(Path(clean_root))
         return {"ok": True, "accepted": True, "root": clean_root}
 
-    def promote(self, root: str) -> dict[str, Any]:
+    def promote(self, root: str, root_identity: Any = None) -> dict[str, Any]:
         """Promote a root's pending frontier to user-visible-demand (item 5).
 
         A Quick Open query whose scope is not yet fully covered reaches this bounded operation. It
@@ -161,7 +162,18 @@ class PersistentSearchIndexer:
         clean_root = str(Path(root).expanduser().resolve(strict=False))
         if not clean_root.startswith("/"):
             return {"ok": False, "error": "root must be absolute"}
-        promoted = file_index.promote_frontier(Path(clean_root))
+        try:
+            expected_root_identity = (
+                file_index.parse_root_identity(root_identity)
+                if root_identity is not None
+                else file_index._current_root_identity(Path(clean_root))
+            )
+        except ValueError:
+            return {"ok": False, "error": "authorized root identity is invalid"}
+        promoted = file_index.promote_frontier(
+            Path(clean_root),
+            expected_root_identity=expected_root_identity,
+        )
         kicked = False
         if promoted == 0 and file_index.read_index_coverage(Path(clean_root)) is None:
             self.enqueue(clean_root, [], reason=bfs_index.REASON_STARTUP)
@@ -239,7 +251,15 @@ class PersistentSearchIndexer:
         return {"ok": True, "processed": processed, "status": self.common_status()}, b""
 
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"), self_connection=request_is_self_connection(request))
+        # `lease_id` is THE shared local-service wire key for the id being
+        # refreshed: it is what `LocalServiceRegistry.acquire_lease` sends and what
+        # statusd, watchd and jobd read. Reading any other spelling here is not a
+        # cosmetic mismatch -- the key simply never arrives, so `acquire_client_lease`
+        # sees an empty existing id, skips the refresh branch and MINTS a row on
+        # every call. Nothing reaps those rows (only DEAD clients are reaped), so one
+        # healthy long-lived client walks the table to LOCAL_SERVICE_MAX_CLIENT_LEASES,
+        # is then refused with "too many clients", and pins this daemon awake forever.
+        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), self_connection=request_is_self_connection(request))
         return {**response, "version": INDEXER_PROTOCOL_VERSION}, b""
 
     def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
@@ -263,8 +283,30 @@ class PersistentSearchIndexer:
         return self.enqueue(str(request.get("root") or ""), raw_paths if isinstance(raw_paths, list) else [], str(request.get("reason") or "")), b""
 
     def _handle_search(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
+        policy = paths.access_policy_from_descriptor(request.get(paths.FS_ACCESS_POLICY_FIELD))
+        try:
+            expected_identity = file_index.parse_root_identity(request.get(file_index.AUTHORIZED_ROOT_IDENTITY_FIELD))
+        except ValueError as error:
+            raise paths.access_policy_refused("authorized_root_identity_invalid") from error
         cursor = str(request.get("cursor") or "") or None
-        return {"ok": True, "payload": search.search_files(str(request.get("root") or ""), str(request.get("query") or ""), request.get("limit"), recursive=True, cursor=cursor)}, b""
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        with paths.enforce_access_policy(policy):
+            with paths.safe_path(
+                str(request.get("root") or ""),
+                flags=directory_flags,
+                operation="index_search",
+            ) as handle:
+                actual_identity = file_index.parse_root_identity(file_index.root_identity(handle.stat_result))
+                if actual_identity != expected_identity:
+                    raise paths.access_policy_refused("authorized_root_identity_mismatch")
+                payload = search._search_files_from_authorized_handle(
+                    handle,
+                    str(request.get("query") or ""),
+                    request.get("limit"),
+                    True,
+                    cursor,
+                )
+        return {"ok": True, "payload": payload}, b""
 
     def _handle_drain_search_progress(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         return self.drain_search_progress(), b""
@@ -273,7 +315,10 @@ class PersistentSearchIndexer:
         return self.unindex(str(request.get("root") or "")), b""
 
     def _handle_promote(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        return self.promote(str(request.get("root") or "")), b""
+        return self.promote(
+            str(request.get("root") or ""),
+            request.get(file_index.AUTHORIZED_ROOT_IDENTITY_FIELD),
+        ), b""
 
     def _handle_shutdown(self, _request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
         self.stop_event.set()
@@ -393,7 +438,10 @@ class SearchIndexerClient:
         # `acquire_client_lease` owner: passing our current id back returns the SAME id when it is
         # still valid (so refreshing on every settings change does not leak leases) and a NEW id
         # when the daemon has restarted with an empty table. We adopt whatever id it returns.
-        lease = self.request({"action": "lease", "client_pid": os.getpid(), "existing_lease_id": self.scheduler_lease_id or ""})
+        # Sends the SAME `lease_id` key as `LocalServiceRegistry.acquire_lease`, the one
+        # cross-service client. indexd's lease handler reads exactly one spelling; a
+        # private second one here would mint a fresh row on every reconcile.
+        lease = self.request({"action": "lease", "client_pid": os.getpid(), "lease_id": self.scheduler_lease_id or ""})
         if lease.get("ok"):
             lease_id = str(lease.get("lease_id") or "")
             if lease_id:
@@ -595,7 +643,12 @@ class SearchIndexerClient:
         response = self.request({"action": "unindex", "root": root})
         return {**response, "accepted": bool(response.get("ok"))}
 
-    def promote_user_visible(self, root: str, directory: str = "") -> dict[str, Any]:
+    def promote_user_visible(
+        self,
+        root: str,
+        directory: str = "",
+        root_identity: Any = None,
+    ) -> dict[str, Any]:
         """Promote a root's frontier to user-visible-demand on behalf of a Quick Open query (item 5).
 
         The read path dispatches this off the query thread, so it may start the daemon (an initial
@@ -604,7 +657,11 @@ class SearchIndexerClient:
         """
         if not self.ensure_started():
             return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
-        payload = {"action": "promote", "root": root}
+        payload = {
+            "action": "promote",
+            "root": root,
+            file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: root_identity,
+        }
         if directory:
             payload["directory"] = directory
         response = self.request(payload)
@@ -623,6 +680,10 @@ class SearchIndexerClient:
 
     def search(self, root: str, query: str, limit: int) -> dict[str, Any]:
         payload = {"action": "search", "root": root, "query": query, "limit": limit}
+        forwarded = file_index.background_index_search_request()
+        for field in (paths.FS_ACCESS_POLICY_FIELD, file_index.AUTHORIZED_ROOT_IDENTITY_FIELD):
+            if field in forwarded:
+                payload[field] = forwarded[field]
         if self.supports("search"):
             return self.request(payload, timeout=INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)
         if not self.ensure_started():

@@ -51,6 +51,7 @@ from yolomux_lib.auth import read_auth_users
 from yolomux_lib.common import RUNTIME_DIR
 from yolomux_lib.common import STATE_DIR
 from yolomux_lib.filesystem.io_ops import read_json_file
+from yolomux_lib.infra.listener_census import unique_listener_pid
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import tracked_local_service_groups
 from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
@@ -107,14 +108,6 @@ def find_chrome() -> str:
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
     ]
     return next((candidate for candidate in candidates if candidate and Path(candidate).is_file()), "")
-
-
-def listener_pid(port: int) -> int:
-    result = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True, text=True, check=False, timeout=2.0)
-    values = [line.strip() for line in result.stdout.splitlines() if line.strip().isdigit()]
-    if len(values) != 1:
-        raise RuntimeError(f"expected one listener on {port}, found {values or 'none'}")
-    return int(values[0])
 
 
 def service_pid_for_socket(socket_path: str) -> int:
@@ -1826,7 +1819,7 @@ def main() -> int:
         print("error: output must be under /tmp", file=sys.stderr)
         return 2
     base_url = f"https://localhost:{args.port}"
-    web_pid = listener_pid(args.port)
+    web_pid = unique_listener_pid(args.port, timeout_seconds=2.0)
     service_pids = runtime_service_pids()
     statsd_pid = service_pids.get("statsd", 0)
     indexd_pid = service_pids.get("indexd", 0)

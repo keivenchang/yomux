@@ -151,7 +151,6 @@ def test_backend_primitive_consumers_share_the_canonical_owners():
     assert session_files.normal_ref is git_ops.normal_ref
     assert session_files.diff_refs is git_ops.diff_refs
     assert session_files.refs_requested is git_ops.refs_requested
-    assert session_files.git_ref_exists is git_ops.git_ref_exists
 
     calls = []
 
@@ -179,7 +178,6 @@ def test_backend_primitive_implementation_bodies_have_one_owner():
         "normal_ref",
         "diff_refs",
         "refs_requested",
-        "git_ref_exists",
         "bootstrap_agent_auth_status",
         "healed_runtime_path",
     }

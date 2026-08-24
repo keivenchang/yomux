@@ -4,6 +4,9 @@
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 from tools import system_status_latency_probe as probe
 from tests.isolated_dev_server import build_paths
@@ -13,22 +16,63 @@ from tests.tmux_runtime import stop_isolated_tmux_runtime
 
 
 def test_probe_fails_zero_or_multiple_listeners(monkeypatch, tmp_path):
-    # Zero or unrelated multiple owners remain hard setup failures.
     for pids in ([], [1, 2]):
-        monkeypatch.setattr(probe, "listener_pids", lambda _port, pids=pids: pids)
+        monkeypatch.setattr(probe, "canonicalized_listener_pids", lambda _port, pids=pids: pids)
         assert probe.main(["--port", "49152", "--scheme", "http", "--output", str(tmp_path / "out.json")]) == 2
-    # A fork-before-exec child momentarily retains the parent's close-on-exec socket and command.
-    # Only that exact ancestor/command relationship collapses; an unrelated listener stays visible.
-    # This exercises the canonical owner without retrying the listener observation.
+
+
+def test_latency_probe_alone_canonicalizes_same_command_ancestry(monkeypatch):
     parents = {101: 1, 202: 101, 303: 1}
-    commands = {101: "python yolomux.py --port 49152", 202: "python yolomux.py --port 49152", 303: "foreign"}
-    assert probe.canonical_listener_pids([101, 202], parent_reader=parents.get, command_reader=commands.get) == [101]
-    assert probe.canonical_listener_pids([101, 303], parent_reader=parents.get, command_reader=commands.get) == [101, 303]
+    commands = {101: "python yolomux.py", 202: "python yolomux.py", 303: "foreign"}
+    monkeypatch.setattr(probe, "process_parent_pid", parents.get)
+    monkeypatch.setattr(probe, "process_command", commands.get)
+
+    monkeypatch.setattr(probe, "listener_pids", lambda _port: [101, 202])
+    assert probe.canonicalized_listener_pids(49152) == [101]
+    monkeypatch.setattr(probe, "listener_pids", lambda _port: [101, 303])
+    assert probe.canonicalized_listener_pids(49152) == [101, 303]
+
+
+@pytest.mark.parametrize(
+    ("snapshot", "pids", "match"),
+    (
+        (None, [123], "owner process exited"),
+        (SimpleNamespace(state="Z", start_identity="proc:1"), [123], "owner process exited"),
+        (SimpleNamespace(state="S", start_identity="proc:2"), [123], "process identity changed"),
+        (SimpleNamespace(state="S", start_identity="proc:1"), [], "listener absent while original process remains alive"),
+        (SimpleNamespace(state="S", start_identity="proc:1"), [456], "listener takeover.*123 -> 456"),
+        (SimpleNamespace(state="S", start_identity="proc:1"), [123, 456], "multiple listener owners"),
+    ),
+)
+def test_final_listener_owner_classifies_each_failure(monkeypatch, snapshot, pids, match):
+    monkeypatch.setattr(probe, "process_identity_snapshot", lambda _pid: snapshot)
+    monkeypatch.setattr(probe, "canonicalized_listener_pids", lambda _port: pids)
+
+    with pytest.raises(RuntimeError, match=match):
+        probe.validate_final_listener_owner(
+            49152,
+            123,
+            {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40},
+        )
+
+
+def test_final_listener_owner_resamples_identity_after_final_census(monkeypatch):
+    snapshots = iter((SimpleNamespace(state="S", start_identity="proc:1"), None))
+    monkeypatch.setattr(probe, "process_identity_snapshot", lambda _pid: next(snapshots))
+    monkeypatch.setattr(probe, "canonicalized_listener_pids", lambda _port: [123])
+
+    with pytest.raises(RuntimeError, match="became unobservable after final listener census"):
+        probe.validate_final_listener_owner(
+            49152,
+            123,
+            {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40},
+        )
 
 
 def test_probe_acceptance_failure_is_nonzero(monkeypatch, tmp_path):
     output = tmp_path / "out.json"
-    monkeypatch.setattr(probe, "listener_pids", lambda _port: [123])
+    monkeypatch.setattr(probe, "canonicalized_listener_pids", lambda _port: [123])
+    monkeypatch.setattr(probe, "process_identity_snapshot", lambda _pid: SimpleNamespace(state="S", start_identity="proc:1"))
     monkeypatch.setattr(probe, "process_identity", lambda _pid: {"pid": 123, "start_identity": "proc:1", "cwd": "/repo", "sha": "a" * 40})
     monkeypatch.setattr(probe, "process_environment", lambda _pid: {"YOLOMUX_CONFIG_DIR": str(tmp_path)})
     monkeypatch.setattr(probe, "config_dir_from_process", lambda _env, _port: tmp_path)

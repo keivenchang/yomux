@@ -11,6 +11,7 @@
   Daemons roster no longer says "Idle - Starts on demand" while a root is configured.
 """
 
+import os
 import shutil
 import sqlite3
 import threading
@@ -149,7 +150,7 @@ def test_coverage_falls_back_to_manifest_when_live_sqlite_unavailable(tmp_path, 
     bfs_index.build_root_progressively(root, set(), generation=1)
     assert file_index._index_manifest_path(root).exists()
 
-    monkeypatch.setattr(file_index, "_coverage_from_live_sqlite", lambda _root: None)
+    monkeypatch.setattr(file_index, "_coverage_from_live_sqlite", lambda _root, **_kwargs: None)
     coverage = file_index.read_index_coverage(root)
     assert coverage is not None
     assert coverage["source"] == "manifest"
@@ -318,6 +319,9 @@ def test_bfs_full_build_off_list_exception_still_clears_building(tmp_path, monke
     index.build_generation = 1
     index.active_generation = 1
     index.stop_event = threading.Event()
+    root_descriptor = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    index.replace_root_fd(root_descriptor)
+    os.close(root_descriptor)
 
     def _boom(*_args, **_kwargs):
         # sqlite3.Error is off the (OSError, RuntimeError, ValueError) list _run_build catches; the
@@ -325,30 +329,33 @@ def test_bfs_full_build_off_list_exception_still_clears_building(tmp_path, monke
         raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", _boom)
-    with pytest.raises(sqlite3.OperationalError):
-        file_index._run_build(index, SEARCH_SKIP_DIRS, generation=1)
-    assert index.building is False
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            file_index._run_build(index, SEARCH_SKIP_DIRS, generation=1)
+        assert index.building is False
+    finally:
+        index.close_root_fd()
 
 
 def test_policy_signature_change_rebuilds_without_stale_excluded_rows(tmp_path):
     root = tmp_path / "root"
-    (root / ".ssh").mkdir(parents=True)
+    (root / "node_modules").mkdir(parents=True)
     (root / "visible.txt").write_text("ok", encoding="utf-8")
-    (root / ".ssh" / "id_rsa").write_text("secret", encoding="utf-8")
-    skip_dirs = SEARCH_SKIP_DIRS - {".ssh"}
+    (root / "node_modules" / "package.js").write_text("package", encoding="utf-8")
+    skip_dirs = SEARCH_SKIP_DIRS - {"node_modules"}
 
     initial = file_index.build_now(root, skip_dirs)
-    assert any(name == "id_rsa" for _p, name, _r, _s, _m in initial.entries)
+    assert any(name == "package.js" for _p, name, _r, _s, _m in initial.entries)
 
     filtered = file_index.build_now(
         root,
         skip_dirs,
-        exclude_path=lambda path: ".ssh" in path.parts,
-        exclude_signature="secret-filter",
+        exclude_path=lambda path: "node_modules" in path.parts,
+        exclude_signature="node-modules-filter",
     )
     names = {name for _p, name, _r, _s, _m in filtered.entries}
     assert "visible.txt" in names
-    assert "id_rsa" not in names
+    assert "package.js" not in names
 
 
 def test_total_entry_cap_truncates_but_stays_a_durable_partial(tmp_path, monkeypatch):
@@ -456,7 +463,14 @@ class _FakeLeaseDaemon:
                 return {"ok": False, "status": "unavailable"}
             # Emulate the shared acquire_client_lease owner: a still-held id is returned unchanged;
             # a missing/stale id yields a fresh lease.
-            existing = payload.get("existing_lease_id")
+            #
+            # The key is `lease_id`, the one spelling the shared client actually puts on the wire
+            # (LocalServiceRegistry.acquire_lease). This fake used to read `existing_lease_id`, a
+            # key nothing sends -- and so did indexd's real handler, which is exactly why a healthy
+            # client refreshing its lease minted a new unreapable row every time instead of
+            # refreshing one. A double that models the wire with the wrong key cannot catch that:
+            # it agreed with the bug rather than with the protocol.
+            existing = payload.get("lease_id")
             if existing and existing in self.leases:
                 return {"ok": True, "lease_id": existing}
             self.counter += 1
@@ -814,9 +828,11 @@ def test_indexd_promote_bumps_frontier_or_kicks_unscheduled_root(tmp_path):
     assert str(other.resolve()) in indexer.pending_paths
 
 
-def test_request_user_visible_promotion_is_nonblocking_and_debounced(monkeypatch):
+def test_request_user_visible_promotion_is_nonblocking_and_debounced(tmp_path, monkeypatch):
     file_index._PROMOTION_LAST_DISPATCH.clear()
     started = threading.Event()
+    root = tmp_path / "root"
+    root.mkdir()
 
     def _slow(_role, _payload):
         started.set()
@@ -825,15 +841,40 @@ def test_request_user_visible_promotion_is_nonblocking_and_debounced(monkeypatch
 
     monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", _slow)
     t0 = time.perf_counter()
-    assert file_index.request_user_visible_promotion("/x/root") is True
+    assert file_index.request_user_visible_promotion(str(root)) is True
     assert time.perf_counter() - t0 < 0.5  # dispatch returns immediately; the RPC runs off-thread
-    assert file_index.request_user_visible_promotion("/x/root") is False  # coalesced within the window
+    assert file_index.request_user_visible_promotion(str(root)) is False  # coalesced within the window
     assert started.wait(2)
 
 
 def test_request_user_visible_promotion_without_owner_is_a_noop(monkeypatch):
     monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", None)
     assert file_index.request_user_visible_promotion("/x/no-owner") is False
+
+
+def test_request_user_visible_promotion_carries_the_authorized_root_identity(tmp_path, monkeypatch):
+    file_index._PROMOTION_LAST_DISPATCH.clear()
+    root = tmp_path / "root"
+    root.mkdir()
+    captured = []
+    delivered = threading.Event()
+
+    def capture(_role, payload):
+        captured.append(payload)
+        delivered.set()
+        return {}
+
+    monkeypatch.setattr(file_index, "_BACKGROUND_OWNER_REFRESH_REQUESTER", capture)
+    assert file_index.request_user_visible_promotion(str(root)) is True
+    assert delivered.wait(2)
+    assert captured == [
+        {
+            "root": str(root),
+            "operation": "promote",
+            "reason": file_index.USER_VISIBLE_DEMAND_REASON,
+            file_index.AUTHORIZED_ROOT_IDENTITY_FIELD: list(file_index.root_identity(root.stat())),
+        }
+    ]
 
 
 # --------------------------------------------------------------------------

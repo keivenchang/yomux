@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import collections
+from concurrent.futures import Future
 import copy
 from datetime import datetime
 from datetime import timezone
@@ -20,6 +21,7 @@ from typing import Any
 from typing import Callable
 from typing import Mapping
 
+from ..infra.atomic_file import AppendRollbackError
 from ..infra.atomic_file import append_fsync_text
 from ..infra.atomic_file import atomic_write_text
 from ..infra.atomic_file import file_lock
@@ -38,6 +40,8 @@ QUEUED_OPERATION_COMPACT_RECORDS = 256
 QUEUED_OPERATION_COMPACT_MIN_INTERVAL_SECONDS = 30.0
 QUEUED_OPERATION_COMPACT_MAX_DEFER_SECONDS = 5 * 60.0
 QUEUED_OPERATION_COMPACT_RETRY_SECONDS = 5.0
+QUEUED_OPERATION_TERMINAL_RETRY_SECONDS = 0.05
+QUEUED_OPERATION_TERMINAL_RETRY_BUDGET_SECONDS = 0.25
 QUEUED_OPERATION_ACCEPTED_STATUS = int(HTTPStatus.ACCEPTED)
 QUEUED_DELIVERY_OPEN_STATES = frozenset({"pending", "queued", "running"})
 QUEUED_DELIVERY_DONE_STATES = frozenset({"done", "ready", "success"})
@@ -71,6 +75,7 @@ class QueuedDeliveryLedger:
         self._operation_id_factory = operation_id_factory or (lambda: f"op-{uuid.uuid4().hex}")
         self._operation_retention_seconds = max(1.0, float(operation_retention_seconds))
         self._operations: dict[str, dict[str, Any]] = {}
+        self._terminalizations: dict[str, Future[dict[str, Any]]] = {}
         self._compaction_clock = compaction_clock
         self._compaction_signal = compaction_signal
         self._journal_tail_bytes = 0
@@ -168,6 +173,13 @@ class QueuedDeliveryLedger:
                 if not isinstance(record, dict):
                     raise ValueError("queued-operation journal record must contain an operation")
                 self._load_operation_records([record])
+                self._journal_tail_bytes += len(line.encode("utf-8")) + 1
+                self._journal_tail_records += 1
+            elif version == QUEUED_OPERATION_JOURNAL_VERSION and kind == "operations":
+                records = entry.get("operations")
+                if not isinstance(records, list) or not all(isinstance(record, dict) for record in records):
+                    raise ValueError("queued-operation journal record must contain operations")
+                self._load_operation_records(records)
                 self._journal_tail_bytes += len(line.encode("utf-8")) + 1
                 self._journal_tail_records += 1
             elif version == QUEUED_OPERATION_ACK_JOURNAL_VERSION and kind == "ack":
@@ -309,6 +321,16 @@ class QueuedDeliveryLedger:
         }
         self._append_payload_locked(payload)
 
+    def _append_operations_locked(self, records: list[dict[str, Any]]) -> None:
+        if self._state_path is None:
+            return
+        self._append_payload_locked({
+            "version": QUEUED_OPERATION_JOURNAL_VERSION,
+            "type": "operations",
+            "epoch": self._operation_epoch,
+            "operations": records,
+        })
+
     def _append_acknowledgments_locked(self, acknowledgments: list[dict[str, Any]]) -> None:
         self._append_payload_locked({
             "version": QUEUED_OPERATION_ACK_JOURNAL_VERSION,
@@ -376,6 +398,7 @@ class QueuedDeliveryLedger:
                 "deadline_at": float(deadline_at),
                 "cursor": cursor,
                 "producer": copy.deepcopy(producer),
+                "producer_generation": 0,
                 "receipt": receipt,
                 "receipt_exposed": False,
                 "delivery_acknowledged": False,
@@ -392,33 +415,100 @@ class QueuedDeliveryLedger:
         status: HTTPStatus | int,
     ) -> dict[str, Any] | None:
         """Persist one terminal result, returning its event only for the new transition."""
+        operation_key = str(operation_id)
+        while True:
+            with self._lock:
+                record = self._operations.get(operation_key)
+                if record is None or isinstance(record.get("terminal_event"), dict):
+                    return None
+                terminalization = self._terminalizations.get(operation_key)
+                owns_terminalization = terminalization is None
+                if owns_terminalization:
+                    terminalization = Future(); self._terminalizations[operation_key] = terminalization
+                    cursor = {"epoch": str(record.get("cursor", {}).get("epoch") or self._operation_epoch), "seq": int(record.get("cursor", {}).get("seq") or 0) + 1}
+                    event = {"operation": {"id": operation_key, "cursor": cursor}, "result": copy.deepcopy(result), "status": int(status)}
+                    terminal_fields = {"state": str(result.get("state") or "failed"), "cursor": cursor, "terminal_at": self.clock(), "terminal_event": event, "terminal_event_bytes": self._terminal_event_bytes(event), "http_status": int(status)}
+            if not owns_terminalization:
+                try:
+                    terminalization.result()
+                    return None
+                except AppendRollbackError:
+                    raise
+                except OSError:
+                    continue
+            retry_deadline = time.monotonic() + QUEUED_OPERATION_TERMINAL_RETRY_BUDGET_SECONDS
+            try:
+                while True:
+                    try:
+                        with self._lock:
+                            current = self._operations.get(operation_key)
+                            if current is None or isinstance(current.get("terminal_event"), dict):
+                                terminalization.set_result(event); return None
+                            updated_record = copy.deepcopy(current); updated_record.update(terminal_fields)
+                            self._append_operation_locked(updated_record)
+                            self._operations[operation_key] = updated_record; self._prune_operations_locked()
+                        terminalization.set_result(event)
+                        return copy.deepcopy(event)
+                    except AppendRollbackError:
+                        raise
+                    except OSError:
+                        remaining = retry_deadline - time.monotonic()
+                        if remaining <= 0: raise
+                        time.sleep(min(QUEUED_OPERATION_TERMINAL_RETRY_SECONDS, remaining))
+            except BaseException as error:
+                terminalization.set_exception(error)
+                raise
+            finally:
+                with self._lock:
+                    if self._terminalizations.get(operation_key) is terminalization: self._terminalizations.pop(operation_key, None)
+
+    def update_operation_producer(
+        self,
+        operation_id: str,
+        producer: dict[str, Any],
+        *,
+        producer_generation: int = 0,
+    ) -> bool:
+        """Persist a newer producer for one still-open accepted operation."""
+        return bool(self.update_operation_producers(
+            (operation_id,),
+            producer,
+            producer_generation=producer_generation,
+        ))
+
+    def update_operation_producers(
+        self,
+        operation_ids: tuple[str, ...],
+        producer: dict[str, Any],
+        *,
+        producer_generation: int = 0,
+    ) -> tuple[str, ...]:
+        """Persist one flight transition for every still-open participant."""
+        updated_records = []
         with self._lock:
-            record = self._operations.get(str(operation_id))
-            if record is None:
-                return None
-            existing = record.get("terminal_event")
-            if isinstance(existing, dict):
-                return None
-            cursor = {
-                "epoch": str(record.get("cursor", {}).get("epoch") or self._operation_epoch),
-                "seq": int(record.get("cursor", {}).get("seq") or 0) + 1,
-            }
-            event = {
-                "operation": {"id": str(operation_id), "cursor": cursor},
-                "result": copy.deepcopy(result),
-                "status": int(status),
-            }
-            record.update({
-                "state": str(result.get("state") or "failed"),
-                "cursor": cursor,
-                "terminal_at": self.clock(),
-                "terminal_event": event,
-                "terminal_event_bytes": self._terminal_event_bytes(event),
-                "http_status": int(status),
-            })
-            self._prune_operations_locked()
-            self._append_operation_locked(record)
-            return copy.deepcopy(event)
+            for operation_id in operation_ids:
+                record = self._operations.get(str(operation_id))
+                if not isinstance(record, dict) or str(record.get("state") or "") != "queued":
+                    continue
+                if int(producer_generation) < int(record.get("producer_generation") or 0):
+                    continue
+                updated_record = copy.deepcopy(record)
+                updated_record["producer"] = copy.deepcopy(producer)
+                updated_record["producer_generation"] = int(producer_generation)
+                receipt = updated_record.get("receipt")
+                operation = receipt.get("operation") if isinstance(receipt, dict) else None
+                progress = operation.get("progress") if isinstance(operation, dict) else None
+                chain = producer.get("chain") if isinstance(producer.get("chain"), list) else []
+                current = chain[-1] if chain and isinstance(chain[-1], dict) else {}
+                if isinstance(progress, dict):
+                    progress["producer_stage"] = str(current.get("stage") or "")
+                    progress["producer_state"] = str(current.get("state") or "")
+                updated_records.append(updated_record)
+            if updated_records:
+                self._append_operations_locked(updated_records)
+                for record in updated_records:
+                    self._operations[str(record["id"])] = record
+        return tuple(str(record["id"]) for record in updated_records)
 
     # Exactly the scheduling facts needed to attribute a slow operation, and nothing else. A
     # completed operation's total wall time cannot distinguish "the task was slow" from "the task

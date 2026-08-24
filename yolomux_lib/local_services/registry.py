@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from collections import deque
 from collections.abc import Iterator
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -56,6 +57,7 @@ from ..infra.process_claims import CLAIM_RESULT_ADOPTION_CONTENDED
 from ..infra.process_claims import ProcessClaim
 from ..infra.process_claims import ProcessClaimError
 from ..infra.process_claims import ProcessClaimLedger
+from ..infra.process_claims import process_is_provably_gone
 from ..infra.worktree_writer import child_process_artifact_environment
 from .lifetime import DIMENSION_CLAIM
 from .lifetime import LIFETIME_ACTION_NONE
@@ -722,6 +724,16 @@ def resolve_tracked_local_service_groups(
                 # decision site: a dimension both sides read off the same target
                 # can never disagree, so re-proving it would prove nothing.
                 "spawn_generation": str(record.get("spawn_generation") or ""),
+                # The directory the RECORD ITSELF names, carried out of the
+                # persisted file for exactly the reason above. Every caller used
+                # to restamp this with the directory it had just globbed, then
+                # pass that same expression as the expected value, so the
+                # namespace dimension compared a string to itself and could not
+                # refuse anything. Carried, it can: a record that names another
+                # root -- copied in, left by another installation, or written by
+                # a caller that resolved a different service directory -- now
+                # disagrees and produces zero signals.
+                "namespace": str(record.get("namespace") or ""),
                 "socket": str(record.get("socket") or ""),
                 "launcher_pid": int(record.get("launcher_pid") or 0),
                 "launcher_port": int(record.get("launcher_port") or 0),
@@ -809,6 +821,44 @@ ORPHAN_REASON_PROCESS_TABLE_UNAVAILABLE = "process_table_unavailable"
 # distinguishable authority gaps a survivor can sit in; they were previously
 # collapsed into the single constant `untracked_no_ledger_record`, which made
 # the field incapable of telling an operator anything.
+# What goes in the namespace dimension when the target genuinely carries no
+# persisted directory of its own.  A server port lease file has never had a
+# `namespace` field, and a record written before this build stamped one carries
+# none either, so for those targets the only value that could exist is the one
+# the caller just resolved -- and a dimension compared against itself is
+# incapable of refusing.
+NAMESPACE_NOT_APPLICABLE_STRUCTURAL = "not_applicable_structural"
+
+
+def namespace_dimension(recorded: object, resolved: Path) -> tuple[str, str]:
+    """Return ``(recorded, expected)`` for one target's namespace dimension.
+
+    The ONE owner of that pair, because the two halves being computed separately
+    is exactly how this dimension became incapable of refusing: every destructive
+    call site used to stamp ``str(service_dir)`` into the record and then pass the
+    same expression as the expected value, so the comparison in
+    ``authorize_service_destruction`` was a string against itself.  Computing both
+    halves here means a caller cannot supply one without the other.
+
+    A record that PERSISTED its directory is compared against the directory the
+    caller independently resolved.  Those can genuinely disagree -- a record
+    copied between roots, left by another installation, or reached through a
+    resolver that globbed a different directory -- and a disagreement refuses.
+
+    A record that persisted NONE is a different case, and calling it a missing
+    proof would be as wrong as calling it a verified one.  Its provenance is
+    structural: the resolver found the file inside the resolved directory, so it
+    demonstrably belongs to that directory, and no field can add to or subtract
+    from that.  Those targets report ``not_applicable_structural`` on both sides,
+    which says what was actually established rather than restating the caller's
+    own path as though the record had asserted it.
+    """
+
+    value = str(recorded or "")
+    if not value:
+        return NAMESPACE_NOT_APPLICABLE_STRUCTURAL, NAMESPACE_NOT_APPLICABLE_STRUCTURAL
+    return value, str(resolved)
+
 ORPHAN_REASON_NO_LEDGER_RECORD = "untracked_no_ledger_record"
 ORPHAN_REASON_SUPERSEDED_GENERATION = "superseded_by_recorded_generation"
 ORPHAN_REASON_UNREADABLE_RECORD = "unreadable_service_record"
@@ -854,6 +904,51 @@ class OrphanObservationLedger:
 
 ORPHAN_OBSERVATIONS = OrphanObservationLedger()
 
+# How many executed repair outcomes one service directory retains for the
+# diagnostic surfaces to read back.  Bounded for the same reason every other
+# diagnostic here is: a survivor sweep must never become an unbounded log.
+ORPHAN_REPAIR_RETENTION = 32
+
+
+class OrphanRepairLedger:
+    """The one retained record of repairs this process actually executed.
+
+    Repair happens on the launch path, where the live spawn generation is known;
+    the surfaces that report survivors (``statusd.StatusDaemon.orphan_diagnostics``
+    and ``app.runtime_process_ledger``) run somewhere else entirely and both read
+    exactly one producer, ``verified_orphan_diagnostics``.  Without this the
+    acting half could execute and no operator surface would ever show what it
+    did -- which is how ``attempted_action`` and ``result`` stayed literals on
+    every surface a human can actually see.
+
+    Rows are stored exactly as the repair produced them.  Nothing is synthesized
+    here: an empty ledger means no repair ran, not "no repair was needed".
+    """
+
+    def __init__(self, retention: int = ORPHAN_REPAIR_RETENTION) -> None:
+        self._rows: dict[str, deque[dict[str, Any]]] = {}
+        self._retention = int(retention)
+        self._lock = threading.Lock()
+
+    def record(self, service_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        key = str(Path(service_dir))
+        with self._lock:
+            retained = self._rows.setdefault(key, deque(maxlen=self._retention))
+            retained.extend(dict(row) for row in rows)
+        return rows
+
+    def retained(self, service_dir: Path) -> list[dict[str, Any]]:
+        key = str(Path(service_dir))
+        with self._lock:
+            return [dict(row) for row in self._rows.get(key, ())]
+
+    def forget(self, service_dir: Path) -> None:
+        with self._lock:
+            self._rows.pop(str(Path(service_dir)), None)
+
+
+ORPHAN_REPAIRS = OrphanRepairLedger()
+
 
 def _recorded_socket_owners(service_dir: Path) -> dict[str, dict[str, Any] | None]:
     """Map each recorded socket path to the record that names it.
@@ -885,6 +980,7 @@ def verified_orphan_diagnostics(
     *,
     now: float | None = None,
     observations: OrphanObservationLedger | None = None,
+    repairs: OrphanRepairLedger | None = None,
 ) -> list[dict[str, Any]]:
     """Return one typed, bounded diagnostic row per ambiguous survivor.
 
@@ -898,10 +994,20 @@ def verified_orphan_diagnostics(
     about an ambiguous survivor, but it may only ever report one, never act
     on it beyond reporting.
 
-    ``attempted_action`` and ``result`` are therefore genuinely constant here
-    and say so honestly; ``reason`` is not, and now names which authority gap
-    the survivor actually sits in.  ``age_seconds`` comes from the shared
-    ``OrphanObservationLedger`` so every caller reports the same retained age.
+    ``attempted_action`` and ``result`` are therefore genuinely constant FOR THE
+    ROWS THIS FUNCTION PRODUCES, and say so honestly; ``reason`` is not, and now
+    names which authority gap the survivor actually sits in.  ``age_seconds``
+    comes from the shared ``OrphanObservationLedger`` so every caller reports the
+    same retained age.
+
+    The rows this function RELAYS are a different matter.  The acting half runs
+    on the launch path, where the live spawn generation is known, and both
+    production surfaces that report survivors read only this function -- so a
+    repair could execute and no human-visible surface would ever say what it
+    attempted or what happened.  Executed outcomes are therefore appended from
+    ``ORPHAN_REPAIRS`` exactly as ``repair_verified_orphans`` produced them, with
+    their own ``age_seconds`` from their own pass.  They are relayed, never
+    synthesized: this function still signals nothing and unlinks nothing.
     """
     if table is None:
         table = bounded_process_table()
@@ -935,7 +1041,11 @@ def verified_orphan_diagnostics(
             "reason": reason,
         })
     ledger = observations or ORPHAN_OBSERVATIONS
-    return ledger.age_rows(service_dir, rows, wall_clock() if now is None else float(now))
+    aged = ledger.age_rows(service_dir, rows, wall_clock() if now is None else float(now))
+    # Appended AFTER ageing: `age_rows` prunes any retained pid absent from the
+    # rows it is given, and a repaired pid is by definition gone. Folding repair
+    # rows in first would make the observation clock forget live survivors.
+    return aged + (repairs or ORPHAN_REPAIRS).retained(service_dir)
 
 
 def repair_verified_orphans(
@@ -953,6 +1063,7 @@ def repair_verified_orphans(
     force_seconds: float = LOCAL_SERVICE_RETIRE_FORCE_SECONDS,
     now: float | None = None,
     observations: OrphanObservationLedger | None = None,
+    repairs: OrphanRepairLedger | None = None,
 ) -> list[dict[str, Any]]:
     """Repair claim-backed survivors, host-locally and genuinely bounded.
 
@@ -975,6 +1086,12 @@ def repair_verified_orphans(
 
     ``age_seconds``, ``attempted_action``, ``result`` and ``failure_reason`` all
     come from what actually executed. None of them is a literal.
+
+    Every row is retained in ``ORPHAN_REPAIRS`` before it is returned, because
+    the caller that runs repair (the launch path, the only place the live spawn
+    generation is known) is not the surface an operator reads. Retaining here
+    rather than at the call site is what stops a second caller from executing
+    repair and reporting it nowhere.
     """
 
     identity = host_identity or current_host_identity()
@@ -986,14 +1103,14 @@ def repair_verified_orphans(
     except ProcessTableUnavailable as exc:
         # Fail CLOSED before any signal: an incomplete process table cannot tell
         # a dead survivor from an unreadable one, and the difference is a kill.
-        return [{
+        return (repairs or ORPHAN_REPAIRS).record(Path(service_dir), [{
             "pid": 0,
             "attempted_action": ORPHAN_ACTION_NONE,
             "result": ORPHAN_RESULT_REFUSED,
             "reason": ORPHAN_REASON_PROCESS_TABLE_UNAVAILABLE,
             "failure_reason": str(exc),
             "age_seconds": round(clock() - started, 6),
-        }]
+        }])
     for service_name in service_names:
         ledger = service_claim_ledger(
             Path(state_dir),
@@ -1019,10 +1136,13 @@ def repair_verified_orphans(
                 started=started,
             ))
     ledger_observations = observations or ORPHAN_OBSERVATIONS
-    return ledger_observations.age_rows(
-        Path(service_dir) / "repair",
-        rows,
-        wall_clock() if now is None else float(now),
+    return (repairs or ORPHAN_REPAIRS).record(
+        Path(service_dir),
+        ledger_observations.age_rows(
+            Path(service_dir) / "repair",
+            rows,
+            wall_clock() if now is None else float(now),
+        ),
     )
 
 
@@ -1075,15 +1195,33 @@ def _repair_one_claimed_survivor(
             ORPHAN_REASON_SUPERVISOR_ALIVE,
             surviving_supervisor=supervisor_state.as_dict(),
         )
+    if not process_is_provably_gone(supervisor_state):
+        # Not current is not proof of absence. A supervisor whose identity could
+        # not be re-read is unproven, and the next step down this function is a
+        # signal, so unproven must refuse. Same owner the claim ledger uses.
+        return row(
+            pid,
+            ORPHAN_ACTION_NONE,
+            ORPHAN_RESULT_REFUSED,
+            supervisor_state.reason.value,
+            unprovable_supervisor=supervisor_state.as_dict(),
+        )
     claim_generation = str(claim.get("generation") or "")
     if not claim_generation or not current_generation or claim_generation == current_generation:
         # "Strictly older" is the requirement. An equal generation is the LIVE
         # one and an unknown generation is not older, it is unproven.
         return row(pid, ORPHAN_ACTION_NONE, ORPHAN_RESULT_REFUSED, ORPHAN_REASON_GENERATION_NOT_SUPERSEDED)
+    recorded_namespace, expected_namespace = namespace_dimension("", Path(service_dir))
     record = {
         **{key: claim[key] for key in _CLAIM_IDENTITY_FIELDS if key in claim},
         "service": service_name,
-        "namespace": str(service_dir),
+        # The claim persists a directory, but it is the CLAIM LEDGER's, not the
+        # service directory -- and it is already independently proven a few lines
+        # above against `ledger.namespace`, which this caller resolved from
+        # `state_dir` rather than from the claim. There is no service-directory
+        # value the claim asserts, so the shared owner reports it structural
+        # rather than inventing a second check that compares a string to itself.
+        "namespace": recorded_namespace,
         "spawn_generation": claim_generation,
     }
     diagnostic = process_record_diagnostic(record, table=table)
@@ -1091,7 +1229,7 @@ def _repair_one_claimed_survivor(
         record,
         diagnostic=diagnostic,
         expected_kind=service_name,
-        expected_namespace=str(service_dir),
+        expected_namespace=expected_namespace,
         live_generation_reader=process_spawn_generation,
         claim_state=str(claim.get("claim_id") or ""),
         require_claim=True,
@@ -1106,7 +1244,14 @@ def _repair_one_claimed_survivor(
         )
     outcome = terminate_authorized_process(
         authorization,
-        still_current=lambda: pid_is_serving(pid),
+        still_current=lambda: process_record_diagnostic(
+            record,
+            host_identity=identity,
+        ).current,
+        identity_replaced=lambda: process_record_diagnostic(
+            record,
+            host_identity=identity,
+        ).reason is LocalProcessReason.PROCESS_IDENTITY_REUSED,
         signal_process=kill,
         grace_seconds=grace_seconds,
         force_seconds=force_seconds,
@@ -1191,6 +1336,7 @@ def _terminate_group_member(
     *,
     service_name: str,
     service_dir: Path,
+    recorded_namespace: str,
     group_pgid: int,
     generation_reader: Callable[[int], str | None],
     process_group_reader: Callable[[int], int | None],
@@ -1209,6 +1355,11 @@ def _terminate_group_member(
     provably shares with a leader whose identity came from a persisted record,
     re-read live before the signal. It is signalled only after the leader's own
     escalation, so a child that was going to exit with its parent already has.
+
+    ``recorded_namespace`` is the LEADER's persisted directory, carried in rather
+    than restamped here. A member holds no record of its own, so the leader's is
+    the only namespace it genuinely has; stamping ``service_dir`` and expecting
+    ``service_dir`` compared a string to itself and could not refuse anything.
     """
 
     table = table_reader()
@@ -1216,14 +1367,14 @@ def _terminate_group_member(
         return None
     record = dict(member_record)
     record.setdefault("service", service_name)
-    record["namespace"] = str(service_dir)
+    record["namespace"], expected_namespace = namespace_dimension(recorded_namespace, Path(service_dir))
     record["pgid"] = int(group_pgid)
     diagnostic = process_record_diagnostic(record, table=table)
     authorization = authorize_service_destruction(
         record,
         diagnostic=diagnostic,
         expected_kind=service_name,
-        expected_namespace=str(service_dir),
+        expected_namespace=expected_namespace,
         live_generation_reader=generation_reader,
         claim_state="launcher_owned_group_member",
         scope=SCOPE_TRACKED_PROCESS_GROUP,
@@ -1297,7 +1448,10 @@ def shutdown_owned_local_services(
             continue
         record = dict(group["process_record"])
         record.setdefault("service", group["service"])
-        record["namespace"] = str(service_dir)
+        # The directory the record itself names, not the one this loop globbed.
+        # Restamping made the expected value and the recorded value the same
+        # expression, so the namespace dimension could never disagree.
+        record["namespace"], expected_namespace = namespace_dimension(group["namespace"], Path(service_dir))
         # The generation the RECORD was published with, not one re-read from the
         # live process at the decision site. Re-reading it here and again inside
         # the authorization made recorded and observed the same measurement, so
@@ -1307,7 +1461,7 @@ def shutdown_owned_local_services(
             record,
             diagnostic=process_record_diagnostic(record, table=initial),
             expected_kind=str(group["service"]),
-            expected_namespace=str(service_dir),
+            expected_namespace=expected_namespace,
             live_generation_reader=generation_reader,
             claim_state="launcher_owned_group",
         )
@@ -1363,6 +1517,7 @@ def shutdown_owned_local_services(
                 member_pid,
                 service_name=str(group["service"]),
                 service_dir=Path(service_dir),
+                recorded_namespace=str(group["namespace"]),
                 group_pgid=int(group["pgid"]),
                 generation_reader=generation_reader,
                 process_group_reader=process_group_reader,
@@ -2056,16 +2211,24 @@ class LocalServiceRegistry:
         `pid_is_alive(launcher_pid)` was the old test and it is not a proof: a
         bare integer says nothing about which process now holds that number, and
         a zombie answers it affirmatively. The fenced `supervisor` record carries
-        host, boot, pid and process-start identity, so "gone" means gone. A
-        legacy record that carries only `launcher_pid` still falls back to that
-        integer -- but only to refuse, never to authorize: an unprovable
-        supervisor can never be declared gone.
+        host, boot, pid and process-start identity, so "gone" means gone, and the
+        answer comes from `process_is_provably_gone` -- the SAME owner the claim
+        ledger's reap, adopt, and marker-clearing paths use, so there is one
+        definition of gone rather than four that disagree at the edges.
+
+        A legacy record that carries only `launcher_pid` still falls back to that
+        integer. That fallback IS an authorization, not merely a refusal, and its
+        weakness is real: a recycled pid reads as alive (retain, harmless) but an
+        unreadable one reads as dead (act). It is retained here rather than
+        removed because a legacy record has no supervisor to fence and removing
+        it would strand every pre-identity record permanently; see the lane
+        report. Nothing new depends on it.
         """
 
         supervisor = record.get("supervisor")
         if isinstance(supervisor, dict) and supervisor:
             diagnostic = is_current_local_process(supervisor, host_identity=self.host_identity)
-            return diagnostic.may_remove_stale_record
+            return process_is_provably_gone(diagnostic)
         launcher_pid = int(record.get("launcher_pid") or 0)
         if launcher_pid <= 0 or launcher_pid == os.getpid():
             return False
@@ -2156,7 +2319,7 @@ class LocalServiceRegistry:
         """Run the atomic adoption transaction and retain its typed rows."""
 
         try:
-            rows = self.claim_ledger().adopt_unsupervised()
+            rows = self.claim_ledger().adopt_unsupervised(pid=service_pid)
         except (OSError, ProcessClaimError) as exc:
             # Supervisor boundary for one transfer attempt: a ledger that cannot
             # be read must not crash the start path, and must not silently read
@@ -2256,17 +2419,27 @@ class LocalServiceRegistry:
     def _authorization_record(self, record: dict[str, Any], service_pid: int) -> dict[str, Any]:
         """Fill dimensions this caller can PROVE, and leave the rest missing.
 
-        These are proofs, not defaults.  The namespace is proven because this
-        record was read from exactly ``self.record_path``, which lives in exactly
-        ``self.service_dir``; the spawn generation is proven because it is read
-        live out of the running process's inherited environment.  Anything that
-        cannot be proven stays absent so the authorization refuses, which is what
-        keeps a pre-existing record from silently acquiring authority it never
-        carried.
+        These are proofs, not defaults.  The spawn generation is proven because
+        it is read live out of the running process's inherited environment.
+        Anything that cannot be proven stays absent so the authorization refuses,
+        which is what keeps a pre-existing record from silently acquiring
+        authority it never carried.
+
+        The namespace is deliberately NOT stamped here any more, and the old
+        argument for stamping it -- "the record was read from ``self.record_path``
+        inside ``self.service_dir``, so the directory is proven" -- was the reason
+        the dimension could never refuse.  Overwriting the persisted value with
+        ``str(self.service_dir)`` and then passing that same expression as the
+        expected value is a comparison against itself.  The record on disk has
+        carried its own ``namespace`` since it was published, so the persisted
+        value is passed through untouched and genuinely compared: a record that
+        names another root refuses instead of being silently relabelled as this
+        one's.  A record too old to carry one is empty, and the authorization
+        refuses that as a missing dimension, which is the correct fail-closed
+        answer rather than a stamp that manufactures the missing proof.
         """
 
         proven = dict(record)
-        proven["namespace"] = str(self.service_dir)
         if not str(proven.get("spawn_generation") or ""):
             ownership = self.spawn_ownership
             if ownership is not None and int(ownership.leader_pid) == int(service_pid):
@@ -2296,11 +2469,15 @@ class LocalServiceRegistry:
         """
 
         diagnostic = self._record_process_diagnostic(record)
+        proven = self._authorization_record(record, service_pid)
+        proven["namespace"], expected_namespace = namespace_dimension(
+            proven.get("namespace"), self.service_dir
+        )
         authorization = authorize_service_destruction(
-            self._authorization_record(record, service_pid),
+            proven,
             diagnostic=diagnostic,
             expected_kind=self.spec.name,
-            expected_namespace=str(self.service_dir),
+            expected_namespace=expected_namespace,
             live_generation_reader=process_spawn_generation,
             claim_state=claim_state,
             # A record this registry published before generations existed carries
@@ -3436,8 +3613,51 @@ class LocalServiceRegistry:
             # after this one is gone.
             self.publish_claim(ownership.leader_pid, ownership.generation_marker)
             self._stamp_record_supervision(ownership.leader_pid, generation=ownership.generation_marker)
+            self._repair_superseded_survivors(ownership.generation_marker)
         self._start_child_reaper(process)
         return True
+
+    def _repair_superseded_survivors(self, current_generation: str) -> list[dict[str, Any]]:
+        """Run the bounded, claim-backed repair for this service's own leftovers.
+
+        This is the only moment in the product where the acting half has what it
+        needs: a generation that is provably LIVE because this process just
+        spawned it and holds the marker it passed. Repair from anywhere else --
+        preflight, a status poll, a diagnostics surface -- has no live generation
+        to compare against, so every claim would read as "not superseded" and the
+        sweep would be incapable of acting. That is why the acting half had no
+        production caller at all and its outcomes could never reach a surface.
+
+        Self-protection is structural, not a special case: the claim this
+        registry published moments ago carries exactly ``current_generation``, and
+        the fence requires STRICTLY older, so this can never signal the daemon it
+        was called for.
+
+        A repair that cannot run is recorded, never dropped. This is a supervisor
+        boundary for one bounded sweep: a leftover survivor must not be able to
+        fail a start that has already succeeded, and it must not vanish silently
+        either.
+        """
+
+        try:
+            return repair_verified_orphans(
+                self.service_dir,
+                self.state_dir,
+                (self.spec.name,),
+                current_generations={self.spec.name: str(current_generation)},
+                private_root=self.managed_private_root,
+                host_identity=self.host_identity,
+            )
+        except (OSError, ProcessClaimError, ProcessTableUnavailable) as exc:
+            return ORPHAN_REPAIRS.record(self.service_dir, [{
+                "pid": 0,
+                "service": self.spec.name,
+                "attempted_action": ORPHAN_ACTION_NONE,
+                "result": ORPHAN_RESULT_FAILED,
+                "reason": type(exc).__name__,
+                "failure_reason": str(exc),
+                "age_seconds": 0.0,
+            }])
 
     def _spawned_leader_identity_matches(self) -> bool:
         """Prove the live pid we spawned is still that exact process, not a reused-pid imposter.

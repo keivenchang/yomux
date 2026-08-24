@@ -87,6 +87,16 @@ class FilesystemError(Exception):
         )
 
     @classmethod
+    def changed_on_disk(cls, path: object, *, diagnostic: object = "") -> "FilesystemError":
+        return cls(
+            f"path changed on disk: {path}",
+            status=409,
+            message_key="fs.error.changedOnDisk",
+            message_params={"path": str(path)},
+            diagnostic=diagnostic,
+        )
+
+    @classmethod
     def file_too_large(cls, size: int, maximum: int, *, label: str = "file") -> "FilesystemError":
         return cls(
             f"{label} too large ({size} bytes; max {maximum})",

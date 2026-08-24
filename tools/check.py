@@ -50,6 +50,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ElementTree
@@ -94,6 +95,7 @@ from tests import latency_calibration
 from tests.browser_helpers.webdriver_lease import process_start_key
 from tools import docker_image
 from tools import static_build
+from yolomux_lib.infra.atomic_file import atomic_write_text
 from yolomux_lib.background_owner import pid_is_alive
 from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.infra import worktree_writer
@@ -142,6 +144,9 @@ CERTIFICATION_JUNIT_NAME = "certification-junit.xml"
 # then measures once. It never waits for the machine to become quiet.
 RETIREMENT_DEADLINE_SECONDS = 30.0
 RETIREMENT_POLL_SECONDS = 0.2
+LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES = 1024 * 1024 * 1024
+LANE_OUTPUT_FAILURE_DETAIL_CHARS = 256
+LANE_OUTPUT_WRITE_LOCK = threading.Lock()
 
 # One token minted per gate run and exported so docker/run-tests.sh stamps every container this run
 # starts with `--label CONTAINER_OWNER_LABEL=<token>`. The retirement probe then filters on that
@@ -202,6 +207,35 @@ class LaneResult:
     seconds: float
     output: str
     steps: tuple["StepResult", ...] = ()
+    output_artifact: "LaneOutputArtifact | None" = None
+    output_retention_failure: "LaneOutputRetentionFailure | None" = None
+
+
+@dataclass(frozen=True)
+class LaneOutputArtifact:
+    """One complete retained lane transcript, referenced rather than embedded in JSON."""
+
+    path: str
+    sha256: str
+    bytes: int
+
+
+@dataclass(frozen=True)
+class LaneOutputRetentionFailure:
+    """Bounded evidence that a completed lane transcript could not be retained."""
+
+    reason: str
+    error_type: str
+    detail: str
+    attempted_bytes: int
+    free_bytes: int | None
+    reserve_bytes: int
+
+
+class LaneOutputRetentionError(RuntimeError):
+    def __init__(self, failure: LaneOutputRetentionFailure):
+        super().__init__(failure.detail)
+        self.failure = failure
 
 
 @dataclass(frozen=True)
@@ -543,7 +577,83 @@ def check_run_token_environment(token: str | None = None):
             os.environ[CHECK_RUN_TOKEN_ENV] = previous
 
 
-def run_lane(lane: Lane) -> LaneResult:
+def _tmp_only_path(path: Path, *, label: str) -> Path:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(Path("/tmp").resolve()):
+        raise ValueError(f"{label} must be under /tmp")
+    return path
+
+
+def lane_output_root(report_path: Path) -> Path:
+    """Derive one private per-run artifact directory beside the runtime report."""
+
+    _tmp_only_path(report_path, label="runtime report")
+    return _tmp_only_path(
+        report_path.with_name(report_path.name + ".artifacts"), label="lane output root"
+    )
+
+
+def lane_output_retention_failure(
+    reason: str,
+    error: BaseException,
+    *,
+    attempted_bytes: int,
+    free_bytes: int | None = None,
+) -> LaneOutputRetentionFailure:
+    """Describe a retention failure without embedding the transcript or an unbounded error."""
+
+    return LaneOutputRetentionFailure(
+        reason=reason,
+        error_type=type(error).__name__[:64],
+        detail=str(error)[:LANE_OUTPUT_FAILURE_DETAIL_CHARS],
+        attempted_bytes=attempted_bytes,
+        free_bytes=free_bytes,
+        reserve_bytes=LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES,
+    )
+
+
+def retain_lane_output(output_root: Path, lane_name: str, output: str) -> LaneOutputArtifact:
+    """Persist a complete lane transcript with private permissions and a content identity."""
+
+    encoded = output.encode("utf-8")
+    try:
+        with LANE_OUTPUT_WRITE_LOCK:
+            _tmp_only_path(output_root, label="lane output root")
+            if re.fullmatch(r"[A-Za-z0-9_.-]+", lane_name) is None:
+                raise ValueError(f"invalid lane artifact name: {lane_name!r}")
+            output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            output_root.chmod(0o700)
+            path = output_root / f"{lane_name}.txt"
+            try:
+                free_bytes = shutil.disk_usage(output_root).free
+            except OSError as error:
+                raise LaneOutputRetentionError(
+                    lane_output_retention_failure(
+                        "space_check_failed", error, attempted_bytes=len(encoded)
+                    )
+                ) from error
+            if len(encoded) > max(0, free_bytes - LANE_OUTPUT_FREE_SPACE_RESERVE_BYTES):
+                error = OSError("retention would cross the reserved free-space floor")
+                raise LaneOutputRetentionError(
+                    lane_output_retention_failure(
+                        "insufficient_space",
+                        error,
+                        attempted_bytes=len(encoded),
+                        free_bytes=free_bytes,
+                    )
+                )
+            atomic_write_text(path, output, mode=0o600)
+    except LaneOutputRetentionError:
+        raise
+    except (OSError, ValueError) as error:
+        reason = "unsafe_path" if isinstance(error, ValueError) else "write_failed"
+        raise LaneOutputRetentionError(
+            lane_output_retention_failure(reason, error, attempted_bytes=len(encoded))
+        ) from error
+    return LaneOutputArtifact(str(path), hashlib.sha256(encoded).hexdigest(), len(encoded))
+
+
+def run_lane(lane: Lane, *, output_root: Path | None = None) -> LaneResult:
     started = time.monotonic()
     chunks: list[str] = []
     step_results: list[StepResult] = []
@@ -567,7 +677,24 @@ def run_lane(lane: Lane) -> LaneResult:
             ok = False
             break
     seconds = time.monotonic() - started
-    return LaneResult(lane.name, lane.label, ok, seconds, "".join(chunks), tuple(step_results))
+    output = "".join(chunks)
+    artifact = None
+    retention_failure = None
+    if output_root is not None:
+        try:
+            artifact = retain_lane_output(output_root, lane.name, output)
+        except LaneOutputRetentionError as error:
+            retention_failure = error.failure
+    return LaneResult(
+        lane.name,
+        lane.label,
+        ok,
+        seconds,
+        output,
+        tuple(step_results),
+        artifact,
+        retention_failure,
+    )
 
 
 def child_usage_snapshot() -> dict[str, float | int | str]:
@@ -615,12 +742,40 @@ def child_usage_delta(before: dict[str, float | int | str], after: dict[str, flo
     }
 
 
+def lane_output_report_fields(result: LaneResult | None) -> dict[str, object]:
+    """Serialize one retained-output outcome without embedding raw lane output."""
+
+    if result is None:
+        return {}
+    if result.output_artifact is not None:
+        return {
+            "output_artifact": {
+                "path": result.output_artifact.path,
+                "sha256": result.output_artifact.sha256,
+                "bytes": result.output_artifact.bytes,
+            }
+        }
+    failure = result.output_retention_failure
+    if failure is None:
+        return {}
+    return {
+        "output_retention_failure": {
+            "reason": failure.reason,
+            "error_type": failure.error_type,
+            "detail": failure.detail,
+            "attempted_bytes": failure.attempted_bytes,
+            "free_bytes": failure.free_bytes,
+            "reserve_bytes": failure.reserve_bytes,
+        }
+    }
+
+
 def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
     worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial, cpu_percent=cpu_percent), strict=True))
     return {
-        "schema": 3,
+        "schema": 4,
         "certification": certification,
         "interrupted": interrupted,
         "mode": "serial" if serial else "parallel",
@@ -634,6 +789,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
                 "label": result.label,
                 "ok": result.ok,
                 "wall_seconds": round(result.seconds, 6),
+                **lane_output_report_fields(result),
                 "steps": [
                     {
                         "label": step.label,
@@ -655,10 +811,7 @@ def performance_report_path(value: str) -> Path:
     """Limit raw machine evidence to /tmp, never the source tree or docs."""
 
     path = Path(value) if value else Path("/tmp") / "yolomux-check-runs" / f"check-{time.time_ns()}-{os.getpid()}.json"
-    resolved = path.resolve()
-    tmp_root = Path("/tmp").resolve()
-    if not resolved.is_relative_to(tmp_root):
-        raise ValueError("--performance-report must be under /tmp")
+    _tmp_only_path(path, label="--performance-report")
     # Keep the caller-visible `/tmp/...` spelling on macOS, where resolving the path turns it
     # into `/private/tmp/...`; the resolved value above remains the security check.
     return path
@@ -701,11 +854,13 @@ def slowest_first(selected: list[Lane]) -> list[Lane]:
     return sorted(selected, key=lambda lane: rank.get(lane.name, len(rank)))
 
 
-def run_parallel(selected: list[Lane]) -> list[LaneResult]:
+def run_parallel(selected: list[Lane], *, output_root: Path | None = None) -> list[LaneResult]:
     results: list[LaneResult] = []
     workers = min(len(selected), 8)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_lane = {executor.submit(run_lane, lane): lane for lane in selected}
+        future_to_lane = {
+            executor.submit(run_lane, lane, output_root=output_root): lane for lane in selected
+        }
         for future in concurrent.futures.as_completed(future_to_lane):
             result = future.result()
             results.append(result)
@@ -713,29 +868,31 @@ def run_parallel(selected: list[Lane]) -> list[LaneResult]:
     return results
 
 
-def run_serial(selected: list[Lane]) -> list[LaneResult]:
+def run_serial(selected: list[Lane], *, output_root: Path | None = None) -> list[LaneResult]:
     results = []
     for lane in selected:
-        result = run_lane(lane)
+        result = run_lane(lane, output_root=output_root)
         results.append(result)
         print_result(result)
     return results
 
 
-def run_functional_lanes(selected: list[Lane], *, serial: bool) -> list[LaneResult]:
+def run_functional_lanes(
+    selected: list[Lane], *, serial: bool, output_root: Path | None = None
+) -> list[LaneResult]:
     """Run declared final lanes serially after every parallel functional lane retires."""
 
     if serial:
-        return run_serial(selected)
+        return run_serial(selected, output_root=output_root)
     parallel_lanes = [lane for lane in selected if not lane.run_last]
     final_lanes = [lane for lane in selected if lane.run_last]
-    results = run_parallel(parallel_lanes) if parallel_lanes else []
+    results = run_parallel(parallel_lanes, output_root=output_root) if parallel_lanes else []
     if final_lanes:
         print(
             "Running final serial lane(s): " + ", ".join(lane.name for lane in final_lanes),
             flush=True,
         )
-        results.extend(run_serial(final_lanes))
+        results.extend(run_serial(final_lanes, output_root=output_root))
     return results
 
 
@@ -1185,7 +1342,12 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
     junit_admission: dict[str, object] | None = None
     returncode: int | None = None
     if preflight is not None and preflight["qualified"]:
-        lane_result = run_lane(Lane("certification", "latency certification", (certification_step(evidence_dir),)))
+        lane_result = run_lane(
+            Lane("certification", "latency certification", (certification_step(evidence_dir),)),
+            output_root=_tmp_only_path(
+                evidence_dir / "lane-output", label="certification lane output root"
+            ),
+        )
         returncode = lane_result.steps[-1].returncode if lane_result.steps else None
         postflight = latency_calibration.certification_host_qualification(evidence_root=evidence_dir)
         junit_admission = certification_junit_admission(evidence_dir / CERTIFICATION_JUNIT_NAME)
@@ -1217,6 +1379,7 @@ def run_certification_phase(*, evidence_dir: Path, expected_containers: bool = F
         "outcomes": outcomes,
         "junit_admission": junit_admission,
         "returncode": returncode,
+        **lane_output_report_fields(lane_result),
     }
     return payload, lane_result
 
@@ -1295,6 +1458,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 2
+    output_root = lane_output_root(report_path)
     selected = [instrument_lane_for_performance(lane) for lane in selected]
 
     inotify_capacity = admit_inotify_capacity(selected)
@@ -1337,7 +1501,9 @@ def main(argv: list[str] | None = None) -> int:
                     mode = "parallel plus final serial" if any(lane.run_last for lane in selected) else "parallel"
                 if selected:
                     print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-                    results = run_functional_lanes(selected, serial=args.serial)
+                    results = run_functional_lanes(
+                        selected, serial=args.serial, output_root=output_root
+                    )
                 # Always, even when a lane already failed. A phase that only runs on an otherwise
                 # green gate cannot be trusted on a box where some lane is usually red: its own
                 # regressions would never be observed.

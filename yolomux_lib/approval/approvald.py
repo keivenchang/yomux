@@ -220,7 +220,14 @@ class PersistentApprovalService(LocalRpcServiceState):
         return {"ok": True, "drained": True, "targets": len(self.records)}, b""
 
     def _handle_lease(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:
-        response = acquire_client_lease(self.leases, request.get("client_pid"), self_connection=request_is_self_connection(request))
+        # `lease_id` is THE shared local-service wire key for the id being refreshed:
+        # it is what `LocalServiceRegistry.acquire_lease` sends and what statusd,
+        # watchd and jobd read. Dropping it made every refresh look like a first
+        # acquisition to `acquire_client_lease`, which MINTS a row each time. Nothing
+        # reaps those rows (only DEAD clients are reaped), so one healthy long-lived
+        # client walks the table to LOCAL_SERVICE_MAX_CLIENT_LEASES, is then refused
+        # with "too many clients", and pins this daemon awake forever.
+        response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"), self_connection=request_is_self_connection(request))
         return {**response, "version": APPROVALD_PROTOCOL_VERSION}, b""
 
     def _handle_release(self, request: dict[str, Any], _body: bytes) -> tuple[dict[str, Any], bytes]:

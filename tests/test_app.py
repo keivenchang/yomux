@@ -40,7 +40,10 @@ from tests.gate_harness import gate_http_request
 from tests.gate_harness import gate_runtime_paths  # noqa: F401 - fixture import
 from tests.gate_harness import gate_tmux  # noqa: F401 - fixture import
 from tests.helpers.http_routes import login_cookie
-from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation, reservation_must_not_release as _reservation_must_not_release
+from tests.helpers.operation_reservations import isolate_jobd_fs_batch_lease as _isolate_jobd_fs_batch_lease
+from tests.helpers.operation_reservations import replace_job_client_for_fs_batch as _replace_job_client_for_fs_batch
+from tests.helpers.operation_reservations import reservation_must_not_release as _reservation_must_not_release
+from tests.helpers.operation_reservations import StubOperationReservation as _StubOperationReservation
 from tests.tmux_runtime import run_isolated_tmux
 from tests.helpers.app_domain_owners import assert_composed_owners_preserve_facade_overrides
 from tests.subsystems import app_darwin_memory
@@ -7693,6 +7696,66 @@ def test_activity_warmup_adopts_session_files_disk_cache_without_rebuild(monkeyp
     assert path.stat().st_mtime_ns == payload_mtime
 
 
+def test_session_files_warm_isolates_unsupported_repository_and_adopts_next_session(monkeypatch):
+    infos = {
+        session: SessionInfo(
+            session=session,
+            panes=[],
+            selected_pane=None,
+            agents=[
+                AgentInfo(
+                    session=session,
+                    kind="codex",
+                    pid=100 + index,
+                    pane_target=f"{session}:0.0",
+                    command="codex",
+                    cwd=f"/{session}",
+                    status="running",
+                    session_id=f"sid-{session}",
+                    transcript=None,
+                    error=None,
+                )
+            ],
+        )
+        for index, session in enumerate(("unsupported", "healthy"))
+    }
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: (infos, []))
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.sessions = ["unsupported", "healthy"]
+    adopted = []
+    events = []
+
+    def cache_key(_kind, _infos, session, *_args):
+        if session == "unsupported":
+            raise app_module.filesystem.FilesystemError(
+                "unsupported repository",
+                status=422,
+                message_key="fs.error.gitRepositoryUnsupported",
+            )
+        return (session,)
+
+    monkeypatch.setattr(webapp, "session_files_cache_key", cache_key)
+    monkeypatch.setattr(webapp, "get_session_files_cache", lambda key, **_kwargs: adopted.append(key))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    try:
+        webapp.warm_start_session_files_payload_cache()
+    finally:
+        webapp.control_server.stop()
+
+    assert adopted == [("healthy",)]
+    assert len(events) == 1
+    assert events[0][0][0:3] == (
+        "unsupported",
+        "session_files_warm_failed",
+        "Session files warm skipped",
+    )
+    assert events[0][0][3] == {
+        "error": "FilesystemError",
+        "status": 422,
+        "message_key": "fs.error.gitRepositoryUnsupported",
+    }
+
+
 def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(monkeypatch):
     info5 = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     info6 = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
@@ -7794,8 +7857,8 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
 
     # The owner-side background refresh now materializes the payload in jobd; simulate a successful
     # product so the stale-while-revalidate recompute is still observed by the in-process fake.
-    def fake_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority="freshness", requester="unknown"):
-        assert requester in {"api-session-files", "background-refresh"}
+    def fake_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, _cache_key, requester="unknown", replace=False, **_kwargs):
+        assert requester in {"api-session-files", "background-refresh"} and replace is False
         return fake_session_files_payload(session, infos, hours, from_ref, to_ref, repo_refs)
 
     monkeypatch.setattr(webapp, "compute_session_files_payload_via_jobd", fake_via_jobd)
@@ -8671,7 +8734,6 @@ def test_filesystem_change_summary_counts_entry_changes():
     ]
 
 
-
 def test_filesystem_watch_signature_for_roots_matches_watch_batch_signature(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -8690,7 +8752,7 @@ def test_filesystem_watch_signature_for_roots_matches_watch_batch_signature(tmp_
             }, json.dumps(product).encode("utf-8")
 
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = ReadyBatchJob()
+    _replace_job_client_for_fs_batch(webapp, ReadyBatchJob())
     payload = {
         "client_scope": "browser",
         "requests": [{
@@ -8785,7 +8847,7 @@ def test_filesystem_watch_diff_request_submits_bounded_jobd_batches_and_complete
     terminal = threading.Event()
     published = []
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = CompletingBatchJob()
+    _replace_job_client_for_fs_batch(webapp, CompletingBatchJob())
 
     def capture_event(event_type, payload=None, **kwargs):
         published.append((event_type, payload, kwargs))
@@ -8863,7 +8925,7 @@ def test_filesystem_watch_diff_warm_calls_return_ready_without_another_jobd_rpc(
 
     terminal = threading.Event()
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = WarmBatchJob()
+    _replace_job_client_for_fs_batch(webapp, WarmBatchJob())
     accept_operation = webapp.queued_delivery_ledger.accept_operation
 
     def accept_after_producer_started(**kwargs):
@@ -8948,8 +9010,7 @@ def test_equivalent_inflight_filesystem_watch_diff_requests_share_one_completion
     terminal_events = []
     terminals_ready = threading.Event()
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = BlockingBatchJob()
-    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    _replace_job_client_for_fs_batch(webapp, BlockingBatchJob())
     webapp.jobd_operation_service = app_module.JobdOperationService(worker_limit=1, operation_limit=1)
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
 
@@ -9129,8 +9190,7 @@ def test_inflight_watch_diff_fanout_owns_one_completion_per_semantic_key(monkeyp
     terminal_events = []
     terminals_ready = threading.Event()
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = BlockingBatchJob()
-    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    _replace_job_client_for_fs_batch(webapp, BlockingBatchJob())
     webapp.jobd_operation_service = app_module.JobdOperationService(worker_limit=2, operation_limit=2)
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: list(selected_roots))
 
@@ -9184,7 +9244,7 @@ def test_filesystem_watch_diff_async_submit_failure_terminalizes_the_accepted_re
             }, b""
 
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = FailingBatchJob()
+    _replace_job_client_for_fs_batch(webapp, FailingBatchJob())
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: ["/repo"])
 
     def capture_event(event_type, payload=None, **kwargs):
@@ -9403,7 +9463,7 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
     completion_service = app_module.JobdOperationService(worker_limit=1, operation_limit=1)
     webapp = app_module.TmuxWebtermApp([])
     webapp.jobd_operation_service = completion_service
-    webapp.jobd_fs_batch_lease = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    _isolate_jobd_fs_batch_lease(webapp)
     monkeypatch.setattr(
         webapp,
         "submit_filesystem_watch_batches",
@@ -10323,7 +10383,7 @@ def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypat
     terminal = threading.Event()
     published = []
     webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = CompletingBatchJob()
+    _replace_job_client_for_fs_batch(webapp, CompletingBatchJob())
 
     def capture_event(event_type, payload=None, **kwargs):
         published.append((event_type, payload, kwargs))
@@ -12545,7 +12605,7 @@ def test_filesystem_batch_ready_product_reuses_stable_key_and_materializes_curre
 
     webapp = app_module.TmuxWebtermApp([])
     completion_service = ImmediateCompletionService()
-    webapp.job_client = ReadyBatchJob()
+    _replace_job_client_for_fs_batch(webapp, ReadyBatchJob())
     webapp.jobd_operation_service = completion_service
     first = {
         "client_scope": "browser",

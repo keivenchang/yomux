@@ -17,6 +17,31 @@ from yolomux_lib.tmux.session_retirement import SessionRetirementIdentity
 from yolomux_lib.tmux.session_retirement import retained_tmux_session_births
 
 
+def test_isolated_tmux_session_creation_has_one_cwd_owner():
+    sources = {
+        path.name: ast.parse(path.read_text(encoding="utf-8"))
+        for path in (
+            Path(tmux_runtime.__file__),
+            Path(__file__).with_name("test_gate_agent_state.py"),
+        )
+    }
+    new_session_literals = [
+        (name, node.value)
+        for name, tree in sources.items()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value == "new-session"
+    ]
+    helper = next(
+        node
+        for node in sources["tmux_runtime.py"].body
+        if isinstance(node, ast.FunctionDef) and node.name == "create_isolated_tmux_session"
+    )
+    helper_source = ast.unparse(helper)
+    assert new_session_literals == [("tmux_runtime.py", "new-session")]
+    assert "runtime.session_cwd" in helper_source
+    assert "'-c'" in helper_source
+
+
 def test_stop_isolated_tmux_runtime_declares_private_socket_for_kill_server(monkeypatch, tmp_path):
     calls = []
     socket_dir = tmp_path / "tmux-runtime"

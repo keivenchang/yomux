@@ -21,12 +21,12 @@ from ..infra.common import OTHER_BRANCH_LIMIT
 from ..infra.common import TmuxPaneInfo
 from ..infra.common import SessionInfo
 from ..infra.cache import TtlCache
-from ..infra.common import git
-from ..infra.common import git_ahead_behind_counts
 from ..infra.host_identity import HostIdentity
 from ..infra.host_identity import current_host_identity
+from ..filesystem import git_ops as filesystem_git_ops
+from ..filesystem import paths as filesystem_paths
+from ..filesystem.errors import FilesystemError
 from ..filesystem.search import SEARCH_SKIP_DIRS
-from ..filesystem.git_ops import git_control_files_signature
 from ..filesystem.git_ops import invalidate_repo_info_paths
 from ..integrations.github_client import extract_linear_ids
 from ..integrations.github_client import github_checks_unknown
@@ -39,6 +39,7 @@ from ..integrations.github_client import pull_request_status_label  # noqa: F401
 from ..integrations.github_client import summarize_github_checks  # noqa: F401 - re-exported for existing metadata callers
 from ..integrations.linear_client import linear_issue_metadata
 from .locales import message_fields
+from .repository_snapshot_schema import repository_snapshot_admits_path
 from .session_files import scan_agent_changes
 from .session_files import session_info_from_json
 from .session_files import session_touched_dirs
@@ -103,6 +104,18 @@ def cached_build_value(bucket: str, key: str, compute: Any, *, copy_value: bool 
     return copy.deepcopy(value) if copy_value else value
 
 
+@contextmanager
+def pinned_metadata_git_scope(path: str | Path) -> Any:
+    """Authorize one repository generation and keep its private Git view for the whole snapshot."""
+
+    with filesystem_git_ops.pinned_git_scope(
+        path,
+        operation="workspace_git_metadata",
+        include_index=True,
+    ) as scope:
+        yield scope, filesystem_git_ops.pinned_git_runner(scope, operation="workspaceGitMetadata")
+
+
 def resolved_path_text(path: str | Path) -> str:
     try:
         return str(Path(path).expanduser().resolve(strict=False))
@@ -116,14 +129,11 @@ def git_root_for_cwd(cwd: str | None) -> str | None:
     cwd_text = resolved_path_text(cwd)
 
     def compute() -> str | None:
-        candidate = Path(cwd_text)
-        if candidate.is_file():
-            candidate = candidate.parent
-        for parent in (candidate, *candidate.parents):
-            if (parent / ".git").exists():
-                return str(parent)
-        root = git(["rev-parse", "--show-toplevel"], cwd_text)
-        return root.stdout.strip() if root.returncode == 0 else None
+        try:
+            root = filesystem_git_ops.authorized_repo_root(cwd_text, operation="workspace_git_root")
+            return str(root) if root is not None else None
+        except FilesystemError:
+            return None
 
     return cached_build_value("git_root_by_cwd", cwd_text, compute)
 
@@ -195,22 +205,22 @@ def path_within(path_text: str, root_text: str) -> bool:
         return False
     return path == root or path.is_relative_to(root)
 
-def git_worktree_paths(cwd: str) -> tuple[str, str] | None:
-    result = git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd)
-    if result.returncode != 0:
-        return None
-    parts = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if len(parts) < 2:
-        return None
-    return parts[0], parts[1]
+def git_worktree_paths(cwd: str, scope: Any | None = None) -> tuple[str, str] | None:
+    if scope is None:
+        try:
+            with pinned_metadata_git_scope(cwd) as (pinned, _runner):
+                return git_worktree_paths(cwd, pinned)
+        except FilesystemError:
+            return None
+    return str(scope.git_dir_handle.resolved), str(scope.git_common_dir_handle.resolved)
 
 
-def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
+def git_worktree_identity(cwd: str, toplevel: str, scope: Any | None = None) -> dict[str, str] | None:
     """S7: name a LINKED git worktree vs its parent repo, cheaply (one local git call).
     A linked worktree's per-worktree git dir (`.../.git/worktrees/<name>`) differs from the shared
     common dir (`.../.git`); the main worktree's two are identical. Returns the worktree path, its
     name, and the parent (main) repo root — or None when `cwd` is the main worktree / not a worktree."""
-    paths = git_worktree_paths(cwd)
+    paths = git_worktree_paths(cwd, scope)
     if paths is None:
         return None
     git_dir, common_dir = paths
@@ -219,14 +229,14 @@ def git_worktree_identity(cwd: str, toplevel: str) -> dict[str, str] | None:
     return {"path": toplevel, "parent_root": str(Path(common_dir).parent), "name": Path(git_dir).name}
 
 
-def git_local_repository_identity(cwd: str, toplevel: str) -> dict[str, Any] | None:
+def git_local_repository_identity(cwd: str, toplevel: str, scope: Any | None = None) -> dict[str, Any] | None:
     """Return canonical local-repository/worktree identities for one checked-out path.
 
     `git-common-dir` identifies one local repository's shared refs and object database. A linked
     worktree has its own git dir but the same common dir; independent clones remain separate even
     when their remotes point to the same hosted repository.
     """
-    paths = git_worktree_paths(cwd)
+    paths = git_worktree_paths(cwd, scope)
     if paths is None:
         return None
     git_dir, common_dir = paths
@@ -240,6 +250,56 @@ def git_local_repository_identity(cwd: str, toplevel: str) -> dict[str, Any] | N
         "worktree_git_dir": worktree_git_dir,
         "kind": "primary" if worktree_git_dir == common else "linked",
     }
+
+
+def admitted_git_status_lines(repo: Path, output: str) -> list[str]:
+    """Project porcelain rows only after every referenced path passes filesystem policy."""
+
+    fields = output.split("\0")
+    rows: list[str] = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4 or record[2] != " ":
+            continue
+        status = record[:2]
+        target = record[3:]
+        paths = [target]
+        source = ""
+        if "R" in status or "C" in status:
+            if index >= len(fields):
+                continue
+            source = fields[index]
+            index += 1
+            paths.append(source)
+        if not all(repository_snapshot_admits_path(repo, path) for path in paths):
+            continue
+        rows.append(record if not source else f"{status} {source} -> {target}")
+    return rows
+
+
+def pinned_dirty_activity_ts(scope: Any, status_lines: list[str]) -> float:
+    latest = 0.0
+    for line in status_lines[:200]:
+        relative_path = status_entry_path(line)
+        if not relative_path:
+            continue
+        try:
+            with filesystem_paths.safe_descendant(
+                scope.repo_handle.descriptor,
+                scope.repo,
+                scope.repo_handle.resolved,
+                Path(relative_path),
+                operation="workspace_git_activity",
+                observe_name=False,
+            ) as handle:
+                latest = max(latest, handle.stat_result.st_mtime)
+        except (FilesystemError, OSError):
+            continue
+    return latest
 
 
 def git_metadata_base(
@@ -269,40 +329,49 @@ def git_metadata_base(
             cached = _GIT_METADATA_CACHE.get(cache_key)
         return copy.deepcopy(cached[0]) if cached is not None else None
 
-    def compute(status: Any) -> dict[str, Any] | None:
-        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], root_text)
-        head_sha = git(["rev-parse", "HEAD"], root_text)
+    def compute(status: Any, scope: Any, runner: Any) -> dict[str, Any] | None:
+        branch = runner(["rev-parse", "--abbrev-ref", "HEAD"], 3.0)
+        head_sha = runner(["rev-parse", "HEAD"], 3.0)
+        head_sha_text = head_sha.stdout.strip() if head_sha.returncode == 0 else None
         # An unborn repository has a symbolic initial branch (normally `main`) but no HEAD commit.
         # `rev-parse --abbrev-ref HEAD` reports `HEAD` in that state, which would make the graph
         # invent neither a useful current branch nor an honest null SHA. Read the symbolic ref only
         # for that state; detached HEAD intentionally remains branchless.
         branch_name = branch.stdout.strip() if branch.returncode == 0 else None
         if head_sha.returncode != 0 and (not branch_name or branch_name == "HEAD"):
-            symbolic_head = git(["symbolic-ref", "--quiet", "--short", "HEAD"], root_text)
+            symbolic_head = runner(["symbolic-ref", "--quiet", "--short", "HEAD"], 3.0)
             if symbolic_head.returncode == 0 and symbolic_head.stdout.strip():
                 branch_name = symbolic_head.stdout.strip()
-        head = git(["log", "-1", "--pretty=%h %s"], root_text)
-        upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root_text)
+        head = runner(["log", "-1", "--pretty=%h %s"], 3.0)
+        upstream = runner(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], 3.0)
         upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
-        ahead, behind = git_ahead_behind(root_text, upstream_name)
-        status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
-        worktree = git_worktree_identity(root_text, root_text)
-        local_repository = git_local_repository_identity(root_text, root_text)
+        ahead, behind = git_ahead_behind(root_text, upstream_name, runner=runner)
+        commit_activity_ts = repo_commit_activity_ts(root_text, runner=runner)
+        status_lines = admitted_git_status_lines(Path(root_text), status.stdout) if status.returncode == 0 else []
+        dirty_activity_ts = pinned_dirty_activity_ts(scope, status_lines)
+        worktree = git_worktree_identity(root_text, root_text, scope)
+        local_repository = git_local_repository_identity(root_text, root_text, scope)
+        pull_requests_by_sha = local_pull_request_by_sha(root_text, runner=runner)
         return {
             "root": root_text,
             "branch": branch_name,
             "upstream": upstream_name,
             "head": head.stdout.strip() if head.returncode == 0 else None,
-            "head_sha": head_sha.stdout.strip() if head_sha.returncode == 0 else None,
+            "head_sha": head_sha_text,
             "ahead": ahead,
             "behind": behind,
+            "commit_activity_ts": commit_activity_ts,
+            "dirty_activity_ts": dirty_activity_ts,
             "status_lines": status_lines,
-            "github_repo": github_repo_for_git_remotes(root_text),
+            "github_repo": github_repo_for_git_remotes(root_text, scope=scope),
             "other_branches": local_branch_inventory(
                 root_text,
                 branch_name,
                 branch_limit=branch_limit,
+                runner=runner,
+                pull_requests_by_sha=pull_requests_by_sha,
             ),
+            "local_pull_request": pull_requests_by_sha.get(head_sha_text) if head_sha_text else None,
             "worktree": worktree,
             "local_repository": local_repository,
         }
@@ -310,8 +379,12 @@ def git_metadata_base(
     with _GIT_METADATA_CACHE_LOCK:
         generation = _GIT_METADATA_GENERATIONS.get(root_text, 0)
     try:
-        status = git(["status", "--short", "--untracked-files=all"], root_text, timeout=10.0)
-        value = compute(status)
+        try:
+            with pinned_metadata_git_scope(root_text) as (scope, runner):
+                status = runner(["status", "--porcelain=v1", "-z", "--untracked-files=all"], 10.0)
+                value = compute(status, scope, runner)
+        except FilesystemError:
+            value = None
         with _GIT_METADATA_CACHE_LOCK:
             # Cache against the generation this value was computed from. If a real
             # invalidation arrived mid-compute the generation has since advanced, so
@@ -383,21 +456,38 @@ def git_inventory(cwd: str | None, branch_limit: int | None = OTHER_BRANCH_LIMIT
         "head_sha": base["head_sha"],
         "ahead": base["ahead"],
         "behind": base["behind"],
+        "commit_activity_ts": base["commit_activity_ts"],
+        "dirty_activity_ts": base["dirty_activity_ts"],
         "dirty_count": len(base["status_lines"]),
         "status": base["status_lines"][:30],
         "github_repo": base["github_repo"],
         "other_branches": base["other_branches"],
+        "local_pull_request": base["local_pull_request"],
         "worktree": base["worktree"],
         "local_repository": base["local_repository"],
     }
 
-def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
-    # ahead/behind counting lives in common.git_ahead_behind_counts (one ref order, one parse).
+def git_ahead_behind(cwd: str, upstream: str | None, *, runner: Any | None = None) -> tuple[int | None, int | None]:
     # HEAD relative to its upstream: ahead = local commits not pushed, behind = upstream commits not pulled.
     if not upstream:
         return None, None
-    counts = git_ahead_behind_counts(cwd, upstream, "HEAD")
-    return counts if counts is not None else (None, None)
+    if runner is None:
+        try:
+            with pinned_metadata_git_scope(cwd) as (_scope, pinned_runner):
+                return git_ahead_behind(cwd, upstream, runner=pinned_runner)
+        except FilesystemError:
+            return None, None
+    result = runner(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], 3.0)
+    if result.returncode != 0:
+        return None, None
+    parts = result.stdout.strip().split()
+    if len(parts) != 2:
+        return None, None
+    try:
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None, None
+    return ahead, behind
 
 def local_branch_inventory(
     cwd: str,
@@ -405,18 +495,34 @@ def local_branch_inventory(
     worktree: dict[str, str] | None = None,
     linked_worktree_branches: set[str] | None = None,
     branch_limit: int | None = OTHER_BRANCH_LIMIT,
+    runner: Any | None = None,
+    pull_requests_by_sha: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    result = git(
+    if runner is None:
+        try:
+            with pinned_metadata_git_scope(cwd) as (_scope, pinned_runner):
+                return local_branch_inventory(
+                    cwd,
+                    current_branch,
+                    worktree,
+                    linked_worktree_branches,
+                    branch_limit,
+                    runner=pinned_runner,
+                    pull_requests_by_sha=pull_requests_by_sha,
+                )
+        except FilesystemError:
+            return {"branches": [], "hidden_count": 0}
+    result = runner(
         [
             "branch",
             "--format=%(refname)\t%(refname:short)\t%(objectname)\t%(committerdate:unix)"
             "\t%(committerdate:relative)\t%(subject)",
         ],
-        cwd,
+        3.0,
     )
     if result.returncode != 0:
         return {"branches": [], "hidden_count": 0}
-    pr_by_sha = local_pull_request_by_sha(cwd)
+    pr_by_sha = pull_requests_by_sha if pull_requests_by_sha is not None else local_pull_request_by_sha(cwd, runner=runner)
     entries: list[dict[str, Any]] = []
     for line in result.stdout.splitlines():
         full_ref, _, rest = line.partition("\t")
@@ -505,10 +611,16 @@ def branch_inventory_ref(full_ref: str, short_ref: str) -> tuple[str | None, str
     return None, short_ref or None
 
 
-def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
-    result = git(
+def local_pull_request_by_sha(cwd: str, *, runner: Any | None = None) -> dict[str, dict[str, Any]]:
+    if runner is None:
+        try:
+            with pinned_metadata_git_scope(cwd) as (_scope, pinned_runner):
+                return local_pull_request_by_sha(cwd, runner=pinned_runner)
+        except FilesystemError:
+            return {}
+    result = runner(
         ["for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(subject)", "refs/remotes/origin/pull-request"],
-        cwd,
+        3.0,
     )
     if result.returncode != 0:
         return {}
@@ -559,28 +671,17 @@ def parse_github_remote(remote_url: str) -> dict[str, str] | None:
         "url": f"https://github.com/{quote(owner)}/{quote(name)}",
     }
 
-def github_repo_for_git_remotes(root_text: str) -> dict[str, str] | None:
-    remotes = git(["config", "--get-regexp", r"^remote\..*\.url$"], root_text)
-    if remotes.returncode != 0:
+def github_repo_for_git_remotes(root_text: str, *, scope: Any | None = None) -> dict[str, str] | None:
+    if scope is None:
+        try:
+            with pinned_metadata_git_scope(root_text) as (pinned, _runner):
+                return github_repo_for_git_remotes(root_text, scope=pinned)
+        except FilesystemError:
+            return None
+    remote = scope.hosted_remote
+    if not isinstance(remote, dict) or remote.get("provider") != "github":
         return None
-    candidates: list[tuple[int, int, dict[str, str]]] = []
-    for index, line in enumerate(remotes.stdout.splitlines()):
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        key, remote_url = parts
-        match = re.match(r"^remote\.(.+)\.url$", key)
-        if not match:
-            continue
-        repo = parse_github_remote(remote_url.strip())
-        if repo is None:
-            continue
-        remote_name = match.group(1)
-        priority = {"origin": 0, "upstream": 1}.get(remote_name, 2)
-        candidates.append((priority, index, repo))
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: (item[0], item[1]))[0][2]
+    return parse_github_remote(str(remote.get("base_url") or ""))
 
 # a watched-PR entry is either "owner/repo#N" (or "owner/repo/N") or a full GitHub PR URL.
 # An owner/repo segment is a conservative `[A-Za-z0-9._-]+` (GitHub's own allowed set).
@@ -1498,7 +1599,7 @@ def session_work_graph(
         worktree["git"] = {
             key: copy.deepcopy(value)
             for key, value in git_data.items()
-            if key not in {"other_branches", "local_repository"}
+            if key not in {"other_branches", "local_repository", "local_pull_request"}
         }
     annotate_worktree_activity(graph)
     validate_work_graph(graph)
@@ -1596,9 +1697,8 @@ def annotate_worktree_activity(graph: dict[str, Any]) -> None:
         ]
         worktree["activity_priority"] = min((int(observation["priority"]) for observation in observations), default=999)
         worktree["has_actor_cwd"] = any(observation["source"] == "actor-cwd" for observation in observations)
-        status_lines = worktree["git"].get("status")
-        dirty_activity_ts = repo_dirty_activity_ts(worktree["root"], status_lines if isinstance(status_lines, list) else [])
-        commit_activity_ts = repo_commit_activity_ts(worktree["root"])
+        dirty_activity_ts = float(worktree["git"].get("dirty_activity_ts") or 0.0)
+        commit_activity_ts = float(worktree["git"].get("commit_activity_ts") or 0.0)
         worktree["activity_ts"] = max(dirty_activity_ts, commit_activity_ts)
         worktree["activity_source"] = "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else "")
         current_branch_id = worktree.get("current_branch_id")
@@ -1772,22 +1872,14 @@ def status_entry_path(line: str) -> str:
     return path
 
 
-def repo_dirty_activity_ts(root: str, status_lines: list[str]) -> float:
-    latest = 0.0
-    repo = Path(root)
-    for line in status_lines[:200]:
-        rel_path = status_entry_path(line)
-        if not rel_path:
-            continue
+def repo_commit_activity_ts(cwd: str, *, runner: Any | None = None) -> float:
+    if runner is None:
         try:
-            latest = max(latest, (repo / rel_path).stat().st_mtime)
-        except OSError:
-            continue
-    return latest
-
-
-def repo_commit_activity_ts(cwd: str) -> float:
-    result = git(["log", "-1", "--format=%ct"], cwd)
+            with pinned_metadata_git_scope(cwd) as (_scope, pinned_runner):
+                return repo_commit_activity_ts(cwd, runner=pinned_runner)
+        except FilesystemError:
+            return 0.0
+    result = runner(["log", "-1", "--format=%ct"], 3.0)
     if result.returncode != 0:
         return 0.0
     try:
@@ -1809,8 +1901,8 @@ def repo_summary(
     if base is None:
         return None
     status_lines = base["status_lines"]
-    dirty_activity_ts = repo_dirty_activity_ts(root_text, status_lines)
-    commit_activity_ts = repo_commit_activity_ts(root_text)
+    dirty_activity_ts = float(base.get("dirty_activity_ts") or 0.0)
+    commit_activity_ts = float(base.get("commit_activity_ts") or 0.0)
     activity_ts = max(dirty_activity_ts, commit_activity_ts)
     return {
         "root": root_text,
@@ -2032,9 +2124,13 @@ def current_branch_pull_request(git_data: dict[str, Any], cache: MetadataCache, 
     branch = git_data.get("branch")
     if not isinstance(branch, str) or branch in MAIN_BRANCHES or branch == "HEAD":
         return None
-    cwd = git_data.get("root") or git_data.get("cwd")
-    head_sha = git_data.get("head_sha")
-    local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
+    if "local_pull_request" in git_data:
+        raw_local_pr = git_data.get("local_pull_request")
+        local_pr = raw_local_pr if isinstance(raw_local_pr, dict) else None
+    else:
+        cwd = git_data.get("root") or git_data.get("cwd")
+        head_sha = git_data.get("head_sha")
+        local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
     if local_pr is not None:
         return pull_request_by_number_or_fallback(
             repo,
@@ -2074,9 +2170,13 @@ def current_worktree_pull_request(git_data: dict[str, Any], cache: MetadataCache
     repo = git_data.get("github_repo")
     if not isinstance(repo, dict):
         return None
-    cwd = git_data.get("root") or git_data.get("cwd")
-    head_sha = git_data.get("head_sha")
-    local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
+    if "local_pull_request" in git_data:
+        raw_local_pr = git_data.get("local_pull_request")
+        local_pr = raw_local_pr if isinstance(raw_local_pr, dict) else None
+    else:
+        cwd = git_data.get("root") or git_data.get("cwd")
+        head_sha = git_data.get("head_sha")
+        local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
     if local_pr is None:
         return None
     return pull_request_by_number_or_fallback(

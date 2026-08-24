@@ -48,6 +48,37 @@ def run_isolated_tmux(runtime, *args: str, timeout: float = 8, declared_socket: 
     )
 
 
+def create_isolated_tmux_session(
+    runtime,
+    session: str,
+    *,
+    columns: int,
+    rows: int,
+    command: str,
+    session_cwd: str | Path | None = None,
+) -> None:
+    """Create one fixture-owned session beneath the runtime's declared cwd."""
+
+    owned_cwd = Path(session_cwd) if session_cwd is not None else runtime.session_cwd
+    result = run_isolated_tmux(
+        runtime,
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-x",
+        str(columns),
+        "-y",
+        str(rows),
+        "-c",
+        str(owned_cwd),
+        command,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
+
+
 def capture_isolated_tmux_pane_identities(runtime) -> tuple[tuple[int, str], ...]:
     """Capture the exact live pane processes whose exit effects teardown must own."""
 
@@ -187,17 +218,18 @@ def start_isolated_tmux_runtime(
     monkeypatch.delenv("TMUX_PANE", raising=False)
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     monkeypatch.setenv("HISTFILE", os.devnull)
-    runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=["-S", str(socket_path)], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, stopped=False)
+    owned_cwd = Path(session_cwd) if session_cwd is not None else tmp_path
+    runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=["-S", str(socket_path)], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, session_cwd=owned_cwd, stopped=False)
     try:
         for session in session_names:
-            args = ["new-session", "-d", "-s", session, "-x", str(columns), "-y", str(rows)]
-            if session_cwd is not None:
-                args.extend(["-c", str(session_cwd)])
             command = commands.get(session)
-            args.append(command if command is not None else "exec /bin/bash --noprofile --norc")
-            result = run_isolated_tmux(runtime, *args, timeout=10)
-            if result.returncode != 0:
-                raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
+            create_isolated_tmux_session(
+                runtime,
+                session,
+                columns=columns,
+                rows=rows,
+                command=command if command is not None else "exec /bin/bash --noprofile --norc",
+            )
             if command is None:
                 run_isolated_tmux(runtime, "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter", timeout=5)
         return runtime
@@ -227,24 +259,16 @@ def start_isolated_default_tmux_runtime(monkeypatch, tmp_path: Path, session_cou
     monkeypatch.setenv("TMUX_TMPDIR", str(socket_dir))
     monkeypatch.setenv("HISTFILE", os.devnull)
     socket_path = socket_dir / f"tmux-{os.getuid()}" / "default"
-    runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=[], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, stopped=False)
+    runtime = SimpleNamespace(tmux_binary=tmux_binary, tmux_args=[], socket_path=socket_path, socket_dir=socket_dir, sessions=session_names, session_cwd=tmp_path, stopped=False)
     try:
         for session in session_names:
-            result = run_isolated_tmux(
+            create_isolated_tmux_session(
                 runtime,
-                "new-session",
-                "-d",
-                "-s",
                 session,
-                "-x",
-                str(columns),
-                "-y",
-                str(rows),
-                "exec /bin/bash --noprofile --norc",
-                timeout=10,
+                columns=columns,
+                rows=rows,
+                command="exec /bin/bash --noprofile --norc",
             )
-            if result.returncode != 0:
-                raise AssertionError(f"isolated default tmux session failed: {result.stderr or result.stdout}")
         return runtime
     except Exception:
         stop_isolated_tmux_runtime(runtime)

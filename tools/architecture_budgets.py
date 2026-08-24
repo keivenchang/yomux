@@ -42,9 +42,12 @@ CLASS_TARGETS: Final[tuple[tuple[str, str], ...]] = (
     ("yolomux_lib/infra/jobd.py", "PersistentJobBroker"),
     ("yolomux_lib/infra/jobd.py", "JobProductStore"),
     ("yolomux_lib/infra/background_owner.py", "BackgroundOwnerRegistry"),
+    ("yolomux_lib/infra/state_services.py", "SessionFilesOperationLifecycle"),
 )
 PRODUCTION_LINE_TARGETS: Final[tuple[str, ...]] = (
     "yolomux_lib/app.py",
+    "yolomux_lib/infra/listener_census.py",
+    "yolomux_lib/infra/state_services.py",
     "yolomux_lib/server.py",
     "yolomux_lib/search/file_index.py",
     "yolomux_lib/workspace/session_files.py",

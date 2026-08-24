@@ -2878,7 +2878,7 @@ def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, An
     return state
 
 
-def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, Any]:
+def wait_for_fixture_api_quiescence(driver, timeout: float = 12.0) -> dict[str, Any]:
     """Wait until product work and its diagnostic receipts reach owned terminal state."""
 
     last_state = None

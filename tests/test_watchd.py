@@ -1868,7 +1868,7 @@ def test_watchd_reconcile_bumps_repo_generation_on_same_commit_branch_switch(tmp
     """A same-commit branch switch changes checked-out HEAD identity with NO working-tree event.
 
     Reconcile must still advance ``repo_generations`` -- through the ONE typed generation owner
-    ``filesystem.git_ops.repository_generation`` -- so the Differ consumer's
+    ``filesystem.git_ops.pinned_repository_generation`` -- so the Differ consumer's
     ``repo_dirty_generations`` refreshes.  The published revision must isolate two tenants and must
     never name a ``.git`` control path.
     """
@@ -1908,6 +1908,50 @@ def test_watchd_reconcile_bumps_repo_generation_on_same_commit_branch_switch(tmp
     assert revision["repo_generations"] == {str(tenant_a): 1}
     # No .git control path anywhere in the published payload (fail closed on disclosure).
     assert ".git" not in json.dumps(revision)
+
+
+def test_watchd_repo_generation_refuses_a_post_authorization_repo_repoint(tmp_path, monkeypatch):
+    safe = tmp_path / "safe"
+    blocked = tmp_path / ".ssh" / "blocked"
+    for repo, content in ((safe, "safe\n"), (blocked, "BLOCKED_SENTINEL_DO_NOT_EXPOSE\n")):
+        repo.mkdir(parents=True)
+        init_repo(repo)
+        (repo / "file.txt").write_text(content, encoding="utf-8")
+        git(repo, "add", "file.txt")
+        git(repo, "commit", "-m", "initial")
+
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = EffectiveWatchConfiguration(
+        repo_roots=(str(safe),),
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(tmp_path),),
+    )
+    service.reconcile(reason="configuration", watch_generation=1)
+    baseline_generations = dict(service.repo_head_generations)
+    parked = tmp_path / "safe-authorized"
+    original_git = watchd.filesystem.git_ops._git_with_pinned_repo
+    swapped = False
+
+    def swap_before_git(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            safe.rename(parked)
+            safe.symlink_to(blocked, target_is_directory=True)
+        return original_git(*args, **kwargs)
+
+    monkeypatch.setattr(watchd.filesystem.git_ops, "_git_with_pinned_repo", swap_before_git)
+    try:
+        revision = service.reconcile(reason="fallback", watch_generation=1)
+    finally:
+        safe.unlink()
+        parked.rename(safe)
+
+    assert swapped is True
+    assert revision is None
+    assert service.repo_head_generations == baseline_generations
+    assert "BLOCKED_SENTINEL_DO_NOT_EXPOSE" not in repr(service.repo_head_generations)
 
 
 @pytest.mark.parametrize("scope_kind", ("root", "exact-file"))
@@ -2650,7 +2694,7 @@ def test_session_files_owner_counter_advances_only_for_the_materialized_cache_mi
     monkeypatch.setattr(
         webapp,
         "compute_session_files_cache_entry",
-        lambda _key, compute: (*compute(), False, 0.0),
+        lambda _key, compute, *, reserved=False, replace=False: (*compute(), False, 0.0),
     )
     monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
 

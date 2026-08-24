@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools import yostats_capture_common
+from yolomux_lib.infra import listener_census
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +54,36 @@ def load_tool_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_active_browser_window_uses_two_second_listener_census(monkeypatch):
+    tool = load_tool_module()
+    observed = []
+
+    class CensusObserved(Exception):
+        pass
+
+    def census(port, *, timeout_seconds):
+        observed.append((port, timeout_seconds))
+        raise CensusObserved
+
+    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT))
+    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr(tool, "unique_listener_pid", census)
+
+    with pytest.raises(CensusObserved):
+        tool.main()
+    assert observed == [(FIXTURE_PORT, 2.0)]
+
+
+def test_active_browser_window_rejects_raw_fork_parent_and_child(monkeypatch):
+    tool = load_tool_module()
+    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT))
+    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr(listener_census, "listener_pids", lambda *_args, **_kwargs: [101, 202])
+
+    with pytest.raises(RuntimeError, match=r"found \[101, 202\]"):
+        tool.main()
 
 
 def test_active_browser_window_resolves_requested_instance_before_product_imports():
@@ -329,7 +360,7 @@ def test_active_browser_window_rejects_non_tmp_output_before_chrome_starts(monke
     tool = load_tool_module()
     monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=output, port=FIXTURE_PORT, duration=60, workload="active", username=None))
     monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(tool, "listener_pid", lambda _port: 1)
+    monkeypatch.setattr(tool, "unique_listener_pid", lambda _port, **_kwargs: 1)
     monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
     monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
     monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: pytest.fail("Chrome must not start for an unsafe output path"))
@@ -350,7 +381,7 @@ def test_active_browser_window_sigterm_cleans_up_once(monkeypatch):
     )
     monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT, duration=60, workload="active", username=None))
     monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
-    monkeypatch.setattr(tool, "listener_pid", lambda _port: 1)
+    monkeypatch.setattr(tool, "unique_listener_pid", lambda _port, **_kwargs: 1)
     monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
     monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
     monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: driver)

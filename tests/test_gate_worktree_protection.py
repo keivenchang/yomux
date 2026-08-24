@@ -290,8 +290,13 @@ def test_static_build_and_check_runner_acquire_the_shared_writer_parent(
     assert static_build.main(["--lint-light"]) == 0
 
     monkeypatch.setattr(check.worktree_writer, "acquire_worktree_writer", acquire)
-    monkeypatch.setattr(check, "run_serial", lambda _selected: [])
     report = tmp_path / "check-report.json"
+
+    def run_serial(_selected: Any, *, output_root: Path | None = None) -> list[Any]:
+        assert output_root == check.lane_output_root(report)
+        return []
+
+    monkeypatch.setattr(check, "run_serial", run_serial)
     assert check.main(["--serial", "--lane", "whitespace", "--no-tool-guard", "--performance-report", str(report)]) == 0
     assert purposes == ["static-build", "test-gate"]
 

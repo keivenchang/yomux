@@ -26,8 +26,13 @@ share one runtime directory, so this watchdog can see -- and used to contain --
 services another live server owns. A service whose recorded supervisor is not
 PROVABLY gone by the shared identity fence is therefore retained: zero signals,
 zero unlinks, and one typed row naming that surviving supervisor. Missing,
-unreadable, and merely unprovable all retain too; only `may_remove_stale_record`
-(the same property `registry._supervisor_is_gone` uses) counts as gone.
+unreadable, and merely unprovable all retain too. The gate itself lives in
+`lifetime.authorize_service_destruction` and still spells "gone" as
+`may_remove_stale_record`, which is STRICTER than the shared
+`process_claims.process_is_provably_gone` the claim ledger and
+`registry._supervisor_is_gone` now use: it additionally retains a supervisor from
+a previous boot. Stricter in the retaining direction is safe here, but the two
+spellings should become one owner.
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from ..host_identity import LocalProcessReason
 from .registry import ProcessTableEntry
 from .registry import bounded_process_table
 from .registry import live_process_group
+from .registry import namespace_dimension
 from .registry import pid_is_serving
 from .registry import process_record_diagnostic
 from .registry import process_spawn_generation
@@ -244,7 +250,8 @@ class GroupOverloadWatchdog:
         pid: int,
         record: dict[str, Any],
         kind: str,
-        namespace: Path,
+        recorded_namespace: object,
+        resolved_namespace: Path,
         pgid: int,
         table: dict[int, ProcessTableEntry],
         graceful_first: bool,
@@ -269,11 +276,21 @@ class GroupOverloadWatchdog:
         (it is the top of the supervision tree, started by boot.sh), so its group
         does not demand the dimension rather than failing an unprovable one and
         retaining the very group this watchdog exists to contain.
+
+        ``recorded_namespace`` is what the TARGET's own persisted record names
+        and ``resolved_namespace`` is the directory this watchdog resolved; the
+        shared owner turns the pair into the two halves of the dimension.  They
+        used to be ONE expression stamped into both slots, which made the
+        namespace comparison a string against itself that no input could fail.  A
+        tracked service persists a directory and is now genuinely compared
+        against it.  A web port lease never had a ``namespace`` field at all, so
+        its targets report the dimension as structural instead of reporting a
+        path that reads as a proof and is not one.
         """
 
         fenced = dict(record)
         fenced["service"] = kind
-        fenced["namespace"] = str(namespace)
+        fenced["namespace"], expected_namespace = namespace_dimension(recorded_namespace, resolved_namespace)
         fenced["pgid"] = int(pgid)
         self._fenced_records[int(pid)] = fenced
         return TerminationRequest(
@@ -281,7 +298,7 @@ class GroupOverloadWatchdog:
                 fenced,
                 diagnostic=process_record_diagnostic(fenced, table=table),
                 expected_kind=kind,
-                expected_namespace=str(namespace),
+                expected_namespace=expected_namespace,
                 live_generation_reader=self.generation_reader,
                 claim_state=WATCHDOG_CLAIM_STATE,
                 require_claim=True,
@@ -327,7 +344,11 @@ class GroupOverloadWatchdog:
                 pid=web_pid,
                 record=web["process_record"],
                 kind=WATCHDOG_WEB_GROUP_KIND,
-                namespace=self.state_dir,
+                # The port lease file has never persisted a directory of its own,
+                # so there is nothing for the shared owner to compare and it says
+                # so rather than restating this watchdog's own state_dir.
+                recorded_namespace="",
+                resolved_namespace=self.state_dir,
                 pgid=web_pgid,
                 table=table,
                 graceful_first=True,
@@ -340,7 +361,8 @@ class GroupOverloadWatchdog:
                 pid=pid,
                 record=web["member_records"][pid],
                 kind=WATCHDOG_WEB_GROUP_KIND,
-                namespace=self.state_dir,
+                recorded_namespace="",
+                resolved_namespace=self.state_dir,
                 pgid=web_pgid,
                 table=table,
                 graceful_first=False,
@@ -358,7 +380,10 @@ class GroupOverloadWatchdog:
                 pid=int(group["pid"]),
                 record=group["process_record"],
                 kind=str(group["service"]),
-                namespace=self.service_dir,
+                # What the service's own persisted record names, carried out of
+                # the resolver, against the directory this watchdog resolved.
+                recorded_namespace=group["namespace"],
+                resolved_namespace=self.service_dir,
                 pgid=int(group["pgid"]),
                 table=table,
                 graceful_first=True,
@@ -373,7 +398,8 @@ class GroupOverloadWatchdog:
                     pid=pid,
                     record=group["member_records"][pid],
                     kind=str(group["service"]),
-                    namespace=self.service_dir,
+                    recorded_namespace=group["namespace"],
+                    resolved_namespace=self.service_dir,
                     pgid=int(group["pgid"]),
                     table=table,
                     graceful_first=False,

@@ -3921,6 +3921,127 @@ def _publish_orphan_claim(state_dir, service_name, pid, generation, identity, *,
     return claim
 
 
+def test_adoption_targets_only_the_requested_survivor(tmp_path):
+    generation = uuid.uuid4().hex
+    identity = registry_mod.current_host_identity()
+    processes = [_spawn_claimable_survivor(generation) for _index in range(2)]
+    ledger = registry_mod.service_claim_ledger(
+        tmp_path / "state",
+        "jobd",
+        private_root=False,
+        host_identity=identity,
+    )
+    try:
+        claims = [ledger.publish(process.pid, generation=generation) for process in processes]
+        dead_supervisor = identity.process_record_fields(pid=999_999_999, start_identity="proc:1")
+        for claim in claims:
+            payload = json.loads(claim.path.read_text(encoding="utf-8"))
+            payload["supervisor"] = dead_supervisor
+            claim.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        rows = ledger.adopt_unsupervised(pid=processes[0].pid)
+
+        assert [int(row["pid"]) for row in rows] == [processes[0].pid]
+        first = json.loads(claims[0].path.read_text(encoding="utf-8"))
+        second = json.loads(claims[1].path.read_text(encoding="utf-8"))
+        assert int(first["supervisor"]["pid"]) == os.getpid()
+        assert second["supervisor"] == dead_supervisor
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
+def test_orphan_repair_refuses_force_signal_after_pid_identity_reuse(tmp_path, monkeypatch):
+    pid = 4242
+    identity = registry_mod.current_host_identity()
+    old_generation = uuid.uuid4().hex
+    current_generation = uuid.uuid4().hex
+    ledger = registry_mod.service_claim_ledger(
+        tmp_path / "state",
+        "jobd",
+        private_root=False,
+        host_identity=identity,
+    )
+    claim_path = ledger.claim_path("claim-one")
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
+    claim = {
+        **identity.process_record_fields(pid=pid, start_identity="proc:111"),
+        "claim_id": "claim-one",
+        "kind": ledger.kind,
+        "namespace": ledger.namespace,
+        "generation": old_generation,
+        "supervisor": identity.process_record_fields(pid=999_999_999, start_identity="proc:1"),
+    }
+    claim_path.write_text(json.dumps(claim), encoding="utf-8")
+    table = {
+        pid: registry_mod.ProcessTableEntry(
+            ppid=1,
+            pgid=pid,
+            cpu_seconds=0.0,
+            command="jobd",
+            start_time=111,
+            start_identity="proc:111",
+            spawn_generation=old_generation,
+        )
+    }
+    reused = [False]
+    signals = []
+    now = [100.0]
+    real_diagnostic = registry_mod.process_record_diagnostic
+
+    def diagnostic(record, *, host_identity=None, table=None):
+        if table is not None:
+            return real_diagnostic(record, host_identity=host_identity, table=table)
+        return registry_mod.LocalProcessDiagnostic(
+            current=not reused[0],
+            reason=(
+                LocalProcessReason.PROCESS_IDENTITY_REUSED
+                if reused[0]
+                else LocalProcessReason.CURRENT
+            ),
+            pid=pid,
+            record_host_id=identity.stable_host_id,
+            current_host_id=identity.stable_host_id,
+            record_boot_id=identity.boot_id,
+            current_boot_id=identity.boot_id,
+            recorded_start_identity="proc:111",
+            observed_start_identity="proc:222" if reused[0] else "proc:111",
+        )
+
+    def signal_process(target_pid, signum):
+        signals.append((target_pid, signum))
+        if signum == signal.SIGTERM:
+            reused[0] = True
+
+    monkeypatch.setattr(registry_mod, "process_record_diagnostic", diagnostic)
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: old_generation)
+    monkeypatch.setattr(registry_mod, "pid_is_serving", lambda _pid: True)
+
+    row = registry_mod._repair_one_claimed_survivor(
+        ledger,
+        claim_path,
+        claim,
+        service_name="jobd",
+        service_dir=tmp_path / "services",
+        current_generation=current_generation,
+        identity=identity,
+        table=table,
+        kill=signal_process,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        grace_seconds=0.1,
+        force_seconds=0.1,
+        started=100.0,
+    )
+
+    assert row["attempted_action"] == registry_mod.ORPHAN_ACTION_TERMINATE, row
+    assert signals == [(pid, signal.SIGTERM)], row
+    assert row["result"] == registry_mod.ORPHAN_RESULT_FAILED
+    assert row["reason"] == LocalProcessReason.PROCESS_IDENTITY_REUSED.value
+    assert claim_path.exists() is True
+
+
 @contextlib.contextmanager
 def _repairable_claim_ledger(tmp_path, survivors):
     """One state dir, one service dir, and one real claimed survivor per entry.

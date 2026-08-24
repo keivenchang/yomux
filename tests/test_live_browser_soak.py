@@ -12,6 +12,7 @@ import pytest
 from urllib.parse import urlsplit
 
 from yolomux_lib import live_browser_soak as soak
+from yolomux_lib.infra import listener_census
 from yolomux_lib import browser_diagnostic_receipts
 from tests.browser_helpers.browser_layout import browser  # noqa: F401
 from tests.gate_harness import gate_live_server  # noqa: F401
@@ -422,6 +423,62 @@ def test_write_artifact_redacts_every_retained_evidence_channel(tmp_path):
     for channel in ("browserEvents", "browserLocalFailures", "serverLogErrors", "browserLogFailures"):
         assert "[redacted" in restored[channel][0]["message"]
     assert "[redacted" in restored["failure"]["message"]
+
+
+def negative_probe_failure_diagnostic(driver, handle, raw, evidence):
+    try:
+        operation_state = driver.execute_script(
+            "const lifecycle = window.__yolomuxFixtureLifecycle; "
+            "return lifecycle && typeof lifecycle.operationState === 'function' "
+            "? lifecycle.operationState() : {available: false};"
+        )
+    except (soak.WebDriverException, AttributeError, RuntimeError) as error:
+        operation_state = {"error": f"{type(error).__name__}: {str(error)[:256]}"}
+    projection = evidence.get("browserReceiptProjection")
+    receipts = projection.get("receipts", []) if isinstance(projection, dict) else []
+    request_id = handle.get("requestId")
+    matching_receipts = [
+        receipt
+        for receipt in receipts
+        if isinstance(receipt, dict)
+        and (receipt.get("key") == handle.get("key") or receipt.get("requestId") == request_id)
+    ]
+    cursors = evidence.get("cursors") if isinstance(evidence.get("cursors"), dict) else {}
+    state = {
+        "requestId": request_id,
+        "route": handle.get("route"),
+        "event": handle.get("event"),
+        "eventId": handle.get("eventId"),
+        "receiptKey": handle.get("key"),
+        "receiptBarrier": evidence.get("browserReceiptBarrier"),
+        "receiptProjection": {
+            "count": len(receipts),
+            "matching": matching_receipts[:3],
+            "barrier": projection.get("barrier") if isinstance(projection, dict) else None,
+        },
+        "integrityFailures": evidence.get("integrityFailures", [])[:5],
+        "raw": raw,
+        "rendered": handle.get("rendered"),
+        "redaction": handle.get("redaction"),
+        "operationState": operation_state,
+        "serverLogErrors": evidence.get("serverLogErrors", [])[:3],
+        "serverLogDropped": evidence.get("serverLogDropped"),
+        "serverLogCursor": {
+            "epoch": cursors.get("server_epoch"),
+            "sequence": cursors.get("server_sequence"),
+            "ids": cursors.get("server_log_ids", [])[:10],
+            "capacity": cursors.get("server_capacity"),
+        },
+    }
+    # Keep every top-level state visible while bounding each independently. Reuse the soak's
+    # shared redaction owner because assertion messages are retained in the gate transcript.
+    return json.dumps(
+        {
+            key: json.dumps(soak.redact_evidence(value), sort_keys=True)[:768]
+            for key, value in state.items()
+        },
+        sort_keys=True,
+    )
 
 
 def receipt_row(event_id=1, status="accepted", *, epoch="page-1", request_id="", source="/", route="/", event="error", wall_time="", delivery="failed", http_status=None):
@@ -1326,24 +1383,122 @@ def test_negative_probe_owned_product_to_statsd_receipt_lifecycle(browser, gate_
         "return jsDebugEvents.find(event => event?.id === arguments[0]) || null;",
         handle["eventId"],
     )
-    assert isinstance(raw, dict)
 
     try:
         evidence = soak.sample_evidence(browser)
         evidence.setdefault("integrityFailures", [])
         soak.require_negative_acknowledgement(evidence, handle, validated_baseline)
+        diagnostic = negative_probe_failure_diagnostic(browser, handle, raw, evidence)
 
-        assert evidence["integrityFailures"] == []
-        receipt = next(row for row in evidence["browserReceiptProjection"]["receipts"] if row["key"] == handle["key"])
-        assert receipt["status"] == "accepted"
-        sampled_raw = next(event for event in evidence["browserEvents"] if event.get("id") == handle["eventId"])
-        assert sampled_raw == raw
-        assert raw["endpoint"] == soak.NEGATIVE_ROUTE
-        assert raw["requestId"] == handle["requestId"]
-        assert handle["rendered"]["matchingRows"] == 1
-        assert all(handle["redaction"].values())
+        assert isinstance(raw, dict), diagnostic
+        assert evidence["integrityFailures"] == [], diagnostic
+        matching_receipts = [
+            row
+            for row in evidence["browserReceiptProjection"]["receipts"]
+            if row.get("key") == handle["key"]
+        ]
+        assert len(matching_receipts) == 1, diagnostic
+        receipt = matching_receipts[0]
+        assert receipt["status"] == "accepted", diagnostic
+        assert {
+            field: receipt.get(field)
+            for field in ("requestId", "route", "event", "key", "status")
+        } == {
+            "requestId": handle["requestId"],
+            "route": soak.NEGATIVE_ROUTE,
+            "event": "api",
+            "key": handle["key"],
+            "status": "accepted",
+        }, diagnostic
+        sampled_raw_matches = [
+            event for event in evidence["browserEvents"] if event.get("id") == handle["eventId"]
+        ]
+        assert len(sampled_raw_matches) == 1, diagnostic
+        sampled_raw = sampled_raw_matches[0]
+        assert sampled_raw == raw, diagnostic
+        assert raw["endpoint"] == soak.NEGATIVE_ROUTE, diagnostic
+        assert raw["requestId"] == handle["requestId"], diagnostic
+        assert raw.get("type") == "api" and raw.get("status") == 500 and raw.get("ok") is False, diagnostic
+        assert {
+            field: handle["rendered"].get(field)
+            for field in ("matchingRows", "requestId", "source", "route", "event")
+        } == {
+            "matchingRows": 1,
+            "requestId": handle["requestId"],
+            "source": soak.NEGATIVE_SOURCE,
+            "route": soak.NEGATIVE_ROUTE,
+            "event": "api",
+        }, diagnostic
+        assert handle["redaction"] == {
+            channel: True for channel in ("dom", "clipboard", "retained", "upload", "storage")
+        }, diagnostic
     finally:
-        acknowledge_and_consume_only_expected_js_debug_failures(browser, (raw,))
+        acknowledge_and_consume_only_expected_js_debug_failures(
+            browser,
+            (raw,) if isinstance(raw, dict) else (),
+        )
+
+
+def test_negative_probe_failure_diagnostic_is_bounded_and_names_each_state():
+    raw_secret = "browser-diagnostic-secret"
+    redaction_marker = "[redacted"
+
+    class Driver:
+        def execute_script(self, _script):
+            return {
+                "pending": [f"operation-{index}" for index in range(100)],
+                "pendingDetails": [{"id": f"operation-{index}", "path": "p" * 1000} for index in range(100)],
+            }
+
+    handle = {
+        "requestId": "request-diagnostic",
+        "route": soak.NEGATIVE_ROUTE,
+        "event": "api",
+        "eventId": 7,
+        "key": "page:7",
+        "rendered": {"matchingRows": 0, "text": "r" * 1000},
+        "redaction": {"dom": False},
+    }
+    evidence = {
+        "browserReceiptBarrier": {"quiescent": False, "blocking": [{"key": f"k-{index}"} for index in range(100)]},
+        "browserReceiptProjection": {
+            "barrier": {"quiescent": False},
+            "receipts": [{"key": f"other-{index}", "requestId": f"r-{index}"} for index in range(100)],
+        },
+        "integrityFailures": ["failure" * 1000],
+        "serverLogErrors": [{"id": index, "message": "s" * 1000} for index in range(100)],
+        "serverLogDropped": {"count": 2},
+        "cursors": {
+            "server_epoch": "epoch-a",
+            "server_sequence": 99,
+            "server_log_ids": list(range(100)),
+            "server_capacity": 100,
+        },
+    }
+
+    diagnostic = negative_probe_failure_diagnostic(
+        Driver(),
+        handle,
+        {"id": 7, "message": f"Bearer {raw_secret}"},
+        evidence,
+    )
+
+    assert len(diagnostic) < 12_000
+    assert raw_secret not in diagnostic
+    assert redaction_marker in diagnostic
+    for field in (
+        "requestId",
+        "route",
+        "event",
+        "receiptBarrier",
+        "receiptProjection",
+        "operationState",
+        "serverLogErrors",
+        "serverLogDropped",
+        "serverLogCursor",
+    ):
+        assert field in diagnostic
+    assert "request-diagnostic" in diagnostic
 
 
 def test_run_soak_rejects_dirty_authenticated_baseline(monkeypatch):
@@ -3320,78 +3475,32 @@ def test_success_artifact_rejects_missing_or_malformed_final_boundary(monkeypatc
         soak.validate_success_artifact(artifact)
 
 
-LIVE_SS_LISTEN_OUTPUT = (
-    "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\n"
-    "LISTEN 0      64           0.0.0.0:19771      0.0.0.0:*    users:((\"python3\",pid=3364478,fd=6))\n"
-)
-
-
-def record_listener_probe(monkeypatch, stdout, *, platform_name, ss_present=True):
-    """Capture the exact listener-probe argv and let the caller supply its stdout."""
-
+def test_listener_identity_uses_shared_unique_owner(monkeypatch):
     calls = []
+    monkeypatch.setattr(soak, "unique_listener_pid", lambda port: calls.append(("census", port)) or 3364478)
+    monkeypatch.setattr(soak, "process_cwd", lambda pid: calls.append(("cwd", pid)) or "/repo")
 
-    def fake_run(args, **kwargs):
-        calls.append((list(args), kwargs.get("timeout")))
-        return subprocess.CompletedProcess(list(args), 0, stdout, "")
+    def run(command, **_kwargs):
+        calls.append((command[0], command[-1]))
+        output = "Mon Aug 24 01:02:03 2026" if command[0] == "ps" else "a" * 40
+        return subprocess.CompletedProcess(command, 0, output, "")
 
-    monkeypatch.setattr(soak.platform, "system", lambda: platform_name)
-    monkeypatch.setattr(soak.shutil, "which", lambda name: "/usr/bin/ss" if (name == "ss" and ss_present) else ("/usr/bin/lsof" if name == "lsof" else None))
-    monkeypatch.setattr(soak.subprocess, "run", fake_run)
-    return calls
+    monkeypatch.setattr(soak.subprocess, "run", run)
 
-
-def test_listener_pid_uses_ss_on_linux_and_never_walks_every_fd_with_lsof(monkeypatch):
-    """lsof -iTCP walks all open FDs and takes ~9s on a busy host, so Linux must use ss like boot.sh does."""
-
-    calls = record_listener_probe(monkeypatch, LIVE_SS_LISTEN_OUTPUT, platform_name="Linux")
-
-    assert soak.listener_pid(19771) == 3364478
-    assert calls == [(["ss", "-ltnp", "sport = :19771"], soak.LISTENER_PROBE_TIMEOUT_SECONDS)]
-    assert all("lsof" not in argv[0] for argv, _timeout in calls)
-
-
-def test_listener_pid_keeps_lsof_on_macos(monkeypatch):
-    calls = record_listener_probe(monkeypatch, "3364478\n", platform_name="Darwin")
-
-    assert soak.listener_pid(19771) == 3364478
-    assert calls == [(["lsof", "-nP", "-iTCP:19771", "-sTCP:LISTEN", "-t"], soak.LISTENER_PROBE_TIMEOUT_SECONDS)]
-
-
-def test_listener_pid_falls_back_to_lsof_when_linux_lacks_ss(monkeypatch):
-    calls = record_listener_probe(monkeypatch, "3364478\n", platform_name="Linux", ss_present=False)
-
-    assert soak.listener_pid(19771) == 3364478
-    assert calls == [(["lsof", "-nP", "-iTCP:19771", "-sTCP:LISTEN", "-t"], soak.LISTENER_PROBE_TIMEOUT_SECONDS)]
-
-
-def test_listener_pid_dedupes_one_process_holding_several_listening_fds(monkeypatch):
-    dual_stack = (
-        "LISTEN 0 64 0.0.0.0:19771 0.0.0.0:* users:((\"python3\",pid=3364478,fd=6))\n"
-        "LISTEN 0 64    [::]:19771    [::]:* users:((\"python3\",pid=3364478,fd=7),(\"python3\",pid=3364478,fd=8))\n"
+    assert soak.listener_identity(19771) == soak.ListenerIdentity(
+        pid=3364478,
+        cwd="/repo",
+        started="Mon Aug 24 01:02:03 2026",
+        head="a" * 40,
     )
-    record_listener_probe(monkeypatch, dual_stack, platform_name="Linux")
-
-    assert soak.listener_pid(19771) == 3364478
+    assert calls == [("census", 19771), ("cwd", 3364478), ("ps", "lstart="), ("git", "HEAD")]
 
 
-@pytest.mark.parametrize(
-    ("stdout", "expected"),
-    (
-        ("State Recv-Q Send-Q Local Address:Port\n", "none"),
-        (
-            "LISTEN 0 64 0.0.0.0:19771 0.0.0.0:* users:((\"python3\",pid=3364478,fd=6))\n"
-            "LISTEN 0 64    [::]:19771    [::]:* users:((\"python3\",pid=4242424,fd=6))\n",
-            "['3364478', '4242424']",
-        ),
-        ("LISTEN 0 64 0.0.0.0:19771 0.0.0.0:*\n", "none"),
-    ),
-)
-def test_listener_pid_stays_strict_about_exactly_one_identified_listener(monkeypatch, stdout, expected):
-    record_listener_probe(monkeypatch, stdout, platform_name="Linux")
+def test_listener_identity_rejects_raw_fork_parent_and_child(monkeypatch):
+    monkeypatch.setattr(listener_census, "listener_pids", lambda *_args, **_kwargs: [101, 202])
 
-    with pytest.raises(RuntimeError, match=f"expected exactly one listener on port 19771, found {re.escape(expected)}"):
-        soak.listener_pid(19771)
+    with pytest.raises(RuntimeError, match=r"found \[101, 202\]"):
+        soak.listener_identity(19771)
 
 
 # The two hrefs below were measured on the live 7771 server on 2026-08-07 with the soak's own

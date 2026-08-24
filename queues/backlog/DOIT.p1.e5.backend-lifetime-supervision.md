@@ -1,0 +1,91 @@
+# DOIT.p1.e5.backend-lifetime-supervision.md - Bound Backend Lifetime And Simplify Root Ownership
+
+## Queue Lineage
+
+- Authoritative queue: this file in `/home/keivenc/dev/yolomux.dev7771-unified`, branch `integration/v0.7.12-one-ai`, HEAD `2c1d0954ca9f6017e84189dc7db45b93f833fa62` when consolidated on 2026-08-23.
+- Worked source: `/home/keivenc/dev/yolomux.dev7773`, branch `fix/watchd-demand-quick-open-cpu`, HEAD `6dcfbf0d949fb7ec98f34e93fe8e28a08f92a9ec`, intentionally dirty and stopped at 0/14.
+- Corrective batch source: `/tmp/yop-p1-027-worktree`, local `main`, HEAD `2c1d0954ca9f6017e84189dc7db45b93f833fa62`, with the seven uncommitted files named in the stopped handoff below copied into the unified tree for verification.
+- Status: focused, unfinished, and verification-only at resume. The old source queue is removed after this transfer; its worktree and dirty implementation evidence remain untouched.
+
+Source provenance: Bugs 9, 9b, 9c, 9e and S4 from `EVIDENCE-ARCHIVE.md`, the launch-lifecycle rules from `REGRESSION-GATE.md`, `DOIT.p2.same-root-coordination-simplification.md`, and the rotating-daemon fixture evidence formerly retained in sibling worktrees.
+
+## Goal
+
+Every backend and sidecar has one explicit lifetime owner, exits within a numeric budget after its last valid claim disappears, and uses same-root coordination only for the deliberate caller-shared-root compatibility case.
+
+## Why These Tasks Are One Queue
+
+Backend retirement and same-root owner election use the same host/boot/process/generation identity, service records, locks, signals, unlink, reclaim, and adoption paths. Implementing them in separate queues would make two agents edit the same lifecycle owner and could leave private-root and caller-shared-root behavior inconsistent.
+
+## Context
+
+- Historical evidence found daemon/storaged processes reparented to PID 1 for 66 minutes because startup-only preflight was the sole reaper, self-connections prevented idle expiry, and the sidecar ledger was empty. Current topology must be re-inventoried before accepting old symbols or owners.
+- A historical fixture failure reached `atomic_write_text(...); path.chmod(mode)` after its pytest temporary directory disappeared. That proves a useful lifetime boundary to reproduce, but not the retracted claim that an orphan child was the root cause.
+- Managed instances derive private roots and need no cross-instance election or compatible-service reuse. A caller-set root may be deliberately shared, so removing all coordination would be unsafe.
+- Exact host, boot, PID start identity, namespace, service kind, generation, and lifetime claim are the destructive-authority boundary. Ambiguity must leak visibly and fail closed rather than signal or unlink.
+- Scope exception, 2026-08-22: the separately authorized 7773 empty-stats repair made pre-handler overload retries share one bounded deadline owner and closed reproduced local-service recovery/shutdown races. It did not remove private-root coordination, define the full authority matrix, or complete any checkbox in this broader lifetime queue.
+- Scope exception, 2026-08-22: the committed demand-started watchd bridge acquired no lease before the first filesystem descriptor, but after the final descriptor detached it synchronized an empty set and kept waiting for revisions while unrelated SSE demand kept the parent event worker alive. The narrow repair must release that lease, recheck descriptor demand after clearing the retiring worker, start exactly one replacement when demand races with retirement, and never restart after explicit parent shutdown; it does not complete the broader lifetime-owner checkbox.
+- Scope exception, 2026-08-22: an already-expired accepted job still entered four sibling blocking product/result RPC edges for up to the default 500 ms before the outer owner returned 504, while only the filesystem-product sibling prechecked and capped its remaining budget. The narrow repair must route every equivalent edge through one remaining-budget owner and add timeout support to the result fallback; it does not define the broader service authority matrix.
+- Scope exception, 2026-08-22: forwarding the outer remaining budget into `JobClient.result` or `product` was still insufficient because the shared launching request path could spend up to five seconds in `ensure_started` before issuing the bounded RPC, then retry with the original timeout. Deadline-bound result reads must use one non-launching binary request twin after submit has already established the broker; they must not hide broker absence by launching outside the accepted operation budget.
+- Scope exception, 2026-08-22: jobd's graceful-shutdown admission refusal returned generic `service busy` without the provenance required by the shared retry classifier, so a safe pre-admission refusal became non-retryable. The narrow repair must mark and classify that admission refusal through the existing fixed-vocabulary busy owner; it does not change in-flight shutdown draining.
+- Scope exception, 2026-08-22: adding `admission_rejected` changes the jobd wire response contract, while clients have no independent code-revision fence for an old same-version broker. The repair must bump the single jobd protocol owner and its compatibility pin so a v24 broker cannot silently omit the new provenance.
+- Scope exception, 2026-08-22: a watchd child-thread launch rollback latched `watchd_stop_event`, while the retained parent worker's documented recovery entry point reused that record without clearing the child-only stop fence. The narrow repair must reset that fence only while atomically claiming an empty child slot, retain explicit parent shutdown fencing, and prove a later descriptor starts one real replacement.
+- Scope exception, 2026-08-22: when a demand-scoped daemon idled and restarted between observer cycles, no accepted absent row existed and the running epoch replacement was counted exactly as an unexpected restart. The narrow repair must carry the static demand-scoped classification with the running observation and mark an unobserved replacement unclassified rather than incrementing either exact cause counter; it does not change recovery policy.
+- Scope closeout, 2026-08-22: the narrow repair now releases watchd after the final descriptor, starts exactly one replacement when demand races retirement, preserves explicit parent shutdown, and clears a failed-launch child fence before retry. Accepted jobd operations precheck and cap product/result RPCs through the bounded non-launching path; graceful-shutdown admission returns retryable typed `admission_rejected`; protocol v25 fences old brokers; and between-sample demand-epoch replacement remains unclassified. All nine functional gate lanes and all seven certification units passed, and the fresh 7773-only restart verified owned watchd/statsd/jobd topology plus a live protocol-v25 jobd. None of this completes the broader lifetime-owner checkbox.
+- STOP checkpoint, 2026-08-22: work paused on user request on branch `fix/watchd-demand-quick-open-cpu` at base HEAD `6dcfbf0d949fb7ec98f34e93fe8e28a08f92a9ec`; the checkout is intentionally dirty and uncommitted, and 7773 has not been restarted onto this tree. The current batch fixes stale browser-upload `upgrade_required` poisoning of the shared stats client, maps `service_load` to the Daemons chart, retains process-lifetime lease-release ownership, makes jobd retirement epoch- and accepted-work-safe, and protects stats-ring/transcript convergence. Focused evidence passed 1,010 stats/convergence tests, 253 coordinator regressions, 97 retirement files, all 19 Node shards, static freshness, architecture budgets, and whitespace checks. The preserved first canonical gate at `/tmp/yo7773-canonical-gate-20260822.raw.txt` found one non-browser compatibility regression after 17,940 passes; the jobd-only legacy-idle rule had incorrectly gated statusd, and the scoped correction passed its 4-case predecessor/target set plus both affected files. The changed-tree gate at `/tmp/yo7773-canonical-gate-20260822-r2.raw.txt` passed E2E, 17,941 non-browser tests, Node/static, and the final serial lane, but remains red on two browser cases: Mermaid split-preview fit width and retirement-ring event mutation; certification also refused the loaded postflight host at disk busy fraction `0.970891 > 0.9`, and exact-SHA certification correctly refused the dirty checkout. A focused reproduction of those two browser failures was interrupted immediately when work stopped, so neither may be called flaky or fixed. No checkbox is complete; resume by reproducing each browser failure with its immediate predecessor, then rerun the canonical gate before any 7773 restart or live-chart claim.
+
+## STOPPED Handoff — 2026-08-23
+
+- The user stopped all work after three findings-blind task-045 audits. P1 remains the sole focused queue at 0/14; P2 and every other queue remain paused. Zero task-owned workers, tests, probes, helpers, fixtures, or listeners remain. Port 7773 and its sidecars were not contacted.
+- Frozen integration state: `/tmp/yop-p1-027-worktree`, local `main`, committed HEAD `2c1d0954ca9f6017e84189dc7db45b93f833fa62`, seven uncommitted dirty paths, and approximately 49 untouched pre-existing unrelated stash entries. Do not reset, restore, stash, clean, rebase, or delete this tree.
+- The seven dirty paths hold a finished but unverified corrective batch: `yolomux_lib/infra/process_claims.py`, `yolomux_lib/local_services/preflight.py`, `yolomux_lib/local_services/registry.py`, and `yolomux_lib/local_services/watchdog.py` from Lane J; `yolomux_lib/approval/approvald.py` and `yolomux_lib/search/search_indexer.py` from Lane K; and `tests/test_search_indexer_bfs_cutover.py` from the integrator.
+- Accepted task-045 findings fixed in those seven paths: adoption transfer now uses a real supervisor-identity plus `adoption_count` compare-and-swap; `repair_verified_orphans` is wired into production diagnostics; namespace provenance no longer self-compares or pretends an inert dimension was proved; indexd and approvald consume the shared `lease_id` key; the protocol test double uses that same key; and unreadable supervisor identity fails closed instead of being treated as gone.
+- Lane K measured the latent lease-wire defect with a genuinely live external client: before the fix, refreshes grew the lease table `[1,2,3,…]`, saturated at 64, and returned `too many clients`; after the fix it stayed `[1,1,1,…]` with no errors. The current production severity is latent because approvald has no production lease caller and indexd's caller used its private matching spelling.
+- Still open and not fixed: the fifth supervisor-gone spelling at `lifetime.py:508`/`preflight.py:313`; the self-derived `expected_kind` path at `preflight.py:203`; the deliberately retained legacy `pid_is_alive` fallback at `registry.py:2228`; indexd's unproduced search `cursor`; unfenced destructive paths at `app.py:10234` and `boot.sh:352/365`; and the authority matrix's unmet exactly-once promise.
+- Historical evidence at committed SHA `2c1d0954c` remains useful but is invalid for the seven dirty files: the independently verified four-file gate passed 169 tests, the captured 16-module sweep passed 843 tests, architecture budgets exited 0, four budget mutations failed causally, the old zombie predicate reproduced the 0.51-second signature, and the supervisor-veto test had a real positive control. Lane J later reported 892 passed and one jobd-retirement failure, but the coordinator stopped before independent verification; do not accept or classify that result from self-report.
+- Exact next safe action is verification only. Run the captured module list plus `tests/test_local_service_jobd_retirement.py` against the frozen dirty tree with a failure-capable command, retain both the module list and real exit status, and classify every red before editing. Do not commit, amend, run the canonical gate, restart 7773, change queue checkboxes, archive/remove this file, push, or start P2 first.
+
+```bash
+cd /tmp/yop-p1-027-worktree
+set -o pipefail
+python3 -m pytest -q -p no:randomly $(tr '\n' ' ' < /tmp/yop-045-sweep-modules.txt) tests/test_local_service_jobd_retirement.py > /tmp/yop-046-resume-sweep.log 2>&1
+rc=$?
+echo "RC=$rc"
+grep -cE '^FAILED|^ERROR' /tmp/yop-046-resume-sweep.log || true
+```
+
+## Ownership And Execution Order
+
+- One implementation owner controls the lifecycle/identity conflict group in local-service watchdogs, owner records, process ledgers, signal/unlink/reclaim paths, and same-root coordination. Do not assign concurrent writers to those files.
+- Two read-only audits may run in parallel before implementation: one inventories every backend/sidecar lifetime and connection; the other inventories every background-election, compatible-service-reuse, signal, unlink, reclaim, and adoption caller and classifies it as `private-root-remove` or `caller-shared-root-retain`.
+- After the shared owner is stable, fixture/test work may be split between lifetime-retirement cases and private-root/caller-shared-root topology cases. Runtime verification is the final serial lane.
+
+## Plan
+
+- [ ] Freeze the current topology and authority matrix: record every backend/sidecar, launcher/client claim, self-connection, idle rule, service record, lock, shutdown/reap path, and same-root coordination caller; give each row one lifetime owner and one `private-root-remove` or `caller-shared-root-retain` decision.
+- [ ] Add one shared lifetime owner that observes the last valid external claim disappearing and performs bounded graceful then forced shutdown without waiting for a future restart; self-connections never count as demand and deliberately retained services must state their surviving supervisor.
+- [ ] Remove background-owner election, compatible-service reuse, signal, unlink, reclaim, and adoption from managed private-root instances; preserve only the explicitly justified caller-shared-root compatibility path through the same lifecycle owner.
+- [ ] Bind every destructive decision to stable host and boot identity plus exact PID start identity, namespace, service kind, generation, and claim; ambiguous, legacy, stale, or reused identities receive zero signals/unlinks and one typed retained orphan diagnostic.
+- [ ] Add a bounded host-local repair path for verified legacy/untracked processes using the same identity verifier, with retained orphan age, attempted action, result, and failure reason visible through the existing status owner.
+- [ ] Add deterministic fixture regressions for launcher crash without restart, self-connection, last-client disconnect, replacement handoff, old/new generation mismatch, PID/PGID reuse, stale lease, a child whose fixture directory is removed, two private roots, two callers sharing one root, incompatible generations on one caller-shared root, and graceful-to-forced escalation without touching unrelated processes.
+- [ ] Update `docs/specs/BACKEND_ARCHITECTURE.md`, run the focused lifecycle/topology suites and the canonical gate, then restart two isolated fixture servers and prove stopping either changes no process, socket, or file owned by the other.
+
+## Rejected Shortcuts
+
+- Do not use hostname, PPID, PGID, command text, socket path, or a future restart as sufficient authority.
+- Do not add a broad host sweeper, keep private-root election for convenience, or let a process count its own connection as external demand.
+- Do not claim the historical temporary-directory traceback proves its former orphan-child attribution; reproduce the current first failing boundary.
+
+## Done Criteria
+
+- [ ] The DONE note records the implementation HEAD, the complete authority matrix, exact focused node IDs, commands/exit codes, numeric graceful/forced budgets, and `/tmp` evidence; every current backend/sidecar and coordination caller appears exactly once.
+- [ ] `python3 -m pytest -q tests/test_local_services_watchdog.py tests/test_local_services_launch.py tests/test_local_service_registry_state.py tests/test_local_services_host_identity.py` exits 0 with a controllable clock and covers every topology and lifecycle case named in the Plan.
+- [ ] For every non-retained service, removing the last valid external claim produces graceful exit no later than the declared grace deadline plus one supervision pass; a deliberately wedged child is force-terminated no later than the declared force deadline plus one pass, with both deadlines asserted without sleeps.
+- [ ] Managed private-root fixtures perform zero cross-root election, reuse, signal, unlink, reclaim, or adoption; caller-shared-root fixtures retain exactly one compatible owner only where the matrix says `caller-shared-root-retain`, and incompatible generations fail typed and isolated.
+- [ ] PID/PGID reuse, stale leases, old generations, ambiguous foreign identity, and two co-tenant deployments receive exactly zero signals and zero unlinks; each ambiguous survivor emits one typed orphan record within one supervision pass rather than remaining silent.
+- [ ] The removed-fixture-directory regression terminates or fences the exact child before its next write and produces no `atomic_write_text`/`chmod` after fixture teardown; any different reproduced owner is named in the DONE note instead of preserving the historical hypothesis.
+- [ ] An unmodified `python3 tools/check.py` exits 0; after restarting two isolated fixture servers, the recorded runtime report lists every expected retained service and zero dead-owner or silent-orphan rows, and stopping either instance leaves the other's roster and files byte-for-byte unchanged.
+
+## Completion
+
+When every checkbox is checked, summarize the merged lifecycle/root-ownership contract in `docs/DONE/`, remove this queue, and do not retain the absorbed `DOIT.p2.same-root-coordination-simplification.md` as a second source.

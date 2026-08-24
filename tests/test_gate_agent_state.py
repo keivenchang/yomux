@@ -23,6 +23,7 @@ from tests.gate_harness import wait_for_browser_boot
 from tests.gate_harness import wait_for_fixture_api_quiescence
 from tests.gate_harness import wait_for_fixture_client_event_demand
 from tests.gate_harness import gate_tmux  # noqa: F401
+from tests.tmux_runtime import create_isolated_tmux_session
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yolomux_lib.app import TmuxWebtermApp
@@ -213,20 +214,13 @@ def _add_mock_agent_sessions(runtime, count: int) -> list[str]:
     sessions = [f"{stem}-{index}" for index in range(len(runtime.sessions) + 1, len(runtime.sessions) + count + 1)]
     command = shlex.join([sys.executable, str(REPO_ROOT / "tools" / "mockers" / "claude.py"), "--mock"])
     for session in sessions:
-        created = run_isolated_tmux(
+        create_isolated_tmux_session(
             runtime.tmux,
-            "new-session",
-            "-d",
-            "-s",
             session,
-            "-x",
-            "120",
-            "-y",
-            "36",
-            command,
-            timeout=10,
+            columns=120,
+            rows=36,
+            command=command,
         )
-        assert created.returncode == 0, created.stderr or created.stdout
     runtime.sessions.extend(sessions)
     _wait_for_mock_agents(runtime, sessions)
     runtime.tmux.sessions.extend(sessions)

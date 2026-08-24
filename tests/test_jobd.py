@@ -12,6 +12,7 @@ from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -65,6 +66,22 @@ def _init_repo_with_commit(repo):
     git(repo, "commit", "-m", "init")
 
 
+def _empty_repository_snapshot():
+    return {
+        "branch": "main",
+        "statuses": {},
+        "numstat": {},
+        "file_identities": {},
+        "selected_from": "",
+        "selected_to": "",
+        "status_error": "",
+        "repo_error": "",
+        "repo_error_message": {"key": "", "params": {}, "fallback": ""},
+        "recent_refs": [],
+        "ahead_behind": {},
+    }
+
+
 def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, ready, in_builder, release):
     """Exercise the private cache from an independent spawned worker process.
 
@@ -94,7 +111,7 @@ def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text,
             handle.write("build\n")
         in_builder.set()
         assert release.wait(timeout=10.0), "builder was never released by the parent"
-        return {"statuses": {}}
+        return _empty_repository_snapshot()
 
     session_files.cached_repository_snapshot(Path(repo_text), None, None, 9, build)
 
@@ -133,7 +150,7 @@ def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_
     result_bytes = jobd.run_registered_task("session_files_view", json.dumps(payload).encode("utf-8"))
     assert len(result_bytes) <= jobd.JOBD_MAX_RESULT_BYTES
     result = json.loads(result_bytes.decode("utf-8"))
-    assert set(result) >= {"payload", "status", "truncated", "profile"}
+    assert set(result) >= {"payload", "status", "truncated", "profile", "repository_identities"}; assert str(repo.resolve()) in result["repository_identities"]
     assert result["status"] == 200
     assert result["truncated"] is False
     # The git-tracked modification is attributed to the editing agent.
@@ -1026,31 +1043,26 @@ def test_session_files_view_skips_deleted_root_from_durable_transcript_cache(tmp
 
 
 def test_session_files_view_memoizes_git_snapshot_per_repo(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    _init_repo_with_commit(repo)
+    repo = tmp_path / "repo"; _init_repo_with_commit(repo)
     (repo / "one.py").write_text("x = 3\n", encoding="utf-8")
-    calls: list[str] = []
-    real_build = session_files.build_git_snapshot
-
-    def counting_build(path, from_ref=None, to_ref=None):
-        calls.append(str(path))
-        return real_build(path, from_ref, to_ref)
-
-    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    calls = Mock(wraps=session_files._build_git_snapshot_from_scope)
+    monkeypatch.setattr(session_files, "_build_git_snapshot_from_scope", calls)
     # Two sessions whose panes sit in the SAME repo, cross-session pass: the memoizing provider must
     # build that repo's git snapshot exactly once for the whole task.
-    payload = {
-        "session": "",
-        "infos": {
-            "a": _session_info_json("a", repo),
-            "b": _session_info_json("b", repo),
-        },
-        "hours": 24.0,
-        "include_cross_session_attribution": True,
-    }
+    payload = {"session": "", "infos": {"a": _session_info_json("a", repo), "b": _session_info_json("b", repo)}, "hours": 24.0, "include_cross_session_attribution": True}
     result = session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
     assert result["status"] == 200
-    assert len(calls) == 1
+    assert calls.call_count == 1
+
+
+def test_session_files_view_retries_a_snapshot_that_changes_identity(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"; _init_repo_with_commit(repo); real_identity = session_files.git_worktree_signature_from_scope; identity_calls = [0]
+    def changing_identity(scope):
+        identity_calls[0] += 1; identity = real_identity(scope)
+        return "changed" if identity_calls[0] == 2 else identity
+    monkeypatch.setattr(session_files, "git_worktree_signature_from_scope", changing_identity)
+    result = session_files.session_files_view_result({"session": "s1", "infos": {"s1": _session_info_json("s1", repo)}, "hours": 24.0, "include_cross_session_attribution": False}, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    assert result["status"] == 200; assert identity_calls == [4]; assert str(repo.resolve()) in result["repository_identities"]
 
 
 def test_session_files_view_reuses_watcher_generation_across_metadata_only_products(tmp_path, monkeypatch):
@@ -1280,7 +1292,7 @@ def test_repository_snapshot_cache_single_flights_concurrent_callers_determinist
         if ordinal == 1:
             first_in_builder.set()
             assert release_first.wait(timeout=10.0), "first caller was never released"
-        return {"statuses": {}}
+        return _empty_repository_snapshot()
 
     results: dict[str, tuple[dict, bool]] = {}
 
@@ -1313,7 +1325,7 @@ def test_repository_snapshot_cache_keeps_ref_comparisons_separate(tmp_path, monk
 
     def build(path, from_ref, to_ref):
         calls.append((str(path), from_ref, to_ref))
-        return {"statuses": {}}
+        return _empty_repository_snapshot()
 
     session_files.cached_repository_snapshot(repo, "HEAD~1", "HEAD", 9, build)
     session_files.cached_repository_snapshot(repo, "HEAD", "current", 9, build)
@@ -1334,7 +1346,7 @@ def test_repository_snapshot_cache_revalidates_after_the_healthy_watcher_safety_
 
     def build(path, from_ref, to_ref):
         calls.append((str(path), from_ref, to_ref))
-        return {"statuses": {}}
+        return _empty_repository_snapshot()
 
     session_files.cached_repository_snapshot(repo, None, None, 9, build)
     now[0] += session_files._REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS - 1
@@ -1355,10 +1367,10 @@ def test_repository_snapshot_cache_rebuilds_corrupt_records_and_propagates_git_f
 
     def build(path, from_ref, to_ref):
         calls.append(str(path))
-        return {"statuses": {}}
+        return _empty_repository_snapshot()
 
     snapshot, hit = session_files.cached_repository_snapshot(repo, None, None, 1, build)
-    assert snapshot == {"statuses": {}}
+    assert snapshot == _empty_repository_snapshot()
     assert hit is False
     assert calls == [str(repo)]
 
@@ -1389,10 +1401,10 @@ def test_repository_snapshot_cache_prunes_only_expired_entries(tmp_path, monkeyp
 
 
 def test_session_files_view_bounding_trims_files_and_sets_truncated_flag():
-    payload = {"files": [{"path": f"/repo/file{index}.py", "blob": "y" * 256} for index in range(200)], "repos": []}
-    truncated = session_files.bound_session_files_view_payload(payload, 4096)
+    payload = {"files": [{"path": f"/repo/file{index}.py", "blob": "y" * 256} for index in range(200)], "repos": []}; response = {"payload": payload, "repository_identities": {f"/repo/{index}": ["x" * 64] for index in range(64)}}
+    truncated = session_files.bound_session_files_view_payload(response, 8192)
     assert truncated is True
-    assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= 4096
+    assert len(json.dumps(response, separators=(",", ":")).encode("utf-8")) <= 8192
     assert len(payload["files"]) < 200
 
 
@@ -1557,7 +1569,7 @@ def test_jobd_control_plane_is_ready_before_blocked_data_plane_setup(tmp_path, m
         time.sleep(0.01)
     assert client.registry.healthy() is True
     deadline = time.monotonic() + 1.0
-    while service.scheduler_thread is None and time.monotonic() < deadline:
+    while not priority_calls and time.monotonic() < deadline:
         time.sleep(0.01)
     assert service.scheduler_thread is not None
     assert priority_calls == ["jobd-scheduler"]
@@ -2437,7 +2449,11 @@ def test_jobd_submit_never_creates_a_process_in_the_request_path(tmp_path, monke
     monkeypatch.setattr(client, "request", lambda payload: calls.append(payload) or {"ok": False, "error": "jobd unavailable"})
 
     assert client.submit("text_facts", {"text": "queued"}) == {"ok": False, "error": "jobd unavailable"}
-    assert calls == [{"action": "submit", "task": "text_facts", "payload": {"text": "queued"}, "priority": "freshness", "generation": 0, "coalesce_key": "", "deadline_ms": 0}]
+    assert client.submit("text_facts", {"text": "fresh"}, fresh_only=True) == {"ok": False, "error": "jobd unavailable"}
+    assert calls == [
+        {"action": "submit", "task": "text_facts", "payload": {"text": "queued"}, "priority": "freshness", "generation": 0, "coalesce_key": "", "deadline_ms": 0},
+        {"action": "submit", "task": "text_facts", "payload": {"text": "fresh"}, "priority": "freshness", "generation": 0, "coalesce_key": "", "deadline_ms": 0, "fresh_only": True},
+    ]
 
 
 @pytest.mark.parametrize("priority", ["interactive", "freshness"])
