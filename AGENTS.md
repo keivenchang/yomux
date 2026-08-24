@@ -9,7 +9,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 - [`docs/specs/GUI.md`](docs/specs/GUI.md): GUI behavior contract and test coverage map.
 - [`docs/RESEARCH.md`](docs/RESEARCH.md): dated peer research, including actionable lessons and non-goals.
 - [`docs/YOAGENT.md`](docs/YOAGENT.md): YO!agent product behavior, skill/context files, sends, watches, and handoffs.
-- [`queues/README.md`](queues/README.md): active-queue policy and product guardrails; current work lives in concrete `queues/backlog/DOIT*.md` files.
+- [`queues/README.md`](queues/README.md): queue policy and product guardrails; authorized work lives in concrete `queues/backlog/DOIT*.md` files when an active queue exists.
 - [`docs/DONE/`](docs/DONE/README.md): completed work archive.
 
 ## Development Workflow
@@ -20,7 +20,7 @@ This file documents AI-agent behavior and repo-specific lessons for working in Y
 
 ## Recent Agent Learnings
 
-- Start with `STATUS-REPORT.md`, `queues/README.md`, the concrete `queues/backlog/DOIT*.md` files, and `README.md`, and re-read them after each batch. The user updates these files while work is in progress, and stale assumptions caused repeated misses.
+- Start with `queues/README.md` and `README.md`. When present, also read `STATUS-REPORT.md` and every concrete `queues/backlog/DOIT*.md` file, then re-read the active records after each batch. The user updates these files while work is in progress, and stale assumptions caused repeated misses.
 - Separate feature completion from cleanup. Commit/push/sync the completed behavior first when asked, then do refactor work as a distinct pass so regressions and review diffs stay easier to reason about.
 - All visual UX behavior belongs in [`docs/specs/GUI.md`](docs/specs/GUI.md). When a visual rule is discovered from a screenshot, user report, browser behavior, or design decision, codify it there before or in the same change as the implementation and tests.
 - For Claude/Codex TUI and mock parity, reproduce against the real client first: launch real `claude`/`codex` in tmux with the same common inputs and states, capture the pane, then launch `tools/mockers/claude.py --mock` / `tools/mockers/codex.py --mock` with the matching inputs and compare the panes. The mocks live in the real client entry points plus `tools/mockers/common.py`; do not recreate a top-level `mock/` package. Update the mock renderer, prompt fixtures, tests, `tools/mockers/CLIENTS.md`, and `docs/specs/GUI.md` from the real capture until the mock matches the real TUI behavior and layout.
