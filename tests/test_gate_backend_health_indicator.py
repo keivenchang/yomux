@@ -71,8 +71,8 @@ INDICATOR = ".backend-health-indicator"
 INDICATOR_SELECTOR = "[data-backend-health]"
 HOST_SELECTOR = ".topbar-right-tools"
 
-# The rendered state of the ONE permanently mounted control. `severity` is '' while healthy: the
-# control is not removed on recovery, it goes inert and empty, so the slot's geometry never changes.
+# The rendered state of the ONE permanently mounted control. `severity` is empty only before the
+# first report; accepted healthy state is the same mounted control painted `ready`.
 _STATE_JS = """
     const indicator = document.querySelector('.topbar [data-backend-health]');
     if (!indicator) return null;
@@ -101,6 +101,11 @@ _STATE_JS = """
       width: rect.width,
       height: rect.height,
       visible: rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden',
+      color: style.color,
+      borderColor: style.borderColor,
+      backgroundColor: style.backgroundColor,
+      boxShadow: style.boxShadow,
+      textShadow: style.textShadow,
     };
 """
 
@@ -412,12 +417,16 @@ def test_a7_6_severity_is_carried_by_the_words_and_a_worse_signal_outranks_a_bet
     assert down["severity"] == "down", down
     assert down["text"] != degraded["text"], (down, degraded)
 
-    # `starting` and `ready` are not warnings and never escalate the control; the debounce keeps the
-    # existing warning shown for one healthy revision, then clears it back to the inert '' state.
+    # `starting` and `ready` are not warnings and never escalate the control. They recover it to the
+    # rendered GREEN state, on the FIRST accepted healthy revision. There used to be a second,
+    # browser-side hold here that waited for a second healthy revision -- but the observer publishes
+    # only when its accepted signature changes, so that second revision never arrives on a system
+    # that simply stays healthy, and the warning was retained forever beside an all-green roster.
     one_healthy = _push(browser, _event(3, "ready", []))
-    assert one_healthy["severity"] == "down", one_healthy  # one healthy revision does not clear a warning
-    two_healthy = _push(browser, _event(4, "starting", []))
-    assert two_healthy["severity"] == "", two_healthy  # the second clears; a healthy/starting state never raises a warning
+    assert one_healthy["severity"] == "ready", one_healthy
+    assert one_healthy["text"] != down["text"], one_healthy
+    still_healthy = _push(browser, _event(4, "starting", []))
+    assert still_healthy["severity"] == "ready", still_healthy
 
 
 @pytest.mark.browser
@@ -457,27 +466,40 @@ def test_a7_7_the_control_opens_the_system_view_from_a_real_click(browser, tmp_p
 
 
 @pytest.mark.browser
-def test_a7_8_the_warning_clears_only_after_the_recovery_debounce_and_ignores_stale_revisions(browser, tmp_path):
-    """Sub-clause 9: one good sample does not clear a warning, and an old revision cannot reopen it.
+def test_a7_8_one_accepted_healthy_revision_recovers_to_green_and_stale_revisions_are_ignored(browser, tmp_path):
+    """Sub-clause 9, as corrected: recovery is the FIRST accepted healthy revision, and it is GREEN.
 
-    "Cleared" now means the same node returns to its inert '' state -- it is never removed.
+    The live failing state this replaces: `Daemons 8 ready - 0 idle - 0 issues`, every displayed
+    Status row green, and the topbar triangle still amber
+    (`/tmp/yolomux.keivenc/uploads/yo7220/20260823-004.png`). The browser was holding the warning for
+    a second healthy revision that `BackendHealthObserver` never publishes, because it publishes only
+    on an accepted-signature CHANGE. The observer's own debounce is untouched.
+
+    Recovered does NOT mean an emptied slot: the same triangle stays mounted and turns green.
     """
 
     load_live_runtime_boot_fixture(browser, tmp_path)
-    assert _push(browser, _watchd_down(revision=5))["severity"] == "down"
+    down = _push(browser, _watchd_down(revision=5))
+    assert down["severity"] == "down"
 
     # A replayed and an older revision are both ignored: the node stays exactly as it was.
     assert _push(browser, _watchd_down(revision=5))["severity"] == "down"
     assert _push(browser, _watchd_down(revision=4))["severity"] == "down"
 
-    first_healthy = _push(browser, _event(6, "ready", []))
-    assert first_healthy["severity"] == "down", "one healthy revision must not clear a backend warning"
+    recovered = _push(browser, _event(6, "ready", []))
+    assert recovered["severity"] == "ready", recovered
+    # One node, still mounted, still the details route -- painted, not cleared.
+    assert recovered["duplicates"] == 1, recovered
+    assert recovered["disabled"] is False, recovered
+    assert recovered["ariaLabel"], recovered
+    assert recovered["text"], "healthy must announce a state sentence, not an empty live region"
+    assert recovered["boxShadow"] == "none", recovered
+    assert recovered["textShadow"] == "none", recovered
+    assert recovered["color"] != down["color"], (recovered, down)
+    assert recovered["borderColor"] != down["borderColor"], (recovered, down)
 
-    second_healthy = _push(browser, _event(7, "ready", []))
-    assert second_healthy["severity"] == "", second_healthy
-    # The node is still mounted (one, inert), not removed.
-    assert second_healthy["duplicates"] == 1, second_healthy
-    assert second_healthy["disabled"] is True, second_healthy
+    # A stale revision cannot reopen the warning after recovery either.
+    assert _push(browser, _watchd_down(revision=5))["severity"] == "ready"
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -531,25 +553,27 @@ def test_a7_9_health_transitions_never_move_the_workspace(browser, tmp_path, wid
     load_live_runtime_boot_fixture(browser, tmp_path)
     set_browser_visual_profile(browser, theme=theme, dpr=dpr)
 
-    healthy = _geometry(browser)
-    assert healthy["health"] is not None, healthy
-    assert healthy["health"]["width"] > 0 and healthy["health"]["height"] > 0, healthy
-    assert healthy["severity"] == "", healthy
+    unreported = _geometry(browser)
+    assert unreported["health"] is not None, unreported
+    assert unreported["health"]["width"] > 0 and unreported["health"]["height"] > 0, unreported
+    assert unreported["severity"] == "", unreported  # nothing has reported yet: inert, but mounted
 
     down = _push_geometry(browser, _watchd_down(revision=1))
     assert down["severity"] == "down", down
-    _assert_same_vertical_geometry(healthy, down, "down")
-    _assert_stable_slot_and_neighbors(healthy, down, "down")
+    _assert_same_vertical_geometry(unreported, down, "down")
+    _assert_stable_slot_and_neighbors(unreported, down, "down")
 
-    first_recovery = _push_geometry(browser, _event(2, "ready", []))
-    assert first_recovery["severity"] == "down", first_recovery  # debounce keeps the warning shown
-    _assert_same_vertical_geometry(healthy, first_recovery, "first-recovery")
-    _assert_stable_slot_and_neighbors(healthy, first_recovery, "first-recovery")
+    degraded = _push_geometry(browser, _event(2, "degraded", [_resource("statsd", "Statistics", "unknown", "probe_timeout")]))
+    assert degraded["severity"] == "degraded", degraded
+    _assert_same_vertical_geometry(unreported, degraded, "degraded")
+    _assert_stable_slot_and_neighbors(unreported, degraded, "degraded")
 
-    cleared = _push_geometry(browser, _event(3, "ready", []))
-    assert cleared["severity"] == "", cleared
-    _assert_same_vertical_geometry(healthy, cleared, "cleared")
-    _assert_stable_slot_and_neighbors(healthy, cleared, "cleared")
+    # The recovered GREEN state is a fourth painted state of the same slot, so it is measured too:
+    # painting healthy instead of emptying it must not be what finally moves the workspace.
+    recovered = _push_geometry(browser, _event(3, "ready", []))
+    assert recovered["severity"] == "ready", recovered
+    _assert_same_vertical_geometry(unreported, recovered, "recovered")
+    _assert_stable_slot_and_neighbors(unreported, recovered, "recovered")
 
 
 @pytest.mark.browser

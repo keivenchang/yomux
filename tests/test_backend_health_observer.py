@@ -136,6 +136,20 @@ def test_a_demand_scoped_absent_service_is_not_a_failure():
     assert observed_health({"pid": 0}) == ("down", "service_absent")
 
 
+def test_a_running_service_in_an_explicit_starting_state_is_not_unhealthy():
+    row = {"pid": 100, "healthy": False, "serving_state": "starting"}
+
+    assert observed_health(row) == ("starting", "service_starting")
+    assert observed_health({**row, "transport_reason": "connection refused"}) == (
+        "degraded",
+        "probe_failed",
+    )
+    assert observed_health({**row, "last_failure": "watchd exited"}) == (
+        "degraded",
+        "service_unhealthy",
+    )
+
+
 # -- per-service classification, pinned through the real row producers --------------------
 
 

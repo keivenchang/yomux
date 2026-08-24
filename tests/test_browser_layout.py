@@ -1970,7 +1970,7 @@ def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path
             const base = {
               ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {}, caches: {},
               client_events: {}, chat: {}, cpu_budget: {}, local_services: {
-                schema_version: 4, inventory: ['statsd'], totals: {}, services: [{
+                schema_version: 5, inventory: ['statsd'], totals: {}, services: [{
                   id: 'statsd', service: 'statsd', label: 'YO!stats', state: 'running', pid: 4242, metrics: {},
                   sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
                     state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,

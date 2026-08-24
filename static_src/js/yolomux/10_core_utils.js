@@ -6,9 +6,15 @@
 // It is push-fed on purpose. Nothing here polls /api/system-status: the whole point is that a dead
 // service becomes visible without the System panel being open.
 const backendHealthFailureThreshold = 3;
-// The observer already debounces its own transitions; this debounces the CLEAR in the browser. One
-// healthy revision after an outage is a sample, not a recovery, so the warning survives it.
-const backendHealthRecoveryRevisions = 2;
+// NO second recovery debounce in the browser, deliberately, and this is the defect that removing it
+// fixes. There used to be a `backendHealthRecoveryRevisions = 2` hold here, so a warning survived
+// the first healthy revision and cleared only on the second. But the observer publishes
+// `backend_health_changed` ONLY when its accepted signature CHANGES
+// (`observer.py:observe_once` -> `_publish_change`), so after it accepts `ready` there is no second
+// healthy revision to wait for -- the next event arrives whenever something breaks again. MEASURED
+// on live port 7220: `Daemons 8 ready - 0 idle - 0 issues`, every displayed Status row green, and
+// the topbar triangle still amber. The server-side debounce is the real one and is untouched; a
+// second hold on top of it could only ever wait for a message that is not coming.
 // Bounded twice: we retain at most this many degraded resources, and we NAME at most one of them.
 // Six service names in a topbar chip is a wall nobody reads; "and 2 more" is the readable form.
 const backendHealthResourceLimit = 8;
@@ -20,8 +26,25 @@ const backendHealthDownStates = Object.freeze(['down', 'upgrade_required']);
 const backendHealthDegradedStates = Object.freeze(['degraded', 'backoff', 'unknown']);
 // Precedence, highest first. A browser talking to nothing must not be described as "one service is
 // slow", and a service outage must not be hidden because the last request happened to succeed.
-const backendHealthSeverityRank = Object.freeze({'': 0, degraded: 1, down: 2, unresponsive: 3});
+// `ready` is IN this ladder, not below it: healthy is a rendered state of the control, so it has to
+// be comparable with the failure states rather than being the absence of one.
+const backendHealthSeverityRank = Object.freeze({'': 0, ready: 1, degraded: 2, down: 3, unresponsive: 4});
+// The Daemons roster paints each row from a tone (`85_debug_panel.js:DEBUG_SYSTEM_STATE_TONES`).
+// This is the ONE translation from that tone to this indicator's severity, so "what colour is the
+// triangle" and "what colour is that row" cannot be answered by two different tables.
+//   good/muted -> ready   (serving, or legitimately idle: neither is an alarm)
+//   warn       -> degraded
+//   bad        -> down
+const backendHealthToneSeverity = Object.freeze({good: 'ready', muted: 'ready', warn: 'degraded', bad: 'down'});
 
+// The ONE aggregate both visible health surfaces answer from: the topbar triangle and the Daemons
+// roster. Two producers write it through `acceptBackendHealthReport` -- the pushed
+// `backend_health_changed` event (the only one that works with the System panel CLOSED) and the
+// panel's own `/api/system-status` roster -- and both are ordered by the retained document's epoch
+// and revision, so a slow poll can never overwrite a newer push.
+//
+// `revision: -1` with `serviceSeverity: ''` is NOT "healthy". It is "nothing has reported yet", and
+// it renders as the inert slot, because claiming green before the first report would be a guess.
 const backendHealthState = {
   consecutiveFailures: 0,
   epoch: '',
@@ -29,7 +52,20 @@ const backendHealthState = {
   serviceSeverity: '',
   resources: [],
   resourceCount: 0,
-  healthyRevisions: 0,
+  // The failing rows the observer itself reported, from the newest accepted revision.
+  observedResources: [],
+  // Once a newer observer epoch is accepted, a delayed response from an epoch already seen must
+  // never walk the aggregate backwards. The list is bounded because epochs change only when the
+  // retained health history is reset, while a browser can remain open indefinitely.
+  retiredEpochs: [],
+  // The failing rows the Daemons roster DISPLAYS that the observer never probes: the web process
+  // itself and its nested tmux signal watcher. They are held beside the ordered report rather than
+  // inside it because they have no revision of their own -- the observer cannot publish them, so
+  // there is no newer observer message that should ever clear them. This is what stops the two
+  // surfaces diverging by transport timing: a pushed `all observed services ready` at a higher
+  // revision can no longer paint the triangle green while `Tmux signal watcher - Attaching` is
+  // still amber on screen.
+  rosterOnlyResources: [],
 };
 
 function backendHealthStateSeverity(state) {
@@ -61,50 +97,108 @@ function backendHealthResourcesFromPayload(resources) {
   return failing;
 }
 
-function backendHealthPayloadSeverity(overallState, resources) {
-  let severity = backendHealthStateSeverity(overallState);
-  for (const resource of resources) {
+// The ONE writer of the aggregate. Both producers come through here so ordering, bounding and the
+// repaint are decided once.
+//
+// `allowSameRevision` is the difference between the two, and it is not a loosening of the ordering
+// rule. A pushed event at a revision already held is a RECONNECT REPLAY of a state we applied, so
+// it is rejected. The roster at that same revision is the SAME retained state seen through more
+// rows -- it renders the web process and its tmux signal watcher, neither of which the observer
+// probes -- so it is accepted and can only add displayed rows, never rewind. An older revision from
+// either producer is stale and is always rejected.
+function acceptBackendHealthReport({epoch, revision, resources, allowSameRevision = false}) {
+  const revisionNumber = Number(revision);
+  if (!Number.isFinite(revisionNumber)) return false;
+  const epochToken = String(epoch ?? '');
+  if (backendHealthState.retiredEpochs.includes(epochToken)) return false;
+  if (epochToken === backendHealthState.epoch) {
+    if (revisionNumber < backendHealthState.revision) return false;
+    if (revisionNumber === backendHealthState.revision && !allowSameRevision) return false;
+  } else if (backendHealthState.epoch) {
+    backendHealthState.retiredEpochs.push(backendHealthState.epoch);
+    backendHealthState.retiredEpochs = backendHealthState.retiredEpochs.slice(-backendHealthResourceLimit);
+  }
+  backendHealthState.epoch = epochToken;
+  backendHealthState.revision = revisionNumber;
+  backendHealthState.observedResources = resources;
+  reduceBackendHealthAggregate();
+  return true;
+}
+
+function applyBackendHealthRosterOnlyState(rows) {
+  backendHealthState.rosterOnlyResources = (Array.isArray(rows) ? rows : [])
+    .filter(row => row && row.severity && row.severity !== 'ready');
+  reduceBackendHealthAggregate();
+  return true;
+}
+
+// The ONE reduction: observed failures plus displayed roster-only failures, worst first, bounded,
+// repainted. Every writer above ends here, so there is exactly one place that decides what colour
+// the triangle is and which resource it names.
+function reduceBackendHealthAggregate() {
+  const failing = [...(backendHealthState.observedResources || []), ...backendHealthState.rosterOnlyResources];
+  failing.sort((left, right) => backendHealthSeverityRank[right.severity] - backendHealthSeverityRank[left.severity]);
+  let severity = backendHealthState.revision >= 0 ? 'ready' : '';
+  for (const resource of failing) {
     if (backendHealthSeverityRank[resource.severity] > backendHealthSeverityRank[severity]) severity = resource.severity;
   }
-  return severity;
+  backendHealthState.serviceSeverity = severity;
+  backendHealthState.resources = failing.slice(0, backendHealthResourceLimit);
+  backendHealthState.resourceCount = failing.length;
+  syncBackendHealthIndicator();
 }
 
 // Apply one `backend_health_changed` payload: {epoch, revision, overall_state, degraded_resources}.
 // Returns false for a stale or replayed revision so a reconnect replay cannot walk the state backwards.
+//
+// A payload with nothing degraded is accepted as `ready` IMMEDIATELY. See the note on
+// `backendHealthFailureThreshold` above: the observer already debounced this transition and will
+// not publish an unchanged healthy cycle, so waiting for a second one waits forever.
 function applyBackendHealthPayload(payload = {}) {
   const source = payload && typeof payload === 'object' ? payload : {};
-  const revision = Number(source.revision);
-  if (!Number.isFinite(revision)) return false;
-  const epoch = String(source.epoch ?? '');
-  if (epoch === backendHealthState.epoch && revision <= backendHealthState.revision) return false;
-  if (epoch !== backendHealthState.epoch) {
-    // A new observer epoch restarts the revision counter, so a partial recovery count from the
-    // previous epoch means nothing here: start counting healthy revisions again.
-    backendHealthState.epoch = epoch;
-    backendHealthState.healthyRevisions = 0;
-  }
-  backendHealthState.revision = revision;
   const resources = backendHealthResourcesFromPayload(source.degraded_resources);
-  const severity = backendHealthPayloadSeverity(source.overall_state, resources);
-  if (severity) {
-    backendHealthState.serviceSeverity = severity;
-    backendHealthState.resources = resources.slice(0, backendHealthResourceLimit);
-    backendHealthState.resourceCount = resources.length;
-    backendHealthState.healthyRevisions = 0;
-  } else {
-    backendHealthState.healthyRevisions += 1;
-    if (backendHealthState.healthyRevisions >= backendHealthRecoveryRevisions) {
-      backendHealthState.serviceSeverity = '';
-      backendHealthState.resources = [];
-      backendHealthState.resourceCount = 0;
-    }
+  const overall = backendHealthStateSeverity(source.overall_state);
+  // `overall_state` can be worse than any NAMED resource (the event caps the named list at
+  // `BACKEND_HEALTH_EVENT_MAX_RESOURCES`), so it is kept as an unnamed contribution rather than
+  // dropped. `backendHealth.service` is the translated noun the renderer already falls back to.
+  if (overall && !resources.some(resource => backendHealthSeverityRank[resource.severity] >= backendHealthSeverityRank[overall])) {
+    resources.push({id: '', label: '', severity: overall, reasonCode: ''});
   }
-  syncBackendHealthIndicator();
-  return true;
+  return acceptBackendHealthReport({epoch: source.epoch, revision: source.revision, resources});
 }
 
-// The rendered model, or null when there is nothing to show. This is where precedence lives:
-// `unresponsive` outranks `down` outranks `degraded`, and it is decided in exactly one place.
+// Apply the Daemons roster the System panel just rendered. `rows` are the rows it DREW, already
+// reduced to `{id, label, severity, reasonCode}` by the panel's own tone owner, so the triangle is
+// derived from the very rows the reader is looking at rather than from a parallel reduction of the
+// same payload. `observedIds` is the observer's inventory, which splits them:
+//
+//   * rows the observer owns go into the ORDERED report, so a newer pushed revision supersedes
+//     this poll's view of them and a slower poll can never rewind it;
+//   * rows the observer does not own (the web process, the tmux signal watcher) are held beside it
+//     and are replaced only by the next roster read, because no pushed event can ever describe them.
+function applyBackendHealthRosterState({epoch, revision, rows, observedIds}) {
+  const owned = new Set((Array.isArray(observedIds) ? observedIds : []).map(String));
+  const failing = (Array.isArray(rows) ? rows : []).filter(row => row && row.severity && row.severity !== 'ready');
+  backendHealthState.rosterOnlyResources = failing.filter(row => !owned.has(String(row.id)));
+  const accepted = acceptBackendHealthReport({
+    epoch,
+    revision,
+    resources: failing.filter(row => owned.has(String(row.id))),
+    allowSameRevision: true,
+  });
+  // A rejected (stale) report must still not strand the roster-only rows the reader can see, so the
+  // aggregate is reduced either way. `acceptBackendHealthReport` already reduced it when it accepted.
+  if (!accepted) reduceBackendHealthAggregate();
+  return accepted;
+}
+
+// The rendered model, or null ONLY when nothing has reported yet. This is where precedence lives:
+// `unresponsive` outranks `down` outranks `degraded` outranks `ready`, and it is decided in exactly
+// one place.
+//
+// `ready` returns a model like every other state. It used to return null, which routed healthy into
+// the same branch as "no report yet" and painted it as an empty transparent slot -- so an all-green
+// Daemons roster could not produce a green triangle even in principle.
 function backendHealthIndicatorModel() {
   if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
     return {
@@ -114,12 +208,15 @@ function backendHealthIndicatorModel() {
     };
   }
   const severity = backendHealthState.serviceSeverity;
-  if (severity !== 'down' && severity !== 'degraded') return null;
+  if (!severity) return null;
+  if (severity === 'ready') return {severity, text: t('backendHealth.ready'), reasonCode: ''};
   const named = backendHealthState.resources.find(resource => resource.label) || null;
   const label = named ? named.label : t('backendHealth.service');
   const count = Math.max(0, backendHealthState.resourceCount - backendHealthNamedResourceLimit);
   let text;
-  if (severity === 'down') {
+  if (named?.reasonCode === 'probe_timeout') {
+    text = count > 0 ? t('backendHealth.probeTimeout.multiple', {label, count}) : t('backendHealth.probeTimeout.single', {label});
+  } else if (severity === 'down') {
     text = count > 0 ? t('backendHealth.down.multiple', {label, count}) : t('backendHealth.down.single', {label});
   } else {
     text = count > 0 ? t('backendHealth.degraded.multiple', {label, count}) : t('backendHealth.degraded.single', {label});
@@ -142,6 +239,9 @@ function backendHealthIndicatorHost() {
 
 // One glyph for the fixed icon shell. It is a marker, never the message: the severity is carried by
 // the WORDS in the role=status label, so a monochrome or forced-colours theme still reads correctly.
+// The SAME triangle is drawn for every reported state, healthy included -- a reader tracks one
+// persistent control that changes colour, not a control that appears when something breaks. Only
+// "nothing has reported yet" draws nothing, because there is no state to mark.
 function backendHealthIndicatorGlyph(severity) {
   return severity ? '⚠' : '';
 }
@@ -172,9 +272,10 @@ function createBackendHealthIndicator() {
   return indicator;
 }
 
-// Push one model (or null when healthy) into the existing control. Healthy is a state of the SAME
-// node -- an inert, empty, transparent icon shell that still occupies its fixed slot -- not the
-// node's absence, so recovery does not remove layout content.
+// Push one model (or null before the first report) into the existing control. Every reported state,
+// healthy included, paints the SAME node: same fixed slot, same triangle, different colour and a
+// different sentence in the role=status live region. Only the pre-report state is the inert,
+// transparent shell, and it still occupies the slot, so no transition moves layout.
 function applyBackendHealthIndicatorState(indicator, model) {
   const severity = model ? model.severity : '';
   indicator.dataset.backendHealth = severity;

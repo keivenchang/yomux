@@ -5329,6 +5329,8 @@ const DEBUG_SYSTEM_STATE_TONES = Object.freeze({
   attaching: 'warn',
   recovering: 'warn',
   backoff: 'warn',
+  unknown: 'warn',
+  degraded: 'warn',
   stale: 'warn',
   partial: 'warn',
   // The panel cannot read this payload's rows, which is not the same as the service being down.
@@ -5710,6 +5712,11 @@ const DEBUG_SYSTEM_ROSTER_STATE_LABEL_KEYS = Object.freeze({
   running: 'debug.system.roster.state.ready',
   idle: 'state.idle',
   issue: 'debug.system.localServices.state.issue',
+  unknown: 'debug.cost.unknown',
+  degraded: 'debug.system.localServices.state.issue',
+  backoff: 'debug.system.localServices.state.issue',
+  down: 'debug.system.roster.state.unavailable',
+  upgrade_required: 'debug.system.localServices.state.issue',
   unavailable: 'debug.system.roster.state.unavailable',
   attached: 'debug.system.roster.state.attached',
   attaching: 'debug.system.roster.state.attaching',
@@ -5850,6 +5857,53 @@ function debugSystemRosterServiceRow(service = {}) {
     health,
     service,
   };
+}
+
+// The roster reduced to the shape the ONE topbar aggregate accepts. It runs over the SAME row array
+// `debugSystemRosterHtml` renders and reuses `debugSystemStateTone`, so "this row is green" and "the
+// triangle is green" are one decision made once, not two reductions of one payload that drift.
+//
+// Two rows here are invisible to the observer entirely -- the web process itself and its nested tmux
+// signal watcher -- which is exactly why the roster, not the pushed event, is the richer input when
+// the panel is open. `Tmux signal watcher - Attaching` is a `warn` row, so it correctly holds the
+// triangle amber until the control client reports `Attached`, without being mistaken for a daemon.
+function debugSystemRosterHealthRows(payload = {}) {
+  return debugSystemRosterRows(payload).map(row => ({
+    id: String(row.id || ''),
+    label: String(row.label || row.id || ''),
+    severity: backendHealthToneSeverity[row.tone || debugSystemStateTone(row.state)] || 'down',
+    reasonCode: String(row.service?.reason_code || row.reasonCode || ''),
+  }));
+}
+
+// Feed the ONE aggregate from a freshly fetched `/api/system-status`. Ordered by the retained
+// health document's own epoch and revision (`local_service_projection.RetainedHealth.payload`), so a
+// slow poll that lands after a newer pushed `backend_health_changed` is rejected as stale rather
+// than rewinding the topbar to what the server thought two revisions ago.
+function publishDebugSystemRosterHealth(payload = {}) {
+  if (typeof applyBackendHealthRosterState !== 'function') return false;
+  if (!payload || typeof payload !== 'object') return false;
+  if (!debugSystemLocalServicesSchemaSupported(payload)) {
+    // The renderer intentionally refuses every unknown-schema field and displays one typed yellow
+    // row. Feed only that safe row to the roster-only aggregate so the triangle matches it without
+    // trusting the unsupported payload's epoch, inventory, or services.
+    return applyBackendHealthRosterOnlyState(
+      debugSystemRosterHealthRows(payload).filter(row => row.id === DEBUG_SYSTEM_ROSTER_LOCAL_SERVICES_ID),
+    );
+  }
+  const localServices = debugSystemRenderableLocalServices(payload);
+  const health = localServices.health;
+  // No retained document means the observer is unattached: it has reported nothing, and the
+  // aggregate must keep saying so rather than inventing a colour from rows nobody observed.
+  if (!health || typeof health !== 'object' || health.available !== true) return false;
+  return applyBackendHealthRosterState({
+    epoch: health.observer_epoch,
+    revision: health.revision,
+    rows: debugSystemRosterHealthRows(payload),
+    // The observer's own inventory, so the split between "a pushed revision can supersede this" and
+    // "only another roster read can" is read off the payload rather than hardcoded here.
+    observedIds: Array.isArray(localServices.inventory) ? localServices.inventory.map(String) : [],
+  });
 }
 
 // The ONE adapter. Top-level rows in the inventory's declared order, with the web process first and
@@ -6098,7 +6152,8 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 
 // The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
 // payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed;
-// lifecycle accounting bumped it to 4. The guard is exact, not `>=`: rendering an older payload through the roster
+// lifecycle accounting bumped it to 4; watchd bridge readiness bumped it to 5. The guard is exact,
+// not `>=`: rendering an older payload through the roster
 // would print absent health as though it had been measured, which is the defect the version number
 // exists to prevent.
 //
@@ -6109,7 +6164,7 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 // condition the roster already covers is the divergent-copies defect; the roster says it in one
 // typed state now, and the legacy view is gone.
 function debugSystemLocalServicesSchemaSupported(payload = {}) {
-  return Number(payload.local_services?.schema_version) === 4;
+  return Number(payload.local_services?.schema_version) === 5;
 }
 
 // The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather
@@ -6799,6 +6854,9 @@ async function pollDebugSystemStatus({force = false} = {}) {
   try {
     jsDebugSystemState.payload = await apiFetchJsonQuiet('/api/system-status', {cache: 'no-store'});
     jsDebugSystemState.updatedAt = Date.now();
+    // Same rows, same aggregate. The topbar triangle cannot disagree with the roster a reader is
+    // looking at, because it is now told what that roster says the moment the roster changes.
+    publishDebugSystemRosterHealth(jsDebugSystemState.payload);
     return true;
   } catch (error) {
     jsDebugSystemState.error = userMessageText(error);

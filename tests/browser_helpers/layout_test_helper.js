@@ -1911,6 +1911,10 @@ globalThis.__layoutTestApi = {
   backendHealthStateForTest: () => ({...backendHealthState, resources: backendHealthState.resources.map(item => ({...item}))}),
   backendHealthIndicatorModelForTest: backendHealthIndicatorModel,
   applyBackendHealthPayloadForTest: applyBackendHealthPayload,
+  applyBackendHealthRosterStateForTest: applyBackendHealthRosterState,
+  applyBackendHealthRosterOnlyStateForTest: applyBackendHealthRosterOnlyState,
+  publishDebugSystemRosterHealthForTest: publishDebugSystemRosterHealth,
+  debugSystemRosterHealthRowsForTest: debugSystemRosterHealthRows,
   noteBackendHealthFailureForTest: noteBackendHealthFailure,
   noteBackendHealthSuccessForTest: noteBackendHealthSuccess,
   // The product resolves its host from the real topbar, which the node DOM stub does not build.

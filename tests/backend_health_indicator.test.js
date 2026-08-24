@@ -25,6 +25,7 @@ const {
 
 const EN = JSON.parse(fs.readFileSync('static/locales/en.json', 'utf8'));
 const CORE_SOURCE = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const CSS_SOURCE = fs.readFileSync('static_src/css/yolomux/10_topbar_menus.css', 'utf8');
 const BOOT_SOURCE = [
   'static_src/js/yolomux/99_terminal_boot.js',
   'static_src/js/yolomux/99_client_event_transport.js',
@@ -182,7 +183,7 @@ async function runBackendHealthIndicatorSuite() {
     assert.ok(!accessibleText(indicator).includes('watchd'), 'the id is not a label substitute');
   });
 
-  test('the indicator is not cleared by a single good sample', () => {
+  test('one accepted healthy revision immediately paints the same indicator green', () => {
     const api = loadYolomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
@@ -193,14 +194,10 @@ async function runBackendHealthIndicatorSuite() {
     assert.equal(api.syncBackendHealthIndicatorForTest(host).dataset.backendHealth, 'down');
 
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({revision: 2, overall_state: 'ready'}));
-    const afterOne = api.syncBackendHealthIndicatorForTest(host);
-    assert.ok(afterOne, 'one healthy revision is a sample, not a recovery');
-    assert.equal(messageText(afterOne), 'File watching is not running', 'the warning keeps naming the failure it is still describing');
-
-    api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({revision: 3, overall_state: 'ready'}));
-    const cleared = api.syncBackendHealthIndicatorForTest(host);
-    assert.equal(severityOf(cleared), '', 'the debounced healthy revision clears the warning severity');
-    assert.equal(cleared.disabled, true, 'the cleared control is inert');
+    const recovered = api.syncBackendHealthIndicatorForTest(host);
+    assert.equal(severityOf(recovered), 'ready');
+    assert.equal(messageText(recovered), 'All backend services are ready');
+    assert.equal(recovered.disabled, false, 'green remains a details action');
     assert.equal(host.children.length, 1, 'the node persists as an inert fixed slot, it is not removed');
   });
 
@@ -219,7 +216,7 @@ async function runBackendHealthIndicatorSuite() {
     assert.equal(api.syncBackendHealthIndicatorForTest(host).dataset.backendHealth, 'down');
   });
 
-  test('a new observer epoch restarts the recovery debounce rather than inheriting it', () => {
+  test('a new observer epoch can immediately publish its accepted healthy state', () => {
     const api = loadYolomux();
     const host = topbarHost();
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
@@ -229,13 +226,10 @@ async function runBackendHealthIndicatorSuite() {
     }));
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({revision: 5, overall_state: 'ready'}));
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({epoch: 'observer-2', revision: 1, overall_state: 'ready'}));
-    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'down', 'the first healthy revision of a new epoch does not inherit the old count');
-
-    api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({epoch: 'observer-2', revision: 2, overall_state: 'ready'}));
-    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), '');
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'ready');
   });
 
-  test('starting and ready never raise the indicator', () => {
+  test('starting and ready both render the non-alerting green state', () => {
     const api = loadYolomux();
     for (const state of ['starting', 'ready']) {
       const {indicator, host} = renderHealth(api, healthPayload({
@@ -243,8 +237,8 @@ async function runBackendHealthIndicatorSuite() {
         overall_state: state,
         degraded_resources: [resource({state})],
       }));
-      assert.equal(severityOf(indicator), '', `${state} is not a failure and must not warn during startup`);
-      assert.equal(indicator.disabled, true, `${state} leaves the control inert`);
+      assert.equal(severityOf(indicator), 'ready', `${state} must agree with green roster rows`);
+      assert.equal(indicator.disabled, false, `${state} keeps the System details action available`);
       assert.equal(host.children.length, 1, 'the fixed slot is permanently mounted, warning or not');
     }
   });
@@ -271,6 +265,78 @@ async function runBackendHealthIndicatorSuite() {
     assert.notEqual(downText, degradedText, 'severity must be distinguishable with every colour token removed');
     assert.equal(liveRegionRole(down), 'status', 'both states stay in the same live region');
     assert.equal(liveRegionRole(degraded), 'status');
+  });
+
+  test('the triangle severity is reduced from the same green yellow and red roster rows', () => {
+    const api = loadYolomux();
+    const serviceIds = ['indexd', 'statsd', 'jobd', 'statusd', 'watchd', 'approvald'];
+    const measured = value => ({state: 'measured', value, reason_code: '', reason: ''});
+    const payload = (states, revision) => ({
+      ok: true,
+      generated_at: 1902,
+      server: {
+        version: '0.7.12', pid: 5150, started_at: 1000,
+        uptime_seconds: measured(8040), cpu_percent: measured(3),
+        system_cpu_percent: measured(11), rss_bytes: measured(88),
+      },
+      owner: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {},
+      tmux_signal_watcher: {state: 'attached', demanded: true, sessions: ['debug'], process_pid: 9001},
+      local_services: {
+        schema_version: 5,
+        inventory: serviceIds,
+        services: serviceIds.map(id => ({
+          id, service: id, label: id, pid: 4242,
+          state: states[id] || 'running', reason_code: '', reason: '',
+          metrics: {
+            cpu_now_percent: measured(2), rss_bytes: measured(48), uptime_seconds: measured(3600),
+          },
+          health: {},
+        })),
+        health: {available: true, observer_epoch: 'observer-1', revision, port: 7220},
+      },
+    });
+    const host = topbarHost();
+
+    api.publishDebugSystemRosterHealthForTest(payload({}, 10));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'ready');
+    api.publishDebugSystemRosterHealthForTest(payload({statsd: 'unknown'}, 11));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'degraded');
+    api.publishDebugSystemRosterHealthForTest(payload({statsd: 'unknown', watchd: 'unavailable'}, 12));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'down');
+    api.publishDebugSystemRosterHealthForTest(payload({}, 13));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'ready');
+  });
+
+  test('a delayed roster response from a retired observer epoch cannot clear a newer failure', () => {
+    const api = loadYolomux();
+    const host = topbarHost();
+    api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
+      epoch: 'old', revision: 20, overall_state: 'ready',
+    }));
+    api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
+      epoch: 'new', revision: 1, overall_state: 'down', degraded_resources: [resource()],
+    }));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'down');
+
+    assert.equal(api.applyBackendHealthRosterStateForTest({
+      epoch: 'old', revision: 99, rows: [], observedIds: ['watchd'],
+    }), false);
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'down');
+  });
+
+  test('the typed unsupported-schema yellow row also makes the triangle yellow', () => {
+    const api = loadYolomux();
+    const host = topbarHost();
+    api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({
+      epoch: 'observer-1', revision: 1, overall_state: 'ready',
+    }));
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'ready');
+
+    assert.equal(api.publishDebugSystemRosterHealthForTest({
+      ok: true,
+      local_services: {schema_version: 999, inventory: [{hostile: true}], services: [{state: 'running'}]},
+    }), true);
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'degraded');
   });
 
   test('the whole control is a details action that reuses the existing System view route', () => {
@@ -364,6 +430,13 @@ async function runBackendHealthIndicatorSuite() {
     assert.equal([...CORE_SOURCE.matchAll(/function createBackendHealthIndicator\(\)/g)].length, 1, 'one control factory');
     assert.equal([...CORE_SOURCE.matchAll(/const backendHealthState = \{/g)].length, 1, 'one state object');
     assert.equal([...CORE_SOURCE.matchAll(/host\.prepend\(indicator\)/g)].length, 1, 'one insertion point');
+  });
+
+  test('the healthy triangle is visible green but deliberately subtle', () => {
+    assert.match(CSS_SOURCE, /\[data-backend-health="ready"\][\s\S]*?color:\s*color-mix\(in srgb, var\(--good\) 45%, transparent\)/);
+    assert.match(CSS_SOURCE, /\[data-backend-health="ready"\][\s\S]*?border-color:\s*color-mix\(in srgb, var\(--good\) 28%, transparent\)/);
+    const readyRule = CSS_SOURCE.match(/\.backend-health-indicator\[data-backend-health="ready"\]\s*\{([\s\S]*?)\}/)?.[1] || '';
+    assert.doesNotMatch(readyRule, /box-shadow|text-shadow/);
   });
 }
 

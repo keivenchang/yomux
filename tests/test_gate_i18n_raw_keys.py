@@ -58,7 +58,7 @@ def test_rendered_ui_has_no_recorded_raw_i18n_keys(i18n_source_bundle, gate_brow
         """
         i18nSetCatalogForTest('en', {});
         const host = document.createElement('div');
-        host.innerHTML = debugSystemRosterHtml({local_services: {schema_version: 4, inventory: [], services: []}}, {nowSeconds: 0});
+        host.innerHTML = debugSystemRosterHtml({local_services: {schema_version: 5, inventory: [], services: []}}, {nowSeconds: 0});
         document.body.append(host);
         const keys = i18nMissingKeyList();
         const raw = [...document.querySelectorAll('body *')].flatMap(element => {

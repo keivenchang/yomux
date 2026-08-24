@@ -4,10 +4,13 @@
 
 import json
 import os
+import threading
+import time
 
 import pytest
 
 from yolomux_lib import session_files
+from yolomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
 from yolomux_lib.pricing_catalog import PricingCatalog
 from yolomux_lib.stats_current import materializer
 from yolomux_lib.stats_current import pricing
@@ -1258,3 +1261,80 @@ def test_codex_session_meta_seeds_model_without_guessing_from_prose(tmp_path):
     assert [(item.atom.model, item.atom.effort, item.atom.model_evidence) for item in output] == [
         ("gpt-meta", "low", "session_meta.payload.model"),
     ]
+
+
+def test_a_new_roster_transcript_is_scanned_before_legacy_repair_backlog(tmp_path, monkeypatch):
+    sessions = tmp_path / ".codex" / "sessions"
+    live = sessions / "2026" / "07" / "16" / "rollout-live.jsonl"
+    _write_records(live, [
+        _codex_meta("live-thread", model="gpt-live"),
+        {"type": "turn_context", "timestamp": 1, "payload": {"model": "gpt-live"}},
+        _codex_usage(2, 10, 4, 2),
+    ])
+    historical = sessions / "2026" / "01" / "01" / "rollout-historical.jsonl"
+    _write_records(historical, [
+        _codex_meta("historical-child", "live-thread", forked_from_id="live-thread", thread_source="user"),
+        {"type": "turn_context", "timestamp": 1, "payload": {"model": "gpt-old"}},
+        _codex_usage(2, 20, 8, 4),
+    ])
+    orphans = []
+    for index in range(6):
+        orphan = sessions / "2026" / "01" / "01" / f"rollout-orphan-{index}.jsonl"
+        _write_records(orphan, [
+            _codex_meta(f"orphan-{index}", "live-thread", forked_from_id="live-thread", thread_source="subagent"),
+            _codex_meta("live-thread", model="gpt-live"),
+            _codex_usage(2, 10, 4, 2),
+            {"type": "inter_agent_communication_metadata", "timestamp": 3, "payload": {}},
+        ])
+        orphans.append(orphan)
+
+    def candidates(*, root: object = None, limit: int = 256):
+        return [historical, live, *orphans] if limit >= 1 << 30 else [historical, live]
+
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", candidates)
+    scan = StatsCurrentTranscriptUsageScanner(max_records_per_scan=3).scan([
+        {"key": "live", "kind": "codex", "transcript": str(live)},
+    ])
+
+    assert scan.budget_exhausted is True
+    assert any(item.atom.model == "gpt-live" for item in scan.items)
+
+
+def test_committed_status_is_readable_while_a_scan_holds_the_scanner_lock(tmp_path):
+    transcript = tmp_path / "rollout-nonblocking.jsonl"
+    _write_records(transcript, [_codex_meta("nonblocking-thread"), _codex_usage(2, 10, 0, 3)])
+    rows = [{"key": "yo7220|0|codex", "kind": "codex", "transcript": str(transcript)}]
+    now = [100.0]
+    scanner = StatsCurrentTranscriptUsageScanner(clock=lambda: now[0])
+    _commit(scanner, scanner.scan(rows))
+    appended = _append_record(transcript, _codex_usage(3, 20, 0, 5))
+    now[0] = 110.0
+    _commit(scanner, scanner.scan(rows))
+    committed = scanner.status()
+    assert committed["committed_appended_bytes"] == len(appended.encode("utf-8"))
+
+    _append_record(transcript, _codex_usage(4, 30, 0, 7))
+    holding = threading.Event()
+    release = threading.Event()
+    ordered_sources = scanner._ordered_sources
+
+    def parked(*args, **kwargs):
+        holding.set()
+        release.wait(timeout=5.0)
+        return ordered_sources(*args, **kwargs)
+
+    scanner._ordered_sources = parked
+    scan_thread = threading.Thread(target=lambda: scanner.scan(rows), name="parked-scan")
+    scan_thread.start()
+    try:
+        assert holding.wait(timeout=5.0)
+        started = time.perf_counter()
+        observed = scanner.status()
+        elapsed = time.perf_counter() - started
+    finally:
+        release.set()
+        scan_thread.join(timeout=10.0)
+
+    assert not scan_thread.is_alive()
+    assert elapsed < BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS / 5
+    assert observed == committed

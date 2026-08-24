@@ -4,6 +4,7 @@ One evidence page per shipped version. Each page records what that release actua
 
 | version | tag | release commit | evidence | note |
 | --- | --- | --- | --- | --- |
+| 0.7.12 | `v0.7.12` | `v0.7.12^{commit}` | [v0.7.12-evidence.md](v0.7.12-evidence.md) | backend lifetime ownership, Stats correctness and responsiveness, and synchronized daemon health reporting |
 | 0.7.8 | `v0.7.8` | `f32ffd898` | [v0.7.8-evidence.md](v0.7.8-evidence.md) | mobile and Stats GUI, bounded background work, macOS compatibility, correctness, and safety fixes |
 | 0.7.7 | `v0.7.7` | `fb58cac56` | [v0.7.7-evidence.md](v0.7.7-evidence.md) | complete Markdown and specs overhaul with 331 open requirements preserved in concrete queues |
 | 0.7.6 | `v0.7.6` | `35907e6f3` | [v0.7.6-evidence.md](v0.7.6-evidence.md) | bounded tmux mutations, retained window strips, filtered Quick Open, and reduced quiet polling |
